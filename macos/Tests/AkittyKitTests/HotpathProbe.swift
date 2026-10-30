@@ -37,6 +37,9 @@ final class HotpathProbe: XCTestCase {
             _ = try session.call("feed", ["text": "\u{1b}[1;1H\(toggle % 2 == 0 ? "x" : "y")"])
             held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
         }
+        // The idle case: nothing changed, so every 30 Hz poll gets the short "unchanged" reply.
+        let idle = try XCTUnwrap(try session.snapshot())
+        try time("idle poll: snapshot(since:) unchanged", 200) { XCTAssertNil(try session.snapshot(since: idle.revision, base: idle)) }
         // Persistent rasterizer: a full frame, then a typing frame that repaints one row.
         let stateful = GridRasterizer()
         var typed = try XCTUnwrap(try session.snapshot())
