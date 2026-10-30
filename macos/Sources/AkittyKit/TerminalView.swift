@@ -86,10 +86,16 @@ import os
     init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences) throws {
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
-        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback)
+        let integrationDirectory: String?
+        if initial.shellIntegration && !headless {
+            guard let resources = Bundle.main.resourceURL else { throw AkittyError.core("Shell integration resources missing") }
+            integrationDirectory = resources.appendingPathComponent("shell-integration").path
+        } else { integrationDirectory = nil }
+        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory)
         preferences = initial; fontSize = initial.fontSize
         try syncProgramChrome()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
+        registerForDraggedTypes([.fileURL, .string])
         wantsLayer = true
         do {
             let renderer = try MetalPresenter(forceFailure: forceSoftware || ProcessInfo.processInfo.environment["AKITTY_FORCE_METAL_UNAVAILABLE"] == "1", forceShaderFailure: forceShaderFailure)
@@ -179,6 +185,14 @@ import os
         guard !stopped, window != nil else { link.isPaused = true; return }
         poll()
     }
+    public func runAgentCommand(actor: String, command: String) async throws -> (lease: UInt64, dispatch: AgentDispatch) {
+        guard let window else { throw AkittyError.core("Terminal must be in a window for command approval.") }
+        let host = AgentCommandHost(session: session)
+        return try await host.execute(actor: actor, command: command) { await AgentCommandHost.confirm($0, in: window) }
+    }
+    @objc public func reclaimAgentControl(_ sender: Any?) {
+        do { try session.reclaimControl(); poll() } catch { show(error) }
+    }
     public func poll() {
         guard !stopped, !pollInFlight else { return }
         pollInFlight = true
@@ -223,6 +237,7 @@ import os
                 if let error = next.error { onStatus?(error) }
                 else if let failure = health.failure { onStatus?("Software rendering: \(failure)") }
                 else if next.exited { onStatus?("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
+                else if next.control?.agent == true { onStatus?("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
                 else if let presentation = next.chrome?.presentation { onStatus?(presentation) }
                 else { onStatus?("\(next.cols) cols × \(next.rows) rows") }
                 onTitle?(next.title)
@@ -316,7 +331,7 @@ import os
     }
     public override func draw(_ dirtyRect: NSRect) {
         guard presenter == nil else { return }
-        NSColor(calibratedRed: 18/255, green: 22/255, blue: 29/255, alpha: 1).setFill(); bounds.fill()
+        NSColor(calibratedRed: 8/255, green: 10/255, blue: 13/255, alpha: 1).setFill(); bounds.fill()
         if let image = bitmap?.makeImage(), let context = NSGraphicsContext.current?.cgContext {
             context.saveGState(); context.translateBy(x: 0, y: bounds.height); context.scaleBy(x: 1, y: -1)
             context.draw(image, in: bounds); context.restoreGState()
@@ -555,6 +570,22 @@ import os
         }
         do { _ = try session.call("scroll", ["lines": delta > 0 ? max(1,Int(delta)) : min(-1,Int(delta))]); poll() } catch { show(error) }
     }
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard !stopped, snapshot?.control?.agent != true, sender.draggingSourceOperationMask.contains(.copy),
+              (try? DropPolicy.text(from: sender.draggingPasteboard)) != nil else { return [] }
+        return .copy
+    }
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        acceptDrop(from: sender.draggingPasteboard)
+    }
+    @discardableResult func acceptDrop(from pasteboard: NSPasteboard) -> Bool {
+        guard !stopped else { return false }
+        do {
+            guard try session.snapshot()?.control?.agent != true else { throw AkittyError.core("Reclaim terminal control before dropping files or text.") }
+            guard let text = try DropPolicy.text(from: pasteboard) else { return false }
+            window?.makeFirstResponder(self); paste(text); return true
+        } catch { show(error); return false }
+    }
     @objc public func copy(_ sender: Any?) {
         guard !selectedText.isEmpty else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(selectedText, forType: .string)
@@ -567,7 +598,7 @@ import os
     /// Sends already-validated clipboard text. Control or multiline text must not reach
     /// the PTY without confirmation; without a window there is nowhere to ask, so fail closed.
     func paste(_ text: String) {
-        guard !stopped else { return }
+        guard !stopped, ClipboardPolicy.acceptsText(text) else { return }
         if ClipboardPolicy.needsPasteConfirmation(text) {
             guard let window else { onStatus?("Paste requires confirmation, but the terminal is not in a window"); return }
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"

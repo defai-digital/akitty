@@ -265,6 +265,8 @@ pub enum Segment {
     Pass(Vec<u8>),
     /// JSON body of one complete `OSC 771` sequence, without the introducer.
     Document(Vec<u8>),
+    /// Bounded shell metadata; never grants input authority.
+    Shell(Vec<u8>),
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -274,13 +276,13 @@ enum State {
     Esc,
     Osc,
     OscEsc,
-    /// A non-771 OSC, already handed to the parser. Later bytes are copied through.
+    /// An unintercepted OSC, already handed to the parser. Later bytes are copied through.
     Forward,
     ForwardEsc,
 }
 
-/// Pulls `OSC 771` out of a byte stream before the VT parser sees it.
-/// State survives chunk boundaries. Any other bytes, including a long `OSC 52`, are returned unchanged.
+/// Pulls chrome and shell metadata out before the VT parser sees it.
+/// State survives chunk boundaries. Other bytes, including long OSC 52 payloads, pass unchanged.
 #[derive(Default)]
 pub struct Filter {
     state: State,
@@ -288,9 +290,9 @@ pub struct Filter {
     overflow: bool,
 }
 
-/// True while `body` is `771;` or a still-ambiguous prefix of it.
-fn osc_could_be_chrome(body: &[u8]) -> bool {
-    body.starts_with(CHROME_OSC) || (body.len() < CHROME_OSC.len() && CHROME_OSC.starts_with(body))
+/// True for an intercepted OSC body or a still-ambiguous prefix.
+fn osc_is_intercepted(body: &[u8]) -> bool {
+    [CHROME_OSC, b"133;", b"7;", b"772;"].iter().any(|prefix| body.starts_with(prefix) || prefix.starts_with(body))
 }
 
 impl Filter {
@@ -338,7 +340,7 @@ impl Filter {
                             } else if self.buffer.len() < MAX_OSC_BODY {
                                 self.buffer.push(byte);
                                 // Decide before the body can exceed the cap. OSC 52 diverges at its first byte.
-                                if !osc_could_be_chrome(&self.buffer) {
+                                if !osc_is_intercepted(&self.buffer) {
                                     pass.extend_from_slice(b"\x1b]");
                                     pass.append(&mut self.buffer);
                                     self.state = State::Forward;
@@ -397,6 +399,8 @@ impl Filter {
         self.state = State::Ground;
         if !overflow && body.starts_with(b"771;") {
             out.push(Segment::Document(body[4..].to_vec()));
+        } else if body.starts_with(b"133;") || body.starts_with(b"7;") || body.starts_with(b"772;") {
+            out.push(Segment::Shell(body));
         } else if !overflow {
             let mut bytes = vec![0x1b, b']'];
             bytes.extend_from_slice(&body);
@@ -411,7 +415,7 @@ impl Filter {
         let body = std::mem::take(&mut self.buffer);
         let overflow = self.overflow;
         self.overflow = false;
-        if overflow || body.starts_with(b"771;") {
+        if overflow || osc_is_intercepted(&body) {
             return;
         }
         let mut bytes = vec![0x1b, b']'];

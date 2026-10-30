@@ -1,0 +1,7 @@
+# Integration sessions use interactive bash with login startup files loaded explicitly.
+[[ ! -r /etc/profile ]] || source /etc/profile
+for __akitty_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    if [[ -r $__akitty_profile ]]; then source "$__akitty_profile"; break; fi
+done
+source "$AKITTY_INTEGRATION_DIR/akitty.bash"
+unset AKITTY_INTEGRATION_DIR __akitty_profile

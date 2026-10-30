@@ -163,6 +163,8 @@ struct SnapshotOut<'a> {
     exit_code: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chrome: Option<Value>,
+    shell: Value,
+    control: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     partial: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +186,8 @@ pub struct Model {
     apc: ApcFilter,
     chrome: Chrome,
     chrome_filter: ChromeFilter,
+    pub shell: crate::shell::Shell,
+    pub control: crate::control::Control,
     /// When false, a terminal `OSC 771` sequence does not change [`Self::chrome`].
     /// The C ABI chrome request still does.
     program_chrome: bool,
@@ -242,6 +246,8 @@ impl Model {
             apc: ApcFilter::default(),
             chrome: Chrome::default(),
             chrome_filter: ChromeFilter::default(),
+            shell: crate::shell::Shell::default(),
+            control: crate::control::Control::default(),
             program_chrome: true,
             reported_transient: false,
             reported_animating: false,
@@ -331,7 +337,15 @@ impl Model {
         let mut overflowed = false;
         for segment in self.chrome_filter.feed(bytes) {
             match segment {
-                ChromeSegment::Pass(data) => self.feed_terminal(&data, &mut replies, &mut overflowed),
+                ChromeSegment::Pass(data) => {
+                    self.shell.output(&data);
+                    self.feed_terminal(&data, &mut replies, &mut overflowed);
+                },
+                ChromeSegment::Shell(body) => {
+                    self.shell.observe(&body);
+                    if body == b"133;A" { self.control.dirty = false; }
+                    if body.starts_with(b"133;D") { self.control.observed_completion(); }
+                },
                 // A program sequence is consumed either way, so it never lands in the grid.
                 // With program chrome off it does not replace the document.
                 ChromeSegment::Document(payload) => {
@@ -791,6 +805,8 @@ impl Model {
             exited: self.exited,
             exit_code: self.exit_code,
             chrome: self.chrome.to_json(now),
+            shell: self.shell.summary(),
+            control: self.control.summary(),
             partial: partial.then_some(true),
             dirty: partial.then_some(dirty_rows),
         };
@@ -833,7 +849,7 @@ pub fn palette(index: usize) -> Rgb {
             [v(i / 36), v(i / 6 % 6), v(i % 6)]
         }
         232..=255 => [8 + (index as u8 - 232) * 10; 3],
-        257 | 268 => [18, 22, 29],
+        257 | 268 => [8, 10, 13],
         259..=266 => ANSI[index - 259].map(|v| v / 2),
         _ => [218, 226, 239],
     };
@@ -955,7 +971,7 @@ fn expand_cell(cell: &Value) -> Value {
     out
 }
 /// Resolved default background; the host clears to this colour, so matching cells need no entry.
-const DEFAULT_BACKGROUND: [u8; 3] = [18, 22, 29];
+const DEFAULT_BACKGROUND: [u8; 3] = [8, 10, 13];
 /// Active Kitty keyboard flags: 1 disambiguate, 2 event types, 4 alternate keys,
 /// 8 all keys as escape codes, 16 associated text.
 fn kitty_flags(mode: TermMode) -> u8 {
@@ -1232,7 +1248,7 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
         assert_eq!(snapshot["links"], json!([]));
         // Positional cells: [row, col, text, fg, bg, attrs] with nothing trailing when unset.
-        assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x12161d, 0]));
+        assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x080a0d, 0]));
     }
     #[test]
     fn wire_cells_pack_attributes_and_trail_ucolor_then_link() {
@@ -1241,10 +1257,10 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
         let cells = &snapshot["cells"];
         let attrs = ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE | ATTR_STRIKE | 3 << ATTR_USTYLE_SHIFT;
-        assert_eq!(cells[0], json!([0, 0, "A", 0xdae2ef, 0x12161d, attrs, 0x010203]));
+        assert_eq!(cells[0], json!([0, 0, "A", 0xdae2ef, 0x080a0d, attrs, 0x010203]));
         // A link without an underline colour keeps the colour slot as null.
-        assert_eq!(cells[1], json!([0, 1, "B", 0xdae2ef, 0x12161d, 0, null, 0]));
-        assert_eq!(cells[2], json!([0, 2, "界", 0xdae2ef, 0x12161d, ATTR_WIDE]));
+        assert_eq!(cells[1], json!([0, 1, "B", 0xdae2ef, 0x080a0d, 0, null, 0]));
+        assert_eq!(cells[2], json!([0, 2, "界", 0xdae2ef, 0x080a0d, ATTR_WIDE]));
     }
     #[test]
     fn cursor_report_and_device_status_reply() {

@@ -3,7 +3,7 @@ from check_public import violations
 from pathlib import Path
 class PublicationTests(unittest.TestCase):
     def test_private_names_are_case_insensitive_at_any_depth(self):
-        for path in ['AGENTS.md','.ax-wiki/project.md','docs/Agents.md','CLAUDE.md','.internal/report.txt','.codex/config.toml','foo/.env.production','Gemini.md','native/a.zig']:
+        for path in ['AGENTS.md','.ax-wiki/project.md','docs/Agents.md','CLAUDE.md','.internal/report.txt','.codex/config.toml','foo/.env.production','Gemini.md','native/a.zig','resources/.zsh_history','nested/.bash_history']:
             self.assertTrue(violations(path,b''),path)
     def test_private_account_and_machine_data(self):
         for value in [b'/'+b'Users/example/private', b'user'+b'@icloud.com', b'ghp_'+b'A'*36]:

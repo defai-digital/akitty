@@ -397,7 +397,7 @@ fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     // The ABI splices pre-serialized snapshot JSON into the envelope; it must match the value path exactly.
     assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0,"compact":true})));
     // Bold, italic, underline, strike and underline style 3 in attrs, then the underline colour and link index.
-    assert_eq!(response["data"]["cells"][0], json!([0, 0, "x", 0xdae2ef, 0x12161d, 1 | 2 | 4 | 32 | 3 << 8, 0x010203, 0]));
+    assert_eq!(response["data"]["cells"][0], json!([0, 0, "x", 0xdae2ef, 0x080a0d, 1 | 2 | 4 | 32 | 3 << 8, 0x010203, 0]));
     eprintln!("worst-case snapshot: {} bytes", bytes.len());
 }
 #[test]
@@ -700,4 +700,109 @@ fn synchronized_expiry_preserves_clipboard_bell_and_screen_transition() {
     assert_eq!(t.snapshot()["clipboard"], json!([]));
     t.feed("\x1b[?1049l");
     assert!(t.snapshot()["lines"][0].as_str().unwrap().starts_with("main"));
+}
+
+#[test]
+fn shell_notifications_survive_every_split_and_keep_output_separate() {
+    let stream = "\x1b]7;file://localhost/tmp/a%20b\x07\x1b]133;A\x07prompt> \x1b]133;B\x07\x1b]772;ZWNobyBoaQ==\x07\x1b]133;C\x07\x1b[31mhi\x1b[0m\r\n\x1b]133;D;7\x1b\\\x1b]133;A\x07";
+    for split in 0..=stream.len() {
+        let t = Terminal::new(40, 4);
+        t.feed(&stream[..split]); t.feed(&stream[split..]);
+        let history = call(json!({"op":"command_history","id":t.0}));
+        let command = &history["commands"][0];
+        assert_eq!(command["command"], "echo hi", "split {split}");
+        assert_eq!(command["exit_code"], 7);
+        assert_eq!(command["cwd"], "/tmp/a b");
+        assert_eq!(command["interrupted"], false);
+        let output = call(json!({"op":"command_output","id":t.0,"command_id":1}));
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(output["output_base64"].as_str().unwrap()).unwrap(), b"\x1b[31mhi\x1b[0m\r\n");
+        assert_eq!(t.snapshot()["shell"]["ready"], true);
+    }
+}
+
+#[test]
+fn shell_history_is_bounded_and_invalid_notifications_cannot_replace_cwd() {
+    let t = Terminal::new(20, 3);
+    t.feed("\x1b]7;file:///tmp\x07\x1b]7;file:///bad%00\x07");
+    for _ in 0..70 { t.feed("\x1b]133;C\x07output\x1b]133;D;0\x07"); }
+    let h = call(json!({"op":"command_history","id":t.0}));
+    assert_eq!(h["commands"].as_array().unwrap().len(), 64);
+    assert_eq!(h["oldest_id"], 7);
+    assert_eq!(t.snapshot()["shell"]["cwd"], "/tmp");
+    assert_eq!(response(json!({"op":"command_output","id":t.0,"command_id":1}))["ok"],false);
+}
+
+#[test]
+fn actual_bash_and_zsh_integration_tracks_cwd_exit_and_output() {
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+        let deadline = Instant::now()+Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline,"initial prompt missing in {shell}: {}",t.snapshot()); std::thread::sleep(Duration::from_millis(10)); }
+        call(json!({"op":"input","id":t.0,"text":"printf 'AKITTY-RESULT\\n'; (exit 7)\r"}));
+        loop {
+            let h = call(json!({"op":"command_history","id":t.0}));
+            if h["commands"].as_array().unwrap().iter().any(|c| c["exit_code"] == 7) {
+                let cmd = h["commands"].as_array().unwrap().iter().find(|c|c["exit_code"]==7).unwrap();
+                let out = call(json!({"op":"command_output","id":t.0,"command_id":cmd["id"]}));
+                let bytes = base64::engine::general_purpose::STANDARD.decode(out["output_base64"].as_str().unwrap()).unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains("AKITTY-RESULT"),"{shell}: {out}");
+                assert_eq!(cmd["cwd"],"/private/tmp"); break;
+            }
+            assert!(Instant::now()<deadline,"missing completion in {shell}: {h}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+fn agent_control_requires_exact_host_approval_and_human_can_reclaim() {
+    let t = Terminal::new(30,4);
+    t.feed("\x1b]7;file:///tmp\x07\x1b]133;A\x07");
+    let lease = call(json!({"op":"control_acquire","id":t.0,"actor":"agent"}))["lease"].clone();
+    assert_eq!(response(json!({"op":"input_bytes","id":t.0,"bytes":[65]}))["ok"],false);
+    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":1,"command":"echo hi"}))["ok"],false);
+    assert_eq!(response(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/elsewhere"}))["ok"],false);
+    let authorization = call(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/tmp"}))["authorization"].clone();
+    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo changed"}))["ok"],false);
+    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"}))["ok"],false);
+    // An arbitrary program printing prompt/completion notifications cannot mint authority.
+    t.feed("\x1b]133;D;0\x07\x1b]133;A\x07");
+    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"}))["ok"],false);
+    call(json!({"op":"control_reclaim","id":t.0}));
+    assert_eq!(response(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/tmp"}))["ok"],false);
+    let audit = call(json!({"op":"control_audit","id":t.0}));
+    assert!(audit["events"].as_array().unwrap().iter().any(|e|e["event"]=="human_reclaimed"));
+    assert_eq!(t.snapshot()["control"]["agent"],false);
+}
+
+#[test]
+fn actual_agent_dispatch_is_once_only_and_retains_control_until_released() {
+    let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+    let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":"/bin/zsh","cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+    let deadline = Instant::now()+Duration::from_secs(10);
+    while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let lease = call(json!({"op":"control_acquire","id":t.0,"actor":"test-agent"}))["lease"].clone();
+    let command = "printf 'AGENT-ONCE\\n'; (exit 9)";
+    let grant = call(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":command,"expected_cwd":"/private/tmp"}))["authorization"].clone();
+    call(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command}));
+    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command}))["ok"],false);
+    loop {
+        let h = call(json!({"op":"command_history","id":t.0}));
+        if h["commands"].as_array().unwrap().iter().any(|c|c["exit_code"]==9) { break; }
+        assert!(Instant::now()<deadline,"{h}"); std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(t.snapshot()["control"]["agent"],true);
+    assert_eq!(response(json!({"op":"input","id":t.0,"text":"echo BAD\r"}))["ok"],false);
+    call(json!({"op":"control_release","id":t.0,"lease":lease}));
+    call(json!({"op":"input","id":t.0,"text":"echo HUMAN\r"}));
+}
+
+#[test]
+fn shell_metadata_overflow_is_rejected_without_leaking_into_grid() {
+    let t = Terminal::new(20,3);
+    t.feed(&format!("\x1b]772;{}\x07SAFE", "x".repeat(70_000)));
+    let snapshot = t.snapshot();
+    assert_eq!(snapshot["shell"]["rejected"],1);
+    assert!(snapshot["lines"][0].as_str().unwrap().starts_with("SAFE"));
 }

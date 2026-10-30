@@ -257,7 +257,7 @@ final class AkittyTests: XCTestCase {
         return value
     }
     /// A wire cell: `[row, col, text, fg, bg, attrs]` with packed 0xRRGGBB colours; attrs bit 8 is selected.
-    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], attrs: Int = 0, selected: Bool = false) -> [Any] {
+    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [8, 10, 13], attrs: Int = 0, selected: Bool = false) -> [Any] {
         [row, col, text, fg[0] << 16 | fg[1] << 8 | fg[2], bg[0] << 16 | bg[1] << 8 | bg[2], (selected ? 8 : 0) | attrs]
     }
     private func testSnapshot(rows: Int = 2, cols: Int = 6, cells: [[Any]] = [], images: [[String: Any]] = []) throws -> Snapshot {

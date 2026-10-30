@@ -84,3 +84,50 @@ Tests include an isolated packed consumer with declaration checks. The repositor
 `scripts/verify.sh` also feeds actual SDK output through the native C ABI/parser,
 checks snapshots and cleanup, and verifies that OSC payloads never enter the grid.
 See [the protocol contract](../../docs/ABI.md).
+
+## Trusted host command management (current source after 1.0.0)
+
+The main import remains a program-side presentation client. It lets each program
+show its own tab sprite/activity and background completion indicator, with text
+and progress in the pane status line. Ordinary CLIs must integrate it explicitly.
+It does not prove a command's execution or result.
+
+A separate `@ax-code/akitty-sdk/host` entry is for trusted embedding hosts:
+
+```ts
+import { createCommandHost } from "@ax-code/akitty-sdk/host"
+
+const host = createCommandHost({
+  session: sessionId,
+  // Return schema-1 data, after validating the ABI envelope. Transport and
+  // caller authentication belong to your host, not the terminal output stream.
+  request: requestNativeCore,
+  approve: async request => showCommandApproval(request),
+})
+const receipt = await host.execute("coding-agent", "npm test")
+// Poll history after receipt.afterCommandId, then read output by command id.
+// Shell-reported completion and output are untrusted metadata.
+const history = await host.history(receipt.afterCommandId)
+// After reviewing completion, release explicitly; reclaim() is human takeover.
+await host.release(receipt.lease)
+```
+
+The native `AgentCommandHost` offers the same policy boundary; the Mac view's
+`runAgentCommand` presents a confirmation sheet. One exclusive agent lease blocks
+human typing/paste/drop until release or **Edit → Reclaim Terminal Control**.
+Approvals bind the exact command, session lease and displayed directory, expire
+after 30 seconds and can be consumed only once. An integrated, unedited local
+bash/zsh prompt is required. Shell completion never grants another approval.
+
+The host policy callback can call an authenticated ax-trust adapter; none is
+configured or deployed by this SDK. Never expose the transport directly to
+terminal programs, remote agents or the read-only WebMCP tools. AkiTTY Web and
+AX Code Desktop's PTY host must adopt/enforce their own integration separately.
+
+`history`, `output` and `audit` return bounded pages. History retains 64 commands,
+output the first 16 KiB per command (`output_base64`, `truncated`), and audit the
+last 64 events with sequence cursors for loss detection. The host must persist
+pages before eviction/close for durable auditing. Commands may contain secrets;
+retention and access control belong to the host. A transport failure after dispatch
+can mean the command already ran: do not blindly retry. See the complete
+[host contract](../../docs/AGENT_WORKFLOWS.md) and [ABI](../../docs/ABI.md).

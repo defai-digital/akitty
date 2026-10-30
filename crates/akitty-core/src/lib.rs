@@ -5,11 +5,13 @@ compile_error!("Akitty supports macOS only");
 
 mod child;
 mod chrome;
+mod control;
 mod graphics;
 mod media;
 mod model;
 mod placeholder;
 mod session;
+mod shell;
 mod tracker;
 
 use serde::Deserialize;
@@ -33,7 +35,17 @@ enum Request {
         cwd: Option<String>,
         headless: Option<bool>,
         scrollback: Option<usize>,
+        shell_integration_dir: Option<String>,
     },
+    ControlAcquire { id: u64, actor: String },
+    ControlRelease { id: u64, lease: u64 },
+    ControlReclaim { id: u64 },
+    CommandAuthorize { id: u64, lease: u64, command: String, expected_cwd: Option<String> },
+    CommandExecute { id: u64, lease: u64, authorization: u64, command: String },
+    CommandDeny { id: u64, lease: u64 },
+    ControlAudit { id: u64, after: Option<u64> },
+    CommandHistory { id: u64, after: Option<u64> },
+    CommandOutput { id: u64, command_id: u64 },
     Close {
         id: u64,
     },
@@ -167,6 +179,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
             cwd,
             headless,
             scrollback,
+            shell_integration_dir,
         } => {
             model::Size::validate(cols, rows)?;
             if registry.sessions.len() + registry.creating >= 64 {
@@ -186,6 +199,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 cwd,
                 headless.unwrap_or(false),
                 scrollback.unwrap_or(5000),
+                shell_integration_dir,
             );
             let mut registry = REGISTRY
                 .get()
@@ -208,6 +222,15 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
         request => {
             let id = match &request {
                 Request::Snapshot { id, .. }
+                | Request::ControlAcquire { id, .. }
+                | Request::ControlRelease { id, .. }
+                | Request::ControlReclaim { id }
+                | Request::CommandAuthorize { id, .. }
+                | Request::CommandExecute { id, .. }
+                | Request::CommandDeny { id, .. }
+                | Request::ControlAudit { id, .. }
+                | Request::CommandHistory { id, .. }
+                | Request::CommandOutput { id, .. }
                 | Request::Input { id, .. }
                 | Request::InputBytes { id, .. }
                 | Request::Feed { id, .. }
@@ -227,6 +250,15 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             match request {
+                Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
+                Request::ControlRelease { lease, .. } => session.control_release(Some(lease)),
+                Request::ControlReclaim { .. } => session.control_release(None),
+                Request::CommandAuthorize { lease, command, expected_cwd, .. } => session.command_authorize(lease, command, expected_cwd),
+                Request::CommandDeny { lease, .. } => session.command_deny(lease),
+                Request::CommandExecute { lease, authorization, command, .. } => session.command_execute(lease, authorization, command),
+                Request::ControlAudit { after, .. } => session.control_audit(after.unwrap_or(0)),
+                Request::CommandHistory { after, .. } => session.command_history(after.unwrap_or(0)),
+                Request::CommandOutput { command_id, .. } => session.command_output(command_id),
                 Request::Snapshot { since, compact, .. } => return session.snapshot(since, compact.unwrap_or(false)).map(Reply::Json),
                 Request::Input { text, paste, .. } => {
                     session.input(text, paste.unwrap_or(false))?;

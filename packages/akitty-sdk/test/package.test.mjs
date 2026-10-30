@@ -40,6 +40,9 @@ test("packed SDK imports and typechecks in an isolated consumer without native l
       join(directory, "consumer.mts"),
       `
 import { createTerminalClient, createSprite, type Status } from "@ax-code/akitty-sdk"
+import { createCommandHost } from "@ax-code/akitty-sdk/host"
+const host = createCommandHost({ session: 1, request: async () => ({}), approve: async () => false })
+if (typeof host.execute !== "function") throw new Error("Host entry unavailable")
 const writes: string[] = []
 const client = createTerminalClient({ capabilities: { title: true, chrome: true }, write: (s) => { writes.push(s); return true } })
 const status: Status = { text: "consumer", tone: "info" }

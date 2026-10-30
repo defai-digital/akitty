@@ -248,6 +248,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
 }
 
 @MainActor final class TerminalWindow: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
+    var quickDismiss: (() -> Void)?
     let tabs = NSTabView()
     private let tabStrip = NSStackView()
     private(set) var tabChips: [TabChip] = []
@@ -567,6 +568,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         } catch { findBar.status.stringValue = error.localizedDescription }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let quickDismiss { quickDismiss(); return false }
         if panes.isEmpty || panes.allSatisfy({ $0.terminal.snapshot?.exited == true }) { return true }
         closeConfirmation.present(in: sender, title: "Close this window?", message: "All terminal processes in this window will be stopped.") { [weak sender] approved in
             if approved { sender?.close() }
@@ -652,6 +654,18 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
 
 @MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
     private var windows: [TerminalWindow] = []
+    private lazy var quickTerminal: QuickTerminalController = {
+        let controller = QuickTerminalController { [unowned self] in
+            let window = try TerminalWindow(app: self); windows.append(window); return window
+        }
+        controller.onError = { NSAlert(error: $0).runModal() }
+        return controller
+    }()
+    func configureQuickTerminal(_ preferences: TerminalPreferences) throws { try quickTerminal.configure(preferences) }
+    @objc private func toggleQuickTerminal(_ sender: Any?) {
+        do { try quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
+    }
+    public func applicationWillTerminate(_ notification: Notification) { quickTerminal.stop() }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
     private var launched = false
@@ -663,6 +677,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         launched = true
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
         makeMenu()
+        do { try configureQuickTerminal(.load()) } catch { NSAlert(error: error).runModal() }
         // A cold launch for a folder delivers application(_:open:) before this; that window replaces the default one.
         if !openedFolderAtLaunch { newWindow(nil) }
         NSApp.activate(ignoringOtherApps: true); updates.start()
@@ -682,7 +697,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         do { let controller = try TerminalWindow(app: self, directory: directory); windows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil) }
         catch { NSAlert(error: error).runModal() }
     }
-    fileprivate func remove(_ controller: TerminalWindow) { windows.removeAll { $0 === controller } }
+    fileprivate func remove(_ controller: TerminalWindow) { quickTerminal.closed(controller); windows.removeAll { $0 === controller } }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let owner = windows.first(where: { $0.window?.isKeyWindow == true })?.window ?? windows.first?.window
@@ -699,6 +714,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         if terminals.contains(where: { $0.snapshot?.exited != true }) {
             guard let window else { return .terminateCancel }
+            if !window.isVisible { window.makeKeyAndOrderFront(nil) }
             terminationState = .confirming
             let presented = quitConfirmation.present(in: window, title: "Quit Akitty?", message: "All running terminal processes will be stopped.", action: "Quit") { [self] approved in
                 if approved { shutdown() }
@@ -744,10 +760,13 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             let item = menu.addItem(withTitle: command.title, action: #selector(self.command(_:)), keyEquivalent: key)
             item.keyEquivalentModifierMask = modifiers; item.target = self; item.representedObject = command.rawValue
         }
+        let quick = file.addItem(withTitle: "Toggle Quick Terminal", action: #selector(toggleQuickTerminal(_:)), keyEquivalent: ""); quick.target = self
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         add(.copy,key: "c",to: edit); add(.paste,key: "v",to: edit)
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let reclaim = edit.addItem(withTitle: "Reclaim Terminal Control", action: #selector(TerminalView.reclaimAgentControl(_:)), keyEquivalent: "")
+        reclaim.target = nil
         edit.addItem(.separator()); add(.find,key: "f",to: edit)
         add(.findNext,key: "g",to: edit); add(.findPrevious,key: "g",modifiers: [.command, .shift],to: edit)
         let paletteItem = view.addItem(withTitle: "Command Palette…", action: #selector(palette(_:)), keyEquivalent: "p"); paletteItem.keyEquivalentModifierMask = [.command,.shift]; paletteItem.target = self

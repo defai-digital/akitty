@@ -18,7 +18,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | Operation | Additional fields | Behavior |
 | --- | --- | --- |
 | version | none | Version/platform information |
-| create | cols, rows; optional shell, cwd, headless | Create session; absolute shell path; default login shell |
+| create | cols, rows; optional shell, cwd, headless, scrollback, shell_integration_dir | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
 | snapshot | id; optional since, compact | Current snapshot, changed=false, or a partial snapshot (below) |
 | input | id, text; optional paste | UTF-8 input with optional bracketed-paste protection |
@@ -181,3 +181,52 @@ Additive response fields must be tolerated; unknown operations must fail.
 `create` accepts optional `scrollback` in the range 0..20000 lines (default 5000).
 Normal PTY termination reports the child exit code; the native UI closes successful
 sessions and leaves failures visible.
+
+## Shell observations and host command control (current source after 1.0.0)
+
+These are additive schema-1 operations; no C symbols or existing fields change.
+
+| Operation | Fields after id | Result / behavior |
+| --- | --- | --- |
+| command_history | after? (default 0) | commands with id > after, oldest_id, last_id, untrusted |
+| command_output | command_id | command_id, output_base64, truncated, complete, untrusted; unknown/evicted id fails |
+| control_acquire | actor | exclusive lease; actor 1–64 UTF-8 bytes without controls |
+| control_release | lease | return control; stale lease fails |
+| control_reclaim | none | human takeover revokes lease and authorization, without interrupting process |
+| command_authorize | lease, command, expected_cwd? | authorization, expires_in_ms=30000; trusted host approval entry |
+| command_deny | lease | revoke pending authorization and record denial |
+| command_execute | lease, authorization, command | accepted, after_command_id, completion_untrusted=true |
+| control_audit | after? (default 0) | events after sequence, oldest_seq, last_seq |
+
+`create.shell_integration_dir` opts into the bundled local bash/zsh integration.
+It is a trusted absolute resource directory of at most 4096 bytes; other shells
+or missing resources fail visibly. Omitting it preserves ordinary login startup.
+See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinction.
+
+Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
+untrusted=true) and `control` (owner, agent, audit_seq). OSC 7 file URIs are decoded
+into absolute paths (max 4096 URI bytes, no control characters), for display only;
+the authority is not used to access a remote filesystem. OSC 133 A/B/C/D and OSC
+772 base64 command text are consumed by the bounded stream filter. Metadata bodies
+over 8192 bytes or malformed messages are rejected. OSC 772 decodes at most 4096
+UTF-8 bytes without controls. Other OSC sequences retain existing behavior.
+
+History holds 64 records: id, command, cwd, started_ms, ended_ms, exit_code (0–255
+or null), interrupted and truncated. Per-command output retains the first 16384
+raw bytes, base64 encoded at read time. No stdout/stderr separation is claimed.
+Unknown completion, replayed prompt and premature restart do not invent a success.
+All shell observations and output are untrusted and forgeable by PTY programs.
+
+Authorization requires an integrated, unedited prompt and exact expected_cwd
+(including null for unknown). It binds the exact command (1–4096 UTF-8 bytes,
+one line, no controls), lease and directory. It expires on a monotonic 30-second
+deadline and is consumed once, including on mismatch/readiness/queue failure.
+A terminal-emitted completion cannot grant another authorization or release the
+lease. Existing input/input_bytes operations represent human input and reject
+while agent-controlled. Reclaim permits human input but does not stop the process.
+
+Only the trusted host invokes authorization/control operations after authenticating
+and approving the caller. The ABI does not implement network authentication or
+ax-trust service connectivity. Audit is a 64-entry session-local ring, not a durable
+security ledger; sequence cursors reveal eviction. See the host contract for
+retention, sensitive-command handling and uncertain dispatch outcomes.

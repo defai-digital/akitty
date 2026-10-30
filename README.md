@@ -48,6 +48,56 @@ You can also [download the v1.0.0 ZIP](https://download.automatosx.com/akitty/re
 or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.0.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
+## What makes AkiTTY useful
+
+AkiTTY gives each participating program a visible identity in its own tab:
+its own small animated icon, working state, and a completion indicator that stays
+until you view the tab. Imagine three AX Code sessions: a translation agent with
+its own sprite and progress, a coding agent showing activity, and a test agent
+leaving a finished dot when its background work ends.
+
+Programs opt in through the dependency-free [terminal SDK](packages/akitty-sdk/README.md),
+which writes OSC 771 through their existing stdout queue. The native app renders
+the tab icon and activity, with text/progress in the pane status line; no separate
+Python status-bar script is needed. Ordinary CLI programs do not gain this behavior
+automatically, and these reports are program-supplied presentation, not verified
+command results. Default detection disables these SDK updates through SSH and
+multiplexers unless a host explicitly integrates them.
+
+A second integration convenience is AkiTTY Web's ready-made, **read-only** agent
+adapter: `list_sessions`, `read_screen`, and `read_output` expose terminal text,
+including from a Canvas renderer. The host registers the tools; WebMCP additionally
+needs a supporting browser. This is Web-only, and neither the tools nor terminal
+output grant command execution or input ownership.
+
+These are AkiTTY's integration strengths, not a claim that other terminals cannot
+show progress or be automated. [Ghostty supports OSC 9;4 progress](https://ghostty.org/docs/install/release-notes/1-2-0),
+and [iTerm2 has a scriptable status bar](https://iterm2.com/documentation-status-bar.html)
+and [Python automation](https://iterm2.com/python-api/). AkiTTY emphasizes the
+combination of program-selected tab identity, activity and completion, with direct
+AX ecosystem integration. See [product scope and host integration](docs/AGENT_WORKFLOWS.md).
+
+## Current source additions (not in the published 1.0.0 archive)
+
+- Opt-in bash/zsh shell integration records command boundaries, timestamps,
+  reported working directories and exit status, with bounded per-command output.
+- Trusted native and JavaScript embedding hosts can use exclusive agent control,
+  exact-command one-shot approvals, human reclaim and a bounded audit history.
+  A native sheet asks for approval. The separate SDK `/host` entry accepts a host
+  policy callback; an ax-trust deployment must supply its own authenticated adapter.
+  There is no built-in ax-trust service connection.
+- A persistent quick terminal can be shown/hidden from the Shell menu or an opt-in
+  global shortcut selected in Settings. Hiding preserves its shell session.
+- Drag files/folders into a terminal pane to insert shell-quoted paths; drag text
+  to paste it with the same confirmation policy as the clipboard. Dropping onto
+  the Dock/app continues to open a window at the requested folder.
+- The native default background is deep dark (`#080A0D`), consistently across
+  the core, Metal presentation and software rendering.
+
+The new host API does not automatically upgrade AX Code Desktop's vendored Web
+terminal or its PTY service. Shell metadata is untrusted; remote/multiplexer,
+physical IME, sleep/wake and multi-day reliability need their own qualification.
+
 ## Why AkiTTY exists
 
 AkiTTY began with [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop),
@@ -83,8 +133,8 @@ Ctrl-click or Command-click. The wasm loader accepts a Windows `file://` path
 (`/C:/…` becomes `C:/…`) and a normal browser fetch.
 
 There is no AkiTTY installer for Windows or Linux. This repository type-checks
-AkiTTY Web and runs its unit tests on macOS. It does not run a Windows or Linux
-browser suite. Details are in [the package README](packages/akitty-web/README.md).
+AkiTTY Web and runs its unit tests on macOS. Playwright runs Chromium, Firefox
+and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details are in [the package README](packages/akitty-web/README.md).
 
 ## What is implemented
 
@@ -124,7 +174,8 @@ and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
 **Status: 1.0.0.** This is not a drop-in Ghostty replacement.
-Shell integration and quick terminal are planned and are not implemented yet.
+The published 1.0.0 archive does not include shell integration or quick terminal;
+current-source additions are described above.
 Ghostty configuration compatibility and third-party plugins are outside the current
 roadmap. Sixel, image clipboard protocols, and custom shaders remain unsupported.
 The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
@@ -148,12 +199,10 @@ on every supported Mac version are not claimed.
 - **Performance and stability:** measure parser/snapshot/rendering costs, reduce
   unnecessary idle and hidden-pane work, and expand malformed-input and PTY
   lifecycle stress coverage.
-- **Shell integration:** prompt and command boundaries, working-directory updates,
-  and command completion/exit status through bounded shell notifications.
-- **Quick terminal:** a configurable global shortcut to show/hide a persistent
-  terminal, with predictable focus and multi-display behavior.
+- **Shell integration qualification:** broaden startup-hook compatibility and remote/multiplexer coverage beyond the opt-in local bash/zsh implementation.
+- **Quick terminal qualification:** expand sleep/wake, Spaces and multi-display checks for the implemented persistent window and configurable global shortcut.
 
-These are planned capabilities, not features of the current release. See the
+These are remaining qualification goals; the source additions above are not yet in the published archive. See the
 [implementation roadmap](docs/ROADMAP.md) for acceptance criteria and exclusions.
 
 ## Build and run

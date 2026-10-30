@@ -1,0 +1,135 @@
+# Program identity, shell observations, and trusted host control
+
+This document describes current source additions after the published 1.0.0 release.
+A public archive is unchanged until a separately built, tested and published release.
+
+## Product strengths and scope
+
+The native app's distinctive workflow is **per-program tab identity**: an integrating
+program supplies a small sprite, activity and progress, and a background completion
+dot remains until that tab is viewed. Status text and progress appear in the pane;
+the tab shows the activity mark/sprite and completion indicator. This uses the
+existing stdout writer, OSC 771, and the zero-dependency SDK's main entry. Programs
+must integrate it; ordinary CLI applications are unchanged. No status-bar Python
+script needs installing. Presentation is not proof a command ran or succeeded.
+
+Generic progress, status displays and automation are not exclusive capabilities:
+[Ghostty 1.2 added OSC 9;4 progress](https://ghostty.org/docs/install/release-notes/1-2-0),
+while iTerm2 offers a [scriptable status bar](https://iterm2.com/documentation-status-bar.html)
+and [Python API](https://iterm2.com/python-api/). We do not claim competitors cannot
+reproduce this combination or that AkiTTY is a universal replacement.
+
+AkiTTY Web supplies ready-made bounded text tools (`list_sessions`, `read_screen`,
+`read_output`) and an optional WebMCP adapter. The browser and host must support
+and register them. This is Web-only and read-only. The private Web source package
+neither starts a PTY nor executes commands; native OSC 771 support is not implied
+by the AkiTTY Web name. AX Code Desktop must adopt source changes and its own PTY,
+authorization and lifecycle integration separately.
+
+## Local shell integration
+
+Enable **Settings → Sessions → Shell integration** for new terminals. Only bash
+and zsh are supported; another selected shell produces a visible startup error
+rather than silently pretending to integrate. The app loads bundled resources;
+no user startup file is edited. Hosts using the ABI supply an absolute
+`shell_integration_dir` pointing at these trusted resources, or omit it to disable.
+The resources can also be explicitly sourced in an existing interactive shell:
+`source /path/to/shell-integration/akitty.zsh` (or `akitty.bash`).
+
+Zsh runs as an interactive login shell. A bundled ZDOTDIR wrapper loads the user's
+`.zshenv`, `.zprofile` and `.zshrc`, restores their ZDOTDIR, then lets ordinary login
+startup continue. Bash uses an interactive `--rcfile` wrapper and explicitly sources
+`/etc/profile` and the first user login profile; its `login_shell` flag is not set.
+A bashrc sourced by that profile still runs normally. A pre-existing DEBUG trap
+is preserved and integration is declined with a visible warning. Prompt frameworks,
+custom traps, nested shells and nonstandard startup policies need separate checks.
+Existing bash prompt arrays are preserved. When history omits a command, bash
+falls back to the first simple command text; a compound line may therefore have
+partial descriptive text. Host approval/audit still binds the full exact requested
+command independently of this untrusted shell description.
+
+Hooks emit OSC 133 A/B/C/D, OSC 7 directory URIs and bounded OSC 772 base64 command
+text. A command starts at C and ends at D; missing completion followed by a new
+prompt/start marks it interrupted. A missing D has unknown exit status. Captured
+output is the ordered raw terminal byte stream between these boundaries, excluding
+intercepted shell/chrome metadata; ANSI bytes remain. It is not separated stdout
+and stderr, and is not a durable transcript. Retain up to 64 records and 16 KiB per
+command; `truncated` reports clipping and evicted ids return errors. History metadata
+and output explicitly report `untrusted:true`. The shell child's exit code in a
+snapshot remains distinct from each observed command's exit status.
+
+Every program in the PTY can forge these notifications. They support navigation
+and result interpretation; they never prove command execution, create approvals,
+change ownership, or authorize host actions. SSH/tmux propagation is not configured
+by this local integration. SDK capability detection likewise disables title/chrome
+updates through SSH and multiplexers unless the host explicitly opts in.
+
+## Host control and approval
+
+Native embedders use `AgentCommandHost` or `TerminalView.runAgentCommand` (native
+confirmation sheet). JavaScript hosts import `@ax-code/akitty-sdk/host` and supply
+an authenticated transport to the native ABI (or a host enforcing the same contract).
+This interface is separate from the stdout/status SDK and read-only Web tools.
+
+1. Acquire one exclusive lease for an actor. Human input is rejected while leased.
+2. Read the integrated, unedited prompt and reported directory. Ask the user or the
+   host's authorization policy about the exact session, actor, command and context.
+3. On approval, mint one authorization bound to that session's lease, exact command
+   and directory. It expires after 30 seconds; replacing it revokes the older grant.
+4. Dispatch the same command once. Replay, mismatch, changed directory, expired
+   lease or failed prompt checks reject execution. Dispatch consumes the grant even
+   when queueing fails; a retry requires fresh approval. A command is at most 4096
+   UTF-8 bytes, on one line, without control characters; shell syntax is permitted
+   because the complete command is what the host approves.
+5. Read history/output after the receipt's `after_command_id`. Shell completion is
+   untrusted and does not release control or authorize the next command. Explicitly
+   release the lease after reviewing results. **Edit → Reclaim Terminal Control**
+   revokes the agent lease and outstanding grant; it does not kill the running
+   process. The human can then send an interrupt or close the pane normally.
+
+The C ABI is a trusted embedding boundary, not an authentication endpoint. Do not
+expose its approval/control operations directly to terminal programs, browser agent
+text, remote callers or the public read-only tools. A host service must authenticate
+callers and enforce its approval policy before reaching this API. The JavaScript
+`approve` callback is the integration point for an ax-trust-backed policy, but this
+repository does not include an authenticated ax-trust deployment or claim a cutover.
+The native UI remains the local approval authority.
+
+Audit events have monotonic session-local sequence numbers and timestamps, bounded
+to 64 entries, with oldest/last cursors for loss detection. They include acquisition,
+authorization, denial, dispatch/failure, untrusted shell completion, blocked human
+input, release and reclaim. Commands can contain secrets: the host controls access
+and retention. These records disappear when the session closes. Durable/tamper-resistant
+or organization-wide auditing requires a host sink; it is not established by this
+in-memory ring. Read/export pages before eviction and close. A transport failure
+following dispatch is an uncertain outcome: never blindly retry the command.
+
+## Quick terminal and input
+
+**Shell → Toggle Quick Terminal** shows or hides a persistent terminal window.
+Enable a global shortcut in Settings → Keyboard and choose one of the three
+combinations. A registration conflict is shown in Settings and the existing
+shortcut stays registered. The window appears in the current Space on the display
+under the pointer, including alongside full-screen apps where macOS permits it.
+Hiding (hotkey/menu/close button) retains PTYs, tabs and scrollback and restores
+prior application/window focus. Exiting the last shell closes it; showing again
+creates a new session. App quit retains ordinary live-session confirmation and
+bounded cleanup, including hidden quick terminals. Display/Space transitions and
+sleep/wake should also be checked on the target macOS version.
+
+Drop local files/folders into a pane to insert POSIX-shell-quoted absolute paths
+with no execution newline (up to 64 items / 64 KiB). Apostrophes, spaces and shell
+metacharacters are quoted. Plain text drops use clipboard paste protection;
+control/multiline text needs confirmation. Remote file URLs and mixed file/text
+items are rejected. Agent ownership also blocks drops until human reclaim. A Dock
+or application drop instead opens a window in the folder; it does not paste a path.
+The native default background is `#080A0D`; explicit application-selected ANSI
+background colors remain respected.
+
+## Validation boundary
+
+The canonical `scripts/verify.sh` covers the native ABI, actual local bash/zsh PTYs,
+lease/approval regressions, Swift UI policies and Web tests. Playwright exercises
+Chromium/Firefox/WebKit on macOS; the workflow adds Ubuntu and Windows browser jobs.
+These are browser component tests, not proof of AX Code Desktop's packaged PTY,
+physical IME, every OS/font combination, accessibility or multi-day stability.

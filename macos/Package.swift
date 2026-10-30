@@ -12,7 +12,7 @@ let package = Package(
         .target(name: "AkittyKit", dependencies: ["AkittyCore", .product(name: "Sparkle", package: "Sparkle")], exclude: ["Resources"],
                 linkerSettings: [.unsafeFlags(["-L", rustLibrary, "-lakitty_core", "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
                                  .linkedFramework("AppKit"), .linkedFramework("MetalKit"),
-                                 .linkedFramework("CoreText"), .linkedFramework("JavaScriptCore")]),
+                                 .linkedFramework("Carbon"), .linkedFramework("CoreText"), .linkedFramework("JavaScriptCore")]),
         .executableTarget(name: "Akitty", dependencies: ["AkittyKit"]),
         .testTarget(name: "AkittyKitTests", dependencies: ["AkittyKit"])
     ], swiftLanguageModes: [.v5]

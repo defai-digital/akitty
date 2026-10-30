@@ -28,6 +28,23 @@ trap 'rm -rf "$stage"' EXIT
 app="$stage/Akitty.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/Akitty" "$app/Contents/MacOS/Akitty"
+# Swift may add a build-only package-framework search path. Bundled frameworks
+# live at @executable_path/../Frameworks; remove the private build path before signing.
+python3 - "$app/Contents/MacOS/Akitty" "$PWD/macos/.build/" <<'PYRPATH'
+import subprocess, sys
+binary, build_root = sys.argv[1:]
+lines = subprocess.check_output(['otool', '-l', binary], text=True).splitlines()
+for index, line in enumerate(lines):
+    if line.strip() != 'cmd LC_RPATH':
+        continue
+    for detail in lines[index + 1:index + 4]:
+        value = detail.strip()
+        if value.startswith('path '):
+            path = value[5:].rsplit(' (offset ', 1)[0]
+            if path.startswith(build_root):
+                subprocess.run(['install_name_tool', '-delete_rpath', path, binary], check=True)
+            break
+PYRPATH
 # Remove linker debug-map object paths from the distributable executable.
 xcrun strip -S "$app/Contents/MacOS/Akitty"
 python3 - "$app/Contents/MacOS/Akitty" <<'PYSCAN'
@@ -38,6 +55,10 @@ PYSCAN
 mkdir -p "$app/Contents/Frameworks"
 ditto macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app/Contents/Frameworks/Sparkle.framework"
 cp third_party/sparkle/LICENSE "$app/Contents/Resources/SPARKLE_LICENSE"
+mkdir -p "$app/Contents/Resources/shell-integration"
+for resource in .zshenv .zprofile .zshrc akitty.bash akitty.zsh bashrc; do
+    cp "macos/Sources/AkittyKit/Resources/shell-integration/$resource" "$app/Contents/Resources/shell-integration/$resource"
+done
 cp macos/Sources/AkittyKit/Resources/features.js "$app/Contents/Resources/features.js"
 # AppKit loads these credits in the standard About panel from Bundle.main.
 cp macos/Sources/AkittyKit/Resources/Credits.html "$app/Contents/Resources/Credits.html"

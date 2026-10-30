@@ -123,7 +123,7 @@ final class LayeredRenderingTests: XCTestCase {
         return try! JSONDecoder().decode(ImagePlacement.self, from: JSONSerialization.data(withJSONObject: value))
     }
 
-    private func cell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29],
+    private func cell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [8, 10, 13],
                       selected: Bool = false, underline: Bool = false, strike: Bool = false, bold: Bool = false) -> [Any] {
         // The wire form: [row, col, text, fg, bg, attrs, ucolor?]; an underline here is single (style 1) in red.
         let attrs = (bold ? 1 : 0) | (underline ? 4 | 1 << 8 : 0) | (selected ? 8 : 0) | (strike ? 32 : 0)
@@ -223,7 +223,7 @@ final class LayeredRenderingTests: XCTestCase {
         // Spot-check the z bands through the composited output: the underlay shows on default cells only,
         // the between image sits under glyphs, the overlay covers the text beneath it.
         func at(_ x: Int, _ y: Int) -> [UInt8] { [left[y * stride + x * 4 + 2], left[y * stride + x * 4 + 1], left[y * stride + x * 4]] }
-        XCTAssertNotEqual(at(120, 40), [18, 22, 29], "the underlay paints outside the custom cell")
+        XCTAssertNotEqual(at(120, 40), [8, 10, 13], "the underlay paints outside the custom cell")
         XCTAssertEqual(at(100, 60), at(100, 60), "stable")
     }
 }

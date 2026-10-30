@@ -12,6 +12,9 @@ struct TerminalPreferences: Codable, Equatable {
     var optionAsAlt = false
     /// Programs may update chrome only when this preference is enabled.
     var programChrome = true
+    var shellIntegration = false
+    var quickTerminal = false
+    var quickShortcut = 0
     /// The system monospace face, then every installed fixed-pitch family, so CJK-optimised monospace fonts are selectable.
     @MainActor static func availableFonts() -> [String] {
         var families = Set<String>()
@@ -34,6 +37,7 @@ struct TerminalPreferences: Codable, Equatable {
             && !isDirectory.boolValue && FileManager.default.isExecutableFile(atPath: path)
     }
     func validated() throws -> Self {
+        guard (0...2).contains(quickShortcut) else { throw AkittyError.core("Choose a valid quick terminal shortcut.") }
         guard Self.installed(fontName), fontSize.isFinite, (9...36).contains(fontSize), (0...20000).contains(scrollback) else { throw AkittyError.core("Choose a supported font, size 9–36, and scrollback 0–20,000.") }
         guard cjkFont.isEmpty || NSFont(name: cjkFont, size: 12) != nil else { throw AkittyError.core("Choose an installed CJK font, or Automatic.") }
         guard Self.validShell(shell) else { throw AkittyError.core("Shell must be an absolute path to an executable, without arguments.") }
@@ -49,6 +53,7 @@ struct TerminalPreferences: Codable, Equatable {
         // Recover each invalid field independently, preserving other saved settings.
         let fallback = Self()
         var isDirectory: ObjCBool = false
+        if !(0...2).contains(value.quickShortcut) { value.quickShortcut = fallback.quickShortcut }
         if !Self.installed(value.fontName) { value.fontName = fallback.fontName }
         if !value.cjkFont.isEmpty, NSFont(name: value.cjkFont, size: 12) == nil { value.cjkFont = fallback.cjkFont }
         if !value.fontSize.isFinite || !(9...36).contains(value.fontSize) { value.fontSize = fallback.fontSize }
@@ -66,7 +71,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome, shellIntegration, quickTerminal, quickShortcut
     }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -79,6 +84,9 @@ extension TerminalPreferences {
         scrollback = try container.decodeIfPresent(Int.self, forKey: .scrollback) ?? scrollback
         optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? optionAsAlt
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
+        quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
+        quickShortcut = try container.decodeIfPresent(Int.self, forKey: .quickShortcut) ?? 0
+        shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? false
         programChrome = try container.decodeIfPresent(Bool.self, forKey: .programChrome) ?? true
     }
     func encode(to encoder: Encoder) throws {
@@ -91,6 +99,9 @@ extension TerminalPreferences {
         try container.encode(scrollback, forKey: .scrollback)
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
         try container.encode(programChrome, forKey: .programChrome)
+        try container.encode(shellIntegration, forKey: .shellIntegration)
+        try container.encode(quickTerminal, forKey: .quickTerminal)
+        try container.encode(quickShortcut, forKey: .quickShortcut)
     }
 }
 
@@ -152,6 +163,8 @@ struct PreferencesDraft {
                     .tabItem { Text("Appearance") }
                 Form {
                     Section("New Terminals") {
+                        Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
+                        Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files.").font(.caption).foregroundStyle(.secondary)
                         TextField("Shell", text: $state.draft.shell, prompt: Text("Default login shell"))
                         HStack {
                             TextField("Starting directory", text: $state.draft.directory, prompt: Text("Home directory"))
@@ -171,6 +184,13 @@ struct PreferencesDraft {
                 }.formStyle(.grouped)
                     .tabItem { Text("Sessions") }
                 Form {
+                    Section("Quick Terminal") {
+                        Toggle("Enable global quick terminal", isOn: $state.draft.quickTerminal)
+                        Picker("Shortcut", selection: $state.draft.quickShortcut) {
+                            ForEach(0..<GlobalShortcut.names.count, id: \.self) { Text(GlobalShortcut.names[$0]).tag($0) }
+                        }.disabled(!draft.quickTerminal)
+                        Text("Toggle a persistent terminal on the pointer’s display. Hiding keeps its processes running.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Section("Keyboard") {
                         Toggle("Use Option as Alt", isOn: $state.draft.optionAsAlt)
                         Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
@@ -193,6 +213,8 @@ struct PreferencesDraft {
                 Spacer()
                 Button("Apply") {
                     do {
+                        _ = try draft.validated()
+                        try (NSApp.delegate as? AkittyApplication)?.configureQuickTerminal(draft)
                         try draft.save(to: defaults); updater.automaticChecks = automaticChecks
                         state.markSaved(); error = ""
                     } catch { self.error = error.localizedDescription }

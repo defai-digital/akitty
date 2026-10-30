@@ -31,6 +31,7 @@ impl Session {
         cwd: Option<String>,
         headless: bool,
         scrollback: usize,
+        shell_integration_dir: Option<String>,
     ) -> Result<Self, String> {
         if scrollback > 20000 { return Err("scrollback exceeds 20000 lines".into()); }
         let size = Size::validate(cols, rows)?;
@@ -68,8 +69,22 @@ impl Session {
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.arg("-l");
+        let mut cmd = CommandBuilder::new(&shell);
+        if let Some(directory) = shell_integration_dir {
+            if directory.len() > 4096 || !std::path::Path::new(&directory).is_absolute() {
+                return Err("shell integration directory must be an absolute path of at most 4096 bytes".into());
+            }
+            let root = std::path::Path::new(&directory);
+            let name = std::path::Path::new(&shell).file_name().and_then(|n|n.to_str()).unwrap_or("");
+            let resource = match name { "bash" => "bashrc", "zsh" => ".zshrc", _ => return Err("shell integration supports bash and zsh only".into()) };
+            if !root.join(resource).is_file() { return Err("shell integration resources missing".into()); }
+            cmd.env("AKITTY_INTEGRATION_DIR", &directory);
+            if name == "bash" { cmd.args(["--rcfile", &root.join("bashrc").to_string_lossy(), "-i"]); }
+            else {
+                cmd.env("AKITTY_USER_ZDOTDIR", std::env::var("ZDOTDIR").or_else(|_|std::env::var("HOME")).unwrap_or_else(|_|"/".into()));
+                cmd.env("ZDOTDIR", &directory); cmd.args(["-l", "-i"]);
+            }
+        } else { cmd.arg("-l"); }
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -110,6 +125,12 @@ impl Session {
         if self.commands.is_none() { model.expire_sync(); }
         model.snapshot_json(since, compact)
     }
+    pub fn command_history(&self, after: u64) -> Result<Value, String> {
+        Ok(self.model.lock().map_err(|_| "terminal unavailable")?.shell.history(after))
+    }
+    pub fn command_output(&self, id: u64) -> Result<Value, String> {
+        self.model.lock().map_err(|_| "terminal unavailable")?.shell.command_output(id)
+    }
     pub fn feed(&self, bytes: &[u8]) -> Result<(), String> {
         if self.commands.is_some() {
             return Err("feed is only available on headless sessions".into());
@@ -139,9 +160,15 @@ impl Session {
     }
     pub fn input_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > 65548 { return Err("input exceeds 64 KiB plus paste delimiters".into()); }
-        let model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
-        drop(model);
+        let previous_dirty = model.control.dirty;
+        let checked = model.control.human_input(); model.revision += 1; checked?;
+        if let Err(error) = self.enqueue_input(bytes) { model.control.dirty = previous_dirty; return Err(error); }
+        model.term.scroll_display(Scroll::Bottom); model.revision += 1;
+        Ok(())
+    }
+    fn enqueue_input(&self, bytes: Vec<u8>) -> Result<(), String> {
         let sender = self
             .commands
             .as_ref()
@@ -159,12 +186,44 @@ impl Session {
             self.pending.fetch_sub(len, Ordering::SeqCst);
             return Err(format!("PTY command rejected: {error}"));
         }
-        // Typing jumps back to the live screen, but only once the input was accepted.
-        if let Ok(mut model) = self.model.lock() {
-            model.term.scroll_display(Scroll::Bottom);
-            model.revision += 1;
-        }
         Ok(())
+    }
+    pub fn control_acquire(&self, actor: String) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        if model.exited { return Err("shell has exited".into()); }
+        let result = model.control.acquire(actor); model.revision += 1; result
+    }
+    pub fn control_release(&self, lease: Option<u64>) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let result = model.control.release(lease); model.revision += 1; result
+    }
+    pub fn command_authorize(&self, lease: u64, command: String, expected_cwd: Option<String>) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        if model.exited || !model.shell.ready || model.control.dirty { return Err("command requires an unedited integrated shell prompt".into()); }
+        let cwd = model.shell.cwd.clone();
+        if cwd != expected_cwd { return Err("working directory changed since approval request".into()); }
+        let result = model.control.authorize(lease,command,cwd); model.revision += 1; result
+    }
+    pub fn command_deny(&self, lease: u64) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let result = model.control.deny(lease); model.revision += 1; result
+    }
+    pub fn command_execute(&self, lease: u64, authorization: u64, command: String) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let cwd = model.shell.cwd.clone();
+        // Consume even on readiness or queue failure: retry always needs fresh approval.
+        let consumed = model.control.consume(lease,authorization,&command,&cwd); model.revision += 1; consumed?;
+        if model.exited || !model.shell.ready || model.control.dirty {
+            model.control.record("dispatch_failed",None); return Err("command requires an unedited integrated shell prompt".into());
+        }
+        if let Err(error) = self.enqueue_input(format!("{command}\r").into_bytes()) {
+            model.control.record("dispatch_failed",None); return Err(error);
+        }
+        model.shell.ready = false; model.control.dirty = true; model.revision += 1;
+        Ok(json!({"accepted":true,"after_command_id":model.shell.summary()["last_command_id"],"completion_untrusted":true}))
+    }
+    pub fn control_audit(&self, after: u64) -> Result<Value, String> {
+        Ok(self.model.lock().map_err(|_| "terminal unavailable")?.control.audit(after))
     }
     pub fn resize(&self, cols: usize, rows: usize) -> Result<(), String> {
         let size = Size::validate(cols, rows)?;
@@ -448,6 +507,7 @@ fn run(
         io_error = Some(error);
     }
     if let Ok(mut state) = model.lock() {
+        state.shell.finish();
         state.exited = true;
         state.exit_code = child.exit_code();
         state.error = io_error.clone();
@@ -476,7 +536,7 @@ mod tests {
 
     #[test]
     fn input_backpressure_bounds_bytes_and_rolls_back_rejected_messages() {
-        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let (tx, rx) = mpsc::sync_channel(1);
         session.commands = Some(tx);
         session.input_bytes(vec![0xff; 65536]).unwrap();
@@ -505,7 +565,7 @@ mod tests {
 
     #[test]
     fn set_cell_size_pushes_a_pty_resize_without_a_grid_change() {
-        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let (tx, rx) = mpsc::sync_channel(1);
         session.commands = Some(tx);
         session.set_cell_size(10, 20).unwrap();
@@ -517,7 +577,7 @@ mod tests {
 
     #[test]
     fn set_cell_size_invalidates_the_snapshot_revision() {
-        let session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         session.set_cell_size(10, 20).unwrap();
@@ -530,7 +590,7 @@ mod tests {
 
     #[test]
     fn rejected_cell_size_send_rolls_back_pixels_without_a_revision_bump() {
-        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.set_cell_size(10, 20).unwrap();
         let revision = session.model.lock().unwrap().revision;
         // Fill the bounded command queue so the resize send is rejected.

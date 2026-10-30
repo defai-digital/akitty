@@ -164,7 +164,7 @@ struct Quad {
         pixel.withUnsafeMutableBytes { raw in
             let context = CGContext(data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
                                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-            context?.setFillColor(CGColor(red: 18/255, green: 22/255, blue: 29/255, alpha: 1)); context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+            context?.setFillColor(CGColor(red: 8/255, green: 10/255, blue: 13/255, alpha: 1)); context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
         }
         return MTLClearColor(red: Double(pixel[2]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[0]) / 255, alpha: 1)
     }()
@@ -371,7 +371,7 @@ final class GridRasterizer: @unchecked Sendable {
     /// Kitty's lowest z layer: images below this draw under non-default cell backgrounds.
     static let underlayZ = -1_073_741_824
     /// The core's resolved default background, which the frame fill already paints.
-    static let defaultBackground: [UInt8] = [18, 22, 29]
+    static let defaultBackground: [UInt8] = [8, 10, 13]
 
     private var context: CGContext?
     private var layout: Layout?
@@ -467,7 +467,7 @@ final class GridRasterizer: @unchecked Sendable {
             CGRect(x: Self.margin + CGFloat(cell.col) * cellSize.width, y: gridTop - CGFloat(cell.row + 1) * cellSize.height,
                    width: cellSize.width * (cell.wide ? 2 : 1), height: cellSize.height)
         }
-        let background = CGColor(red: 18/255, green: 22/255, blue: 29/255, alpha: 1)
+        let background = CGColor(red: 8/255, green: 10/255, blue: 13/255, alpha: 1)
 
         if let rows, rows.isEmpty { return Frame(context: context, damage: 0..<0) }
         context.saveGState(); defer { context.restoreGState() }

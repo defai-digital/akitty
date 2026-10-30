@@ -309,12 +309,22 @@ public struct ChromeDocument: Codable, Equatable, Sendable {
     }
 }
 
+public struct ShellSummary: Codable, Sendable {
+    public let cwd: String?
+    public let ready: Bool
+    public let last_command_id: UInt64
+    public let rejected: UInt64
+    public let untrusted: Bool
+}
+
 public struct Snapshot: Codable, Sendable {
     public let changed: Bool
     public let revision: UInt64
     public let cols: Int
     public let rows: Int
     public let title: String
+    public let shell: ShellSummary?
+    public let control: ControlSummary?
     /// For a partial snapshot, only the cells of the `dirty` rows; `TerminalSession.snapshot` merges them.
     public internal(set) var cells: [Cell]
     /// For a partial snapshot, the text of the `dirty` rows in order.
@@ -400,10 +410,11 @@ public final class TerminalSession: @unchecked Sendable {
     private let lock = NSLock()
     public let id: UInt64
     private var closed = false
-    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000) throws {
+    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000, shellIntegrationDirectory: String? = nil) throws {
         var request: [String: Any] = ["op": "create", "cols": cols, "rows": rows, "headless": headless, "scrollback": scrollback]
         if let shell, !shell.isEmpty { request["shell"] = shell }
         if let directory, !directory.isEmpty { request["cwd"] = directory }
+        if let shellIntegrationDirectory { request["shell_integration_dir"] = shellIntegrationDirectory }
         let data = try CoreBridge.call(request)
         let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let id = value?["id"] as? UInt64 else { throw AkittyError.core("No terminal handle") }
@@ -477,5 +488,7 @@ public final class TerminalSession: @unchecked Sendable {
         }
         return copied == count ? data : nil
     }
+    public func commandHistory(after: UInt64 = 0) throws -> Data { try call("command_history", ["after": after]) }
+    public func commandOutput(_ commandID: UInt64) throws -> Data { try call("command_output", ["command_id": commandID]) }
     public func input(_ text: String, paste: Bool = false) throws { _ = try call("input", ["text": text, "paste": paste]) }
 }

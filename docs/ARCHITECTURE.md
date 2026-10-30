@@ -85,14 +85,15 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
    Full external esctest qualification and dedicated VoiceOver development/user
    testing are outside the current roadmap, not release gates.
 
-The next planned work is performance/stability qualification, shell integration,
-and quick terminal. Their acceptance criteria are recorded in [the roadmap](ROADMAP.md);
-they are not implemented by the architecture or existing test results alone.
+Current source adds opt-in bash/zsh shell observations, trusted host command control,
+a persistent quick terminal, quoted file/text drops and a deep-dark default background.
+These additions follow the published 1.0.0 archive; see [host workflows](AGENT_WORKFLOWS.md).
+Performance/stability and broader platform/workflow qualification remain in [the roadmap](ROADMAP.md).
 
 ## Compatibility scope
 
-Shell integration and quick terminal are planned native-app features and are not
-implemented yet. Ghostty configuration compatibility, third-party plugins and a
+Shell integration and quick terminal are opt-in native source features after 1.0.0;
+they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
 public extension ecosystem are outside the current roadmap. Sixel, image clipboard
 protocols, and custom shaders remain unsupported. Dedicated VoiceOver work and
 user testing are outside this roadmap; existing macOS accessible text/selection
