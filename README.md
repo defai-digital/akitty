@@ -26,8 +26,8 @@ contributors for the work that helped make AkiTTY possible.
 
 ## Download
 
-[Download AkiTTY 0.8.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.8.0/AkiTTY-0.8.0-macOS-arm64.zip)
-(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.8.0).
+[Download AkiTTY 0.9.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.9.0/AkiTTY-0.9.0-macOS-arm64.zip)
+(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.9.0).
 Unzip and move **Akitty.app** to **Applications** before opening it.
 
 Updates appear as a quiet, versioned titlebar reminder. **AkiTTY → Check for
@@ -80,7 +80,7 @@ download the ZIP above and verify it with `shasum -a 256` against the same `rele
 from ghostty-web, is now maintained independently, and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
 package. See [its README](packages/akitty-web/README.md).
 
-**Status: early 0.8.0 implementation.** This is not a drop-in Ghostty replacement.
+**Status: early 0.9.0 implementation.** This is not a drop-in Ghostty replacement.
 Sixel, PNG and file-based Kitty graphics, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick
 terminal and third-party plugins are not implemented. A bounded Kitty graphics subset
 (direct raw RGB/RGBA with zlib and chunking, placement, z-index, delete) is supported
