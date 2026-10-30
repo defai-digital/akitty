@@ -177,7 +177,7 @@ public struct ChromeStatus: Codable, Equatable, Sendable {
     public let tone: String
 }
 
-/// A title-bar mark. A frame index selects a sprite frame; named marks use frame 0.
+/// A tab activity mark. A frame index selects a sprite frame; named marks use frame 0.
 public enum ChromeMark: Equatable, Sendable {
     case idle, busy, error, frame(Int)
 }
@@ -298,6 +298,8 @@ public struct ChromeDocument: Codable, Equatable, Sendable {
         if let progress { parts.append(progress.label) }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
+    /// True while the program reports work in progress: any progress, or the busy mark.
+    var isWorking: Bool { progress != nil || mark == .busy }
     /// Sprite frame to draw. Reduce motion always uses frame 0; a named mark does too.
     func shownPixels(reduceMotion: Bool) -> Data? {
         guard let sprite, let first = sprite.frames.first else { return nil }

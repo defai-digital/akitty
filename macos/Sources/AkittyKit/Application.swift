@@ -46,6 +46,72 @@ import AppKit
     }
     required init?(coder: NSCoder) { nil }
 }
+/// What a tab's programs report through program chrome, shown in its chip. Several tabs can run agents at once, so
+/// the state belongs to each tab rather than to the window.
+enum TabActivity: Equatable {
+    case none
+    /// Progress or the busy mark is current. Pixels are the shown sprite frame, when the program sent a sprite.
+    case working(pixels: Data?, width: Int, height: Int)
+    /// Work ended while the tab was not in view. Cleared when the tab is shown.
+    case finished
+}
+
+/// The chip's activity mark: the program's own sprite while it works, and a dot once work it did out of view ends.
+@MainActor final class TabActivityMark: NSView {
+    var activity: TabActivity = .none {
+        didSet {
+            guard activity != oldValue else { return }
+            image = Self.image(for: activity)
+            isHidden = activity == .none
+            setAccessibilityLabel(activity == .finished ? "Finished" : activity == .none ? nil : "Working")
+            needsDisplay = true
+        }
+    }
+    private var image: NSBitmapImageRep?
+    init() {
+        super.init(frame: .zero)
+        isHidden = true
+        setAccessibilityElement(true); setAccessibilityRole(.image); setAccessibilityIdentifier("tab-activity")
+    }
+    required init?(coder: NSCoder) { nil }
+    /// Copies one RGBA8 frame into a bitmap; nil when the size does not match.
+    static func bitmap(pixels: Data, width: Int, height: Int) -> NSBitmapImageRep? {
+        guard width > 0, height > 0, pixels.count == width * height * 4,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32),
+              let destination = rep.bitmapData else { return nil }
+        pixels.withUnsafeBytes { raw in
+            if let source = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) { destination.update(from: source, count: pixels.count) }
+        }
+        return rep
+    }
+    private static func image(for activity: TabActivity) -> NSBitmapImageRep? {
+        guard case let .working(pixels?, width, height) = activity else { return nil }
+        return bitmap(pixels: pixels, width: width, height: height)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        switch activity {
+        case .none: return
+        case .finished:
+            NSColor.systemGreen.setFill()
+            NSBezierPath(ovalIn: NSRect(x: bounds.midX - 3.5, y: bounds.midY - 3.5, width: 7, height: 7)).fill()
+        case .working:
+            guard let image else {
+                // A program that reports work without a sprite gets a plain accent dot.
+                NSColor.controlAccentColor.setFill()
+                NSBezierPath(ovalIn: NSRect(x: bounds.midX - 3.5, y: bounds.midY - 3.5, width: 7, height: 7)).fill()
+                return
+            }
+            // Pixel art: scale by whole device pixels without smoothing, centred.
+            let side = min(bounds.width, bounds.height)
+            let scale = side / CGFloat(max(image.pixelsWide, image.pixelsHigh))
+            let size = NSSize(width: CGFloat(image.pixelsWide) * scale, height: CGFloat(image.pixelsHigh) * scale)
+            let rect = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+            NSGraphicsContext.current?.imageInterpolation = .none
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.none.rawValue)])
+        }
+    }
+}
+
 /// One tab in the bar, laid out like a native macOS tab (Ghostty's): a close button on the left, the centred title,
 /// and the ⌘-number that selects it on the right. The close button shows on the selected tab and on hover; clicking
 /// anywhere else selects the tab, and dragging sideways reorders it.
@@ -53,6 +119,8 @@ import AppKit
     let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!, target: nil, action: nil)
     private let title = NSTextField(labelWithString: "")
     private let shortcutLabel = NSTextField(labelWithString: "")
+    let activityMark = TabActivityMark()
+    var activity: TabActivity { get { activityMark.activity } set { activityMark.activity = newValue; refresh() } }
     var shortcut: String { get { shortcutLabel.stringValue } set { shortcutLabel.stringValue = newValue } }
     var onSelect: (() -> Void)?, onClose: (() -> Void)?, contextMenu: (() -> NSMenu)?
     /// The pointer's x in the tab strip while this tab is dragged.
@@ -72,12 +140,15 @@ import AppKit
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         shortcutLabel.font = .systemFont(ofSize: 11); shortcutLabel.textColor = .tertiaryLabelColor; shortcutLabel.alignment = .right
         shortcutLabel.setAccessibilityElement(false)
-        for view in [closeButton, title, shortcutLabel] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        for view in [closeButton, title, activityMark, shortcutLabel] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        // The mark sits just before the ⌘-number; the title keeps clear of it either way, so it does not jump.
         NSLayoutConstraint.activate([
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 16), closeButton.heightAnchor.constraint(equalToConstant: 16),
-            title.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 4), title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -26),
+            title.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 4), title.trailingAnchor.constraint(equalTo: activityMark.leadingAnchor, constant: -4),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            activityMark.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28), activityMark.centerYAnchor.constraint(equalTo: centerYAnchor),
+            activityMark.widthAnchor.constraint(equalToConstant: 14), activityMark.heightAnchor.constraint(equalToConstant: 14),
             shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             shortcutLabel.widthAnchor.constraint(equalToConstant: 20)
         ])
@@ -90,7 +161,8 @@ import AppKit
         // A narrow tab gives its room to the title first.
         shortcutLabel.isHidden = bounds.width < 120
         title.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        setAccessibilityLabel(label); setAccessibilityValue(isSelected)
+        let state = activity == .finished ? ", finished" : activity == .none ? "" : ", working"
+        setAccessibilityLabel(label + state); setAccessibilityValue(isSelected)
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -180,9 +252,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// Starting directory for every tab and split in this window; nil uses the Settings directory.
     let directory: String?
     /// Defaults to the system setting. Tests set this to force the sprite onto frame 0.
-    var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshChromeMark() } }
-    private var chromeDocument: ChromeDocument?
-    private var chromeMark: ChromeMarkAccessory?
+    var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshTabs() } }
+    /// Tabs (by their split view) whose programs reported work at the last chrome update.
+    private var workingTabs: Set<ObjectIdentifier> = []
+    /// Tabs whose work ended while they were out of view; each keeps a dot until it is shown.
+    private var finishedTabs: Set<ObjectIdentifier> = []
     private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
@@ -268,10 +342,10 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             self.refreshTabs()
             if self.tabs.selectedTabViewItem?.view === split { self.window?.title = title == "Akitty" ? title : "\(title) — Akitty" }
         }
-        pane.terminal.onChrome = { [weak self, weak split] chrome in
-            guard let self, self.tabs.selectedTabViewItem?.view === split else { return }
-            self.chromeDocument = chrome
-            self.refreshChromeMark()
+        // Every tab reports, not only the selected one: background tabs are the ones whose state matters most.
+        pane.terminal.onChrome = { [weak self, weak split] _ in
+            guard let self, let split else { return }
+            self.refreshActivity(of: split)
         }
         window?.makeFirstResponder(pane.terminal)
     }
@@ -287,7 +361,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             tabStrip.addArrangedSubview(chip); tabChips.append(chip)
         }
         for (index, (chip, item)) in zip(tabChips, tabs.tabViewItems).enumerated() {
-            chip.label = item.label; chip.isSelected = item === tabs.selectedTabViewItem
+            chip.label = item.label; chip.isSelected = item === tabs.selectedTabViewItem; chip.activity = activity(of: item)
             chip.shortcut = shortcut(forTab: index)
             chip.onSelect = { [weak self, weak item] in if let item { self?.draggedTab = item; self?.tabs.selectTabViewItem(item) } }
             chip.onDrag = { [weak self] x in
@@ -317,22 +391,37 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         updateReminder = nil
         if let version, let updater = app?.updates { let reminder = UpdateReminder(version: version, updater: updater); window?.addTitlebarAccessoryViewController(reminder); updateReminder = reminder }
     }
-    private func refreshChromeMark() {
-        if let old = chromeMark, let index = window?.titlebarAccessoryViewControllers.firstIndex(of: old) {
-            window?.removeTitlebarAccessoryViewController(at: index)
-        }
-        chromeMark = nil
-        guard let pixels = chromeDocument?.shownPixels(reduceMotion: reduceMotion), let sprite = chromeDocument?.sprite else { return }
-        let accessory = ChromeMarkAccessory(pixels: pixels, width: sprite.w, height: sprite.h)
-        window?.addTitlebarAccessoryViewController(accessory)
-        chromeMark = accessory
+    /// The first pane in the split whose program reports work, if any.
+    private func workingChrome(in split: NSSplitView) -> ChromeDocument? {
+        split.arrangedSubviews.lazy.compactMap { ($0 as? TerminalPane)?.terminal.snapshot }.first { !$0.exited && $0.chrome?.isWorking == true }?.chrome
     }
+    /// Whether the user can see this tab now: it is selected in the key window.
+    private func inView(_ split: NSSplitView) -> Bool { tabs.selectedTabViewItem?.view === split && window?.isKeyWindow == true }
+    private func refreshActivity(of split: NSSplitView) {
+        let id = ObjectIdentifier(split)
+        if workingChrome(in: split) != nil { workingTabs.insert(id); finishedTabs.remove(id) }
+        else if workingTabs.remove(id) != nil, !inView(split) { finishedTabs.insert(id) }
+        refreshTabs()
+    }
+    private func activity(of item: NSTabViewItem) -> TabActivity {
+        guard let split = item.view as? NSSplitView else { return .none }
+        if let chrome = workingChrome(in: split) {
+            guard let sprite = chrome.sprite else { return .working(pixels: nil, width: 0, height: 0) }
+            return .working(pixels: chrome.shownPixels(reduceMotion: reduceMotion), width: sprite.w, height: sprite.h)
+        }
+        return finishedTabs.contains(ObjectIdentifier(split)) ? .finished : .none
+    }
+    /// Showing a tab acknowledges work that finished out of view.
+    private func acknowledgeSelectedTab() {
+        guard let split = tabs.selectedTabViewItem?.view as? NSSplitView, finishedTabs.remove(ObjectIdentifier(split)) != nil else { return }
+        refreshTabs()
+    }
+    func windowDidBecomeKey(_ notification: Notification) { acknowledgeSelectedTab() }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        if window?.isKeyWindow == true, let split = tabViewItem?.view as? NSSplitView { finishedTabs.remove(ObjectIdentifier(split)) }
         refreshTabs()
         if let pane = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
             window?.makeFirstResponder(pane.terminal)
-            chromeDocument = pane.terminal.snapshot?.chrome
-            refreshChromeMark()
         }
     }
     func perform(_ command: NativeCommand, target: TerminalView? = nil) {
@@ -404,7 +493,12 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private func remove(_ terminal: TerminalView) {
         guard let pane = panes.first(where: { $0.terminal === terminal }), let split = pane.superview as? NSSplitView else { return }
         terminal.shutdown(); split.removeArrangedSubview(pane); pane.removeFromSuperview()
-        if split.arrangedSubviews.isEmpty, let item = tabs.tabViewItems.first(where: { $0.view === split }) { tabs.removeTabViewItem(item) }
+        if split.arrangedSubviews.isEmpty, let item = tabs.tabViewItems.first(where: { $0.view === split }) {
+            tabs.removeTabViewItem(item)
+            workingTabs.remove(ObjectIdentifier(split)); finishedTabs.remove(ObjectIdentifier(split))
+        } else {
+            refreshActivity(of: split)
+        }
         refreshTabs()
         if tabs.numberOfTabViewItems == 0 { window?.close() } else { window?.makeFirstResponder(active) }
     }

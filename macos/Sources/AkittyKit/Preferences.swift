@@ -153,7 +153,7 @@ extension TerminalPreferences {
                         Toggle("Use Option as Alt", isOn: $draft.optionAsAlt)
                         Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Allow programs to set the status bar", isOn: $draft.programChrome)
-                        Text("Programs can show a status line, progress, and a small title-bar mark. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
+                        Text("Programs can show a status line, progress, and a small mark on their tab while they work. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
                     .tabItem { Text("Keyboard") }

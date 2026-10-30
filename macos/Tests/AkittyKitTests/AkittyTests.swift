@@ -1106,39 +1106,6 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(pane.status.stringValue.contains("50%"), pane.status.stringValue)
     }
 
-    @MainActor func testSpriteMarkUsesFrameZeroWhenReduceMotionIsOn() async throws {
-        _ = NSApplication.shared
-        let app = AkittyApplication()
-        let controller = try TerminalWindow(app: app, headless: true)
-        defer { controller.panes.forEach { $0.terminal.shutdown() } }
-        let pane = try XCTUnwrap(controller.panes.first)
-        let frame0 = Data([0x10, 0x20, 0x30, 0xFF])
-        let frame1 = Data([0x40, 0x50, 0x60, 0xFF])
-        controller.reduceMotion = false
-        _ = try pane.terminal.session.call("chrome", [
-            "mark": 1,
-            "sprite": ["w": 1, "h": 1, "frames": [frame0.base64EncodedString(), frame1.base64EncodedString()]]
-        ])
-        try await waitUntil(pane.terminal, timeout: 3) { chromeMark(controller)?.chromePixels == frame1 }
-        let moving = try XCTUnwrap(chromeMark(controller))
-        XCTAssertEqual(moving.chromePixels, frame1)
-        XCTAssertEqual(moving.bitmapPixels, frame1)
-        XCTAssertEqual(moving.view.accessibilityIdentifier(), "chrome-sprite")
-        XCTAssertEqual(moving.layoutAttribute, .left)
-        controller.reduceMotion = true
-        let still = try XCTUnwrap(chromeMark(controller))
-        XCTAssertEqual(still.chromePixels, frame0)
-        XCTAssertEqual(still.bitmapPixels, frame0)
-        controller.refreshUpdateReminder("0.7.0")
-        let identifiers = controller.window?.titlebarAccessoryViewControllers.map { $0.view.accessibilityIdentifier() } ?? []
-        XCTAssertTrue(identifiers.contains("chrome-sprite"))
-        XCTAssertTrue(identifiers.contains("update-reminder"))
-        XCTAssertEqual(controller.window?.titlebarAccessoryViewControllers.count, 2)
-        controller.refreshUpdateReminder(nil)
-        XCTAssertEqual(controller.window?.titlebarAccessoryViewControllers.map { $0.view.accessibilityIdentifier() }, ["chrome-sprite"])
-        XCTAssertEqual(chromeMark(controller)?.chromePixels, frame0)
-    }
-
     func testChromeSpriteDecodingEnforcesABIBoundsWithoutTrapping() throws {
         func decode(_ object: [String: Any]) -> ChromeSprite? {
             try? JSONDecoder().decode(ChromeSprite.self, from: JSONSerialization.data(withJSONObject: object))
@@ -1202,9 +1169,5 @@ final class AkittyTests: XCTestCase {
     }
 
     @MainActor private func tabLabel(_ controller: TerminalWindow) -> String? { controller.tabChips.first?.label }
-
-    @MainActor private func chromeMark(_ controller: TerminalWindow) -> ChromeMarkAccessory? {
-        controller.window?.titlebarAccessoryViewControllers.compactMap { $0 as? ChromeMarkAccessory }.first
-    }
 
 }
