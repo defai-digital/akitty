@@ -190,6 +190,106 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(store.images.isEmpty)
         XCTAssertNil(session.imagePixels(9, width: 4, height: 4))
     }
+    // MARK: Kitty graphics source rects, offsets and z layers
+    private func placement(id: UInt32 = 1, w: Int, h: Int, row: Int = 0, col: Int = 0, cols: Int, rows: Int, z: Int = 0,
+                           sx: Int? = nil, sy: Int? = nil, sw: Int? = nil, sh: Int? = nil, ox: Int? = nil, oy: Int? = nil) -> [String: Any] {
+        var value: [String: Any] = ["id": id, "gen": 1, "w": w, "h": h, "row": row, "col": col, "cols": cols, "rows": rows, "z": z]
+        if let sx { value["sx"] = sx }; if let sy { value["sy"] = sy }; if let sw { value["sw"] = sw }; if let sh { value["sh"] = sh }
+        if let ox { value["ox"] = ox }; if let oy { value["oy"] = oy }
+        return value
+    }
+    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], selected: Bool = false) -> [String: Any] {
+        ["row": row, "col": col, "text": text, "fg": fg, "bg": bg, "bold": false, "italic": false,
+         "underline": false, "selected": selected, "wide": false]
+    }
+    private func testSnapshot(rows: Int = 2, cols: Int = 6, cells: [[String: Any]] = [], images: [[String: Any]] = []) throws -> Snapshot {
+        let object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
+            "lines": Array(repeating: String(repeating: " ", count: cols), count: rows), "links": [] as [String], "images": images,
+            "cursor": ["row": 0, "col": 0, "visible": false], "bracketed_paste": false, "app_cursor": false, "mouse_mode": false,
+            "mouse_sgr": false, "mouse_drag": false, "mouse_motion": false, "focus_reporting": false, "alternate": false,
+            "offset": 0, "history": 0, "clipboard": [] as [String], "exited": false]
+        return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+    private func testImage(_ width: Int, _ height: Int, _ color: (Int, Int) -> [UInt8]) -> CGImage {
+        var bytes: [UInt8] = []
+        for y in 0..<height { for x in 0..<width { let value = color(x, y); bytes += [value[0], value[1], value[2], 255] } }
+        return ImageStore.makeImage(Data(bytes), width: width, height: height)!
+    }
+    /// Samples a bitmap pixel from the top-left in points (scale 1 in these tests); returns RGB.
+    /// CGBitmapContext stores scanline 0 at the top, so the from-top row is the buffer row.
+    private func sample(_ context: CGContext, x: Int, yFromTop: Int) -> [UInt8] {
+        let data = context.data!.assumingMemoryBound(to: UInt8.self)
+        let offset = yFromTop * context.bytesPerRow + x * 4
+        return [data[offset + 2], data[offset + 1], data[offset]]
+    }
+    /// The rendered default background, which color management may shift from the source bytes.
+    private func renderedBackground() throws -> [UInt8] {
+        sample(try rasterize(try testSnapshot(rows: 1, cols: 1), images: [:]), x: 50, yFromTop: 50)
+    }
+    private func rasterize(_ snapshot: Snapshot, images: [UInt32: CGImage], size: CGSize = CGSize(width: 100, height: 120)) throws -> CGContext {
+        try GridRasterizer.make(snapshot: snapshot, size: size, scale: 1, fontName: "Menlo", fontSize: 13,
+                                cellSize: CGSize(width: 10, height: 20), composition: "", images: images)
+    }
+    func testImagePlacementDecodesSourceRectAndOffsetFields() throws {
+        let json = Data(#"{"id":7,"gen":3,"w":40,"h":30,"row":1,"col":2,"cols":3,"rows":4,"z":-2,"sx":5,"sy":6,"sw":10,"sh":12,"ox":4,"oy":-3}"#.utf8)
+        let value = try JSONDecoder().decode(ImagePlacement.self, from: json)
+        XCTAssertEqual([value.sx, value.sy, value.sw, value.sh, value.ox, value.oy], [5, 6, 10, 12, 4, -3])
+        XCTAssertEqual(value.sourceRect, CGRect(x: 5, y: 6, width: 10, height: 12))
+    }
+    func testImagePlacementDecodesOldSnapshotsWithoutNewFields() throws {
+        let json = Data(#"{"id":9,"gen":1,"w":40,"h":30,"row":0,"col":1,"cols":2,"rows":1,"z":0}"#.utf8)
+        let value = try JSONDecoder().decode(ImagePlacement.self, from: json)
+        XCTAssertNil(value.sx); XCTAssertNil(value.sy); XCTAssertNil(value.sw); XCTAssertNil(value.sh); XCTAssertNil(value.ox); XCTAssertNil(value.oy)
+        XCTAssertEqual(value.sourceRect, CGRect(x: 0, y: 0, width: 40, height: 30))
+        // A zero source width/height means "to the image edge".
+        let zero = try JSONDecoder().decode(ImagePlacement.self, from: Data(#"{"id":9,"gen":1,"w":40,"h":30,"row":0,"col":1,"cols":2,"rows":1,"z":0,"sx":10,"sy":4,"sw":0,"sh":0}"#.utf8))
+        XCTAssertEqual(zero.sourceRect, CGRect(x: 10, y: 4, width: 30, height: 26))
+    }
+    func testRasterizerDrawsOnlyThePlacementSourceRect() throws {
+        // 4x4 image: left half red, right half green.
+        let image = testImage(4, 4) { x, _ in x < 2 ? [255, 0, 0] : [0, 255, 0] }
+        let snapshot = try testSnapshot(rows: 5, cols: 5, images: [placement(w: 4, h: 4, cols: 4, rows: 4, sx: 2, sw: 2, sh: 4)])
+        let context = try rasterize(snapshot, images: [1: image])
+        XCTAssertEqual(sample(context, x: 28, yFromTop: 48), [0, 255, 0], "only the right half of the source is drawn")
+        XCTAssertEqual(sample(context, x: 12, yFromTop: 8 + 8), [0, 255, 0])
+    }
+    func testRasterizerSourceRectYStartsAtTheImageTop() throws {
+        // 4x4 image: top half red, bottom half green. Kitty sy counts from the top.
+        let image = testImage(4, 4) { _, y in y < 2 ? [255, 0, 0] : [0, 255, 0] }
+        let top = try rasterize(try testSnapshot(rows: 4, cols: 5, images: [placement(w: 4, h: 4, cols: 4, rows: 4, sy: 0, sw: 4, sh: 2)]), images: [1: image])
+        XCTAssertEqual(sample(top, x: 28, yFromTop: 28), [255, 0, 0])
+        let bottom = try rasterize(try testSnapshot(rows: 4, cols: 5, images: [placement(w: 4, h: 4, cols: 4, rows: 4, sy: 2, sw: 4, sh: 2)]), images: [1: image])
+        XCTAssertEqual(sample(bottom, x: 28, yFromTop: 68), [0, 255, 0])
+    }
+    func testRasterizerPlacementOffsetMovesTheImage() throws {
+        let image = testImage(4, 4) { _, _ in [255, 0, 0] }
+        let snapshot = try testSnapshot(rows: 4, cols: 5, images: [placement(w: 4, h: 4, cols: 2, rows: 1, ox: 10)])
+        let context = try rasterize(snapshot, images: [1: image])
+        XCTAssertEqual(sample(context, x: 22, yFromTop: 18), [255, 0, 0])
+        XCTAssertEqual(sample(context, x: 12, yFromTop: 18), try renderedBackground(), "the offset leaves the start of the cell uncovered")
+    }
+    func testRasterizerZLayerRespectsKittyThreshold() throws {
+        let image = testImage(4, 4) { _, _ in [0, 0, 255] }
+        let cells = [testCell(0, 0, bg: [255, 0, 0]), testCell(0, 1, text: ".")]
+        let snapshot = try testSnapshot(rows: 2, cols: 6, cells: cells,
+                                        images: [placement(w: 4, h: 4, cols: 2, rows: 1, z: -2_000_000_000)])
+        let context = try rasterize(snapshot, images: [1: image])
+        // Compare against a rendered red cell so color management cannot skew the expectation.
+        let redCell = try rasterize(try testSnapshot(rows: 1, cols: 2, cells: [testCell(0, 0, bg: [255, 0, 0])]), images: [:])
+        XCTAssertEqual(sample(context, x: 13, yFromTop: 18), sample(redCell, x: 13, yFromTop: 18),
+                       "a non-default cell background hides the lowest layer")
+        XCTAssertEqual(sample(context, x: 26, yFromTop: 18), [0, 0, 255], "a default-background cell leaves it visible")
+    }
+    func testRasterizerForegroundImageCoversText() throws {
+        let image = testImage(4, 4) { _, _ in [0, 0, 255] }
+        let cells = [testCell(0, 0, text: "█", fg: [255, 0, 0])]
+        let textOnly = try rasterize(try testSnapshot(rows: 2, cols: 3, cells: cells), images: [:])
+        XCTAssertNotEqual(sample(textOnly, x: 13, yFromTop: 18), [0, 0, 255])
+        let covered = try rasterize(try testSnapshot(rows: 2, cols: 3, cells: cells,
+                                                     images: [placement(w: 4, h: 4, cols: 1, rows: 1, z: 1)]), images: [1: image])
+        XCTAssertEqual(sample(covered, x: 13, yFromTop: 18), [0, 0, 255], "z >= 0 draws over the glyph")
+    }
+
     // MARK: Kitty keyboard protocol
     private func kitty(_ keyCode: UInt16, _ mods: KittyModifiers = [], _ event: KittyEventType = .press, flags: Int) -> KittyKeyResult {
         KittyKeyEncoder.encode(KittyKeyInput(keyCode: keyCode, modifiers: mods, event: event), flags: flags)

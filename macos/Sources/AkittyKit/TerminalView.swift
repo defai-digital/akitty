@@ -92,7 +92,8 @@ import os
     public override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
     public override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); resizeTerminal(); poll(); showClipboardRequest() }
     public override func layout() { super.layout(); presenter?.view.frame = bounds; resizeTerminal(); redraw() }
-    public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); redraw() }
+    // A new backing scale changes the cell's device-pixel size even when the grid does not change.
+    public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
     private func resizeTerminal() {
         guard bounds.width > 20, bounds.height > 20, !stopped else { return }
         let cols = min(512, max(2, Int((bounds.width - 16) / cellSize.width)))

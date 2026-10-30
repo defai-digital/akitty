@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import AkittyCore
 
 public enum AkittyError: Error, LocalizedError {
@@ -73,6 +74,21 @@ public struct ImagePlacement: Codable, Sendable, Equatable {
     public let cols: Int
     public let rows: Int
     public let z: Int
+    /// Source rectangle in image pixels; absent (or a zero width/height) means "to the image edge".
+    public let sx: Int?
+    public let sy: Int?
+    public let sw: Int?
+    public let sh: Int?
+    /// Offset of the image inside its first cell, in device pixels.
+    public let ox: Int?
+    public let oy: Int?
+    /// The source rectangle clamped to the image, defaulting to the whole image.
+    public var sourceRect: CGRect {
+        let x = min(max(0, sx ?? 0), w), y = min(max(0, sy ?? 0), h)
+        let maxW = w - x, maxH = h - y
+        let requestedW = sw ?? maxW, requestedH = sh ?? maxH
+        return CGRect(x: x, y: y, width: requestedW <= 0 ? maxW : min(requestedW, maxW), height: requestedH <= 0 ? maxH : min(requestedH, maxH))
+    }
 }
 private struct SnapshotReply: Decodable {
     let version: Int

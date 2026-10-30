@@ -138,6 +138,10 @@ final class GridRasterizer: @unchecked Sendable {
     private struct GlyphKey: Hashable { var style: UInt8, fg: UInt32, text: String }
     private static let margin: CGFloat = 8
     private static let maxGlyphs = 8192
+    /// Kitty's lowest z layer: images below this draw under non-default cell backgrounds.
+    static let underlayZ = -1_073_741_824
+    /// The core's resolved default background, which the frame fill already paints.
+    static let defaultBackground: [UInt8] = [18, 22, 29]
 
     private var context: CGContext?
     private var layout: Layout?
@@ -219,23 +223,38 @@ final class GridRasterizer: @unchecked Sendable {
             cells = snapshot.cells
         }
 
-        for cell in cells {
-            context.setFillColor(cell.selected ? CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) : color(cell.bg)); context.fill(rect(cell))
-        }
-        let placements = (snapshot.images ?? []).sorted { $0.z < $1.z }
+        // Kitty z-index ties keep snapshot order, so sort with the original offset as the tie-break.
+        let placements = (snapshot.images ?? []).enumerated().sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
         let gridRect = CGRect(x: Self.margin, y: gridTop - CGFloat(snapshot.rows) * cellSize.height, width: CGFloat(snapshot.cols) * cellSize.width, height: CGFloat(snapshot.rows) * cellSize.height)
         func drawImages(_ include: (ImagePlacement) -> Bool) {
             context.saveGState(); defer { context.restoreGState() }
-            context.clip(to: gridRect); context.interpolationQuality = .high
+            context.clip(to: gridRect)
             for placement in placements where include(placement) {
                 guard let image = images[placement.id] else { continue }
-                context.draw(image, in: CGRect(x: Self.margin + CGFloat(placement.col) * cellSize.width,
-                                               y: gridTop - CGFloat(placement.row + placement.rows) * cellSize.height,
-                                               width: CGFloat(placement.cols) * cellSize.width, height: CGFloat(placement.rows) * cellSize.height))
+                let source = placement.sourceRect
+                guard source.width > 0, source.height > 0 else { continue }
+                // Offsets are device pixels; the grid is drawn in points, so scale them down.
+                let ox = CGFloat(placement.ox ?? 0) / scale, oy = CGFloat(placement.oy ?? 0) / scale
+                let width = CGFloat(placement.cols) * cellSize.width - ox, height = CGFloat(placement.rows) * cellSize.height - oy
+                guard width > 0, height > 0 else { continue }
+                let full = source.minX == 0 && source.minY == 0 && source.width == CGFloat(image.width) && source.height == CGFloat(image.height)
+                let cropped = full ? image : (image.cropping(to: source) ?? image)
+                // 1:1 images stay exact; everything else is resampled smoothly.
+                let exact = Int((width * scale).rounded()) == Int(source.width) && Int((height * scale).rounded()) == Int(source.height)
+                context.interpolationQuality = exact ? .none : .high
+                context.draw(cropped, in: CGRect(x: Self.margin + CGFloat(placement.col) * cellSize.width + ox,
+                                                 y: gridTop - CGFloat(placement.row + placement.rows) * cellSize.height,
+                                                 width: width, height: height))
             }
         }
-        // Negative z-index images sit between the cell backgrounds and the text. Frames with images are always full.
-        drawImages { $0.z < 0 }
+        // Images below z = -2^30 are drawn under every non-default cell background; default-background cells were
+        // already painted by the fill above, so skipping them leaves those images visible.
+        drawImages { $0.z < Self.underlayZ }
+        for cell in cells where cell.selected || cell.bg != Self.defaultBackground {
+            context.setFillColor(cell.selected ? CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) : color(cell.bg)); context.fill(rect(cell))
+        }
+        // Remaining negative z-index images sit between the cell backgrounds and the text. Frames with images are always full.
+        drawImages { $0.z >= Self.underlayZ && $0.z < 0 }
         // Draw glyphs after every background: a wide-cell spacer must never
         // paint over the second half of the preceding CJK/emoji glyph.
         let descent = CTFontGetDescent(base)
