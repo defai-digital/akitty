@@ -922,4 +922,57 @@ mod tests {
         model.snapshot(None);
         assert_eq!(model.graphics.placements[0].line, 0);
     }
+    /// (text, wide) of the cell at `row`, `col` in a full snapshot.
+    fn cell_at(snapshot: &Value, row: usize, col: usize) -> (String, bool) {
+        let cell = snapshot["cells"].as_array().unwrap().iter().find(|c| c["row"] == row && c["col"] == col).unwrap();
+        (cell["text"].as_str().unwrap().to_string(), cell["wide"] == true)
+    }
+    #[test]
+    fn cjk_and_fullwidth_characters_take_two_columns_and_keep_neighbours_aligned() {
+        let mut model = Model::new(Size::validate(20, 12).unwrap(), 100);
+        let rows = ["a中b", "ひらがな", "한글a", "「，。」", "ＡＢx", "\u{1112}\u{1161}x", "ｱｲｳ"];
+        for (row, text) in rows.iter().enumerate() { model.feed(format!("\x1b[{};1H{text}", row + 1).as_bytes()); }
+        let snap = model.snapshot(None);
+        assert_eq!(cell_at(&snap, 0, 0), ("a".into(), false));
+        assert_eq!(cell_at(&snap, 0, 1), ("中".into(), true));
+        assert_eq!(cell_at(&snap, 0, 3), ("b".into(), false));
+        for (col, ch) in [(0, "ひ"), (2, "ら"), (4, "が"), (6, "な")] { assert_eq!(cell_at(&snap, 1, col), (ch.into(), true)); }
+        assert_eq!(cell_at(&snap, 2, 0), ("한".into(), true));
+        assert_eq!(cell_at(&snap, 2, 2), ("글".into(), true));
+        assert_eq!(cell_at(&snap, 2, 4), ("a".into(), false));
+        for (col, ch) in [(0, "「"), (2, "，"), (4, "。"), (6, "」")] { assert_eq!(cell_at(&snap, 3, col), (ch.into(), true)); }
+        assert_eq!(cell_at(&snap, 4, 0), ("Ａ".into(), true));
+        assert_eq!(cell_at(&snap, 4, 2), ("Ｂ".into(), true));
+        assert_eq!(cell_at(&snap, 4, 4), ("x".into(), false));
+        // Conjoining jamo share one two-column cell, kept as typed (the renderer composes them when drawing).
+        assert_eq!(cell_at(&snap, 5, 0), ("\u{1112}\u{1161}".into(), true));
+        assert_eq!(cell_at(&snap, 5, 2), ("x".into(), false));
+        // Halfwidth katakana stay single-column.
+        for (col, ch) in [(0, "ｱ"), (1, "ｲ"), (2, "ｳ")] { assert_eq!(cell_at(&snap, 6, col), (ch.into(), false)); }
+    }
+    #[test]
+    fn combining_marks_and_ambiguous_width_symbols_stay_single_column() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        model.feed("\x1b[1;1He\u{301}x\x1b[2;1H→●○│x".as_bytes());
+        let snap = model.snapshot(None);
+        assert_eq!(cell_at(&snap, 0, 0), ("e\u{301}".into(), false));
+        assert_eq!(cell_at(&snap, 0, 1), ("x".into(), false));
+        for (col, ch) in [(0, "→"), (1, "●"), (2, "○"), (3, "│"), (4, "x")] { assert_eq!(cell_at(&snap, 1, col), (ch.into(), false)); }
+    }
+    #[test]
+    fn emoji_sequences_follow_the_wcwidth_model_that_grapheme_mode_off_implies() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        // Apps only get grapheme-cluster widths after DECRQM reports mode 2027; it is unsupported, so each wide
+        // scalar takes its own two columns and VS16 does not widen a narrow base. Cursor maths in apps then agrees.
+        assert_eq!(model.feed(b"\x1b[?2027$p"), b"\x1b[?2027;0$y");
+        model.feed("\x1b[1;1H😀x\x1b[2;1H❤\u{fe0f}x\x1b[3;1H👨\u{200d}👩x".as_bytes());
+        let snap = model.snapshot(None);
+        assert_eq!(cell_at(&snap, 0, 0), ("😀".into(), true));
+        assert_eq!(cell_at(&snap, 0, 2), ("x".into(), false));
+        assert_eq!(cell_at(&snap, 1, 0), ("❤\u{fe0f}".into(), false));
+        assert_eq!(cell_at(&snap, 1, 1), ("x".into(), false));
+        assert_eq!(cell_at(&snap, 2, 0), ("👨\u{200d}".into(), true));
+        assert_eq!(cell_at(&snap, 2, 2), ("👩".into(), true));
+        assert_eq!(cell_at(&snap, 2, 4), ("x".into(), false));
+    }
 }
