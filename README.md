@@ -2,11 +2,22 @@
 
 # AkiTTY
 
-A **terminal revamped from [Ghostty](https://github.com/ghostty-org/ghostty)**.
-The installable app is a macOS client: a Rust terminal core, a native Swift/AppKit
-interface, and a small TypeScript feature layer. No Zig compiler or runtime is
-required. That app runs on Apple Silicon and macOS 14 or later. Windows and Linux
-use **AkiTTY Web**, the browser-canvas terminal inside AX Code Desktop.
+A native macOS terminal powered by [Alacritty](https://github.com/alacritty/alacritty),
+with AkiTTY's own Rust integration, Swift/AppKit interface, CoreText/Metal rendering,
+and a small TypeScript feature layer. The app runs on Apple Silicon and macOS 14
+or later; no Zig compiler or runtime is required. Windows and Linux use
+**AkiTTY Web**, the separate browser-canvas terminal inside AX Code Desktop.
+
+| Component | Technology |
+| --- | --- |
+| AkiTTY native Mac app | Alacritty terminal engine + AkiTTY's own Rust/Swift implementation |
+| AkiTTY Web | Ghostty VT parser compiled to WebAssembly + Canvas rendering |
+| Ghostty app (separate upstream project) | Ghostty's own Zig core and native platform interfaces |
+
+Ghostty informed AkiTTY's design and served as a source reference. The native Mac
+app does not use Ghostty's Zig core or renderer, and does not inherit their
+performance characteristics. AkiTTY Web reuses Ghostty's VT parser; the native
+app and the web terminal have separate engines and rendering paths.
 
 ## Quick start
 
@@ -44,15 +55,16 @@ where we used [ghostty-web](https://github.com/coder/ghostty-web) for the embedd
 terminal. That gave us a foundation for bringing a terminal into the desktop app.
 
 As AX Code evolved, we wanted deeper integration and more powerful capabilities,
-including WebMCP support. Those goals led us to start AkiTTY as a revamp based on
-[Ghostty](https://github.com/ghostty-org/ghostty), with a native Mac client and a
-separately maintained web terminal. WebMCP is part of this direction; [What is
+including WebMCP support. Those goals led us to build an independent native Mac
+client around Alacritty and maintain a separate web terminal using Ghostty's VT
+parser. [Ghostty](https://github.com/ghostty-org/ghostty) informed the native app's
+design as a source reference. WebMCP is part of this direction; [What is
 implemented](#what-is-implemented) describes what the current release implements.
 
 Our focus is our **macOS client** and its integration with AX Code. Windows and
-Linux support is [AkiTTY Web](#windows-and-linux), described below. Ghostty is the
-project this work builds on. It is an excellent project, and we are grateful to its
-contributors for the work that helped make AkiTTY possible.
+Linux support is [AkiTTY Web](#windows-and-linux), described below. We thank the
+Alacritty, Ghostty, and ghostty-web contributors for the engines and reference
+work that helped make these two implementations possible.
 
 ## Windows and Linux
 
@@ -107,8 +119,10 @@ browser suite. Details are in [the package README](packages/akitty-web/README.md
 described in [Windows and Linux](#windows-and-linux). It is a private source package.
 
 **Status: early 0.12.2 implementation.** This is not a drop-in Ghostty replacement.
-Sixel, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick terminal and
-third-party plugins are not implemented. The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
+Shell integration and quick terminal are planned and are not implemented yet.
+Ghostty configuration compatibility and third-party plugins are outside the current
+roadmap. Sixel, image clipboard protocols, and custom shaders remain unsupported.
+The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
 and chunking over direct, file, temp-file and shared-memory transfer, image numbers, source rectangles and cell offsets, z-index
 layers, every delete mode, Unicode placeholders, relative placements and animation (frames, composition, playback and loops).
 Placements follow scrolling, scroll regions and resizes, programs see the window's pixel size (TIOCGWINSZ, CSI 14 t and CSI 16 t),
@@ -118,8 +132,24 @@ exercised by `cargo test --test real_tools -- --ignored` when installed, and AX 
 hyperlinks open with Command-click, and underline styles and strikethrough render.
 The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
 modifier-only keys); base-layout alternate keys are reported only for US-position keys. Find keeps a bar open,
-highlights every visible literal match, and moves to the next or previous one. Full external esctest qualification, VoiceOver user testing,
-performance parity and testing on every supported Mac version remain separate work.
+highlights every visible literal match, and moves to the next or previous one.
+Full external esctest qualification and dedicated VoiceOver development/user testing
+are outside the current roadmap. Existing accessible text and selection remain
+implemented; VoiceOver behavior is not qualified. Performance parity and testing
+on every supported Mac version are not claimed.
+
+## Planned work
+
+- **Performance and stability:** measure parser/snapshot/rendering costs, reduce
+  unnecessary idle and hidden-pane work, and expand malformed-input and PTY
+  lifecycle stress coverage.
+- **Shell integration:** prompt and command boundaries, working-directory updates,
+  and command completion/exit status through bounded shell notifications.
+- **Quick terminal:** a configurable global shortcut to show/hide a persistent
+  terminal, with predictable focus and multi-display behavior.
+
+These are planned capabilities, not features of the current release. See the
+[implementation roadmap](docs/ROADMAP.md) for acceptance criteria and exclusions.
 
 ## Build and run
 
@@ -186,10 +216,17 @@ never committed. This command does not publish a GitHub release.
 
 ## Acknowledgments and MIT license
 
-AkiTTY is a revamp of **[Ghostty](https://github.com/ghostty-org/ghostty)**. We
-acknowledge **Mitchell Hashimoto and the Ghostty contributors** for the original
-project, its native terminal design, and the source used as the starting reference.
-AkiTTY is an independent project, not an official Ghostty release.
+We acknowledge **Mitchell Hashimoto and the [Ghostty](https://github.com/ghostty-org/ghostty)
+contributors** for the terminal design and source reference that informed AkiTTY,
+and for the VT parser used by AkiTTY Web. AkiTTY is an independent project, not an
+official Ghostty release or a port of Ghostty's native terminal core.
+
+The macOS app's terminal engine is **[Alacritty](https://github.com/alacritty/alacritty)**.
+We thank **the Alacritty contributors** for `alacritty_terminal`, which provides
+terminal escape-sequence parsing, the cell grid, and terminal state. AkiTTY uses
+version 0.26.0 under Apache-2.0, with its own Swift/AppKit interface and rendering.
+Alacritty is also credited in the app's **About Akitty** panel and the bundled
+[third-party notices](THIRD_PARTY_NOTICES.md).
 
 We also read **[iTerm2](https://github.com/gnachman/iterm2)** and
 **[Kitty](https://github.com/kovidgoyal/kitty)** to understand how those terminals

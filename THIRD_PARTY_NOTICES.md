@@ -3,12 +3,16 @@
 Akitty's own code is MIT licensed. Dependencies are not relicensed by Akitty.
 
 - **Ghostty** — https://github.com/ghostty-org/ghostty — MIT, copyright 2024
-  Mitchell Hashimoto and Ghostty contributors. Akitty is a Rust/Swift revamp
-  inspired by and developed with the Ghostty source as a reference, not a
-  drop-in source translation. The original MIT notice is preserved in LICENSE.
+  Mitchell Hashimoto and Ghostty contributors. Ghostty informed Akitty's native
+  terminal design and served as a source reference. The native app uses Alacritty,
+  not Ghostty's Zig core or renderer; AkiTTY Web uses Ghostty's VT parser compiled
+  to WebAssembly. The original MIT notice is preserved in LICENSE.
 - **Alacritty terminal engine 0.26.0** — https://github.com/alacritty/alacritty —
-  Apache-2.0. See third_party/alacritty/LICENSE-APACHE. Its parser/grid is linked
-  into the Rust library; no engine ABI is exposed by Akitty.
+  Apache-2.0. Thank you to the Alacritty contributors for the terminal engine.
+  See third_party/alacritty/LICENSE-APACHE. The macOS app links `alacritty_terminal`
+  into its Rust library for escape-sequence parsing, the cell grid, and terminal
+  state; Akitty supplies its own Swift/AppKit interface and rendering. No engine
+  ABI is exposed by Akitty.
 - **portable-pty 0.9.0 / WezTerm** — https://github.com/wezterm/wezterm — MIT.
 - **AX TUI** — https://github.com/defai-digital/ax-tui — MIT, copyright 2025
   opentui and 2026 DEFAI Digital. Adapted fuzzy command ranking only; see

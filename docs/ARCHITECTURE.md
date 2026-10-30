@@ -1,10 +1,20 @@
 # Akitty architecture and implementation plan
 
-Akitty is an independent Rust/Swift revamp of Ghostty, with a small TypeScript
-feature layer. The installable app is macOS-only. Windows and Linux are reached
-through AkiTTY Web, the browser-canvas terminal. Its own source is MIT licensed.
-It is not a mechanical port and does not promise Ghostty protocol or configuration
-parity.
+Akitty's native macOS app uses the unmodified `alacritty_terminal` 0.26.0 engine
+with Akitty's own Rust integration, Swift/AppKit interface, CoreText/Metal
+rendering, and a small TypeScript feature layer. Its own source is MIT licensed.
+Windows and Linux are reached through the separate AkiTTY Web browser terminal.
+
+| Component | Technology |
+| --- | --- |
+| AkiTTY native Mac app | Alacritty terminal engine + Akitty-owned Rust/Swift code |
+| AkiTTY Web | Ghostty VT parser compiled to WebAssembly + Canvas rendering |
+| Ghostty app (separate upstream project) | Ghostty's own Zig core and native platform interfaces |
+
+Ghostty is a design and source reference for the native app, not its runtime
+engine. The Mac app does not reuse Ghostty's Zig core or renderer or inherit their
+performance characteristics. Web parser reuse does not establish native-app
+performance or feature parity. See [the roadmap](ROADMAP.md) for planned work.
 
 ## Decisions
 
@@ -71,12 +81,24 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
 5. macOS CI runs the complete local verification command with no ignored test
    failures. Public files are checked for secrets, machine paths and agent files.
 6. Build and smoke-test the app before committing/pushing. Signing/notarization,
-   release publication and full external esctest qualification are separate gates.
+   release publication and independent artifact verification are separate gates.
+   Full external esctest qualification and dedicated VoiceOver development/user
+   testing are outside the current roadmap, not release gates.
+
+The next planned work is performance/stability qualification, shell integration,
+and quick terminal. Their acceptance criteria are recorded in [the roadmap](ROADMAP.md);
+they are not implemented by the architecture or existing test results alone.
 
 ## Compatibility scope
 
-Unsupported initially: sixel, image clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
-public extension ecosystem. The Kitty keyboard protocol is advertised because
+Shell integration and quick terminal are planned native-app features and are not
+implemented yet. Ghostty configuration compatibility, third-party plugins and a
+public extension ecosystem are outside the current roadmap. Sixel, image clipboard
+protocols, and custom shaders remain unsupported. Dedicated VoiceOver work and
+user testing are outside this roadmap; existing macOS accessible text/selection
+APIs remain part of the implementation.
+
+The Kitty keyboard protocol is advertised because
 `KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
 is a modifier or composes text, and input-method text still composes. CoreText rendering is not a claim of Ghostty's
 performance or shaping parity. Full esctest results are not inferred from the

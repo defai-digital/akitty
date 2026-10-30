@@ -39,6 +39,8 @@ mkdir -p "$app/Contents/Frameworks"
 ditto macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app/Contents/Frameworks/Sparkle.framework"
 cp third_party/sparkle/LICENSE "$app/Contents/Resources/SPARKLE_LICENSE"
 cp macos/Sources/AkittyKit/Resources/features.js "$app/Contents/Resources/features.js"
+# AppKit loads these credits in the standard About panel from Bundle.main.
+cp macos/Sources/AkittyKit/Resources/Credits.html "$app/Contents/Resources/Credits.html"
 swift scripts/build-icons.swift
 iconutil -c icns build/Akitty.iconset -o "$app/Contents/Resources/Akitty.icns"
 cp macos/Info.plist "$app/Contents/Info.plist"
