@@ -7,6 +7,23 @@ with a Rust terminal core, native Swift/AppKit interface, and a small TypeScript
 feature layer. No Zig compiler or runtime is required. Windows and Linux are not
 application targets.
 
+## Why AkiTTY exists
+
+AkiTTY began with [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop),
+where we used [ghostty-web](https://github.com/coder/ghostty-web) for the embedded
+terminal. That gave us a foundation for bringing a terminal into the desktop app.
+
+As AX Code evolved, we wanted deeper integration and more powerful capabilities,
+including WebMCP support. Those goals led us to start AkiTTY as a revamp based on
+[Ghostty](https://github.com/ghostty-org/ghostty), with a native Mac client and a
+separately maintained web terminal. WebMCP is part of this direction; the feature
+list below describes what the current release implements.
+
+Our focus is our **macOS client** and its integration with AX Code. For other
+platforms, we recommend trying **[Ghostty](https://github.com/ghostty-org/ghostty)**
+where it is available. It is an excellent project, and we are grateful to its
+contributors for the work that helped make AkiTTY possible.
+
 ## Download
 
 [Download AkiTTY 0.8.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.8.0/AkiTTY-0.8.0-macOS-arm64.zip)
