@@ -19,6 +19,7 @@ const MAX_PENDING_BASE64: usize = 48 * 1024 * 1024;
 /// One APC string (a single chunk); the protocol itself uses 4 KiB chunks.
 const MAX_APC: usize = 4 * 1024 * 1024;
 const MAX_PLACEMENTS: usize = 256;
+const MAX_IMAGES: usize = 512;
 const MAX_CELLS_SPAN: u32 = 1024;
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
@@ -54,59 +55,58 @@ impl ApcFilter {
         let mut out = Vec::new();
         let mut pass = Vec::new();
         for &byte in bytes {
-            match self.state {
-                ApcState::Ground => {
-                    if byte == 0x1b {
-                        self.state = ApcState::Esc;
-                    } else {
-                        pass.push(byte);
-                    }
-                }
-                ApcState::Esc => {
-                    if byte == b'_' {
-                        if !pass.is_empty() {
-                            out.push(Segment::Pass(std::mem::take(&mut pass)));
-                        }
-                        self.state = ApcState::Apc;
-                        self.buffer.clear();
-                        self.overflow = false;
-                    } else {
-                        pass.push(0x1b);
-                        if byte != 0x1b {
+            // A byte may be handled twice: an aborted string re-reads its ESC's follower.
+            loop {
+                match self.state {
+                    ApcState::Ground => {
+                        if byte == 0x1b {
+                            self.state = ApcState::Esc;
+                        } else {
                             pass.push(byte);
+                        }
+                    }
+                    ApcState::Esc => {
+                        if byte == b'_' {
+                            if !pass.is_empty() {
+                                out.push(Segment::Pass(std::mem::take(&mut pass)));
+                            }
+                            self.state = ApcState::Apc;
+                            self.buffer.clear();
+                            self.overflow = false;
+                        } else {
+                            pass.push(0x1b);
+                            if byte != 0x1b {
+                                pass.push(byte);
+                                self.state = ApcState::Ground;
+                            }
+                        }
+                    }
+                    ApcState::Apc => match byte {
+                        0x1b => self.state = ApcState::ApcEsc,
+                        // CAN and SUB cancel a string, so binary noise cannot swallow output forever.
+                        0x18 | 0x1a => {
+                            self.buffer.clear();
                             self.state = ApcState::Ground;
                         }
-                    }
-                }
-                ApcState::Apc => {
-                    if byte == 0x1b {
-                        self.state = ApcState::ApcEsc;
-                    } else if self.buffer.len() < MAX_APC {
-                        self.buffer.push(byte);
-                    } else {
-                        self.overflow = true;
-                    }
-                }
-                ApcState::ApcEsc => {
-                    if byte == b'\\' {
-                        let payload = std::mem::take(&mut self.buffer);
-                        if !self.overflow && payload.first() == Some(&b'G') {
-                            out.push(Segment::Apc(payload[1..].to_vec()));
-                        }
-                        self.state = ApcState::Ground;
-                    } else {
-                        // ESC inside the string that is not ST: keep it as data.
-                        if self.buffer.len() + 2 <= MAX_APC {
-                            self.buffer.push(0x1b);
-                            if byte != 0x1b {
-                                self.buffer.push(byte);
+                        _ if self.buffer.len() < MAX_APC => self.buffer.push(byte),
+                        _ => self.overflow = true,
+                    },
+                    ApcState::ApcEsc => {
+                        if byte == b'\\' {
+                            let payload = std::mem::take(&mut self.buffer);
+                            if !self.overflow && payload.first() == Some(&b'G') {
+                                out.push(Segment::Apc(payload[1..].to_vec()));
                             }
+                            self.state = ApcState::Ground;
                         } else {
-                            self.overflow = true;
+                            // Any other ESC sequence aborts the string and is parsed normally.
+                            self.buffer.clear();
+                            self.state = ApcState::Esc;
+                            continue;
                         }
-                        self.state = if byte == 0x1b { ApcState::ApcEsc } else { ApcState::Apc };
                     }
                 }
+                break;
             }
         }
         if !pass.is_empty() {
@@ -172,6 +172,8 @@ struct Command {
     z: i32,
     no_move: bool,
     delete: u8,
+    /// True when the packet carries keys other than the chunk keys `m` and `q`.
+    full: bool,
 }
 
 impl Command {
@@ -185,6 +187,9 @@ impl Command {
         };
         for pair in keys.split(',') {
             let Some((key, value)) = pair.split_once('=') else { continue };
+            if !matches!(key, "m" | "q") {
+                command.full = true;
+            }
             let number = value.parse::<i64>().unwrap_or(0);
             let unsigned = u32::try_from(number).unwrap_or(0);
             let letter = value.bytes().next().unwrap_or(0);
@@ -238,6 +243,10 @@ impl Graphics {
         let text = String::from_utf8_lossy(payload);
         let (keys, data) = text.split_once(';').unwrap_or((text.as_ref(), ""));
         let mut command = Command::parse(keys);
+        // A new full command cancels an unfinished transfer instead of being swallowed by it.
+        if command.full {
+            self.pending = None;
+        }
         let (command, data) = if let Some(mut pending) = self.pending.take() {
             // Continuation chunks carry only m (and optionally q) plus data.
             if pending.data.len() + data.len() > MAX_PENDING_BASE64 {
@@ -263,7 +272,12 @@ impl Graphics {
         match command.action {
             b'q' => {
                 // A query never stores anything; it only reports whether the data would load.
-                let result = self.decode(&command, &data).map(|_| ());
+                // Real probes are a pixel or two, so large ones cannot be used to burn CPU.
+                let result = if u64::from(command.width) * u64::from(command.height) > 4096 {
+                    Err("EINVAL:queries are limited to 4096 pixels".to_string())
+                } else {
+                    self.decode(&command, &data).map(|_| ())
+                };
                 Outcome {
                     reply: reply(&command, result.err().as_deref(), 0),
                     advance: None,
@@ -336,6 +350,9 @@ impl Graphics {
             self.next_auto_id = self.next_auto_id.wrapping_add(1);
             0x8000_0000 | (self.next_auto_id & 0x7fff_ffff)
         };
+        if !self.images.contains_key(&id) && self.images.len() >= MAX_IMAGES {
+            return self.fail(&command, "ENOSPC", "too many images");
+        }
         let old = self.images.get(&id).map_or(0, |image| image.rgba.len());
         if self.bytes - old + rgba.len() > MAX_TOTAL_BYTES {
             return self.fail(&command, "ENOSPC", "image memory limit reached");
@@ -512,6 +529,51 @@ mod tests {
         for split in 0..=stream.len() {
             assert_eq!(collect(&[&stream[..split], &stream[split..]]), whole, "split {split}");
         }
+    }
+
+    #[test]
+    fn unterminated_strings_abort_on_cancel_or_a_new_escape_sequence() {
+        let run = |stream: &[u8]| {
+            let mut filter = ApcFilter::default();
+            let mut pass = Vec::new();
+            let mut apc = 0;
+            for segment in filter.feed(stream) {
+                match segment {
+                    Segment::Pass(bytes) => pass.extend(bytes),
+                    Segment::Apc(_) => apc += 1,
+                }
+            }
+            (pass, apc)
+        };
+        assert_eq!(run(b"a\x1b_Gjunk\x18b"), (b"ab".to_vec(), 0));
+        assert_eq!(run(b"a\x1b_Gjunk\x1ab"), (b"ab".to_vec(), 0));
+        assert_eq!(run(b"a\x1b_Gjunk\x1b[1mb"), (b"a\x1b[1mb".to_vec(), 0));
+        assert_eq!(run(b"a\x1b_Gjunk\x1b\x1b_Gi=1;AAAA\x1b\\b"), (b"a\x1bb".to_vec(), 1));
+    }
+
+    #[test]
+    fn a_new_command_cancels_an_unfinished_chunked_transfer() {
+        let mut graphics = Graphics::default();
+        graphics.handle(b"a=T,f=32,s=99,v=99,i=1,m=1;AAAA", &context());
+        graphics.handle(b"a=t,f=24,s=1,v=1,i=2,q=2;AAAA", &context());
+        assert!(graphics.images.contains_key(&2));
+        graphics.handle(b"a=t,f=24,s=1,v=1,i=3,m=1,q=2;AAAA", &context());
+        graphics.handle(b"a=d,d=a", &context());
+        // The delete ran; the half-finished transfer is gone and the next chunk starts nothing.
+        assert!(graphics.images.contains_key(&2));
+        assert!(graphics.handle(b"m=0;", &context()).reply.is_empty());
+        assert!(!graphics.images.contains_key(&3));
+    }
+
+    #[test]
+    fn image_count_and_query_size_are_bounded() {
+        let mut graphics = Graphics::default();
+        for id in 1..=MAX_IMAGES as u32 + 5 {
+            graphics.handle(format!("a=t,f=32,s=1,v=1,i={id},q=2;AAAAAA==").as_bytes(), &context());
+        }
+        assert_eq!(graphics.images.len(), MAX_IMAGES);
+        let big = graphics.handle(b"a=q,i=4,s=4096,v=4096,f=32;AAAA", &context());
+        assert!(String::from_utf8(big.reply).unwrap().contains("limited"));
     }
 
     #[test]

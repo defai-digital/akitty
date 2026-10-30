@@ -164,6 +164,8 @@ impl Model {
         }
         if let Some((rows, cols)) = outcome.advance {
             // Kitty moves the cursor past the image: down by its rows, right by its columns.
+            let rows = rows.min(self.size.rows as u32);
+            let cols = cols.min(self.size.cols as u32);
             let movement = format!("{}\x1b[{cols}C", "\n".repeat(rows.saturating_sub(1) as usize));
             self.advance(movement.as_bytes(), replies, overflowed);
         }
