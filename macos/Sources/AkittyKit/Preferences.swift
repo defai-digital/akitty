@@ -10,7 +10,8 @@ struct TerminalPreferences: Codable, Equatable {
     var directory = ""
     var scrollback = 5000
     var optionAsAlt = false
-    enum CodingKeys: String, CodingKey { case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt }
+    /// Programs may update chrome only when this preference is enabled.
+    var programChrome = true
     /// The system monospace face, then every installed fixed-pitch family, so CJK-optimised monospace fonts are selectable.
     @MainActor static func availableFonts() -> [String] {
         var families = Set<String>()
@@ -52,21 +53,37 @@ struct TerminalPreferences: Codable, Equatable {
         NotificationCenter.default.post(name: .terminalPreferencesChanged, object: nil)
     }
 }
+extension Notification.Name { static let terminalPreferencesChanged = Notification.Name("AkittyTerminalPreferencesChanged") }
+
 extension TerminalPreferences {
-    /// Preferences saved before `cjkFont` existed have no such key; a missing key must not reject the rest of the settings.
+    private enum CodingKeys: String, CodingKey {
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome
+    }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init()
-        fontName = try container.decode(String.self, forKey: .fontName)
-        cjkFont = try container.decodeIfPresent(String.self, forKey: .cjkFont) ?? ""
-        fontSize = try container.decode(Double.self, forKey: .fontSize)
-        shell = try container.decode(String.self, forKey: .shell)
-        directory = try container.decode(String.self, forKey: .directory)
-        scrollback = try container.decode(Int.self, forKey: .scrollback)
-        optionAsAlt = try container.decode(Bool.self, forKey: .optionAsAlt)
+        fontName = try container.decodeIfPresent(String.self, forKey: .fontName) ?? fontName
+        cjkFont = try container.decodeIfPresent(String.self, forKey: .cjkFont) ?? cjkFont
+        fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? fontSize
+        shell = try container.decodeIfPresent(String.self, forKey: .shell) ?? shell
+        directory = try container.decodeIfPresent(String.self, forKey: .directory) ?? directory
+        scrollback = try container.decodeIfPresent(Int.self, forKey: .scrollback) ?? scrollback
+        optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? optionAsAlt
+        // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
+        programChrome = try container.decodeIfPresent(Bool.self, forKey: .programChrome) ?? true
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(fontName, forKey: .fontName)
+        try container.encode(cjkFont, forKey: .cjkFont)
+        try container.encode(fontSize, forKey: .fontSize)
+        try container.encode(shell, forKey: .shell)
+        try container.encode(directory, forKey: .directory)
+        try container.encode(scrollback, forKey: .scrollback)
+        try container.encode(optionAsAlt, forKey: .optionAsAlt)
+        try container.encode(programChrome, forKey: .programChrome)
     }
 }
-extension Notification.Name { static let terminalPreferencesChanged = Notification.Name("AkittyTerminalPreferencesChanged") }
 
 @MainActor private struct PreferencesView: View {
     @State private var draft = TerminalPreferences.load()
@@ -114,6 +131,8 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
                 Section("Keyboard") {
                     Toggle("Use Option as Alt", isOn: $draft.optionAsAlt)
                     Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
+                    Toggle("Allow programs to set the status bar", isOn: $draft.programChrome)
+                    Text("Programs can show a status line, progress, and a small title-bar mark. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Updates") {
                     Toggle("Check for updates automatically", isOn: $automaticChecks)
@@ -129,13 +148,13 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
                     catch { self.error = error.localizedDescription }
                 }.keyboardShortcut(.defaultAction)
             }.padding()
-        }.frame(width: 560, height: 650)
+        }.frame(width: 560, height: 730)
     }
 }
 
 @MainActor final class PreferencesWindow: NSWindowController {
     init(updater: UpdateController) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"; window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater))
         window.center(); super.init(window: window)

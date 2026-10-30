@@ -26,6 +26,30 @@ final class AkittyTests: XCTestCase {
         try session.close(); try session.close()
         XCTAssertThrowsError(try session.snapshot())
     }
+    func testClosingSessionRejectsCallsWithoutWaitingForChildReaping() throws {
+        let session = try TerminalSession(headless: true)
+        let closing = expectation(description: "child cleanup started")
+        let rejected = expectation(description: "late terminal event rejected")
+        let finished = expectation(description: "child cleanup finished")
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            defer { finished.fulfill() }
+            try? session.close { id in
+                closing.fulfill(); release.wait()
+                _ = try CoreBridge.call(["op": "close", "id": id])
+            }
+        }
+        wait(for: [closing], timeout: 2)
+        DispatchQueue.global().async {
+            do { _ = try session.snapshot(); XCTFail("snapshot accepted during cleanup") } catch {}
+            do { try session.input("late input"); XCTFail("input accepted during cleanup") } catch {}
+            XCTAssertNil(session.imagePixels(1, width: 1, height: 1))
+            rejected.fulfill()
+        }
+        wait(for: [rejected], timeout: 0.3)
+        release.signal()
+        wait(for: [finished], timeout: 2)
+    }
     func testClipboardBoundsAndPasteProtection() {
         XCTAssertTrue(ClipboardPolicy.acceptsText("hello"))
         XCTAssertFalse(ClipboardPolicy.acceptsText("\0"))
@@ -490,6 +514,87 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(controller.window!.titlebarAccessoryViewControllers.isEmpty)
     }
 
+    @MainActor func testCloseRequestsShareOneSheetAndCancelKeepsTerminalAlive() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let terminal = controller.panes[0].terminal
+        controller.perform(.closePane, target: terminal)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        controller.perform(.closePane, target: terminal)
+        XCTAssertFalse(controller.windowShouldClose(window))
+        XCTAssertTrue(window.attachedSheet === sheet)
+        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+        for _ in 0..<50 where window.attachedSheet != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.panes.count, 1)
+        XCTAssertNoThrow(try terminal.session.snapshot())
+        // A cancelled request must release the guard, allowing the next close.
+        controller.perform(.closePane, target: terminal)
+        let second = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(second, returnCode: .alertFirstButtonReturn)
+        for _ in 0..<50 where !controller.panes.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(controller.panes.isEmpty)
+    }
+
+    @MainActor func testQuitCanBeCancelledAndRetriedWithoutDuplicateSheetsOrReplies() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        let window = try XCTUnwrap(controller.window), terminals = controller.panes.map(\.terminal)
+        defer { window.close(); terminals.forEach { $0.shutdown() } }
+        var replies: [Bool] = []
+        XCTAssertEqual(app.requestTermination(terminals: terminals, window: window) { replies.append($0) }, .terminateLater)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        func buttons(_ view: NSView) -> [NSButton] { (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(buttons) }
+        let controls = buttons(try XCTUnwrap(sheet.contentView))
+        XCTAssertNotNil(controls.first { $0.title == "Quit" })
+        XCTAssertEqual(controls.first { $0.title == "Cancel" }?.keyEquivalent, "\u{1b}")
+        XCTAssertEqual(app.requestTermination(terminals: terminals, window: window) { _ in XCTFail("duplicate quit reply") }, .terminateLater)
+        XCTAssertTrue(sheet === window.attachedSheet)
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: sheet.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        XCTAssertTrue(sheet.performKeyEquivalent(with: escape))
+        for _ in 0..<50 where replies.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(replies, [false])
+        XCTAssertNoThrow(try terminals[0].session.snapshot())
+        XCTAssertEqual(app.requestTermination(terminals: terminals, window: window) { replies.append($0) }, .terminateLater)
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
+        for _ in 0..<100 where replies.count < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(replies, [false, true])
+        XCTAssertThrowsError(try terminals[0].session.snapshot())
+    }
+
+    @MainActor func testQuitDoesNotQueueBehindAnExistingSheet() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        controller.perform(.closePane)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertEqual(app.requestTermination(terminals: controller.panes.map(\.terminal), window: window) { _ in XCTFail("quit was not deferred") }, .terminateCancel)
+        XCTAssertTrue(sheet === window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+    }
+
+    @MainActor func testStoppedTerminalIgnoresLateInputAndMouseEvents() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[?1003h\u{1b}[?1006h"])
+        terminal.poll()
+        for _ in 0..<100 where terminal.snapshot?.mouse_motion != true { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(terminal.snapshot?.mouse_motion, true)
+        let done = expectation(description: "terminal cleanup")
+        terminal.shutdown { done.fulfill() }
+        await fulfillment(of: [done], timeout: 2)
+        var messages: [String] = []
+        terminal.onStatus = { messages.append($0) }
+        terminal.send("late text")
+        terminal.mouseMoved(with: try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)))
+        XCTAssertTrue(messages.isEmpty)
+    }
+
     func testFolderOpenRequestResolvesFoldersAndCountsSkippedItems() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-open-\(UUID().uuidString)")
         let folder = root.appendingPathComponent("project"); let file = folder.appendingPathComponent("README.md")
@@ -538,6 +643,165 @@ final class AkittyTests: XCTestCase {
         for (width, height) in [(Int.max, 2), (2, Int.max), (Int.min, -1), (0, 1), (8_388_609, 1)] {
             XCTAssertNil(session.imagePixels(0, width: width, height: height))
         }
+    }
+
+    func testSavedPreferencesWithoutProgramChromeStayEnabled() throws {
+        let saved = #"{"fontName":"Menlo","fontSize":16,"shell":"","directory":"","scrollback":1000,"optionAsAlt":true}"#
+        let loaded = try JSONDecoder().decode(TerminalPreferences.self, from: Data(saved.utf8))
+        XCTAssertTrue(loaded.programChrome)
+        XCTAssertEqual(loaded.fontName, "Menlo")
+        XCTAssertEqual(loaded.fontSize, 16)
+        var disabled = loaded
+        disabled.programChrome = false
+        let again = try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(disabled))
+        XCTAssertFalse(again.programChrome)
+        XCTAssertEqual(again.fontName, "Menlo")
+    }
+
+    @MainActor func testChromeStatusDoesNotReplaceWindowOrTabTitle() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let pane = try XCTUnwrap(controller.panes.first)
+        let sequence = "\u{1b}[22t\u{1b}]2;vim\u{07}OK\u{1b}]771;{\"status\":{\"text\":\"building\",\"tone\":\"info\"},\"progress\":0.5}\u{07}"
+        _ = try pane.terminal.session.call("feed", ["text": sequence])
+        try await waitUntil(pane.terminal, timeout: 3) {
+            pane.status.stringValue.contains("building") && pane.status.stringValue.contains("50%") && controller.window?.title == "vim — Akitty"
+        }
+        XCTAssertEqual(controller.window?.title, "vim — Akitty")
+        XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "vim")
+        XCTAssertEqual(segmentLabel(controller), "vim")
+        XCTAssertFalse(controller.window?.title.contains("building") == true)
+        XCTAssertEqual(pane.status.stringValue.contains("building"), true)
+        XCTAssertEqual(pane.status.stringValue.contains("50%"), true)
+        XCTAssertTrue(pane.terminal.snapshot?.text.hasPrefix("OK") == true)
+        XCTAssertFalse(pane.terminal.snapshot?.text.contains("771") == true)
+        _ = try pane.terminal.session.call("feed", ["text": "\u{1b}[23t"])
+        try await waitUntil(pane.terminal, timeout: 3) { controller.window?.title == "Akitty" }
+        XCTAssertEqual(controller.window?.title, "Akitty")
+        XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "Akitty")
+        XCTAssertEqual(segmentLabel(controller), "Akitty")
+        XCTAssertEqual(pane.status.stringValue.contains("building"), true)
+    }
+
+    @MainActor func testChromeStatusAndProgressShowUntilClearOrExpiry() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let pane = try XCTUnwrap(controller.panes.first)
+        _ = try pane.terminal.session.call("chrome", [
+            "status": ["text": "packing", "tone": "info"],
+            "progress": "indeterminate"
+        ])
+        try await waitUntil(pane.terminal, timeout: 2) { pane.status.stringValue.contains("packing") && pane.status.stringValue.contains("…") }
+        XCTAssertEqual(pane.status.stringValue.contains("packing"), true, pane.status.stringValue)
+        XCTAssertEqual(pane.status.stringValue.contains("…"), true, pane.status.stringValue)
+        let shown = pane.terminal.snapshot?.chrome
+        _ = try pane.terminal.session.call("feed", ["text": "x"])
+        try await waitUntil(pane.terminal, timeout: 2) { pane.terminal.snapshot?.text.contains("x") == true }
+        XCTAssertEqual(pane.terminal.snapshot?.chrome, shown)
+        _ = try pane.terminal.session.call("chrome", ["clear": true])
+        try await waitUntil(pane.terminal, timeout: 2) { !pane.status.stringValue.contains("packing") }
+        XCTAssertFalse(pane.status.stringValue.contains("packing"), pane.status.stringValue)
+        XCTAssertNil(pane.terminal.snapshot?.chrome)
+        let expires = Int(Date().timeIntervalSince1970 * 1000) + 2_000
+        _ = try pane.terminal.session.call("chrome", [
+            "status": ["text": "expiring", "tone": "warn", "expires": expires],
+            "progress": 0.5
+        ])
+        try await waitUntil(pane.terminal, timeout: 1.5) {
+            pane.status.stringValue.contains("expiring") && pane.status.stringValue.contains("50%")
+        }
+        XCTAssertEqual(pane.status.stringValue.contains("expiring"), true, pane.status.stringValue)
+        XCTAssertEqual(pane.status.stringValue.contains("50%"), true, pane.status.stringValue)
+        try await waitUntil(pane.terminal, timeout: 4) { !pane.status.stringValue.contains("expiring") }
+        XCTAssertFalse(pane.status.stringValue.contains("expiring"), pane.status.stringValue)
+        XCTAssertFalse(pane.status.stringValue.contains("50%"), pane.status.stringValue)
+    }
+
+    @MainActor func testSpriteMarkUsesFrameZeroWhenReduceMotionIsOn() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let pane = try XCTUnwrap(controller.panes.first)
+        let frame0 = Data([0x10, 0x20, 0x30, 0xFF])
+        let frame1 = Data([0x40, 0x50, 0x60, 0xFF])
+        controller.reduceMotion = false
+        _ = try pane.terminal.session.call("chrome", [
+            "mark": 1,
+            "sprite": ["w": 1, "h": 1, "frames": [frame0.base64EncodedString(), frame1.base64EncodedString()]]
+        ])
+        try await waitUntil(pane.terminal, timeout: 3) { chromeMark(controller)?.chromePixels == frame1 }
+        let moving = try XCTUnwrap(chromeMark(controller))
+        XCTAssertEqual(moving.chromePixels, frame1)
+        XCTAssertEqual(moving.bitmapPixels, frame1)
+        XCTAssertEqual(moving.view.accessibilityIdentifier(), "chrome-sprite")
+        XCTAssertEqual(moving.layoutAttribute, .left)
+        controller.reduceMotion = true
+        let still = try XCTUnwrap(chromeMark(controller))
+        XCTAssertEqual(still.chromePixels, frame0)
+        XCTAssertEqual(still.bitmapPixels, frame0)
+        controller.refreshUpdateReminder("0.7.0")
+        let identifiers = controller.window?.titlebarAccessoryViewControllers.map { $0.view.accessibilityIdentifier() } ?? []
+        XCTAssertTrue(identifiers.contains("chrome-sprite"))
+        XCTAssertTrue(identifiers.contains("update-reminder"))
+        XCTAssertEqual(controller.window?.titlebarAccessoryViewControllers.count, 2)
+        controller.refreshUpdateReminder(nil)
+        XCTAssertEqual(controller.window?.titlebarAccessoryViewControllers.map { $0.view.accessibilityIdentifier() }, ["chrome-sprite"])
+        XCTAssertEqual(chromeMark(controller)?.chromePixels, frame0)
+    }
+
+    @MainActor func testProgramChromeOffIgnoresTerminalSequenceButNotAbi() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let pane = try XCTUnwrap(controller.panes.first)
+        var preferences = TerminalPreferences()
+        preferences.programChrome = false
+        pane.terminal.applyPreferences(preferences)
+        _ = try pane.terminal.session.call("feed", ["text": "\u{1b}]771;{\"status\":{\"text\":\"hidden-osc\",\"tone\":\"error\"},\"progress\":1}\u{07}NO"])
+        try await waitUntil(pane.terminal, timeout: 3) { pane.terminal.snapshot?.text.hasPrefix("NO") == true }
+        XCTAssertFalse(pane.status.stringValue.contains("hidden-osc"), pane.status.stringValue)
+        XCTAssertNil(pane.terminal.snapshot?.chrome?.presentation)
+        XCTAssertFalse(pane.terminal.snapshot?.text.contains("771") == true)
+        _ = try pane.terminal.session.call("chrome", [
+            "status": ["text": "from-abi", "tone": "info"],
+            "progress": "indeterminate"
+        ])
+        try await waitUntil(pane.terminal, timeout: 3) {
+            pane.status.stringValue.contains("from-abi") && pane.status.stringValue.contains("…")
+        }
+        XCTAssertEqual(pane.status.stringValue.contains("from-abi"), true, pane.status.stringValue)
+        XCTAssertEqual(pane.status.stringValue.contains("…"), true, pane.status.stringValue)
+        let revision = pane.terminal.snapshot?.revision
+        _ = try pane.terminal.session.call("feed", ["text": "\u{1b}]771;{\"clear\":true}\u{07}"])
+        try await waitUntil(pane.terminal, timeout: 2) { pane.terminal.snapshot?.revision != revision }
+        XCTAssertEqual(pane.status.stringValue.contains("from-abi"), true, pane.status.stringValue)
+        XCTAssertEqual(pane.terminal.snapshot?.chrome?.status?.text, "from-abi")
+    }
+
+    @MainActor private func waitUntil(_ view: TerminalView, timeout: TimeInterval, until predicate: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            view.poll()
+            try await Task.sleep(nanoseconds: 20_000_000)
+            if predicate() { return }
+        }
+    }
+
+    @MainActor private func segmentLabel(_ controller: TerminalWindow) -> String? {
+        guard let content = controller.window?.contentView else { return nil }
+        func walk(_ view: NSView) -> NSSegmentedControl? {
+            if let control = view as? NSSegmentedControl { return control }
+            for subview in view.subviews { if let found = walk(subview) { return found } }
+            return nil
+        }
+        return walk(content)?.label(forSegment: 0)
+    }
+
+    @MainActor private func chromeMark(_ controller: TerminalWindow) -> ChromeMarkAccessory? {
+        controller.window?.titlebarAccessoryViewControllers.compactMap { $0 as? ChromeMarkAccessory }.first
     }
 
 }

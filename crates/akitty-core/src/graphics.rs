@@ -3,8 +3,11 @@
 //! Supported: queries (`a=q`), direct raw RGB/RGBA transmission (`t=d`, `f=24|32`)
 //! and PNG (`f=100`) with optional zlib (`o=z`) and chunking (`m=`), image numbers
 //! (`I=`), placement with source rectangles at the cursor or of a stored image
-//! (`a=T|p`), and deletion (`a=d`). Files and shared memory are rejected, so
-//! terminal output can never make the core read local files.
+//! (`a=T|p`), virtual (`U=1`) and relative (`P=`,`Q=`,`H=`,`V=`) placements,
+//! animation (`a=f`,`a=a`,`a=c`,`d=f`), and deletion (`a=d`). Direct, file
+//! (`t=f`), temp-file (`t=t`) and shared-memory (`t=s`) transmission are
+//! supported with Kitty's rules: files are read only as regular files outside
+//! /dev, /proc and /sys, and every read is bounded by what the format needs.
 //! Every size is bounded; see the constants below.
 use base64::Engine;
 use base64::alphabet;
@@ -22,6 +25,12 @@ const MAX_APC: usize = 4 * 1024 * 1024;
 const MAX_PLACEMENTS: usize = 256;
 const MAX_IMAGES: usize = 512;
 const MAX_CELLS_SPAN: u32 = 1024;
+/// Appended animation frames one image may hold (frame 1 is the transmission).
+const MAX_FRAMES: usize = 512;
+/// Frame gap in milliseconds when a frame is created without `z=`.
+const DEFAULT_GAP_MS: u32 = 40;
+/// Relative placements may not form chains deeper than this many links.
+const MAX_CHAIN: usize = 8;
 /// png decoder allocation cap; the largest legal frame decompresses to 64 MiB.
 const PNG_LIMIT_BYTES: usize = 64 * 1024 * 1024 + (1 << 20);
 /// Default zlib limit for `f=100` payloads sent without a size hint.
@@ -155,6 +164,7 @@ impl ApcFilter {
 pub struct Image {
     pub width: u32,
     pub height: u32,
+    /// The pixels of the frame on display; frame 1 while nothing animates.
     pub rgba: Vec<u8>,
     pub generation: u64,
     /// Created while the alternate screen was active; dropped when it is left.
@@ -162,6 +172,65 @@ pub struct Image {
     /// Sent with neither `i=` nor `I=`: no client can reference it again, so it is
     /// freed as soon as its last placement goes away.
     pub idless: bool,
+    /// Animation frames, entry 0 being the transmitted image (frame 1). Empty until the first `a=f` materializes the
+    /// root as `frames[0]`; from then on `rgba` is a copy of the frame on display.
+    frames: Vec<Frame>,
+    /// Playback state, created by the first animation command.
+    animation: Option<Animation>,
+}
+
+impl Image {
+    /// Every byte this image counts against the session budget.
+    fn memory(&self) -> usize {
+        self.rgba.len() + self.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
+    }
+
+    /// Frames including the transmitted image (frame 1).
+    fn frame_count(&self) -> u32 {
+        self.frames.len().max(1) as u32
+    }
+
+    /// 0-based index of the frame on display.
+    fn current(&self) -> usize {
+        self.animation.as_ref().map_or(0, |animation| animation.current)
+    }
+
+    /// Gap of one frame (0-based) in milliseconds; 0 is gapless, which playback skips.
+    fn gap(&self, index: usize) -> u32 {
+        if index == 0 { self.animation.as_ref().map_or(0, |animation| animation.root_gap) } else { self.frames[index].gap_ms }
+    }
+
+    /// Pixels of one frame (0-based), writable; frame 1 of an image without frames is `rgba` itself.
+    fn frame_mut(&mut self, index: usize) -> &mut Vec<u8> {
+        if self.frames.is_empty() { &mut self.rgba } else { &mut self.frames[index].rgba }
+    }
+
+    fn frame(&self, index: usize) -> &[u8] {
+        if self.frames.is_empty() { &self.rgba } else { &self.frames[index].rgba }
+    }
+}
+
+/// One animation frame at full image size.
+struct Frame {
+    rgba: Vec<u8>,
+    /// Milliseconds this frame is displayed; 0 is gapless. Unused for frame 1, whose gap is `Animation::root_gap`.
+    gap_ms: u32,
+}
+
+/// Playback state of one image, as Kitty and Ghostty keep it.
+#[derive(Default)]
+struct Animation {
+    /// 0 or 1 stopped (client-driven via `a=a,c=`), 2 loading (parks on the last frame), 3 running.
+    state: u8,
+    /// Loops to play before parking on the last frame; 0 is infinite (`v=1`).
+    max_loops: u32,
+    loops_done: u32,
+    /// 0-based frame on display.
+    current: usize,
+    /// When the frame on display was first shown by a tick; `None` restarts its gap on the next tick.
+    shown: Option<std::time::Instant>,
+    /// Gap of frame 1, gapless until the client sets one with `a=a,r=1,z=`.
+    root_gap: u32,
 }
 
 #[derive(Clone)]
@@ -183,6 +252,21 @@ pub struct Placement {
     /// Pixel offset inside the first cell, clamped below one cell.
     pub off_x: u32,
     pub off_y: u32,
+    /// `U=1`: never drawn directly, never moved by scrolls and never hit by
+    /// position-based deletes; only image deletion removes it.
+    pub virt: bool,
+    /// Relative placement: parent image id and parent placement id (`P=`,`Q=`).
+    pub parent: Option<(u32, u32)>,
+    /// Cell offset from the parent: `H=` columns, `V=` rows.
+    pub rel: (i32, i32),
+}
+
+impl Placement {
+    /// Whether the placement sits at its own grid anchor, so scrolls move it and screen clears remove it; virtual
+    /// placements have none and relative ones follow their parent.
+    pub fn anchored(&self) -> bool {
+        !self.virt && self.parent.is_none()
+    }
 }
 
 /// Terminal state a graphics command needs.
@@ -228,10 +312,23 @@ struct Command {
     rect_h: u32,
     off_x: u32,
     off_y: u32,
-    /// True when the packet carries keys other than the chunk keys `m` and `q`.
+    /// True when the packet carries keys other than the chunk keys `m`, `q` and `a=f`.
     full: bool,
     /// True when a placement key carried an empty value, which the protocol rejects.
     invalid: bool,
+    /// `U=1`: store a virtual placement.
+    virt: bool,
+    /// `P=`/`Q=`: relative placement parent image and placement id (0 = first).
+    parent_image: u32,
+    parent_placement: u32,
+    /// `H=`/`V=`: signed cell offset from the parent.
+    rel_col: i32,
+    rel_line: i32,
+    /// `O=`/`S=`: where a `t=t`/`t=s` read starts and how many bytes it spans.
+    offset: u64,
+    read_size: u64,
+    /// `z=` for animation commands, where its absence means the default gap.
+    gap: Option<i32>,
 }
 
 impl Command {
@@ -241,8 +338,11 @@ impl Command {
             let Some((key, value)) = pair.split_once('=') else {
                 continue;
             };
-            if !matches!(key, "m" | "q") {
-                command.full = true;
+            // Continuation chunks carry only m, q and a=f besides the data.
+            match key {
+                "m" | "q" => {}
+                "a" if value == "f" => {}
+                _ => command.full = true,
             }
             if matches!(key, "x" | "y" | "w" | "h" | "X" | "Y") && value.is_empty() {
                 command.invalid = true;
@@ -264,7 +364,10 @@ impl Command {
                 "q" => command.quiet = unsigned.min(2) as u8,
                 "c" => command.cols = unsigned,
                 "r" => command.rows = unsigned,
-                "z" => command.z = number.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                "z" => {
+                    command.z = number.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    command.gap = Some(command.z);
+                }
                 "C" => command.no_move = number == 1,
                 "d" => command.delete = letter,
                 "x" => command.rect_x = unsigned,
@@ -273,6 +376,13 @@ impl Command {
                 "h" => command.rect_h = unsigned,
                 "X" => command.off_x = unsigned,
                 "Y" => command.off_y = unsigned,
+                "U" => command.virt = number == 1,
+                "P" => command.parent_image = unsigned,
+                "Q" => command.parent_placement = unsigned,
+                "H" => command.rel_col = number.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                "V" => command.rel_line = number.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                "O" => command.offset = number.max(0) as u64,
+                "S" => command.read_size = number.max(0) as u64,
                 _ => {}
             }
         }
@@ -331,7 +441,7 @@ impl Graphics {
             command = pending.command;
             (command, pending.data)
         } else {
-            if command.more && matches!(command.action, b't' | b'T') {
+            if command.more && matches!(command.action, b't' | b'T' | b'f') {
                 if data.len() > MAX_PENDING_BASE64 {
                     return self.fail(&command, "EINVAL", "chunked data too large");
                 }
@@ -345,37 +455,54 @@ impl Graphics {
                 // A query never stores anything; it only reports whether the data would load.
                 // Real probes are a pixel or two, so large ones cannot be used to burn CPU.
                 // PNG queries read only the header; their size comes from the file.
-                let result = if command.format == 100 {
-                    png_bytes(&command, &data)
-                        .and_then(|bytes| png_decode(&bytes, true))
-                        .and_then(|head| query_pixel_rule(head.width, head.height))
-                } else {
-                    query_pixel_rule(command.width, command.height)
-                        .and_then(|_| self.decode(&command, &data).map(|_| ()))
+                let result = match command.medium {
+                    b'd' => {
+                        if command.format == 100 {
+                            BASE64
+                                .decode(&data)
+                                .map_err(|_| "EINVAL:invalid base64".to_string())
+                                .and_then(|raw| png_bytes(&command, &raw))
+                                .and_then(|bytes| png_decode(&bytes, true))
+                                .and_then(|head| query_pixel_rule(head.width, head.height))
+                        } else {
+                            query_pixel_rule(command.width, command.height)
+                                .and_then(|_| self.decode(&command, &data).map(|_| ()))
+                        }
+                    }
+                    // Probes through a file, temp file or shared memory carry real (tiny) data, which is read and,
+                    // for temp files and shared memory, consumed: kitten icat picks its transfer mode this way.
+                    b'f' | b't' | b's' => query_pixel_rule(command.width, command.height)
+                        .and_then(|_| self.decode(&command, &data).map(|_| ())),
+                    _ => Err("ENOTSUP:unknown transmission medium".to_string()),
                 };
                 Outcome { reply: reply(&command, result.err().as_deref(), 0), advance: None }
             }
             b't' | b'T' => self.transmit(command, &data, context),
             b'p' => self.put(command, context),
+            b'f' => self.add_frame(command, &data),
+            b'a' => self.animate(command),
+            b'c' => self.compose(command),
             b'd' => self.delete(&command, context),
             _ => self.fail(&command, "EINVAL", "unsupported action"),
         }
     }
 
-    fn fail(&mut self, command: &Command, code: &str, message: &str) -> Outcome {
+    fn fail(&self, command: &Command, code: &str, message: &str) -> Outcome {
         Outcome { reply: reply(command, Some(&format!("{code}:{message}")), 0), advance: None }
     }
 
     fn decode(&self, command: &Command, data: &[u8]) -> Result<Decoded, String> {
-        if command.medium != b'd' {
-            return Err("ENOTSUP:only direct transmission (t=d) is supported".into());
-        }
+        let payload = match command.medium {
+            b'd' => BASE64.decode(data).map_err(|_| "EINVAL:invalid base64".to_string())?,
+            b'f' | b't' | b's' => self.read_medium(command, data)?,
+            _ => return Err("ENOTSUP:unknown transmission medium".into()),
+        };
         if command.format == 100 {
-            return png_bytes(command, data).and_then(|bytes| png_decode(&bytes, false));
+            return png_bytes(command, &payload).and_then(|bytes| png_decode(&bytes, false));
         }
         let bytes_per_pixel = match command.format {
             24 => 3usize,
-            32 => 4usize,
+            32 => 4,
             _ => return Err("ENOTSUP:only raw RGB (f=24), RGBA (f=32) and PNG (f=100) are supported".into()),
         };
         if command.width == 0 || command.height == 0 {
@@ -385,10 +512,9 @@ impl Graphics {
             return Err("EINVAL:image exceeds the pixel limit".into());
         }
         let expected = command.width as usize * command.height as usize * bytes_per_pixel;
-        let raw = BASE64.decode(data).map_err(|_| "EINVAL:invalid base64".to_string())?;
         let raw = match command.compression {
-            0 => raw,
-            b'z' => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, expected)
+            0 => payload,
+            b'z' => miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&payload, expected)
                 .map_err(|_| "EINVAL:invalid or oversized zlib data".to_string())?,
             _ => return Err("EINVAL:unknown compression".into()),
         };
@@ -403,6 +529,33 @@ impl Graphics {
             rgba.extend_from_slice(&[*red, *green, *blue, 255]);
         }
         Ok(Decoded { width: command.width, height: command.height, rgba })
+    }
+
+    /// Reads the raw (not base64) payload of a `t=f`/`t=t`/`t=s` command from the medium its base64 payload names. The
+    /// read is bounded by what the format can possibly need; compressed data gets the zlib bound.
+    fn read_medium(&self, command: &Command, data: &[u8]) -> Result<Vec<u8>, String> {
+        let max = if command.format == 100 || command.compression != 0 {
+            PNG_ZLIB_LIMIT as u64
+        } else {
+            let bpp = match command.format {
+                24 => 3u64,
+                32 => 4,
+                _ => return Err("ENOTSUP:only raw RGB (f=24), RGBA (f=32) and PNG (f=100) are supported".into()),
+            };
+            if command.width == 0 || command.height == 0 {
+                return Err("EINVAL:zero width or height".into());
+            }
+            if u64::from(command.width) * u64::from(command.height) > MAX_PIXELS {
+                return Err("EINVAL:image exceeds the pixel limit".into());
+            }
+            u64::from(command.width) * u64::from(command.height) * bpp
+        };
+        let name = BASE64.decode(data).map_err(|_| "EINVAL:invalid base64".to_string())?;
+        match command.medium {
+            b'f' => crate::media::read_file(&name, command.offset, command.read_size, max as usize),
+            b't' => crate::media::read_temp_file(&name, command.offset, command.read_size, max as usize),
+            _ => crate::media::read_shared_memory(&name, command.offset, command.read_size, max as usize),
+        }
     }
 
     fn transmit(&mut self, command: Command, data: &[u8], context: &Context) -> Outcome {
@@ -432,7 +585,7 @@ impl Graphics {
                 return self.fail(&command, "ENOSPC", "too many images");
             }
         }
-        let old = self.images.get(&id).map_or(0, |image| image.rgba.len());
+        let old = self.images.get(&id).map_or(0, |image| image.memory());
         while self.bytes - old + decoded.rgba.len() > MAX_TOTAL_BYTES && self.evict_one(id) {}
         if self.bytes - old + decoded.rgba.len() > MAX_TOTAL_BYTES {
             return self.fail(&command, "ENOSPC", "image memory limit reached");
@@ -440,6 +593,7 @@ impl Graphics {
         // Transmissions for an existing id replace it entirely: all placements
         // of the old image go first, so a=T re-creates exactly one placement.
         self.placements.retain(|placement| placement.image != id);
+        self.cascade();
         self.bytes = self.bytes - old + decoded.rgba.len();
         self.next_generation += 1;
         self.images.insert(
@@ -451,6 +605,8 @@ impl Graphics {
                 generation: self.next_generation,
                 alt: context.alt,
                 idless,
+                frames: Vec::new(),
+                animation: None,
             },
         );
         if command.number != 0 {
@@ -477,10 +633,22 @@ impl Graphics {
         } else {
             0
         };
-        let Some(image) = self.images.get(&id) else {
-            return self.fail(&command, "ENOENT", "no such image");
+        let (width, height, idless) = match self.images.get(&id) {
+            Some(image) => (image.width, image.height, image.idless),
+            None => return self.fail(&command, "ENOENT", "no such image"),
         };
-        let (width, height, idless) = (image.width, image.height, image.idless);
+        // A relative placement hangs off another placement and never has an
+        // anchor of its own; the chain may neither loop nor exceed MAX_CHAIN.
+        let parent = (command.parent_image != 0).then_some((command.parent_image, command.parent_placement));
+        if let Some((parent_image, parent_placement)) = parent {
+            let Some(found) = self.find_parent(parent_image, parent_placement) else {
+                return self.fail(&command, "ENOPARENT", "no such parent placement");
+            };
+            if let Err(code) = self.check_chain(id, command.placement, found) {
+                let message = if code == "ECYCLE" { "relative placements may not loop" } else { "relative chain too deep" };
+                return self.fail(&command, code, message);
+            }
+        }
         // Source rectangle in image pixels; w/h 0 extend to the image edge.
         if command.rect_x >= width || command.rect_y >= height {
             return self.fail(&command, "EINVAL", "empty source rectangle");
@@ -519,8 +687,13 @@ impl Graphics {
             src_h,
             off_x,
             off_y,
+            virt: command.virt,
+            parent,
+            rel: (command.rel_col, command.rel_line),
         };
-        let advance = (!command.no_move).then_some((placement.rows, placement.cols));
+        // Virtual and relative placements never move the cursor.
+        let advance =
+            (!command.no_move && !command.virt && parent.is_none()).then_some((placement.rows, placement.cols));
         // An idless frame replaces any idless placement at the same anchor, so
         // one-image-per-frame clients such as mpv --vo=kitty do not accumulate.
         if placement.id == 0 && idless {
@@ -533,6 +706,8 @@ impl Graphics {
                     existing.alt == alt
                         && existing.line == line
                         && existing.col == col
+                        && existing.parent.is_none()
+                        && !existing.virt
                         && self.images.get(&existing.image).is_some_and(|image| image.idless)
                 })
                 .map(|(index, _)| index)
@@ -554,13 +729,315 @@ impl Graphics {
         });
         while self.placements.len() >= MAX_PLACEMENTS {
             // Scrollback placements go first; beyond them the oldest is dropped.
-            let victim =
-                self.placements.iter().position(|existing| existing.line + existing.rows as i32 <= 0).unwrap_or(0);
+            let victim = self
+                .placements
+                .iter()
+                .position(|existing| existing.anchored() && existing.line + existing.rows as i32 <= 0)
+                .unwrap_or(0);
             self.placements.remove(victim);
         }
         self.placements.push(placement);
         self.sweep();
+        self.cascade();
         Outcome { reply: reply(&command, None, id), advance }
+    }
+
+    /// The image a command names by `i=` or `I=`; 0 when it names none.
+    fn target(&self, command: &Command) -> u32 {
+        if command.id != 0 { command.id } else { self.numbers.get(&command.number).copied().unwrap_or(0) }
+    }
+
+    /// Shows frame `index` of `id`: `rgba` becomes its pixels and the generation moves so the renderer re-uploads.
+    fn show(&mut self, id: u32, index: usize) {
+        let Some(image) = self.images.get_mut(&id) else { return };
+        if let Some(animation) = image.animation.as_mut() { animation.current = index; }
+        if !image.frames.is_empty() {
+            let frame = std::mem::take(&mut image.frames[index].rgba);
+            image.rgba.copy_from_slice(&frame);
+            image.frames[index].rgba = frame;
+        }
+        self.next_generation += 1;
+        image.generation = self.next_generation;
+    }
+
+    /// `a=f`: composes the transmitted pixels at `x=`,`y=` onto a new frame (a copy of frame `c=`, or filled with
+    /// the `Y=` colour) or into the existing frame `r=`. `X=1` overwrites instead of alpha blending.
+    fn add_frame(&mut self, mut command: Command, data: &[u8]) -> Outcome {
+        let id = self.target(&command);
+        if id == 0 { return self.fail(&command, "EINVAL", "image id or number required"); }
+        let Some(image) = self.images.get(&id) else { return self.fail(&command, "ENOENT", "no such image") };
+        let (width, height, count) = (image.width, image.height, image.frame_count());
+        // Raw frame data defaults to the full image size.
+        if command.format != 100 {
+            if command.width == 0 { command.width = width; }
+            if command.height == 0 { command.height = height; }
+        }
+        let piece = match self.decode(&command, data) {
+            Ok(piece) => piece,
+            Err(error) => return Outcome { reply: reply(&command, Some(&error), id), advance: None },
+        };
+        if piece.width > width || piece.height > height {
+            return self.fail(&command, "EINVAL", "frame larger than the image");
+        }
+        let overwrite = command.off_x == 1;
+        let gap = command.gap.unwrap_or(0);
+        let number = if command.rows == 0 || command.rows > count { count + 1 } else { command.rows };
+        if number <= count {
+            // Editing a frame in place costs no memory; a gap given with it replaces the frame's gap.
+            let index = number as usize - 1;
+            let image = self.images.get_mut(&id).expect("image looked up above");
+            compose_rect(image.frame_mut(index), width, height, &piece, command.rect_x, command.rect_y, overwrite);
+            if gap != 0 {
+                let gap = gap.max(0) as u32;
+                if index == 0 { image.animation.get_or_insert_with(Animation::default).root_gap = gap; } else { image.frames[index].gap_ms = gap; }
+            }
+            if index == image.current() {
+                if let Some(animation) = image.animation.as_mut() { animation.shown = None; }
+                self.show(id, index);
+            }
+            return Outcome { reply: reply(&command, None, id), advance: None };
+        }
+        if count as usize > MAX_FRAMES { return self.fail(&command, "ENOSPC", "too many animation frames"); }
+        if command.cols > count { return self.fail(&command, "EINVAL", "no such base frame"); }
+        let frame_len = width as usize * height as usize * 4;
+        // The first added frame also materializes frame 1 as a separate copy.
+        let needed = frame_len * if count == 1 { 2 } else { 1 };
+        while self.bytes + needed > MAX_TOTAL_BYTES && self.evict_one(id) {}
+        if self.bytes + needed > MAX_TOTAL_BYTES { return self.fail(&command, "ENOSPC", "image memory limit reached"); }
+        let image = self.images.get_mut(&id).expect("eviction keeps the target image");
+        if image.frames.is_empty() { image.frames.push(Frame { rgba: image.rgba.clone(), gap_ms: 0 }); }
+        let mut canvas = if command.cols != 0 {
+            image.frames[command.cols as usize - 1].rgba.clone()
+        } else {
+            let [r, g, b, a] = command.off_y.to_be_bytes();
+            [r, g, b, a].repeat(width as usize * height as usize)
+        };
+        compose_rect(&mut canvas, width, height, &piece, command.rect_x, command.rect_y, overwrite);
+        // A new frame defaults to a 40 ms gap; a negative gap makes it gapless.
+        let gap_ms = if gap > 0 { gap as u32 } else if gap < 0 { 0 } else { DEFAULT_GAP_MS };
+        image.frames.push(Frame { rgba: canvas, gap_ms });
+        self.bytes += needed;
+        Outcome { reply: reply(&command, None, id), advance: None }
+    }
+
+    /// `a=a`: sets a frame's gap (`r=`,`z=`), the frame on display (`c=`), the playback state (`s=`) and the loop
+    /// count (`v=`, off by one: 1 loops forever). Success never replies; invalid values are ignored like Kitty.
+    fn animate(&mut self, command: Command) -> Outcome {
+        let id = self.target(&command);
+        if id == 0 { return self.fail(&command, "EINVAL", "image id or number required"); }
+        let Some(image) = self.images.get_mut(&id) else { return self.fail(&command, "ENOENT", "no such image") };
+        let count = image.frame_count();
+        image.animation.get_or_insert_with(Animation::default);
+        if let Some(gap) = command.gap.filter(|gap| *gap != 0 && command.rows != 0 && command.rows <= count) {
+            let (index, gap) = (command.rows as usize - 1, gap.max(0) as u32);
+            if index == 0 { image.animation.as_mut().expect("created above").root_gap = gap; } else { image.frames[index].gap_ms = gap; }
+        }
+        let animation = image.animation.as_mut().expect("created above");
+        let mut show = None;
+        if command.cols != 0 && command.cols <= count && command.cols as usize - 1 != animation.current {
+            animation.shown = None;
+            show = Some(command.cols as usize - 1);
+        }
+        if (1..=3).contains(&command.width) {
+            if animation.state <= 1 && command.width != 1 { animation.shown = None; }
+            animation.state = command.width as u8;
+            animation.loops_done = 0;
+        }
+        if command.height != 0 { animation.max_loops = command.height - 1; }
+        if let Some(index) = show { self.show(id, index); }
+        Outcome::default()
+    }
+
+    /// `a=c`: composes a `w=`x`h=` rectangle at `X=`,`Y=` of frame `r=` onto `x=`,`y=` of frame `c=` (`C=1`
+    /// overwrites). Both rectangles must lie inside the image, and inside one frame they may not overlap.
+    fn compose(&mut self, command: Command) -> Outcome {
+        let id = self.target(&command);
+        if id == 0 { return self.fail(&command, "EINVAL", "image id or number required"); }
+        let Some(image) = self.images.get(&id) else { return self.fail(&command, "ENOENT", "no such image") };
+        let count = image.frame_count();
+        let (source, dest) = (command.rows, command.cols);
+        if source == 0 || source > count { return self.fail(&command, "ENOENT", "no such source frame"); }
+        if dest == 0 || dest > count { return self.fail(&command, "ENOENT", "no such destination frame"); }
+        let (width, height) = (image.width, image.height);
+        let w = if command.rect_w > 0 { command.rect_w } else { width };
+        let h = if command.rect_h > 0 { command.rect_h } else { height };
+        let fits = |x: u32, y: u32| u64::from(x) + u64::from(w) <= u64::from(width) && u64::from(y) + u64::from(h) <= u64::from(height);
+        if !fits(command.rect_x, command.rect_y) { return self.fail(&command, "EINVAL", "destination rectangle out of bounds"); }
+        if !fits(command.off_x, command.off_y) { return self.fail(&command, "EINVAL", "source rectangle out of bounds"); }
+        if source == dest {
+            let overlaps = |a: u32, b: u32, size: u32| a.max(b) < a.min(b) + size;
+            if overlaps(command.off_x, command.rect_x, w) && overlaps(command.off_y, command.rect_y, h) {
+                return self.fail(&command, "EINVAL", "source and destination rectangles overlap");
+            }
+        }
+        let stride = width as usize * 4;
+        let (sx, sy) = (command.off_x as usize * 4, command.off_y as usize);
+        let src = image.frame(source as usize - 1);
+        let piece: Vec<u8> = (0..h as usize).flat_map(|row| &src[(sy + row) * stride + sx..][..w as usize * 4]).copied().collect();
+        let piece = Decoded { width: w, height: h, rgba: piece };
+        let image = self.images.get_mut(&id).expect("image looked up above");
+        let index = dest as usize - 1;
+        compose_rect(image.frame_mut(index), width, height, &piece, command.rect_x, command.rect_y, command.no_move);
+        if index == image.current() { self.show(id, index); }
+        Outcome { reply: reply(&command, None, id), advance: None }
+    }
+
+    /// `d=f`/`d=F`: deletes frame `r=` (0 is frame 1, past the end the last frame) of the image `i=`/`I=` names.
+    /// Without frames, `d=F` deletes the whole image and `d=f` does nothing.
+    fn delete_frame(&mut self, command: &Command) {
+        let id = self.target(command);
+        if self.images.get(&id).is_none_or(|image| image.frames.is_empty()) {
+            if command.delete == b'F' && self.images.contains_key(&id) {
+                self.placements.retain(|p| p.image != id);
+                self.drop_unreferenced(&[id]);
+                self.cascade();
+            }
+            return;
+        }
+        let image = self.images.get_mut(&id).expect("checked above");
+        let index = (command.rows.max(1).min(image.frame_count()) - 1) as usize;
+        let removed = image.frames.remove(index);
+        self.bytes -= removed.rgba.len();
+        let animation = image.animation.get_or_insert_with(Animation::default);
+        if index == 0 { animation.root_gap = image.frames[0].gap_ms; }
+        let current = if animation.current > index || animation.current >= image.frames.len() {
+            animation.current.saturating_sub(1).min(image.frames.len() - 1)
+        } else {
+            animation.current
+        };
+        let changed = current != animation.current || index == animation.current;
+        animation.current = current;
+        if changed { animation.shown = None; }
+        // One frame left: it is the image again and the duplicate copy goes.
+        if image.frames.len() == 1 {
+            let last = image.frames.pop().expect("one frame left");
+            self.bytes -= image.rgba.len();
+            image.rgba = last.rgba;
+            animation.current = 0;
+            self.next_generation += 1;
+            image.generation = self.next_generation;
+        } else if changed {
+            self.show(id, current);
+        }
+    }
+
+    /// Advances running animations to `now`, at most one displayed frame per image per tick with no catch-up (an
+    /// animation slows down rather than skipping when ticks lag). Only placed images animate. Returns true when a
+    /// displayed frame changed.
+    pub fn tick(&mut self, now: std::time::Instant) -> bool {
+        let mut changes = Vec::new();
+        for (id, image) in &mut self.images {
+            let count = image.frames.len();
+            let total: u64 = (0..count).map(|index| u64::from(image.gap(index))).sum();
+            let Some(animation) = image.animation.as_ref() else { continue };
+            if animation.state <= 1 || count == 0 || total == 0 { continue; }
+            if animation.max_loops > 0 && animation.loops_done >= animation.max_loops { continue; }
+            if !self.placements.iter().any(|p| p.image == *id) { continue; }
+            let shown = animation.shown.filter(|at| *at <= now).unwrap_or(now);
+            let due = shown + std::time::Duration::from_millis(u64::from(image.gap(animation.current)));
+            let (mut index, mut loops, state, max) = (animation.current, animation.loops_done, animation.state, animation.max_loops);
+            let mut advanced = false;
+            if now >= due {
+                loop {
+                    let next = (index + 1) % count;
+                    if next == 0 {
+                        if state == 2 { break; }
+                        loops += 1;
+                        if max > 0 && loops >= max { break; }
+                    }
+                    index = next;
+                    advanced = true;
+                    if image.gap(index) != 0 { break; }
+                }
+            }
+            let animation = image.animation.as_mut().expect("checked above");
+            animation.loops_done = loops;
+            animation.shown = Some(if advanced { now } else { shown });
+            if advanced && index != animation.current { changes.push((*id, index)); }
+        }
+        let changed = !changes.is_empty();
+        for (id, index) in changes { self.show(id, index); }
+        changed
+    }
+
+    /// Whether some placed animation is running, so the UI should poll at the display rate.
+    pub fn animating(&self) -> bool {
+        self.images.iter().any(|(id, image)| {
+            image.frames.len() > 1
+                && image.animation.as_ref().is_some_and(|animation| {
+                    animation.state >= 2 && (animation.max_loops == 0 || animation.loops_done < animation.max_loops)
+                })
+                && self.placements.iter().any(|p| p.image == *id)
+        })
+    }
+
+    /// The placement a relative placement names: image `image` and placement id `placement` (0 matches the
+    /// image's first placement).
+    fn find_parent(&self, image: u32, placement: u32) -> Option<usize> {
+        self.placements.iter().position(|p| p.image == image && (placement == 0 || p.id == placement))
+    }
+
+    /// Refuses a relative placement whose parent chain, starting at index `parent`, loops back to the placement
+    /// being created (`image`,`id`) or is longer than `MAX_CHAIN`.
+    fn check_chain(&self, image: u32, id: u32, parent: usize) -> Result<(), &'static str> {
+        let mut at = Some(parent);
+        for _ in 0..MAX_CHAIN {
+            let Some(index) = at else { return Ok(()) };
+            let p = &self.placements[index];
+            if p.image == image && (id == 0 || p.id == id) { return Err("ECYCLE"); }
+            at = p.parent.and_then(|(image, placement)| self.find_parent(image, placement));
+        }
+        if at.is_some() { Err("ETOODEEP") } else { Ok(()) }
+    }
+
+    /// Removes relative placements whose parent is gone, transitively, then frees what that unreferenced.
+    fn cascade(&mut self) {
+        loop {
+            let orphan = self.placements.iter().position(|p| {
+                p.parent.is_some_and(|(image, placement)| self.find_parent(image, placement).is_none())
+            });
+            let Some(index) = orphan else { break };
+            self.placements.remove(index);
+        }
+        self.sweep();
+    }
+
+    /// Absolute anchor of placement `index`: relative placements add their offsets up the chain. `None` when the
+    /// chain ends at a virtual placement, breaks or is too deep.
+    fn anchor(&self, index: usize) -> Option<(i32, i64)> {
+        let mut p = &self.placements[index];
+        let (mut line, mut col) = (0i64, 0i64);
+        for _ in 0..=MAX_CHAIN {
+            let Some((image, placement)) = p.parent else {
+                if p.virt { return None; }
+                return Some(((line + i64::from(p.line)).clamp(i32::MIN as i64, i32::MAX as i64) as i32, col + p.col as i64));
+            };
+            line += i64::from(p.rel.1);
+            col += i64::from(p.rel.0);
+            p = &self.placements[self.find_parent(image, placement)?];
+        }
+        None
+    }
+
+    /// The placements to draw on one screen: virtual ones are left out and relative ones resolved to absolute
+    /// anchors (those landing left of column 0 are clipped away).
+    pub fn drawn(&self, alt: bool) -> Vec<Placement> {
+        (0..self.placements.len())
+            .filter(|index| self.placements[*index].alt == alt && !self.placements[*index].virt)
+            .filter_map(|index| {
+                let (line, col) = self.anchor(index)?;
+                let mut placement = self.placements[index].clone();
+                placement.line = line;
+                placement.col = usize::try_from(col).ok()?;
+                Some(placement)
+            })
+            .collect()
+    }
+
+    /// The virtual placement Unicode placeholders of `image` refer to: id `placement`, or the image's first one for 0.
+    pub fn virtual_placement(&self, image: u32, placement: u32) -> Option<&Placement> {
+        let mut virtuals = self.placements.iter().filter(|p| p.virt && p.image == image);
+        if placement == 0 { virtuals.next() } else { virtuals.find(|p| p.id == placement) }
     }
 
     /// Runs one `a=d` command. Deletes touch only the current screen; lowercase
@@ -577,6 +1054,10 @@ impl Graphics {
             }
             return outcome;
         }
+        if mode == b'f' {
+            self.delete_frame(command);
+            return Outcome::default();
+        }
         let free = command.delete.is_ascii_uppercase();
         // d=i and d=n both accept i= or I= (numbers resolve through the map).
         let id = if command.id != 0 {
@@ -586,8 +1067,11 @@ impl Graphics {
         } else {
             0
         };
-        let covers = |p: &Placement, line: i32, col: usize| {
-            p.line <= line && line < p.line + p.rows as i32 && p.col <= col && col < p.col + p.cols as usize
+        // Position-based modes see relative placements where they are drawn; virtual ones never match them.
+        let anchors: Vec<Option<(i32, i64)>> = (0..self.placements.len()).map(|index| self.anchor(index)).collect();
+        let mut index = 0;
+        let covers = |p: &Placement, (top, left): (i32, i64), line: i32, col: usize| {
+            top <= line && line < top + p.rows as i32 && left <= col as i64 && (col as i64) < left + i64::from(p.cols)
         };
         // x/y are 1-based character coordinates for the cell, column and row modes.
         let target_col = command.rect_x.checked_sub(1).map(|x| x as usize);
@@ -595,34 +1079,44 @@ impl Graphics {
         // Images the command touched; only these may lose their data under an uppercase mode.
         let mut touched: Vec<u32> = if matches!(mode, b'i' | b'n') && id != 0 { vec![id] } else { Vec::new() };
         self.placements.retain(|p| {
+            let anchor = anchors[index];
+            index += 1;
             if p.alt != context.alt {
                 return true;
             }
+            let Some(at) = anchor.filter(|_| !p.virt) else {
+                // Virtual placements and children of virtual parents go only with their image.
+                let hit = match mode {
+                    b'i' | b'n' => id != 0 && p.image == id && (command.placement == 0 || p.id == command.placement),
+                    b'r' => p.image >= command.rect_x && p.image <= command.rect_y,
+                    _ => false,
+                };
+                if hit && !touched.contains(&p.image) { touched.push(p.image); }
+                return !hit;
+            };
             let hit = match mode {
                 // Visible-screen placements only; scrollback is untouched.
-                b'a' => p.line < context.rows as i32 && p.line + p.rows as i32 > 0,
+                b'a' => at.0 < context.rows as i32 && at.0 + p.rows as i32 > 0,
                 b'i' | b'n' => {
                     id != 0 && p.image == id && (command.placement == 0 || p.id == command.placement)
                 }
-                b'c' => covers(p, context.line, context.col),
-                b'p' => matches!((target_col, target_line), (Some(col), Some(line)) if covers(p, line, col)),
-                b'q' => matches!((target_col, target_line), (Some(col), Some(line)) if p.z == command.z && covers(p, line, col)),
-                b'x' => matches!(target_col, Some(col) if p.col <= col && col < p.col + p.cols as usize),
-                b'y' => matches!(target_line, Some(line) if p.line <= line && line < p.line + p.rows as i32),
+                b'c' => covers(p, at, context.line, context.col),
+                b'p' => matches!((target_col, target_line), (Some(col), Some(line)) if covers(p, at, line, col)),
+                b'q' => matches!((target_col, target_line), (Some(col), Some(line)) if p.z == command.z && covers(p, at, line, col)),
+                b'x' => matches!(target_col, Some(col) if at.1 <= col as i64 && (col as i64) < at.1 + i64::from(p.cols)),
+                b'y' => matches!(target_line, Some(line) if at.0 <= line && line < at.0 + p.rows as i32),
                 b'z' => p.z == command.z,
                 // Image id range x..=y.
                 b'r' => p.image >= command.rect_x && p.image <= command.rect_y,
-                // No animation frames are stored: a request for them changes nothing.
-                b'f' => false,
                 _ => false,
             };
             if hit && !touched.contains(&p.image) { touched.push(p.image); }
             !hit
         });
+        self.cascade();
         if free {
             self.drop_unreferenced(&touched);
         }
-        self.sweep();
         Outcome::default()
     }
 
@@ -634,7 +1128,7 @@ impl Graphics {
         self.images.retain(|id, image| {
             let keep = !candidates.contains(id) || placements.iter().any(|p| p.image == *id);
             if !keep {
-                freed += image.rgba.len();
+                freed += image.memory();
             }
             keep
         });
@@ -650,7 +1144,7 @@ impl Graphics {
         self.images.retain(|id, image| {
             let keep = !image.idless || placements.iter().any(|p| p.image == *id);
             if !keep {
-                freed += image.rgba.len();
+                freed += image.memory();
             }
             keep
         });
@@ -680,7 +1174,7 @@ impl Graphics {
                     continue;
                 }
                 placed = true;
-                if placement.line + placement.rows as i32 > 0 {
+                if !placement.anchored() || placement.line + placement.rows as i32 > 0 {
                     scrollback_only = false;
                 }
             }
@@ -698,23 +1192,24 @@ impl Graphics {
         let Some((_, _, victim)) = best else {
             return false;
         };
-        let freed = self.images.remove(&victim).map_or(0, |image| image.rgba.len());
+        let freed = self.images.remove(&victim).map_or(0, |image| image.memory());
         self.bytes -= freed;
         self.placements.retain(|p| p.image != victim);
-        self.prune_numbers();
+        self.cascade();
         true
     }
 
     /// Called when the alternate screen is left: its images and placements go with it.
     pub fn leave_alternate_screen(&mut self) {
         self.placements.retain(|p| !p.alt);
+        self.cascade();
         let placements = &self.placements;
         let mut freed = 0;
         // An image the main screen still shows survives even if it was retransmitted on the alternate screen.
         self.images.retain(|id, image| {
             let keep = !image.alt || placements.iter().any(|p| p.image == *id);
             if !keep {
-                freed += image.rgba.len();
+                freed += image.memory();
             }
             keep
         });
@@ -739,52 +1234,52 @@ impl Graphics {
         let before = self.placements.len();
         if rotates_history {
             for placement in &mut self.placements {
-                if !placement.alt && placement.line < bottom {
+                if !placement.alt && placement.anchored() && placement.line < bottom {
                     placement.line -= lines;
                 }
             }
             let limit = -(history as i32);
-            self.placements.retain(|p| p.alt || p.line + p.rows as i32 > limit);
+            self.placements.retain(|p| p.alt || !p.anchored() || p.line + p.rows as i32 > limit);
         } else {
             // Only placements anchored inside the region move; those whose anchor leaves it are deleted. A region
             // starting at the top of the screen has nothing above it but the window edge, so an image there stays
             // until its last row is gone (the grid clip hides the rest), like text scrolling off the top.
             let inside = |line: i32, rows: u32| line < bottom && (line >= top || (top == 0 && line + rows as i32 > 0));
             self.placements.retain_mut(|placement| {
-                if placement.alt != alt || !inside(placement.line, placement.rows) {
+                if placement.alt != alt || !placement.anchored() || !inside(placement.line, placement.rows) {
                     return true;
                 }
                 placement.line -= lines;
                 inside(placement.line, placement.rows)
             });
         }
-        if self.placements.len() != before { self.sweep(); }
+        if self.placements.len() != before { self.cascade(); }
     }
 
     /// Removes the placements of one screen that intersect viewport lines
     /// `0..rows`; image data survives apart from idless images.
     pub fn delete_visible(&mut self, alt: bool, rows: usize) {
-        self.placements.retain(|p| !(p.alt == alt && p.line < rows as i32 && p.line + p.rows as i32 > 0));
-        self.sweep();
+        self.placements.retain(|p| !(p.alt == alt && p.anchored() && p.line < rows as i32 && p.line + p.rows as i32 > 0));
+        self.cascade();
     }
 
     /// Removes main-screen placements that live entirely in scrollback.
     pub fn delete_scrollback(&mut self) {
-        self.placements.retain(|p| p.alt || p.line + p.rows as i32 > 0);
-        self.sweep();
+        self.placements.retain(|p| p.alt || !p.anchored() || p.line + p.rows as i32 > 0);
+        self.cascade();
     }
 
     /// Moves all main placements up by `lines` (positive) after a viewport
     /// clear or resize, dropping those pushed out of history.
     pub fn shift_main(&mut self, lines: i32, history: usize) {
         for placement in &mut self.placements {
-            if !placement.alt {
+            if !placement.alt && placement.anchored() {
                 placement.line -= lines;
             }
         }
         let limit = -(history as i32);
-        self.placements.retain(|p| p.alt || p.line + p.rows as i32 > limit);
-        self.sweep();
+        self.placements.retain(|p| p.alt || !p.anchored() || p.line + p.rows as i32 > limit);
+        self.cascade();
     }
 
     /// Full reset (RIS): images, placements, pending transfers and numbers.
@@ -804,6 +1299,34 @@ struct Decoded {
     rgba: Vec<u8>,
 }
 
+/// Composes `piece` onto the `width`x`height` RGBA canvas with its top-left at (`x`,`y`), clipping at the edges.
+/// Alpha blending is non-premultiplied source-over; `overwrite` copies the pixels as they are.
+fn compose_rect(canvas: &mut [u8], width: u32, height: u32, piece: &Decoded, x: u32, y: u32, overwrite: bool) {
+    if x >= width || y >= height { return; }
+    let cols = piece.width.min(width - x) as usize;
+    let rows = piece.height.min(height - y) as usize;
+    for row in 0..rows {
+        let at = ((y as usize + row) * width as usize + x as usize) * 4;
+        let dst = &mut canvas[at..at + cols * 4];
+        let src = &piece.rgba[row * piece.width as usize * 4..][..cols * 4];
+        if overwrite {
+            dst.copy_from_slice(src);
+            continue;
+        }
+        for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+            let alpha = u32::from(s[3]);
+            if alpha == 255 { d.copy_from_slice(s); continue; }
+            if alpha == 0 { continue; }
+            let below = u32::from(d[3]) * (255 - alpha) / 255;
+            let out = alpha + below;
+            for channel in 0..3 {
+                d[channel] = ((u32::from(s[channel]) * alpha + u32::from(d[channel]) * below) / out) as u8;
+            }
+            d[3] = out as u8;
+        }
+    }
+}
+
 /// Queries must stay tiny: real probes are one or two pixels, so larger ones
 /// cannot be used to burn CPU on decode work.
 fn query_pixel_rule(width: u32, height: u32) -> Result<(), String> {
@@ -816,16 +1339,16 @@ fn query_pixel_rule(width: u32, height: u32) -> Result<(), String> {
 
 /// Unwraps one `f=100` payload to the PNG file bytes: base64, then optional zlib.
 /// For PNG the `S=` hint bounds the inflate; without it 32 MiB is allowed.
-fn png_bytes(command: &Command, data: &[u8]) -> Result<Vec<u8>, String> {
-    let raw = BASE64.decode(data).map_err(|_| "EINVAL:invalid base64".to_string())?;
+/// Inflates `o=z` PNG data; `raw` is the payload after base64 or as read from a file or shared memory.
+fn png_bytes(command: &Command, raw: &[u8]) -> Result<Vec<u8>, String> {
     match command.compression {
-        0 => Ok(raw),
+        0 => Ok(raw.to_vec()),
         b'z' => {
             let limit = match command.width {
                 0 => PNG_ZLIB_LIMIT,
                 hint => (hint as usize).min(PNG_ZLIB_LIMIT_MAX),
             };
-            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, limit)
+            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(raw, limit)
                 .map_err(|_| "EINVAL:invalid or oversized zlib data".to_string())
         }
         _ => Err("EINVAL:unknown compression".into()),
@@ -1037,8 +1560,9 @@ mod tests {
         let ok = graphics.handle(b"i=31337,s=1,v=1,a=q,t=d,f=24;AAAA", &context());
         assert_eq!(ok.reply, b"\x1b_Gi=31337;OK\x1b\\");
         assert!(graphics.images.is_empty());
+        // "AAAA" names no file (it decodes to three zero bytes), so a file probe fails with the fixed read error.
         let bad = graphics.handle(b"i=7,s=1,v=1,a=q,t=f,f=24;AAAA", &context());
-        assert!(String::from_utf8(bad.reply).unwrap().contains("ENOTSUP"));
+        assert!(String::from_utf8(bad.reply).unwrap().contains("EBADF"));
         assert!(graphics.handle(b"i=7,s=1,v=1,a=q,q=2,t=f;AAAA", &context()).reply.is_empty());
     }
 
@@ -1616,5 +2140,171 @@ mod tests {
         // d=I on an image that was never placed still frees it.
         graphics.handle(b"a=d,d=I,i=1,q=2", &context());
         assert_eq!(graphics.images.keys().copied().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[test]
+    fn animation_frames_compose_play_loop_and_park() {
+        let mut graphics = Graphics::default();
+        let red = encode(&[255, 0, 0, 255, 255, 0, 0, 255]);
+        graphics.handle(format!("a=T,f=32,s=2,v=1,i=1,q=2;{red}").as_bytes(), &context());
+        // Frame 2: frame 1 with its right pixel overwritten green; frame 3: half-transparent blue blended over frame 2.
+        let reply = graphics.handle(format!("a=f,i=1,c=1,x=1,s=1,v=1,z=100,X=1;{}", encode(&[0, 255, 0, 255])).as_bytes(), &context());
+        assert_eq!(reply.reply, b"\x1b_Gi=1;OK\x1b\\");
+        graphics.handle(format!("a=f,i=1,c=2,s=1,v=1,z=100,q=2;{}", encode(&[0, 0, 255, 128])).as_bytes(), &context());
+        let image = &graphics.images[&1];
+        assert_eq!(image.frame_count(), 3);
+        assert_eq!(image.frame(1), [255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(image.frame(2), [127, 0, 128, 255, 0, 255, 0, 255]);
+        assert_eq!(image.rgba, image.frame(0), "frame 1 stays on display");
+        // Frame 1 is gapless until a=a r=1 z= gives it a gap; nothing plays before s=3.
+        graphics.handle(b"a=a,i=1,r=1,z=50", &context());
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        assert!(!graphics.tick(at(60)) && !graphics.animating());
+        graphics.handle(b"a=a,i=1,s=3,v=1", &context());
+        assert!(graphics.animating());
+        let generation = graphics.images[&1].generation;
+        assert!(!graphics.tick(at(0)), "the first tick only starts frame 1's gap");
+        assert!(graphics.tick(at(50)));
+        assert_eq!((graphics.images[&1].current(), graphics.images[&1].rgba.as_slice()), (1, graphics.images[&1].frame(1)));
+        assert!(graphics.images[&1].generation > generation, "a new frame is a new generation for the renderer");
+        assert!(!graphics.tick(at(100)));
+        assert!(graphics.tick(at(150)));
+        assert!(graphics.tick(at(250)) && graphics.images[&1].current() == 0, "an infinite loop wraps to frame 1");
+        // v=2 plays one loop more and then parks on the last frame.
+        graphics.handle(b"a=a,i=1,s=3,v=2", &context());
+        for ms in [300, 400, 500, 600, 700] { graphics.tick(at(ms)); }
+        assert_eq!(graphics.images[&1].current(), 2);
+        assert!(!graphics.animating());
+        // c= shows a frame directly; d=f deletes frames until the image is a still again.
+        graphics.handle(b"a=a,i=1,c=1", &context());
+        assert_eq!(graphics.images[&1].rgba, [255, 0, 0, 255, 255, 0, 0, 255]);
+        let before = graphics.bytes();
+        graphics.handle(b"a=d,d=f,i=1,r=2", &context());
+        assert_eq!((graphics.images[&1].frame_count(), graphics.bytes()), (2, before - 8));
+        graphics.handle(b"a=d,d=f,i=1,r=9", &context());
+        assert_eq!((graphics.images[&1].frame_count(), graphics.bytes()), (1, 8));
+        graphics.handle(b"a=d,d=F,i=1", &context());
+        assert!(graphics.images.is_empty() && graphics.placements.is_empty());
+    }
+
+    #[test]
+    fn deleting_root_frame_preserves_the_new_root_gap() {
+        let mut graphics = Graphics::default();
+        let pixel = encode(&[255, 0, 0, 255]);
+        graphics.handle(format!("a=T,f=32,s=1,v=1,i=1,q=2;{pixel}").as_bytes(), &context());
+        for gap in [100, 200] {
+            graphics.handle(format!("a=f,i=1,z={gap},q=2;{pixel}").as_bytes(), &context());
+        }
+        graphics.handle(b"a=a,i=1,r=1,z=50,s=3,v=1", &context());
+        graphics.handle(b"a=d,d=f,i=1,r=1,q=2", &context());
+        assert_eq!(graphics.images[&1].gap(0), 100);
+        let start = std::time::Instant::now();
+        assert!(!graphics.tick(start));
+        assert!(!graphics.tick(start + std::time::Duration::from_millis(99)));
+        assert!(graphics.tick(start + std::time::Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn frame_and_compose_commands_validate_their_targets() {
+        let mut graphics = Graphics::default();
+        let pixels = encode(&[1, 2, 3, 255, 4, 5, 6, 255]);
+        graphics.handle(format!("a=t,f=32,s=2,v=1,i=2,q=2;{pixels}").as_bytes(), &context());
+        let error = |graphics: &mut Graphics, keys: &str| String::from_utf8(graphics.handle(keys.as_bytes(), &context()).reply).unwrap();
+        assert!(error(&mut graphics, &format!("a=f,i=9;{pixels}")).contains("ENOENT"));
+        assert!(error(&mut graphics, &format!("a=f,i=2,s=3,v=1;{}", encode(&[0; 12]))).contains("EINVAL:frame larger"));
+        assert!(error(&mut graphics, &format!("a=f,i=2,c=5;{pixels}")).contains("EINVAL:no such base frame"));
+        assert!(error(&mut graphics, "a=c,i=2,r=1,c=2").contains("ENOENT:no such destination"));
+        assert!(error(&mut graphics, "a=c,i=2,r=1,c=1").contains("overlap"));
+        assert!(error(&mut graphics, "a=c,i=2,r=1,c=1,w=1,x=2").contains("out of bounds"));
+        // Without frames a=c works on frame 1 itself: copy the left pixel over the right one.
+        assert!(error(&mut graphics, "a=c,i=2,r=1,c=1,w=1,x=1,C=1").ends_with(";OK\x1b\\"));
+        assert_eq!(graphics.images[&2].rgba, [1, 2, 3, 255, 1, 2, 3, 255]);
+        // A chunked a=f continues across chunks that carry a=f, m and q only.
+        let chunk = encode(&[9, 9, 9, 255, 9, 9, 9, 255]);
+        let (head, tail) = chunk.split_at(4);
+        assert!(graphics.handle(format!("a=f,i=2,q=2,m=1;{head}").as_bytes(), &context()).reply.is_empty());
+        graphics.handle(format!("a=f,m=0;{tail}").as_bytes(), &context());
+        assert_eq!(graphics.images[&2].frame(1), [9, 9, 9, 255, 9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn relative_placements_follow_their_parent_and_go_with_it() {
+        let mut graphics = Graphics::default();
+        let pixel = encode(&[1, 2, 3]);
+        for id in [1, 2] { graphics.handle(format!("a=t,f=24,s=1,v=1,i={id},q=2;{pixel}").as_bytes(), &context()); }
+        graphics.handle(b"a=p,i=1,p=1,q=2", &Context { line: 3, col: 4, ..context() });
+        let child = graphics.handle(b"a=p,i=2,p=5,P=1,Q=1,H=2,V=-1,q=2", &Context { line: 9, col: 9, ..context() });
+        assert!(child.advance.is_none(), "relative placements never move the cursor");
+        let anchors = |graphics: &Graphics| graphics.drawn(true).iter().map(|p| (p.image, p.line, p.col)).collect::<Vec<_>>();
+        assert_eq!(anchors(&graphics), [(1, 3, 4), (2, 2, 6)]);
+        let reply = |graphics: &mut Graphics, keys: &[u8]| String::from_utf8(graphics.handle(keys, &context()).reply).unwrap();
+        assert!(reply(&mut graphics, b"a=p,i=2,p=6,P=1,Q=9").contains("ENOPARENT"));
+        assert!(reply(&mut graphics, b"a=p,i=1,p=1,P=2,Q=5").contains("ECYCLE"));
+        // A scroll moves the parent; the child keeps its offset and is not moved twice.
+        graphics.scroll(true, 0, 24, 1, false, 0);
+        assert_eq!(anchors(&graphics), [(1, 2, 4), (2, 1, 6)]);
+        // Position deletes see the child where it is drawn; deleting the parent takes the child along.
+        graphics.handle(b"a=d,d=p,x=7,y=2", &context());
+        assert_eq!(anchors(&graphics), [(1, 2, 4)]);
+        graphics.handle(b"a=p,i=2,p=5,P=1,Q=1,H=2,V=-1,q=2", &context());
+        graphics.handle(b"a=d,d=i,i=1", &context());
+        assert!(graphics.placements.is_empty(), "children of a deleted parent are removed");
+        // Chains are bounded.
+        graphics.handle(b"a=p,i=1,p=1,q=2", &context());
+        for link in 2..=MAX_CHAIN as u32 + 1 {
+            graphics.handle(format!("a=p,i=1,p={link},P=1,Q={},H=1,q=2", link - 1).as_bytes(), &context());
+        }
+        let deep = format!("a=p,i=2,p=1,P=1,Q={}", MAX_CHAIN + 1);
+        assert!(reply(&mut graphics, deep.as_bytes()).contains("ETOODEEP"));
+    }
+
+    #[test]
+    fn virtual_placements_are_found_but_never_drawn_moved_or_hit_by_position() {
+        let mut graphics = Graphics::default();
+        graphics.handle(format!("a=t,f=24,s=1,v=1,i=4,q=2;{}", encode(&[1, 2, 3])).as_bytes(), &context());
+        let outcome = graphics.handle(b"a=p,U=1,i=4,p=7,c=4,r=2,q=2", &Context { line: 2, ..context() });
+        assert!(outcome.advance.is_none());
+        assert!(graphics.drawn(true).is_empty());
+        assert_eq!(graphics.virtual_placement(4, 7).map(|p| (p.cols, p.rows)), Some((4, 2)));
+        assert_eq!(graphics.virtual_placement(4, 0).map(|p| p.id), Some(7));
+        assert!(graphics.virtual_placement(4, 8).is_none());
+        graphics.scroll(true, 0, 24, 5, false, 0);
+        graphics.delete_visible(true, 24);
+        graphics.handle(b"a=d,d=a", &context());
+        graphics.handle(b"a=d,d=y,y=3", &context());
+        assert_eq!(graphics.virtual_placement(4, 7).map(|p| p.line), Some(2), "untouched by scrolls and clears");
+        graphics.handle(b"a=d,d=i,i=4", &context());
+        assert!(graphics.virtual_placement(4, 7).is_none());
+    }
+
+    #[test]
+    fn temp_file_transmission_reads_and_deletes_and_queries_read_nothing() {
+        let mut graphics = Graphics::default();
+        let path = std::env::temp_dir().join(format!("tty-graphics-protocol-akitty-graphics-{}.rgb", std::process::id()));
+        std::fs::write(&path, [1u8, 2, 3, 4, 5, 6]).unwrap();
+        let name = encode(path.as_os_str().as_encoded_bytes());
+        let outcome = graphics.handle(format!("a=T,t=t,f=24,s=2,v=1,i=6;{name}").as_bytes(), &context());
+        assert_eq!(outcome.reply, b"\x1b_Gi=6;OK\x1b\\");
+        assert_eq!(graphics.images[&6].rgba, [1, 2, 3, 255, 4, 5, 6, 255]);
+        assert!(!path.exists(), "the terminal deletes temp files it read");
+        // Kitten icat probes each medium with a real one-pixel object; the probe reads it and consumes a temp file.
+        let query = |graphics: &mut Graphics, medium: char, name: &str| {
+            String::from_utf8(graphics.handle(format!("a=q,i=31,t={medium},f=24,s=1,v=1;{}", encode(name.as_bytes())).as_bytes(), &context()).reply).unwrap()
+        };
+        let probe = std::env::temp_dir().join(format!("tty-graphics-protocol-akitty-probe-{}", std::process::id()));
+        std::fs::write(&probe, [1u8, 2, 3]).unwrap();
+        assert!(query(&mut graphics, 't', probe.to_str().unwrap()).ends_with(";OK\x1b\\"));
+        assert!(!probe.exists(), "a temp-file probe is consumed");
+        std::fs::write(&probe, [1u8, 2, 3]).unwrap();
+        assert!(query(&mut graphics, 'f', probe.to_str().unwrap()).ends_with(";OK\x1b\\"));
+        assert!(probe.exists(), "a file probe is not");
+        std::fs::remove_file(&probe).unwrap();
+        assert!(query(&mut graphics, 'f', "/dev/zero").contains("EBADF"));
+        assert!(query(&mut graphics, 'x', "/dev/zero").contains("ENOTSUP"));
+        let missing = encode(b"/tmp/tty-graphics-protocol-missing");
+        // A failed read reports one fixed message, never the path.
+        let reply = graphics.handle(format!("a=T,t=t,f=24,s=2,v=1,i=7;{missing}").as_bytes(), &context()).reply;
+        assert_eq!(reply, b"\x1b_Gi=7;EBADF:failed to read image data\x1b\\");
     }
 }

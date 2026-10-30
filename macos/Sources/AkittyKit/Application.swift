@@ -1,5 +1,30 @@
 import AppKit
 
+/// A close request must not enter a nested application-modal event loop or
+/// enqueue more confirmations behind a sheet the user is already answering.
+@MainActor final class CloseConfirmation {
+    private var alert: NSAlert?
+    @discardableResult func present(in window: NSWindow, title: String, message: String, action: String = "Close", completion: @escaping (Bool) -> Void) -> Bool {
+        guard alert == nil, window.attachedSheet == nil else {
+            window.attachedSheet?.makeKeyAndOrderFront(nil)
+            return false
+        }
+        let alert = NSAlert(); alert.messageText = title; alert.informativeText = message
+        alert.addButton(withTitle: action); alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].keyEquivalent = "\r"; alert.buttons[1].keyEquivalent = "\u{1b}"
+        self.alert = alert
+        alert.beginSheetModal(for: window) { [weak self] response in
+            alert.window.orderOut(nil)
+            self?.alert = nil
+            completion(response == .alertFirstButtonReturn)
+        }
+        return true
+    }
+    func cancel() {
+        if let alert, let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .abort) }
+    }
+}
+
 @MainActor final class TerminalPane: NSView {
     private var terminalStorage: TerminalView?
     var terminal: TerminalView { terminalStorage! }
@@ -27,9 +52,14 @@ import AppKit
     private let headless: Bool
     /// Starting directory for every tab and split in this window; nil uses the Settings directory.
     let directory: String?
+    /// Defaults to the system setting. Tests set this to force the sprite onto frame 0.
+    var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshChromeMark() } }
+    private var chromeDocument: ChromeDocument?
+    private var chromeMark: ChromeMarkAccessory?
     private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
+    private let closeConfirmation = CloseConfirmation()
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
     init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
@@ -87,6 +117,11 @@ import AppKit
             self.refreshTabs()
             if self.tabs.selectedTabViewItem?.view === split { self.window?.title = title == "Akitty" ? title : "\(title) — Akitty" }
         }
+        pane.terminal.onChrome = { [weak self, weak split] chrome in
+            guard let self, self.tabs.selectedTabViewItem?.view === split else { return }
+            self.chromeDocument = chrome
+            self.refreshChromeMark()
+        }
         window?.makeFirstResponder(pane.terminal)
     }
     @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
@@ -106,9 +141,23 @@ import AppKit
         updateReminder = nil
         if let version, let updater = app?.updates { let reminder = UpdateReminder(version: version, updater: updater); window?.addTitlebarAccessoryViewController(reminder); updateReminder = reminder }
     }
+    private func refreshChromeMark() {
+        if let old = chromeMark, let index = window?.titlebarAccessoryViewControllers.firstIndex(of: old) {
+            window?.removeTitlebarAccessoryViewController(at: index)
+        }
+        chromeMark = nil
+        guard let pixels = chromeDocument?.shownPixels(reduceMotion: reduceMotion), let sprite = chromeDocument?.sprite else { return }
+        let accessory = ChromeMarkAccessory(pixels: pixels, width: sprite.w, height: sprite.h)
+        window?.addTitlebarAccessoryViewController(accessory)
+        chromeMark = accessory
+    }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         refreshTabs()
-        if let terminal = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.first as? TerminalPane { window?.makeFirstResponder(terminal.terminal) }
+        if let pane = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
+            window?.makeFirstResponder(pane.terminal)
+            chromeDocument = pane.terminal.snapshot?.chrome
+            refreshChromeMark()
+        }
     }
     func perform(_ command: NativeCommand, target: TerminalView? = nil) {
         let terminal = target ?? active
@@ -134,7 +183,14 @@ import AppKit
         if let panel = palette?.window { window.beginSheet(panel) }
     }
     private func close(_ terminal: TerminalView) {
-        guard terminal.snapshot?.exited == true || confirm("Close this terminal?", "Running processes will be stopped.") else { return }
+        guard panes.contains(where: { $0.terminal === terminal }) else { return }
+        if terminal.snapshot?.exited == true { remove(terminal); return }
+        guard let window else { return }
+        closeConfirmation.present(in: window, title: "Close this terminal?", message: "Running processes will be stopped.") { [weak self, weak terminal] approved in
+            if approved, let terminal { self?.remove(terminal) }
+        }
+    }
+    private func remove(_ terminal: TerminalView) {
         guard let pane = panes.first(where: { $0.terminal === terminal }), let split = pane.superview as? NSSplitView else { return }
         terminal.shutdown(); split.removeArrangedSubview(pane); pane.removeFromSuperview()
         if split.arrangedSubviews.isEmpty, let item = tabs.tabViewItems.first(where: { $0.view === split }) { tabs.removeTabViewItem(item) }
@@ -155,13 +211,14 @@ import AppKit
         }
         alert.window.makeFirstResponder(field)
     }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { panes.isEmpty || panes.allSatisfy { $0.terminal.snapshot?.exited == true } || confirm("Close this window?", "All terminal processes in this window will be stopped.") }
-    func windowWillClose(_ notification: Notification) { for pane in panes { pane.terminal.shutdown() }; app?.remove(self) }
-}
-@MainActor private func confirm(_ title: String, _ message: String) -> Bool {
-    let alert = NSAlert(); alert.messageText = title; alert.informativeText = message
-    alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Close")
-    return alert.runModal() == .alertSecondButtonReturn
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if panes.isEmpty || panes.allSatisfy({ $0.terminal.snapshot?.exited == true }) { return true }
+        closeConfirmation.present(in: sender, title: "Close this window?", message: "All terminal processes in this window will be stopped.") { [weak sender] approved in
+            if approved { sender?.close() }
+        }
+        return false
+    }
+    func windowWillClose(_ notification: Notification) { closeConfirmation.cancel(); for pane in panes { pane.terminal.shutdown() }; app?.remove(self) }
 }
 
 @MainActor final class PaletteController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
@@ -244,6 +301,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private var settingsWindow: PreferencesWindow?
     private var launched = false
     private var openedFolderAtLaunch = false
+    private enum TerminationState { case idle, confirming, closing }
+    private var terminationState = TerminationState.idle
+    private let quitConfirmation = CloseConfirmation()
     public func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
@@ -270,12 +330,29 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     fileprivate func remove(_ controller: TerminalWindow) { windows.removeAll { $0 === controller } }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if windows.flatMap(\.panes).contains(where: { $0.terminal.snapshot?.exited != true }), !confirm("Quit Akitty?", "All running terminal processes will be stopped.") { return .terminateCancel }
-        let group = DispatchGroup()
-        for pane in windows.flatMap(\.panes) {
-            group.enter(); pane.terminal.shutdown { group.leave() }
+        let owner = windows.first(where: { $0.window?.isKeyWindow == true })?.window ?? windows.first?.window
+        return requestTermination(terminals: windows.flatMap(\.panes).map(\.terminal), window: owner) { sender.reply(toApplicationShouldTerminate: $0) }
+    }
+    func requestTermination(terminals: [TerminalView], window: NSWindow?, reply: @escaping (Bool) -> Void) -> NSApplication.TerminateReply {
+        guard terminationState == .idle else { return .terminateLater }
+        guard !terminals.isEmpty else { return .terminateNow }
+        let shutdown = { [self] in
+            terminationState = .closing
+            let group = DispatchGroup()
+            for terminal in terminals { group.enter(); terminal.shutdown { group.leave() } }
+            group.notify(queue: .main) { reply(true) }
         }
-        group.notify(queue: .main) { sender.reply(toApplicationShouldTerminate: true) }
+        if terminals.contains(where: { $0.snapshot?.exited != true }) {
+            guard let window else { return .terminateCancel }
+            terminationState = .confirming
+            let presented = quitConfirmation.present(in: window, title: "Quit Akitty?", message: "All running terminal processes will be stopped.", action: "Quit") { [self] approved in
+                if approved { shutdown() }
+                else { terminationState = .idle; reply(false) }
+            }
+            if !presented { terminationState = .idle; return .terminateCancel }
+        } else {
+            shutdown()
+        }
         return .terminateLater
     }
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow(nil) }; return true }

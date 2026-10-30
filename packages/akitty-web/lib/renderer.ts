@@ -27,6 +27,11 @@ export interface IRenderable {
   getCursor(): { x: number; y: number; visible: boolean };
   getDimensions(): { cols: number; rows: number };
   isRowDirty(y: number): boolean;
+  /**
+   * Optional cheap check that any row at all changed since clearDirty(). When it returns false the renderer skips
+   * polling every row, so a frame with no output costs a few wasm calls instead of one per row.
+   */
+  isDirty?(): boolean;
   /** Returns true if a full redraw is needed (e.g., screen change) */
   needsFullRedraw?(): boolean;
   clearDirty(): void;
@@ -301,8 +306,12 @@ export class CanvasRenderer {
     const dims = buffer.getDimensions();
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
 
+    // Nothing changed since the last clearDirty() means no row can be dirty, so row polling below is skipped.
+    const anyDirty = buffer.isDirty ? buffer.isDirty() : true;
+    const isRowDirty = (y: number): boolean => anyDirty && buffer.isRowDirty(y);
+
     // Check if buffer needs full redraw (e.g., screen change between normal/alternate)
-    if (buffer.needsFullRedraw?.()) {
+    if (anyDirty && buffer.needsFullRedraw?.()) {
       forceAll = true;
     }
 
@@ -339,7 +348,7 @@ export class CanvasRenderer {
     this.lastCursorDrawnVisible = cursorDrawnVisible;
     if (cursorMoved || cursorBlinkChanged) {
       // Mark cursor lines as needing redraw
-      if (!forceAll && !buffer.isRowDirty(cursor.y)) {
+      if (!forceAll && !isRowDirty(cursor.y)) {
         // Need to redraw cursor line
         const line = this.fetchLine(buffer, cursor.y);
         if (line) {
@@ -348,7 +357,7 @@ export class CanvasRenderer {
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
         // Also redraw old cursor line if cursor moved to different line
-        if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
+        if (!forceAll && !isRowDirty(this.lastCursorPosition.y)) {
           const line = this.fetchLine(buffer, this.lastCursorPosition.y);
           if (line) {
             this.renderLine(line, this.lastCursorPosition.y, dims.cols);
@@ -463,7 +472,7 @@ export class CanvasRenderer {
     if (viewportY > 0 && !forceAll) {
       if (this.currentSelectionCoords) forceAll = true;
       for (let y = 0; y < dims.rows; y++) {
-        if (buffer.isRowDirty(y)) {
+        if (isRowDirty(y)) {
           forceAll = true;
           break;
         }
@@ -471,7 +480,7 @@ export class CanvasRenderer {
     }
     for (let y = 0; y < dims.rows; y++) {
       const needsRender =
-        forceAll || (viewportY <= 0 && buffer.isRowDirty(y)) || selectionRows.has(y) || hyperlinkRows.has(y);
+        forceAll || (viewportY <= 0 && isRowDirty(y)) || selectionRows.has(y) || hyperlinkRows.has(y);
 
       if (needsRender) {
         rowsToRender.add(y);

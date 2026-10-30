@@ -49,3 +49,36 @@ import os
     }
     required init?(coder: NSCoder) { nil }
 }
+
+/// Title-bar sprite for the chrome mark. Separate from the update reminder, which stays on the right.
+@MainActor final class ChromeMarkAccessory: NSTitlebarAccessoryViewController {
+    /// RGBA8 of the frame that was copied into the bitmap. Tests read this, not the displayed image.
+    let chromePixels: Data
+    /// Bytes read back from the bitmap immediately after the copy.
+    let bitmapPixels: Data
+    init(pixels: Data, width: Int, height: Int) {
+        chromePixels = pixels
+        let copied = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32)
+        if let copied, let destination = copied.bitmapData, pixels.count == width * height * 4 {
+            pixels.withUnsafeBytes { raw in
+                if let source = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                    destination.update(from: source, count: pixels.count)
+                }
+            }
+            bitmapPixels = Data(bytes: destination, count: pixels.count)
+        } else {
+            bitmapPixels = Data()
+        }
+        super.init(nibName: nil, bundle: nil)
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        if let copied { image.addRepresentation(copied) }
+        let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.identifier = NSUserInterfaceItemIdentifier("chrome-sprite")
+        imageView.setAccessibilityIdentifier("chrome-sprite")
+        view = imageView
+        layoutAttribute = .left
+    }
+    required init?(coder: NSCoder) { nil }
+}

@@ -3,8 +3,12 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Akitty supports macOS only");
 
+mod child;
+mod chrome;
 mod graphics;
+mod media;
 mod model;
+mod placeholder;
 mod session;
 mod tracker;
 
@@ -73,6 +77,19 @@ enum Request {
         id: u64,
         text: String,
     },
+    /// Replace the session chrome document. `clear` removes it. This entry
+    /// applies even when program chrome is off.
+    Chrome {
+        id: u64,
+        #[serde(default)]
+        clear: bool,
+        status: Option<chrome::StatusInput>,
+        mark: Option<chrome::MarkInput>,
+        progress: Option<chrome::ProgressInput>,
+        sprite: Option<Box<chrome::SpriteInput>>,
+    },
+    /// When `enabled` is false, `OSC 771` no longer changes the document.
+    ProgramChrome { id: u64, enabled: bool },
 }
 
 #[derive(Default)]
@@ -162,7 +179,9 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 | Request::Scroll { id, .. }
                 | Request::CellSize { id, .. }
                 | Request::Select { id, .. }
-                | Request::Find { id, .. } => *id,
+                | Request::Find { id, .. }
+                | Request::Chrome { id, .. }
+                | Request::ProgramChrome { id, .. } => *id,
                 _ => unreachable!(),
             };
             let session = registry
@@ -202,6 +221,14 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                     ..
                 } => session.select(start_row, start_col, end_row, end_col),
                 Request::Find { text, .. } => session.find(&text),
+                Request::Chrome { clear, status, mark, progress, sprite, .. } => {
+                    session.set_chrome(chrome::ChromeInput { clear, status, mark, progress, sprite: sprite.map(|value| *value) })?;
+                    Ok(json!({}))
+                }
+                Request::ProgramChrome { enabled, .. } => {
+                    session.set_program_chrome(enabled)?;
+                    Ok(json!({}))
+                }
                 _ => unreachable!(),
             }
         }

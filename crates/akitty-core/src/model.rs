@@ -1,6 +1,8 @@
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
+use crate::chrome::{self, Chrome, Filter as ChromeFilter, Segment as ChromeSegment};
 use crate::graphics::{self, ApcFilter, Graphics, Segment};
+use crate::placeholder;
 use crate::tracker::{Tracker, Tracking};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::Flags};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
@@ -65,6 +67,14 @@ pub struct Model {
     links: Vec<String>,
     pub graphics: Graphics,
     apc: ApcFilter,
+    chrome: Chrome,
+    chrome_filter: ChromeFilter,
+    /// When false, a terminal `OSC 771` sequence does not change [`Self::chrome`].
+    /// The C ABI chrome request still does.
+    program_chrome: bool,
+    /// Whether the last snapshot reported status text or progress, so an expiry
+    /// can refresh a client that polls with `since` equal to the revision.
+    reported_transient: bool,
     /// Pixel size of one cell as reported by the host; (0, 0) until known.
     pub cell_px: (u32, u32),
     in_alt: bool,
@@ -96,6 +106,10 @@ impl Model {
             links: Vec::new(),
             graphics: Graphics::default(),
             apc: ApcFilter::default(),
+            chrome: Chrome::default(),
+            chrome_filter: ChromeFilter::default(),
+            program_chrome: true,
+            reported_transient: false,
             cell_px: (0, 0),
             in_alt: false,
             tracking: Tracking::new(size.cols, size.rows),
@@ -115,17 +129,14 @@ impl Model {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut overflowed = false;
-        for segment in self.apc.feed(bytes) {
+        for segment in self.chrome_filter.feed(bytes) {
             match segment {
-                Segment::Pass(data) => self.advance(&data, &mut replies, &mut overflowed),
-                Segment::Apc(payload) => self.graphics_command(&payload, &mut replies, &mut overflowed),
-                // CSI 16 t: cell size in pixels, height first, like kitty's reply.
-                Segment::CellSizeQuery => {
-                    if !overflowed {
-                        let (width, height) = self.cell_px;
-                        let (width, height) =
-                            (if width > 0 { width } else { 8 }, if height > 0 { height } else { 16 });
-                        replies.extend_from_slice(format!("\x1b[6;{height};{width}t").as_bytes());
+                ChromeSegment::Pass(data) => self.feed_terminal(&data, &mut replies, &mut overflowed),
+                // A program sequence is consumed either way, so it never lands in the grid.
+                // With program chrome off it does not replace the document.
+                ChromeSegment::Document(payload) => {
+                    if self.program_chrome {
+                        let _ = self.chrome.apply_bytes(&payload);
                     }
                 }
             }
@@ -135,6 +146,32 @@ impl Model {
             replies.clear();
         }
         replies
+    }
+    pub fn set_chrome(&mut self, input: chrome::ChromeInput) -> Result<(), String> {
+        self.chrome.apply(input)?;
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+    pub fn set_program_chrome(&mut self, enabled: bool) {
+        self.program_chrome = enabled;
+        self.revision = self.revision.saturating_add(1);
+    }
+    fn feed_terminal(&mut self, bytes: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
+        for segment in self.apc.feed(bytes) {
+            match segment {
+                Segment::Pass(data) => self.advance(&data, replies, overflowed),
+                Segment::Apc(payload) => self.graphics_command(&payload, replies, overflowed),
+                // CSI 16 t: cell size in pixels, height first, like kitty's reply.
+                Segment::CellSizeQuery => {
+                    if !*overflowed {
+                        let (width, height) = self.cell_px;
+                        let (width, height) =
+                            (if width > 0 { width } else { 8 }, if height > 0 { height } else { 16 });
+                        replies.extend_from_slice(format!("\x1b[6;{height};{width}t").as_bytes());
+                    }
+                }
+            }
+        }
     }
     fn advance(&mut self, data: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
         // The event queue holds 128 entries and every event needs at least one input byte,
@@ -226,6 +263,9 @@ impl Model {
                     }
                 }
                 Event::ClipboardLoad(_, format) => replies.extend_from_slice(format("").as_bytes()),
+                // alacritty answers DA1 as a bare VT102 (`CSI ? 6 c`); report VT220 with ANSI colour instead, since
+                // clients such as kitten icat treat a reply without attributes as no reply and time out.
+                Event::PtyWrite(text) if text == "\x1b[?6c" => replies.extend_from_slice(b"\x1b[?62;22c"),
                 Event::PtyWrite(text) => replies.extend_from_slice(text.as_bytes()),
                 Event::ColorRequest(index, format) => {
                     replies.extend_from_slice(format(palette(index)).as_bytes())
@@ -250,14 +290,24 @@ impl Model {
         false
     }
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
-        if since == Some(self.revision) && self.clipboard.is_empty() && !self.bell {
+        // Animations and chrome expiry can change without any new terminal input.
+        if self.graphics.tick(std::time::Instant::now()) {
+            self.revision = self.revision.saturating_add(1);
+        }
+        let now = chrome::now_ms();
+        let transient = self.chrome.transient_visible(now);
+        if since == Some(self.revision) && self.clipboard.is_empty() && !self.bell && transient == self.reported_transient {
             return json!({"changed": false});
         }
+        self.reported_transient = transient;
         self.sync_graphics();
         let rows = self.size.rows;
         // Pass 1 hashes every row without allocating, to learn which rows differ from the
         // client's copy (the snapshot it was last sent, identified by `since`).
         let mut hashes = vec![0xcbf2_9ce4_8422_2325_u64; rows];
+        // Placeholder cells collected per visible row while hashing, so virtual
+        // placements can be decoded into fragments after the pass.
+        let mut placeholders: Vec<Vec<placeholder::Cell>> = vec![Vec::new(); rows];
         {
             let content = self.term.renderable_content();
             for indexed in content.display_iter {
@@ -282,6 +332,14 @@ impl Model {
                 }
                 if let Some(color) = cell.underline_color() {
                     hash = mix(hash, pack(resolve(color, content.colors)) | 1 << 40);
+                }
+                if cell.c == placeholder::PLACEHOLDER && placeholder::color_id(cell.fg) != 0 {
+                    placeholders[row as usize].push(placeholder::Cell {
+                        col: indexed.point.column.0,
+                        low: placeholder::color_id(cell.fg),
+                        placement: cell.underline_color().map_or(0, placeholder::color_id),
+                        marks: placeholder::marks(cell.zerowidth().unwrap_or(&[])),
+                    });
                 }
                 hashes[row as usize] = hash;
             }
@@ -314,7 +372,14 @@ impl Model {
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
             let hidden = cell.flags.contains(Flags::HIDDEN);
-            let mut value = if spacer {
+            // A placeholder cell is an image slot; its glyph and marks stay blank
+            // so only the decoded fragment is drawn.
+            let slot = cell.c == placeholder::PLACEHOLDER
+                && placeholder::color_id(cell.fg) != 0
+                && placeholders[row as usize]
+                    .binary_search_by_key(&indexed.point.column.0, |entry| entry.col)
+                    .is_ok();
+            let mut value = if spacer || slot {
                 String::new()
             } else if hidden {
                 " ".into()
@@ -323,6 +388,7 @@ impl Model {
             };
             if !hidden
                 && !spacer
+                && !slot
                 && let Some(extra) = cell.zerowidth()
             {
                 value.extend(extra);
@@ -376,12 +442,11 @@ impl Model {
             cells.push(entry);
         }
         let alternate = content.mode.contains(TermMode::ALT_SCREEN);
-        // Visible placements are bounded by the graphics limits, not cut here.
-        let images: Vec<Value> = self
+        // Drawn placements are bounded by the graphics limits, not cut here.
+        let mut images: Vec<Value> = self
             .graphics
-            .placements
+            .drawn(alternate)
             .iter()
-            .filter(|p| p.alt == alternate)
             .filter_map(|p| {
                 let image = self.graphics.images.get(&p.image)?;
                 let row = p.line + content.display_offset as i32;
@@ -394,6 +459,35 @@ impl Model {
                     "ox": p.off_x, "oy": p.off_y}))
             })
             .collect();
+        // Placeholder rows of virtual placements decode into fragment entries;
+        // the bound keeps a hostile screen from bloating the snapshot.
+        let cell_px = if self.cell_px.0 > 0 { self.cell_px } else { (8, 16) };
+        let mut fragments = 0usize;
+        for (row, cells) in placeholders.iter().enumerate() {
+            if cells.is_empty() || fragments >= MAX_FRAGMENTS { continue; }
+            let mut resolve = |image: u32, placement: u32| -> Option<placeholder::Grid> {
+                let placed = self.graphics.virtual_placement(image, placement)?;
+                if placed.alt != alternate { return None; }
+                let data = self.graphics.images.get(&image)?;
+                Some(placeholder::Grid {
+                    cols: placed.cols,
+                    rows: placed.rows,
+                    image_w: data.width,
+                    image_h: data.height,
+                })
+            };
+            for (fragment, placement) in placeholder::decode_row(row, cells, cell_px, &mut resolve) {
+                if fragments >= MAX_FRAGMENTS { break; }
+                let (Some(placed), Some(data)) =
+                    (self.graphics.virtual_placement(fragment.image, placement), self.graphics.images.get(&fragment.image))
+                else { break; };
+                images.push(json!({"id": fragment.image, "gen": data.generation, "w": data.width, "h": data.height,
+                    "row": fragment.row, "col": fragment.col, "cols": fragment.cols, "rows": 1, "z": placed.z,
+                    "sx": fragment.sx, "sy": fragment.sy, "sw": fragment.sw, "sh": fragment.sh,
+                    "ox": fragment.ox, "oy": fragment.oy, "dw": fragment.dw, "dh": fragment.dh}));
+                fragments += 1;
+            }
+        }
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
@@ -403,6 +497,7 @@ impl Model {
         let lines: Vec<&String> = dirty_rows.iter().map(|r| &text[*r]).collect();
         let mut snapshot = json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
             "title": self.title, "cells": cells, "lines": lines, "links": links, "images": images,
+            "animating": self.graphics.animating(),
             "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
             "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
             "app_cursor": content.mode.contains(TermMode::APP_CURSOR),
@@ -419,6 +514,9 @@ impl Model {
         if let Some(object) = snapshot.as_object_mut() {
             if links_empty {
                 object.remove("links");
+            }
+            if let Some(chrome) = self.chrome.to_json(now) {
+                object.insert("chrome".into(), chrome);
             }
             if partial {
                 object.insert("partial".into(), json!(true));
@@ -516,6 +614,8 @@ fn underline_style(flags: Flags) -> Option<u8> {
 }
 const MAX_LINKS: usize = 256;
 const MAX_LINK_BYTES: usize = 2048;
+/// Placeholder fragments per snapshot; rows already cap cells at 32,768.
+const MAX_FRAGMENTS: usize = 4096;
 /// Interns a hyperlink target; oversized, control-bearing or excess targets are dropped.
 fn link_index(links: &mut Vec<String>, uri: &str) -> Option<usize> {
     if uri.is_empty() || uri.len() > MAX_LINK_BYTES || uri.chars().any(char::is_control) {
@@ -758,6 +858,32 @@ mod tests {
         let mut model = Model::new(Size::validate(30, 5).unwrap(), 5000);
         assert_eq!(model.feed(b"\x1b[2;4H\x1b[6n"), b"\x1b[2;4R");
         assert_eq!(model.feed(b"\x1b[5n"), b"\x1b[0n");
+    }
+    #[test]
+    fn primary_device_attributes_report_vt220_with_colour() {
+        // kitten icat ends its graphics probe at the DA1 reply and treats a bare `CSI ? 6 c` as no reply.
+        let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+        assert_eq!(model.feed(b"\x1b[c"), b"\x1b[?62;22c");
+        assert_eq!(model.feed(b"\x1b[0c"), b"\x1b[?62;22c");
+    }
+    #[test]
+    fn unicode_placeholders_become_image_fragments_with_blank_text() {
+        let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+        model.cell_px = (8, 16);
+        // A 2x2 image in a virtual 2x1 cell placement; the placeholder cells carry image id 5 in a 24-bit foreground.
+        model.feed(format!("\x1b_Ga=t,f=24,s=2,v=2,i=5,q=2;{PIXEL}\x1b\\\x1b_Ga=p,U=1,i=5,c=2,r=1,q=2\x1b\\").as_bytes());
+        model.feed("\x1b[38;2;0;0;5m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\x1b[0m!".as_bytes());
+        let snapshot = model.snapshot(None);
+        let images = snapshot["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1, "{snapshot}");
+        let fragment = &images[0];
+        // The second cell inherits row 0 and the next column from its left neighbour.
+        assert_eq!((fragment["row"].as_u64(), fragment["col"].as_u64(), fragment["cols"].as_u64()), (Some(0), Some(0), Some(2)));
+        assert_eq!((fragment["dw"].as_u64(), fragment["dh"].as_u64(), fragment["sw"].as_u64()), (Some(16), Some(16), Some(2)));
+        assert_eq!(snapshot["lines"][0].as_str().unwrap().trim_end(), "!");
+        // The virtual placement itself is never drawn, and without placeholders nothing shows.
+        model.feed(b"\x1b[2J");
+        assert!(model.snapshot(None)["images"].as_array().unwrap().is_empty());
     }
 
     /// A 2x2 RGB frame, base64 of 12 zero bytes; small enough to inline.

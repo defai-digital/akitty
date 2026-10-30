@@ -1,3 +1,4 @@
+use crate::child::{ChildGuard, ChildSlot};
 use crate::model::{Model, Size};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -9,7 +10,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 const MAX_PENDING: usize = 1_048_576;
 enum Command {
@@ -58,6 +58,7 @@ impl Session {
         if !std::path::Path::new(&cwd).is_dir() {
             return Err("working directory does not exist".into());
         }
+        let slot = ChildSlot::reserve()?;
         let pty = portable_pty::native_pty_system()
             .openpty(pty_size(size, (0, 0)))
             .map_err(|e| e.to_string())?;
@@ -76,7 +77,7 @@ impl Session {
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         let child = pty.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pty.slave);
-        let child = ChildGuard::new(child, fd);
+        let child = ChildGuard::new(child, fd, slot);
         let (tx, rx) = mpsc::sync_channel(4096);
         let model_worker = model.clone();
         let stop_worker = stop.clone();
@@ -254,6 +255,13 @@ impl Session {
         }
         Ok(json!({"found": false}))
     }
+    pub fn set_chrome(&self, input: crate::chrome::ChromeInput) -> Result<(), String> {
+        self.model.lock().map_err(|_| "terminal unavailable")?.set_chrome(input)
+    }
+    pub fn set_program_chrome(&self, enabled: bool) -> Result<(), String> {
+        self.model.lock().map_err(|_| "terminal unavailable")?.set_program_chrome(enabled);
+        Ok(())
+    }
     pub fn close(&self) -> Result<(), String> {
         self.shutdown()
     }
@@ -422,7 +430,7 @@ fn run(
     }
     if let Ok(mut state) = model.lock() {
         state.exited = true;
-        state.exit_code = child.exit_code;
+        state.exit_code = child.exit_code();
         state.error = io_error.clone();
         state.revision += 1;
     }
@@ -431,85 +439,6 @@ fn run(
         Err(error)
     } else {
         Ok(())
-    }
-}
-
-/// Owns kill/reap responsibility even when parsing unwinds or worker creation fails.
-struct ChildGuard {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    fd: i32,
-    reaped: bool,
-    exit_code: Option<u32>,
-}
-impl ChildGuard {
-    fn new(child: Box<dyn portable_pty::Child + Send + Sync>, fd: i32) -> Self {
-        Self {
-            child,
-            fd,
-            reaped: false,
-            exit_code: None,
-        }
-    }
-    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
-        let result = self.child.try_wait()?;
-        if let Some(status) = &result {
-            self.reaped = true;
-            self.exit_code = Some(status.exit_code());
-        }
-        Ok(result)
-    }
-    fn finish(&mut self) -> Result<(), String> {
-        if self.reaped {
-            return Ok(());
-        }
-        let Some(pid) = self.child.process_id().map(|p| p as i32) else {
-            self.child.kill().map_err(|e| e.to_string())?;
-            self.child.wait().map_err(|e| e.to_string())?;
-            self.reaped = true;
-            return Ok(());
-        };
-        if self.try_wait().map_err(|e| e.to_string())?.is_some() { return Ok(()); }
-        // fd might already have closed if thread creation failed; tcgetpgrp then
-        // fails safely. The still-owned child's PID cannot have been recycled.
-        let foreground = unsafe { libc::tcgetpgrp(self.fd) };
-        let own_group = unsafe { libc::getpgrp() };
-        if foreground > 1 && foreground != own_group {
-            unsafe {
-                libc::kill(-foreground, libc::SIGHUP);
-            }
-        }
-        unsafe {
-            libc::kill(-pid, libc::SIGHUP);
-        }
-        let deadline = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < deadline {
-            if self.try_wait().map_err(|e| e.to_string())?.is_some() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        if foreground > 1 && foreground != own_group {
-            unsafe {
-                libc::kill(-foreground, libc::SIGKILL);
-            }
-        }
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-        // Try both signals and reaping even if a concurrent exit makes kill fail.
-        let kill = self.child.kill();
-        let wait = self.child.wait();
-        if let Ok(status) = &wait {
-            self.exit_code = Some(status.exit_code());
-            self.reaped = true;
-            return Ok(());
-        }
-        Err(format!("PTY cleanup failed: kill={kill:?}, wait={wait:?}"))
-    }
-}
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.finish();
     }
 }
 

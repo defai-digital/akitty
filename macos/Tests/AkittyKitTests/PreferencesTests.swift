@@ -15,12 +15,13 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(preferences.optionAsAlt)
     }
 
-    func testEncodingThenDecodingRoundTripsCJKFont() throws {
+    func testEncodingThenDecodingRoundTripsCJKFontAndChromePreference() throws {
         var preferences = TerminalPreferences()
-        preferences.cjkFont = "PingFang SC"
+        preferences.cjkFont = "PingFang SC"; preferences.programChrome = false
         let decoded = try JSONDecoder().decode(TerminalPreferences.self, from: try JSONEncoder().encode(preferences))
         XCTAssertEqual(decoded, preferences)
         XCTAssertEqual(decoded.cjkFont, "PingFang SC")
+        XCTAssertFalse(decoded.programChrome)
     }
 
     @MainActor func testAvailableFontsStartsWithSystemMonospacedAndListsMenloOnce() {

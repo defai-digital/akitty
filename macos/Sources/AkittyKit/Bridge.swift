@@ -82,6 +82,9 @@ public struct ImagePlacement: Codable, Sendable, Equatable {
     /// Offset of the image inside its first cell, in device pixels.
     public let ox: Int?
     public let oy: Int?
+    /// Destination size inside the placed cells, in device pixels; absent (or non-positive) means the cell rectangle.
+    public let dw: Int?
+    public let dh: Int?
     /// The source rectangle clamped to the image, defaulting to the whole image.
     public var sourceRect: CGRect {
         let x = min(max(0, sx ?? 0), w), y = min(max(0, sy ?? 0), h)
@@ -105,6 +108,137 @@ private struct SnapshotReply: Decodable {
     }
 }
 public struct Cursor: Codable, Sendable { public let row: Int; public let col: Int; public let visible: Bool }
+
+public struct ChromeStatus: Codable, Equatable, Sendable {
+    public let text: String
+    public let tone: String
+}
+
+/// A title-bar mark. A frame index selects a sprite frame; named marks use frame 0.
+public enum ChromeMark: Equatable, Sendable {
+    case idle, busy, error, frame(Int)
+}
+
+extension ChromeMark: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let name = try? container.decode(String.self) {
+            switch name {
+            case "idle": self = .idle
+            case "busy": self = .busy
+            case "error": self = .error
+            default: throw DecodingError.dataCorruptedError(in: container, debugDescription: "chrome mark must be idle, busy, error, or a frame")
+            }
+            return
+        }
+        let frame = try container.decode(Int.self)
+        guard (0...3).contains(frame) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "chrome mark frame must be 0..3")
+        }
+        self = .frame(frame)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .idle: try container.encode("idle")
+        case .busy: try container.encode("busy")
+        case .error: try container.encode("error")
+        case .frame(let index): try container.encode(index)
+        }
+    }
+}
+
+public enum ChromeProgress: Equatable, Sendable {
+    case fraction(Double)
+    case indeterminate
+    var label: String {
+        switch self {
+        case .fraction(let value): return "\(Int((value * 100).rounded()))%"
+        case .indeterminate: return "…"
+        }
+    }
+}
+
+extension ChromeProgress: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(Double.self) {
+            guard value.isFinite, (0...1).contains(value) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "chrome progress out of range")
+            }
+            self = .fraction(value)
+            return
+        }
+        guard try container.decode(String.self) == "indeterminate" else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "chrome progress must be a fraction or indeterminate")
+        }
+        self = .indeterminate
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .fraction(let value): try container.encode(value)
+        case .indeterminate: try container.encode("indeterminate")
+        }
+    }
+}
+
+public struct ChromeSprite: Equatable, Sendable {
+    public let w: Int
+    public let h: Int
+    public let frames: [Data]
+}
+
+extension ChromeSprite: Codable {
+    enum CodingKeys: String, CodingKey { case w, h, frames }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let w = try container.decode(Int.self, forKey: .w)
+        let h = try container.decode(Int.self, forKey: .h)
+        let encoded = try container.decode([String].self, forKey: .frames)
+        let expected = w * h * 4
+        guard w > 0, h > 0, expected / 4 == w * h else {
+            throw DecodingError.dataCorruptedError(forKey: .frames, in: container, debugDescription: "chrome sprite size is invalid")
+        }
+        self.w = w
+        self.h = h
+        frames = try encoded.map { text in
+            guard let data = Data(base64Encoded: text), data.count == expected else {
+                throw DecodingError.dataCorruptedError(forKey: .frames, in: container, debugDescription: "chrome sprite frame is not inline RGBA8")
+            }
+            return data
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(w, forKey: .w)
+        try container.encode(h, forKey: .h)
+        try container.encode(frames.map { $0.base64EncodedString() }, forKey: .frames)
+    }
+}
+
+/// The current chrome document from a snapshot. Absent fields were omitted by the core.
+public struct ChromeDocument: Codable, Equatable, Sendable {
+    public let status: ChromeStatus?
+    public let mark: ChromeMark?
+    public let progress: ChromeProgress?
+    public let sprite: ChromeSprite?
+    /// Status text and progress, joined for the pane status line. Nil when neither is current.
+    var presentation: String? {
+        var parts: [String] = []
+        if let text = status?.text, !text.isEmpty { parts.append(text) }
+        if let progress { parts.append(progress.label) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+    /// Sprite frame to draw. Reduce motion always uses frame 0; a named mark does too.
+    func shownPixels(reduceMotion: Bool) -> Data? {
+        guard let sprite, let first = sprite.frames.first else { return nil }
+        if reduceMotion { return first }
+        if case .frame(let index) = mark, sprite.frames.indices.contains(index) { return sprite.frames[index] }
+        return first
+    }
+}
+
 public struct Snapshot: Codable, Sendable {
     public let changed: Bool
     public let revision: UInt64
@@ -119,6 +253,8 @@ public struct Snapshot: Codable, Sendable {
     public let dirty: [Int]?
     public let links: [String]?
     public let images: [ImagePlacement]?
+    /// True while a Kitty graphics animation still needs frames; absent on snapshots from older cores.
+    public internal(set) var animating: Bool?
     public let cursor: Cursor
     public let bracketed_paste: Bool
     public let app_cursor: Bool
@@ -138,6 +274,8 @@ public struct Snapshot: Codable, Sendable {
     public let error: String?
     public let exited: Bool
     public let exit_code: UInt32?
+    /// Present when a mark, sprite, status, or progress is still current. Omitted by the core otherwise.
+    public let chrome: ChromeDocument?
     public var text: String { lines.joined(separator: "\n") }
     /// This snapshot with a partial one applied: dirty rows replaced, everything else kept.
     func applying(_ partial: Snapshot) -> Snapshot? {
@@ -158,6 +296,8 @@ public struct Snapshot: Codable, Sendable {
         }
         result.cells = merged
         result.lines = newLines
+        // A partial snapshot may not repeat the animation flag, but the animation is still running.
+        if result.animating == nil { result.animating = animating }
         return result
     }
     /// The openable hyperlink under a cell, if any.
@@ -195,10 +335,16 @@ public final class TerminalSession: @unchecked Sendable {
     }
     deinit { try? close() }
     public func close() throws {
-        lock.lock(); defer { lock.unlock() }
-        if closed { return }
+        try close { id in _ = try CoreBridge.call(["op": "close", "id": id]) }
+    }
+    func close(using request: (UInt64) throws -> Void) throws {
+        lock.lock()
+        if closed { lock.unlock(); return }
         closed = true
-        _ = try CoreBridge.call(["op": "close", "id": id])
+        lock.unlock()
+        // Closing may wait for a PTY child. Late AppKit events must see `closed`
+        // immediately, rather than block the main thread behind that wait.
+        try request(id)
     }
     public func call(_ op: String, _ values: [String: Any] = [:]) throws -> Data {
         lock.lock(); defer { lock.unlock() }

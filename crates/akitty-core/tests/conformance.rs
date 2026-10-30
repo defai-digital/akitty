@@ -1,10 +1,14 @@
 use akitty_core::request;
+use base64::Engine;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 fn call(value: Value) -> Value {
     let response = request(&serde_json::to_vec(&value).unwrap());
     assert_eq!(response["ok"], true, "{response}");
     response["data"].clone()
+}
+fn response(value: Value) -> Value {
+    request(&serde_json::to_vec(&value).unwrap())
 }
 struct Terminal(u64);
 impl Terminal {
@@ -411,4 +415,133 @@ fn snapshots_report_every_visible_placement_without_the_old_64_cap() {
     assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 80);
     t.feed("\x1b[2J");
     assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
+}
+
+fn rgba(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn chrome(id: u64, document: Value) -> Value {
+    let mut body = document;
+    body["op"] = json!("chrome");
+    body["id"] = json!(id);
+    response(body)
+}
+
+#[test]
+fn chrome_sequence_and_abi_replace_clear_and_expire_without_changing_title() {
+    let t = Terminal::new(24, 4);
+    // Push the default (unset) title, then set one, so a later pop is a real reset.
+    t.feed("\x1b[22t\x1b]2;vim\x07");
+    let seq = "\x1b]771;{\"status\":{\"text\":\"hel\\u0001lo\\n\",\"tone\":\"info\"},\"progress\":0.5}\x07OK";
+    t.feed(&seq[..8]);
+    t.feed(&seq[8..]);
+    let snap = t.snapshot();
+    assert_eq!(snap["title"], "vim");
+    assert!(snap["lines"][0].as_str().unwrap().starts_with("OK"), "{}", snap["lines"][0]);
+    assert!(!snap["lines"][0].as_str().unwrap().contains("771"));
+    assert_eq!(snap["chrome"]["status"]["text"], "hello");
+    assert_eq!(snap["chrome"]["status"]["tone"], "info");
+    assert_eq!(snap["chrome"]["progress"], json!(0.5));
+    // String terminator form, and a full replacement drops fields the new document omits.
+    t.feed("\x1b]771;{\"mark\":\"busy\"}\x1b\\");
+    let snap = t.snapshot();
+    assert_eq!(snap["title"], "vim");
+    assert!(snap["chrome"].get("status").is_none());
+    assert!(snap["chrome"].get("progress").is_none());
+    assert_eq!(snap["chrome"]["mark"], "busy");
+    let pixel = rgba(&[9, 8, 7, 255]);
+    let other = rgba(&[1, 2, 3, 255]);
+    assert_eq!(
+        chrome(t.0, json!({"sprite": {"w": 1, "h": 1, "frames": [pixel, other]}, "mark": 1, "status": {"text": &"x".repeat(140), "tone": "warn", "expires": 4_102_444_800_000u64}, "progress": "indeterminate"}))["ok"],
+        true
+    );
+    let snap = t.snapshot();
+    assert_eq!(snap["chrome"]["status"]["text"], json!("x".repeat(128)));
+    assert_eq!(snap["chrome"]["status"]["tone"], "warn");
+    assert_eq!(snap["chrome"]["mark"], 1);
+    assert_eq!(snap["chrome"]["progress"], "indeterminate");
+    assert_eq!(snap["chrome"]["sprite"]["w"], 1);
+    assert_eq!(snap["chrome"]["sprite"]["frames"][0], json!(pixel));
+    assert_eq!(snap["title"], "vim");
+    // Already-past expiry removes the status and the progress, and keeps the mark.
+    assert_eq!(chrome(t.0, json!({"status": {"text": "gone", "tone": "error", "expires": 0}, "progress": 1.0, "mark": "idle"}))["ok"], true);
+    let snap = t.snapshot();
+    assert!(snap["chrome"].get("status").is_none(), "{snap}");
+    assert!(snap["chrome"].get("progress").is_none(), "{snap}");
+    assert_eq!(snap["chrome"]["mark"], "idle");
+    assert!(snap["chrome"].get("sprite").is_none());
+    assert_eq!(chrome(t.0, json!({"clear": true}))["ok"], true);
+    assert!(t.snapshot().get("chrome").is_none());
+    t.feed("\x1b[23t");
+    let snap = t.snapshot();
+    assert_eq!(snap["title"], "Akitty");
+    assert!(snap.get("chrome").is_none());
+}
+
+#[test]
+fn chrome_rejects_sprite_limits_and_external_sources_without_replacing() {
+    let t = Terminal::new(20, 3);
+    assert_eq!(chrome(t.0, json!({"status": {"text": "kept", "tone": "info"}, "sprite": {"w": 1, "h": 1, "frames": [rgba(&[4, 5, 6, 7])]}}))["ok"], true);
+    let too_wide = rgba(&[0u8; 33 * 4]);
+    let five = vec![rgba(&[1, 1, 1, 1]); 5];
+    for document in [
+        json!({"sprite": {"w": 33, "h": 1, "frames": [too_wide]}}),
+        json!({"sprite": {"w": 1, "h": 1, "frames": five}}),
+        json!({"sprite": {"w": 0, "h": 1, "frames": [rgba(&[1, 1, 1, 1])]}}),
+        json!({"sprite": {"w": 1, "h": 1, "frames": [rgba(&[1, 2, 3])]}}),
+        json!({"sprite": {"w": 1, "h": 1, "path": "/tmp/akitty.png", "frames": [rgba(&[1, 1, 1, 1])]}}),
+        json!({"sprite": {"w": 1, "h": 1, "url": "https://example.com/a.png"}}),
+        json!({"sprite": {"w": 1, "h": 1, "shm": "kit", "source": "shm"}}),
+        json!({"sprite": {"w": 1, "h": 1, "source": "file", "file": "local.png"}}),
+        json!({"progress": 1.5}),
+        json!({"mark": 4}),
+        json!({"status": {"text": "nope", "tone": "fatal"}}),
+        json!({"video": true}),
+    ] {
+        let reply = chrome(t.0, document);
+        assert_eq!(reply["ok"], false, "{reply}");
+    }
+    // A rejected terminal sequence is consumed and does not replace the document or the title.
+    t.feed("\x1b]2;shell\x07");
+    t.feed("\x1b]771;{\"sprite\":{\"w\":1,\"h\":1,\"url\":\"https://example.com/x.png\"}}\x07NO");
+    let snap = t.snapshot();
+    assert_eq!(snap["title"], "shell");
+    assert_eq!(snap["chrome"]["status"]["text"], "kept");
+    assert_eq!(snap["chrome"]["sprite"]["frames"][0], json!(rgba(&[4, 5, 6, 7])));
+    assert!(snap["lines"][0].as_str().unwrap().starts_with("NO"), "{}", snap["lines"][0]);
+}
+
+#[test]
+fn program_chrome_off_ignores_the_terminal_sequence_but_not_the_abi() {
+    let t = Terminal::new(20, 3);
+    call(json!({"op": "program_chrome", "id": t.0, "enabled": false}));
+    t.feed("\x1b]771;{\"status\":{\"text\":\"from-program\",\"tone\":\"info\"}}\x07");
+    assert!(t.snapshot().get("chrome").is_none());
+    assert_eq!(chrome(t.0, json!({"status": {"text": "from-host", "tone": "error"}, "progress": 0}))["ok"], true);
+    let snap = t.snapshot();
+    assert_eq!(snap["chrome"]["status"]["text"], "from-host");
+    assert_eq!(snap["chrome"]["progress"], json!(0.0));
+    t.feed("\x1b]771;{\"clear\":true}\x07");
+    assert_eq!(t.snapshot()["chrome"]["status"]["text"], "from-host");
+    call(json!({"op": "program_chrome", "id": t.0, "enabled": true}));
+    t.feed("\x1b]771;{\"status\":{\"text\":\"program-again\",\"tone\":\"warn\"}}\x07");
+    assert_eq!(t.snapshot()["chrome"]["status"]["text"], "program-again");
+}
+
+#[test]
+fn long_osc_52_sets_the_clipboard() {
+    let t = Terminal::new(20, 3);
+    let text = "A".repeat(50_000);
+    let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let wire = format!("\x1b]52;c;{payload}\x07");
+    // 50_000 bytes is under the decoded clipboard cap. Base64 makes the wire longer than the OSC 771 body cap.
+    assert_eq!(wire.len(), 66_676);
+    t.feed(&wire);
+    t.feed("\x1b]2;vim\x07OK");
+    let snap = t.snapshot();
+    assert_eq!(snap["clipboard"], json!([text]));
+    assert_eq!(snap["title"], "vim");
+    assert!(snap["lines"][0].as_str().unwrap().starts_with("OK"), "{}", snap["lines"][0]);
+    assert!(!snap["lines"][0].as_str().unwrap().contains('A'));
 }

@@ -29,6 +29,8 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | find | id, text | Latest literal matching line in history; bounded query |
 | feed | id, text | Parser input for headless sessions only |
 | cell_size | id, width, height | Cell size in pixels (1–256 by 1–512), used for graphics placement and size reports |
+| chrome | id; optional clear, status, mark, progress, sprite | Replace the session chrome document. Applies even when program chrome is off |
+| program_chrome | id, enabled | When false, `OSC 771` no longer changes the document |
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
 sessions and 5,000 scrollback lines per session. Input/reply queues are bounded.
@@ -54,8 +56,29 @@ and `r` are given) and deletion (`a=d`). PNG is checked against the pixel limit
 from its header before any frame is allocated, normalized to RGBA8 from every
 colour type and bit depth, and APNG yields only the default image; `o=z` PNG
 inflates with the `S=` limit when given (else 32 MiB) and queries decode the
-header only. Files and shared memory are refused with `ENOTSUP`, so terminal
-output can never make the core read a local file. Retransmitting an existing id
+header only. Files (`t=f`), temp files (`t=t`) and shared memory (`t=s`) follow
+Kitty's rules: the payload is the base64 path or object name, `O=`/`S=` select the
+byte window, reads are bounded by what the format needs, temp files must sit in a
+temp directory with `tty-graphics-protocol` in their name and are deleted after
+the read, shared memory is unlinked, and `t=f` reads only regular files outside
+/dev, /proc and /sys (checked on the opened descriptor) and never deletes them.
+Every media failure answers `EBADF:failed to read image data`. Queries through
+any medium read their (tiny) probe data, so clients can pick a transfer mode.
+`U=1` stores a virtual placement that is never drawn itself: cells holding
+U+10EEEE with the image id in the foreground colour (24-bit or 256-colour), the
+placement id in the underline colour and row/column/high-id diacritics show the
+matching slice of the image, fitted into the placement's `c`x`r` cells; missing
+diacritics continue the left neighbour's run. `P=`,`Q=` with `H=`,`V=` place an
+image relative to another placement (`ENOPARENT`, `ECYCLE`, `ETOODEEP` beyond 8
+links); children move with their parent and are deleted with it. Animation
+follows Kitty: `a=f` composes a frame (base frame `c=`, edit frame `r=`, offset
+`x=`,`y=`, background `Y=`, `X=1` overwrite, gap `z=`, 40 ms default, negative
+gapless), `a=a` sets `s=` state (1 stop, 2 loading, 3 run), `c=` current frame,
+`r=`+`z=` a frame's gap and `v=` loops (1 infinite), `a=c` copies a rectangle
+between frames, and `d=f`/`d=F` delete a frame (`d=F` on a still image deletes
+it). At most 512 frames per image count against the session pixel budget; the
+image's pixels are always the frame on display, and each new displayed frame is
+a new generation. Retransmitting an existing id
 first deletes all of its placements; images sent with neither `i=` nor `I=` are
 freed as soon as their last placement goes away. When a new image would exceed
 the limits the core first evicts images without placements (oldest first), then
@@ -65,22 +88,39 @@ pixels, one session holds at most 128 MiB of pixels and 256 placements, and zlib
 output is capped at the declared size. Deletes implement every `d=` mode
 (a/A visible-only, i/I and n/N by id or number with optional `p=`, c/C at the
 cursor, p/P and q/Q at 1-based x=,y= coordinates (q adds z=), x/X by column,
-y/Y by row, z/Z by z-index, r/R by id range, f/F as a no-op), affect only the
+y/Y by row, z/Z by z-index, r/R by id range, f/F animation frames), affect only the
 current screen, cancel a pending chunked upload, and free unreferenced image
 data when uppercase (lowercase still frees idless images); unknown modes reply
 EINVAL. The snapshot lists visible placements in `images` (`id`, `gen`
 generation, pixel `w`/`h`, viewport `row`/`col`, `cols`/`rows` in cells, `z`,
 and the additive schema-1 fields `sx`,`sy`,`sw`,`sh` for the source rectangle in
-image pixels and `ox`,`oy` for the device-pixel offset inside the first cell);
+image pixels, `ox`,`oy` for the device-pixel offset inside the first cell, and
+`dw`,`dh` for the destination size in device pixels when it is not the cell
+rectangle, as for Unicode-placeholder slices; the top-level `animating` flag is
+true while a placed animation is playing);
 unknown keys are ignored. Pixels do not travel in JSON: `akitty_image_read_v1(session,
 image, out, capacity)` copies `w*h*4` RGBA bytes and returns the count, or 0 on
 any error. Placements follow the text: scrolling (including scroll regions, RI,
 IL/DL and a full scrollback buffer), ED, and reset move or delete them with the
 content on the current screen. Alternate-screen images are removed when that
-screen is left. `CSI 16 t` (cell size in pixels) is answered from the cell size
+screen is left. Primary device attributes (`CSI c`) answer `CSI ? 62 ; 22 c` (VT220
+with ANSI colour), which clients such as `kitten icat` use to end their graphics
+probe. `CSI 16 t` (cell size in pixels) is answered from the cell size
 the host reports via `cell_size`, and the kernel window size reports pixel
 dimensions derived from it; `cell_size` also pushes a PTY resize so the ioctl
 updates without a grid change.
+
+**Program chrome.** A session holds one chrome document: a one-line status, a mark, a progress value, and an optional sprite. Two entries share one validator. A program sends `OSC 771` as `ESC ] 771 ; <json> BEL` or `ESC ] 771 ; <json> ST` (`ESC \`). The JSON is the document itself (no `op` or `id`). A host sends the same fields to `akitty_request_v1` as `{ "op": "chrome", "id", ... }`. `OSC 771` is removed from the byte stream before the terminal parser, including when it is rejected or its body exceeds 64 KiB, so it never appears as grid text. That cap applies only to `OSC 771`. Every other OSC sequence, including title `OSC 0` and `OSC 2` and a clipboard `OSC 52` whose base64 is larger than 64 KiB, passes through unchanged. The shell title stays the window title and the tab label; chrome text does not replace it. There is no video decoder and no plugin or script runtime.
+
+Each accepted update replaces the whole document. Omitted fields clear the previous ones. `"clear": true` removes the document and skips the other checks. An empty update is an error and does not replace anything. A rejected update, from either entry, leaves the previous document in place. `OSC 771` that fails validation is consumed and reported only by leaving the document unchanged. The ABI returns `{ "ok": false, "error" }`.
+
+`status` is `{ "text", "tone", "expires"? }`. `tone` is `info`, `warn`, or `error`. Control characters are removed from `text` and the result is capped at 128 characters. `expires` is a Unix time in milliseconds. When `expires` is already past at snapshot time, the status and the progress value are not current; the mark and the sprite stay until a later replace or clear. `mark` is `idle`, `busy`, `error`, or a frame index `0` through `3`. `progress` is a finite number from 0 through 1, or the string `"indeterminate"`.
+
+`sprite` is `{ "w", "h", "frames" }` with `frames` holding standard Base64 of raw RGBA8, one entry per frame. The image is 1 through 32 pixels on each edge and contains 1 through 4 frames, each exactly `w * h * 4` bytes. A path, file, URL, URI, or shared-memory source is rejected, as is any `source` other than `rgba` or `inline`. Unknown fields are rejected. Sprite pixels travel inline in the snapshot; `akitty_image_read_v1` is only for Kitty graphics placements.
+
+The snapshot includes `chrome` only while something is still current: `status` (`text`, `tone`), `mark`, `progress`, and `sprite` (`w`, `h`, `frames`). A partial snapshot carries the same object, so merging it keeps or drops chrome with the core rather than with the previous frame. While status or progress is current, the macOS pane shows that text and progress in place of the column count. The sprite is a title-bar mark, separate from the update reminder. Reduce motion shows sprite frame 0. Otherwise a frame-index mark shows that frame when it exists, and a named mark shows frame 0.
+
+`{ "op": "program_chrome", "id", "enabled" }` is the host switch, also exposed as the setting "Allow programs to set the status bar". It defaults to on. When it is off, `OSC 771` is still consumed but does not change the document, and `chrome` from `akitty_request_v1` still does.
 
 **Delta snapshots.** Blank cells on the default background are not listed in `cells`;
 `lines` holds every column, and a missing cell is one space. When `since` equals the

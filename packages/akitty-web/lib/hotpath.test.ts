@@ -82,6 +82,50 @@ describe('GhosttyTerminal viewport cache', () => {
   });
 });
 
+describe('GhosttyTerminal lazy row parsing', () => {
+  test('a row read parses only that row', async () => {
+    const term = await makeWasm(10, 4);
+    term.write('aaa\r\nbbb\r\nccc');
+    const pool = (term as any).cellPool as GhosttyCell[];
+    for (const cell of pool) cell.codepoint = 0x2603; // sentinel: rows that are never parsed keep it
+    term.write('\r\nddd'); // invalidates the viewport
+
+    expect(rowText(term.getLineView(1))).toBe('bbb');
+    expect(pool[0].codepoint).toBe(0x2603);
+    expect(pool[20].codepoint).toBe(0x2603);
+    expect(pool[10].codepoint).toBe('b'.codePointAt(0));
+    expect(rowText(term.getLineView(0))).toBe('aaa');
+    term.free();
+  });
+
+  test('reading history between row reads does not corrupt unparsed rows', async () => {
+    const term = await makeWasm(10, 3);
+    for (let i = 0; i < 8; i++) term.write(`hist${i}\r\n`);
+    term.write('row0\r\nrow1\r\nrow2');
+    expect(term.getScrollbackLength()).toBeGreaterThan(0);
+
+    // Load the viewport by reading the last row, then read history before the earlier rows are parsed.
+    expect(rowText(term.getLineView(2))).toBe('row2');
+    expect(rowText(term.getScrollbackLine(0))).toBe('hist0');
+    expect(rowText(term.getLineView(0))).toBe('row0');
+    expect(rowText(term.getScrollbackLine(1))).toBe('hist1');
+    expect(rowText(term.getLineView(1))).toBe('row1');
+    term.free();
+  });
+
+  test('getViewport after partial reads returns every row', async () => {
+    const term = await makeWasm(10, 3);
+    term.write('one\r\ntwo\r\nthree');
+    term.getLineView(1);
+    const reads = countCalls(term, 'ghostty_render_state_get_viewport');
+    const all = term.getViewport();
+    expect(String.fromCodePoint(all[0].codepoint)).toBe('o');
+    expect(String.fromCodePoint(all[20].codepoint)).toBe('t');
+    expect(reads.count()).toBe(0);
+    term.free();
+  });
+});
+
 describe('GhosttyTerminal write path', () => {
   test('reuses one wasm buffer across writes', async () => {
     const term = await makeWasm();
@@ -215,6 +259,25 @@ describe('CanvasRenderer work skipping', () => {
     reset();
     renderer.render(renderable, false, 0);
     expect(counts.fillText).toBe(0);
+    renderer.dispose?.();
+  });
+
+  test('a frame with no dirty rows does not poll them', async () => {
+    const { renderer } = makeRenderer();
+    const { renderable, dirty } = makeRenderable(20, 4, ['abc']);
+    let polls = 0;
+    const isRowDirty = renderable.isRowDirty.bind(renderable);
+    renderable.isRowDirty = (y) => (polls++, isRowDirty(y));
+    renderable.isDirty = () => dirty.size > 0;
+
+    renderer.render(renderable, true, 0);
+    polls = 0;
+    renderer.render(renderable, false, 0);
+    expect(polls).toBe(0);
+
+    dirty.add(2);
+    renderer.render(renderable, false, 0);
+    expect(polls).toBeGreaterThan(0);
     renderer.dispose?.();
   });
 

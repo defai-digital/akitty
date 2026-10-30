@@ -2,10 +2,11 @@
 
 # AkiTTY
 
-A **macOS-only terminal app revamped from [Ghostty](https://github.com/ghostty-org/ghostty)**,
-with a Rust terminal core, native Swift/AppKit interface, and a small TypeScript
-feature layer. No Zig compiler or runtime is required. Windows and Linux are not
-application targets.
+A **terminal revamped from [Ghostty](https://github.com/ghostty-org/ghostty)**.
+The installable app is a macOS client: a Rust terminal core, a native Swift/AppKit
+interface, and a small TypeScript feature layer. No Zig compiler or runtime is
+required. That app runs on Apple Silicon and macOS 14 or later. Windows and Linux
+use **AkiTTY Web**, the browser-canvas terminal inside AX Code Desktop.
 
 ## Quick start
 
@@ -32,8 +33,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v0.10.1 ZIP](https://download.automatosx.com/akitty/releases/download/v0.10.1/AkiTTY-0.10.1-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.10.1).
+You can also [download the v0.11.0 ZIP](https://download.automatosx.com/akitty/releases/download/v0.11.0/AkiTTY-0.11.0-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.11.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## Why AkiTTY exists
@@ -45,13 +46,33 @@ terminal. That gave us a foundation for bringing a terminal into the desktop app
 As AX Code evolved, we wanted deeper integration and more powerful capabilities,
 including WebMCP support. Those goals led us to start AkiTTY as a revamp based on
 [Ghostty](https://github.com/ghostty-org/ghostty), with a native Mac client and a
-separately maintained web terminal. WebMCP is part of this direction; the feature
-list below describes what the current release implements.
+separately maintained web terminal. WebMCP is part of this direction; [What is
+implemented](#what-is-implemented) describes what the current release implements.
 
-Our focus is our **macOS client** and its integration with AX Code. For other
-platforms, we recommend trying **[Ghostty](https://github.com/ghostty-org/ghostty)**
-where it is available. It is an excellent project, and we are grateful to its
+Our focus is our **macOS client** and its integration with AX Code. Windows and
+Linux support is [AkiTTY Web](#windows-and-linux), described below. Ghostty is the
+project this work builds on. It is an excellent project, and we are grateful to its
 contributors for the work that helped make AkiTTY possible.
+
+## Windows and Linux
+
+The downloadable app is macOS-only: Apple Silicon, macOS 14 or later. Windows and
+Linux run AkiTTY through **AkiTTY Web** (`packages/akitty-web`), the canvas terminal
+embedded in [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
+
+AkiTTY Web is a separate implementation from the Mac app. It draws on an HTML canvas
+and parses terminal output with Ghostty's VT parser compiled to WebAssembly. The
+same library runs in a browser on Windows, Linux, and macOS. It has no shell of its
+own. AX Code Desktop starts the process on that operating system, writes the
+output with `term.write()`, and takes keystrokes from `term.onData()`.
+
+In the browser, Ctrl+C is the interrupt on every platform. Links open with
+Ctrl-click or Command-click. The wasm loader accepts a Windows `file://` path
+(`/C:/…` becomes `C:/…`) and a normal browser fetch.
+
+There is no AkiTTY installer for Windows or Linux. This repository type-checks
+AkiTTY Web and runs its unit tests on macOS. It does not run a Windows or Linux
+browser suite. Details are in [the package README](packages/akitty-web/README.md).
 
 ## What is implemented
 
@@ -82,16 +103,18 @@ contributors for the work that helped make AkiTTY possible.
 - A versioned C ABI, explicit memory ownership, panic containment and tests across
   Rust, C, Swift and TypeScript.
 
-**AkiTTY Web** (`packages/akitty-web`) is a separate, browser-canvas terminal used by AX Code Desktop. It started
-from ghostty-web, is now maintained independently, and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
-package. See [its README](packages/akitty-web/README.md).
+**AkiTTY Web** (`packages/akitty-web`) is the Windows, Linux, and in-browser terminal
+described in [Windows and Linux](#windows-and-linux). It is a private source package.
 
-**Status: early 0.10.1 implementation.** This is not a drop-in Ghostty replacement.
-Sixel, file/shared-memory and Unicode-placeholder Kitty graphics, Kitty animation frames, image clipboard protocols, custom shaders,
-Ghostty configuration compatibility, shell integration, quick terminal and third-party plugins are not implemented. A bounded Kitty
-graphics subset (direct raw RGB/RGBA and in-band PNG with zlib and chunking, image numbers, source rectangles and cell offsets,
-z-index layers and every delete mode) is supported, placements follow scrolling, scroll regions and resizes, and programs see the
-window's pixel size (TIOCGWINSZ, CSI 14 t and CSI 16 t), so PNG-based image tools and AX Code's opening and ending scenes can run; OSC 8
+**Status: early 0.11.0 implementation.** This is not a drop-in Ghostty replacement.
+Sixel, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick terminal and
+third-party plugins are not implemented. The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
+and chunking over direct, file, temp-file and shared-memory transfer, image numbers, source rectangles and cell offsets, z-index
+layers, every delete mode, Unicode placeholders, relative placements and animation (frames, composition, playback and loops).
+Placements follow scrolling, scroll regions and resizes, programs see the window's pixel size (TIOCGWINSZ, CSI 14 t and CSI 16 t),
+and on Metal each image is its own GPU texture composited between two text layers, so an animation frame re-uploads one texture
+instead of repainting the window. `kitten icat` (every transfer mode and `--unicode-placeholder`), chafa, timg and viu are
+exercised by `cargo test --test real_tools -- --ignored` when installed, and AX Code's opening and ending scenes run; OSC 8
 hyperlinks open with Command-click, and underline styles and strikethrough render.
 The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
 modifier-only keys); base-layout alternate keys are reported only for US-position keys. Search currently finds the

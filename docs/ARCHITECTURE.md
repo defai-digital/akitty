@@ -1,8 +1,10 @@
 # Akitty architecture and implementation plan
 
-Akitty is an independent, macOS-only Rust/Swift revamp of Ghostty, with a small
-TypeScript feature layer. Its own source is MIT licensed. It is not a mechanical
-port and does not promise Ghostty protocol or configuration parity.
+Akitty is an independent Rust/Swift revamp of Ghostty, with a small TypeScript
+feature layer. The installable app is macOS-only. Windows and Linux are reached
+through AkiTTY Web, the browser-canvas terminal. Its own source is MIT licensed.
+It is not a mechanical port and does not promise Ghostty protocol or configuration
+parity.
 
 ## Decisions
 
@@ -12,6 +14,13 @@ port and does not promise Ghostty protocol or configuration parity.
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
   One nonblocking worker owns each PTY. Session state is mutex protected; logical
   serialization does not assume DispatchQueue calls stay on one OS thread.
+  Shutdown sends HUP, then KILL, and polls child status with a bounded deadline;
+  it never blocks in `wait()`. If macOS delays reaping, one shared reaper retains
+  ownership, with a 64-child limit including pending cleanup. Swift marks a
+  session closed before calling Rust cleanup and releases its lock, so late UI
+  events cannot block the main thread behind child termination. Repeated view
+  shutdown requests wait for the same cleanup. Close/quit confirmations are
+  guarded, asynchronous window sheets; Cancel and Escape preserve the session.
 - ABI v1 uses bounded UTF-8 JSON, integer session handles, explicit buffer freeing,
   version checks, errors and panic containment. Both sides validate dimensions.
 - Swift owns AppKit windows/tabs/splits, IME, text accessibility, pasteboard policy,
@@ -66,28 +75,37 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
 
 ## Compatibility scope
 
-Unsupported initially: sixel, file/shared-memory/Unicode-placeholder Kitty graphics and Kitty animation frames, image
-clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
+Unsupported initially: sixel, image clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
 public extension ecosystem. The Kitty keyboard protocol is advertised because
 `KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
 is a modifier or composes text, and input-method text still composes. CoreText rendering is not a claim of Ghostty's
 performance or shaping parity. Full esctest results are not inferred from the
 curated conformance suite.
 
-Kitty graphics is a small but practical subset. The core strips APC strings from the
+Kitty graphics follows the protocol with hard limits. The core strips APC strings from the
 byte stream before the VT parser, keeps decoded RGBA images under hard limits
 (8 Mi pixels per image, 128 MiB and 256 placements per session) and reports visible
 placements in the snapshot, including source rectangles and pixel offsets. Pixels
 cross the boundary through `akitty_image_read_v1`, not JSON, so 1080p animation
-frames stay clear of the 8 MiB response cap. Direct raw RGB/RGBA transmission and
-in-band PNG (`f=100`, normalized to RGBA8) are accepted; files and shared memory are
-refused, so terminal output can never make Akitty read the filesystem. Placements
+frames stay clear of the 8 MiB response cap. Raw RGB/RGBA and PNG (`f=100`, normalized
+to RGBA8) arrive in-band or through files, temp files and shared memory under Kitty's
+rules (`media.rs`): bounded reads, regular files outside /dev, /proc and /sys only, temp
+files and shared memory consumed. Unicode placeholders (`placeholder.rs`) decode U+10EEEE
+cells per row into image slices of a virtual placement; relative placements resolve
+through their parent chain when the snapshot is built; animation frames, composition and
+playback live in `graphics.rs`, ticked before each snapshot, with `animating` telling the
+app to poll at the display rate. Placements
 stay attached to their text: a `tracker` handler sits between the parser and the
 terminal, forwards every callback unchanged and mirrors scroll regions, linefeeds,
 autowrap, reverse index, insert/delete lines, erase display, resets and resizes into
 the placement list, so images keep moving with the content even once scrollback is
-full. Swift fetches pixels off the main thread and draws them in the grid
-rasterizer by z-index.
+full. Swift fetches pixels off the main thread. With Metal, frames without images keep
+the single CPU bitmap; frames with images render the text as two transparent layers
+(cell fills, then glyphs and cursor) with the same rasterizer code and draw every image
+as its own texture in Kitty's three z bands around them, re-uploading a texture only when
+its generation changes; an image-only update skips the CPU raster entirely. A display
+link polls while `animating` is set or images changed in the last second. The software
+fallback still composites images in the CPU bitmap.
 
 ## macOS 0.6 release additions
 
@@ -105,10 +123,21 @@ cross-platform release policy are not imported. See RELEASING.md for publication
 
 ## AkiTTY Web
 
-`packages/akitty-web` is a separate terminal for AX Code Desktop's web UI. It does not use the Rust core, the C ABI or
-the Swift app. It renders to a canvas and uses Ghostty's VT parser as a prebuilt WebAssembly module, behind an
-xterm.js-style API. It started from coder/ghostty-web v0.4.0 and is now maintained independently.
+`packages/akitty-web` is how AkiTTY supports Windows and Linux. AX Code Desktop embeds this terminal in its web UI.
+The installable app stays Apple Silicon and macOS 14 or later, and this package is a separate implementation: it does
+not use the Rust core, the C ABI, or the Swift app. It renders to an HTML canvas and uses Ghostty's VT parser as a
+prebuilt WebAssembly module, behind an xterm.js-style API. The same library runs in a browser on Windows, Linux, and
+macOS. It started from coder/ghostty-web v0.4.0 and is now maintained independently.
 
+The package does not spawn a PTY. The host starts the shell on that operating system, writes output into the
+terminal, and receives keystrokes from the terminal. Browser keyboard events supply Ctrl, Alt, and Meta. Ctrl+C is
+the interrupt on every platform, and links open on Ctrl-click or Command-click. A Windows `file://` wasm path is
+normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There is no Windows or Linux installer in
+this repository. People on those systems use the host that embeds AkiTTY Web.
+
+- **Platforms:** Windows and Linux support is this browser terminal, including on macOS inside AX Code Desktop. The
+  native app has no Windows or Linux build. CI type-checks the package and runs Vitest on macOS. There is no Windows
+  or Linux browser run in this repo.
 - **Scope:** it was migrated from `ax-code-desktop`, which keeps its own copy for now. Neither side syncs automatically.
 - **Distribution:** private source package, never published. Consumers compile its TypeScript.
 - **Zig:** only rebuilding the wasm needs Zig 0.15.2. The macOS app, the Rust core and the normal build do not.

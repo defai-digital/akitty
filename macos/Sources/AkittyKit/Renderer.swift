@@ -9,20 +9,53 @@ public struct RendererHealth {
     public mutating func fail(_ message: String) { if failure == nil { failure = message } }
 }
 
+/// Grid metrics in points plus the backing scale: the coordinate space shared by the rasterizer and the presenter.
+struct GridGeometry: Equatable {
+    let cols: Int, rows: Int
+    let cell: CGSize
+    let scale: CGFloat
+    /// The grid rectangle in device pixels, top-left origin — exactly where the CPU path clips images.
+    var rect: CGRect {
+        CGRect(x: GridRasterizer.margin * scale, y: GridRasterizer.margin * scale,
+               width: CGFloat(cols) * cell.width * scale, height: CGFloat(rows) * cell.height * scale)
+    }
+}
+
+/// Per-draw uniform of the image pipeline: destination rect in NDC plus source rect in texture UV.
+struct Quad {
+    var destX: Float, destY: Float, destW: Float, destH: Float
+    var srcU: Float, srcV: Float, srcW: Float, srcH: Float
+}
+
 @MainActor final class MetalPresenter: NSObject, MTKViewDelegate {
     let view: MTKView
+    private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    private let imagePipeline: MTLRenderPipelineState
+    private let nearest: MTLSamplerState?
+    private let linear: MTLSamplerState?
     private(set) var texture: MTLTexture?
+    private(set) var backgroundLayer: MTLTexture?
+    private(set) var foregroundLayer: MTLTexture?
+    /// One texture per placed image, re-uploaded only when the core reports a new generation.
+    struct ImageBinding { let generation: UInt64; let texture: MTLTexture }
+    private(set) var imageTextures: [UInt32: ImageBinding] = [:]
+    /// Placements sorted by (z, snapshot order): the exact draw order of the CPU path.
+    private(set) var placements: [ImagePlacement] = []
+    private(set) var grid: GridGeometry?
+    /// Whether frames composite the two text layers and the image textures, rather than the single bitmap.
+    private(set) var layered = false
     var onFailure: ((String) -> Void)?
     init(forceFailure: Bool = false, forceShaderFailure: Bool = false) throws {
         guard !forceFailure, let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw AkittyError.core("Metal device unavailable") }
+        self.device = device
         self.queue = queue
         view = MTKView(frame: .zero, device: device)
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = true
         view.isPaused = true; view.enableSetNeedsDisplay = true
-        view.clearColor = MTLClearColorMake(0.07, 0.086, 0.114, 1)
+        view.clearColor = Self.clearColor
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -35,14 +68,41 @@ public struct RendererHealth {
             constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
             return image.sample(s,in.uv);
         }
+        struct Quad { float4 dest; float4 source; };
+        struct ImageOut { float4 position [[position]]; float2 uv; };
+        vertex ImageOut image_vertex(uint id [[vertex_id]], constant Quad &quad [[buffer(0)]]) {
+            float2 corners[4] = { quad.dest.xy, quad.dest.xy+float2(quad.dest.z,0), quad.dest.xy+float2(0,quad.dest.w), quad.dest.xy+quad.dest.zw };
+            float2 uvs[4] = { quad.source.xy, quad.source.xy+float2(quad.source.z,0), quad.source.xy+float2(0,quad.source.w), quad.source.xy+quad.source.zw };
+            ImageOut o; o.position=float4(corners[id],0,1); o.uv=uvs[id]; return o;
+        }
+        fragment float4 image_fragment(ImageOut in [[stage_in]], texture2d<float> image [[texture(0)]], sampler s [[sampler(0)]]) {
+            return image.sample(s,in.uv);
+        }
         """
         let shader = forceShaderFailure || ProcessInfo.processInfo.environment["AKITTY_FORCE_SHADER_ERROR"] == "1" ? "invalid shader" : source
         let library = try device.makeLibrary(source: shader, options: nil)
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "vertex_main")
-        descriptor.fragmentFunction = library.makeFunction(name: "fragment_main")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        func state(_ vertex: String, _ fragment: String, sourceFactor: MTLBlendFactor) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = library.makeFunction(name: vertex)
+            descriptor.fragmentFunction = library.makeFunction(name: fragment)
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            // Layer bitmaps and image textures are both premultiplied.
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = sourceFactor
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = sourceFactor
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+        pipeline = try state("vertex_main", "fragment_main", sourceFactor: .one)
+        // Image textures hold the device-RGB premultiplied pixels the CPU path would draw, so both pipelines blend alike.
+        imagePipeline = try state("image_vertex", "image_fragment", sourceFactor: .one)
+        func sampler(_ filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
+            let descriptor = MTLSamplerDescriptor(); descriptor.minFilter = filter; descriptor.magFilter = filter
+            descriptor.sAddressMode = .clampToEdge; descriptor.tAddressMode = .clampToEdge
+            return device.makeSamplerState(descriptor: descriptor)
+        }
+        nearest = sampler(.nearest); linear = sampler(.linear)
         super.init()
         view.delegate = self
     }
@@ -56,32 +116,98 @@ public struct RendererHealth {
     }
     /// `damage` is the range of bitmap pixel rows that changed since the last call (nil: all of them).
     func update(bitmap: CGContext, damage: Range<Int>? = nil) throws {
-        guard let device = view.device, let data = bitmap.data else { throw AkittyError.core("Render bitmap unavailable") }
-        if let texture, let damage, texture.width == bitmap.width, texture.height == bitmap.height, pending.count == 0 {
+        // Leaving the layered path frees its layer and image textures.
+        if layered { layered = false; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = [] }
+        texture = try upload(into: texture, bitmap: bitmap, damage: damage)
+        view.needsDisplay = true
+    }
+    /// The layered Metal frame: both text layers with their shared damage, images re-synced by generation.
+    func updateLayers(background: CGContext, foreground: CGContext, damage: Range<Int>?, grid: GridGeometry, placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry]) throws {
+        try syncImages(placements: placements, pixels: pixels)
+        self.grid = grid; self.placements = Self.ordered(placements)
+        backgroundLayer = try upload(into: backgroundLayer, bitmap: background, damage: damage)
+        foregroundLayer = try upload(into: foregroundLayer, bitmap: foreground, damage: damage)
+        layered = true; texture = nil
+        view.needsDisplay = true
+    }
+    /// An image-only frame: the text layers are still valid, so only image textures and geometry move.
+    func updateImages(placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry], grid: GridGeometry) throws {
+        try syncImages(placements: placements, pixels: pixels)
+        self.grid = grid; self.placements = Self.ordered(placements)
+        view.needsDisplay = true
+    }
+    /// Kitty z-index ties keep snapshot order, so sort with the original offset as the tie-break.
+    nonisolated static func ordered(_ placements: [ImagePlacement]) -> [ImagePlacement] {
+        placements.enumerated().sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
+    }
+    /// Same partial-upload rule as the single texture: replace damaged rows in place when the GPU is idle.
+    private func upload(into current: MTLTexture?, bitmap: CGContext, damage: Range<Int>?) throws -> MTLTexture {
+        guard let data = bitmap.data else { throw AkittyError.core("Render bitmap unavailable") }
+        if let current, let damage, current.width == bitmap.width, current.height == bitmap.height, pending.count == 0 {
             // Nothing on the GPU is reading the texture, so upload only the rows that changed.
             if !damage.isEmpty {
-                texture.replace(region: MTLRegionMake2D(0, damage.lowerBound, bitmap.width, damage.count), mipmapLevel: 0,
+                current.replace(region: MTLRegionMake2D(0, damage.lowerBound, bitmap.width, damage.count), mipmapLevel: 0,
                                 withBytes: data + damage.lowerBound * bitmap.bytesPerRow, bytesPerRow: bitmap.bytesPerRow)
             }
-            view.needsDisplay = true
-            return
+            return current
         }
         // A frame still owns the current texture (or the size changed): give this one a fresh, fully uploaded texture.
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: bitmap.width, height: bitmap.height, mipmapped: false)
         descriptor.usage = .shaderRead; descriptor.storageMode = .shared
         guard let next = device.makeTexture(descriptor: descriptor) else { throw AkittyError.core("Metal texture allocation failed") }
         next.replace(region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height), mipmapLevel: 0, withBytes: data, bytesPerRow: bitmap.bytesPerRow)
-        texture = next
-        view.needsDisplay = true
+        return next
+    }
+    /// The default background as the CPU bitmaps store it (device RGB), so layered frames clear to the same bytes.
+    static let clearColor: MTLClearColor = {
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        pixel.withUnsafeMutableBytes { raw in
+            let context = CGContext(data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+            context?.setFillColor(CGColor(red: 18/255, green: 22/255, blue: 29/255, alpha: 1)); context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return MTLClearColor(red: Double(pixel[2]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[0]) / 255, alpha: 1)
+    }()
+    /// Uploads image textures whose generation changed and drops the ones no longer placed.
+    private func syncImages(placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry]) throws {
+        var wanted: Set<UInt32> = []
+        for placement in placements {
+            wanted.insert(placement.id)
+            if let binding = imageTextures[placement.id], binding.generation == placement.gen { continue }
+            // Pixels not yet fetched for this generation leave the previous texture up rather than a gap.
+            guard let entry = pixels[placement.id], entry.generation == placement.gen,
+                  let bgra = entry.device ?? ImageStore.devicePixels(entry.rgba, width: entry.width, height: entry.height) else { continue }
+            let region = MTLRegionMake2D(0, 0, entry.width, entry.height)
+            // Rewrite in place only while no submitted frame can still be sampling the texture.
+            if let binding = imageTextures[placement.id], binding.texture.width == entry.width, binding.texture.height == entry.height, pending.count == 0 {
+                bgra.withUnsafeBytes { binding.texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
+                imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: binding.texture)
+                continue
+            }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: entry.width, height: entry.height, mipmapped: false)
+            descriptor.usage = .shaderRead; descriptor.storageMode = .shared
+            guard let texture = device.makeTexture(descriptor: descriptor) else { throw AkittyError.core("Metal texture allocation failed") }
+            bgra.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
+            imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: texture)
+        }
+        imageTextures = imageTextures.filter { wanted.contains($0.key) }
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
-        guard let texture else { return }
+        guard layered || texture != nil else { return }
         // Occluded windows legitimately have no drawable; no frame was submitted.
         guard let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor else { return }
         guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { onFailure?("Metal command allocation failed"); return }
-        encoder.setRenderPipelineState(pipeline); encoder.setFragmentTexture(texture, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3); encoder.endEncoding()
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = Self.clearColor
+        if layered {
+            encode(encoder, width: drawable.texture.width, height: drawable.texture.height)
+        } else if let texture {
+            // Single-texture frames: the pre-layer composite path (also used by tests).
+            encoder.setRenderPipelineState(pipeline); encoder.setFragmentTexture(texture, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        encoder.endEncoding()
         pending.add(1)
         let pending = self.pending
         command.addCompletedHandler { [weak self] completed in
@@ -93,27 +219,123 @@ public struct RendererHealth {
         }
         command.present(drawable); command.commit()
     }
+    /// The layered frame: clear to the default background, then z bands around the two text layers,
+    /// everything after the first band clipped to the grid area in drawable pixels.
+    private func encode(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+        scissor(to: grid?.rect, width: width, height: height, encoder: encoder)
+        drawImages(where: { $0.z < GridRasterizer.underlayZ }, encoder: encoder, width: width, height: height)
+        drawLayer(backgroundLayer, encoder: encoder)
+        drawImages(where: { GridRasterizer.underlayZ <= $0.z && $0.z < 0 }, encoder: encoder, width: width, height: height)
+        drawLayer(foregroundLayer, encoder: encoder)
+        drawImages(where: { $0.z >= 0 }, encoder: encoder, width: width, height: height)
+    }
+    private func scissor(to rect: CGRect?, width: Int, height: Int, encoder: MTLRenderCommandEncoder) {
+        guard let rect else { return }
+        // Clamp to the attachment: Metal validation aborts on a scissor that reaches outside it.
+        let x = max(0, Int(rect.minX)), y = max(0, Int(rect.minY))
+        let w = min(width - x, Int(ceil(rect.maxX)) - x), h = min(height - y, Int(ceil(rect.maxY)) - y)
+        if w > 0, h > 0 { encoder.setScissorRect(MTLScissorRect(x: x, y: y, width: w, height: h)) }
+    }
+    private func drawLayer(_ texture: MTLTexture?, encoder: MTLRenderCommandEncoder) {
+        guard let texture else { return }
+        encoder.setRenderPipelineState(pipeline); encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+    private func drawImages(where include: (ImagePlacement) -> Bool, encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+        for placement in placements where include(placement) { drawImage(placement, encoder: encoder, width: width, height: height) }
+    }
+    /// One textured quad. The destination mirrors the CPU geometry exactly: device pixels, y downwards,
+    /// ox/oy and dw/dh already in device pixels, points converted as px = point * scale.
+    private func drawImage(_ placement: ImagePlacement, encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+        guard let grid, let binding = imageTextures[placement.id] else { return }
+        let source = placement.sourceRect
+        guard source.width > 0, source.height > 0 else { return }
+        let texture = binding.texture, scale = grid.scale
+        let ox = CGFloat(placement.ox ?? 0), oy = CGFloat(placement.oy ?? 0)
+        let x = (GridRasterizer.margin + CGFloat(placement.col) * grid.cell.width) * scale + ox
+        let y = (GridRasterizer.margin + CGFloat(placement.row) * grid.cell.height) * scale + oy
+        let boundW = CGFloat(placement.cols) * grid.cell.width * scale - ox, boundH = CGFloat(placement.rows) * grid.cell.height * scale - oy
+        let w = placement.dw.map { CGFloat($0) } ?? boundW, h = placement.dh.map { CGFloat($0) } ?? boundH
+        guard w > 0, h > 0 else { return }
+        var quad = Quad(destX: Float(x / CGFloat(width) * 2 - 1), destY: Float(1 - y / CGFloat(height) * 2),
+                        destW: Float(w / CGFloat(width) * 2), destH: Float(-h / CGFloat(height) * 2),
+                        srcU: Float(source.minX / CGFloat(texture.width)), srcV: Float(source.minY / CGFloat(texture.height)),
+                        srcW: Float(source.width / CGFloat(texture.width)), srcH: Float(source.height / CGFloat(texture.height)))
+        encoder.setRenderPipelineState(imagePipeline); encoder.setFragmentTexture(texture, index: 0)
+        // 1:1 images stay exact; everything else is resampled smoothly, like the CPU path's interpolation choice.
+        let exact = Int(w.rounded()) == Int(source.width) && Int(h.rounded()) == Int(source.height)
+        encoder.setFragmentSamplerState(exact ? nearest : linear, index: 0)
+        encoder.setVertexBytes(&quad, length: MemoryLayout<Quad>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+    /// Renders the current layered frame into an offscreen texture and reads the BGRA bytes back; for equivalence tests.
+    func renderOffscreen(width: Int, height: Int) throws -> Data {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]; descriptor.storageMode = .shared
+        guard let target = device.makeTexture(descriptor: descriptor), let command = queue.makeCommandBuffer() else { throw AkittyError.core("Metal offscreen allocation failed") }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear; pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = Self.clearColor
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { throw AkittyError.core("Metal command allocation failed") }
+        encode(encoder, width: width, height: height)
+        encoder.endEncoding()
+        command.commit(); command.waitUntilCompleted()
+        if command.status == .error { throw AkittyError.core(command.error?.localizedDescription ?? "GPU command failed") }
+        var bytes = Data(count: width * height * 4)
+        bytes.withUnsafeMutableBytes { raw in
+            target.getBytes(raw.baseAddress!, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+        return bytes
+    }
 }
 
 /// Decoded Kitty graphics images, refreshed from the core when a placement's generation changes.
 final class ImageStore: @unchecked Sendable {
+    /// Raw pixels exactly as the core returns them: straight-alpha RGBA, ready for a Metal texture.
+    struct Entry { let generation: UInt64; let width: Int; let height: Int; let rgba: Data; var image: CGImage? = nil; var device: Data? = nil }
     private let lock = NSLock()
-    private var entries: [UInt32: (generation: UInt64, image: CGImage)] = [:]
+    private var table: [UInt32: Entry] = [:]
+    /// A copy of the raw pixels; the Metal path wraps these in textures and never needs a CGImage.
+    var entries: [UInt32: Entry] { lock.lock(); defer { lock.unlock() }; return table }
+    /// CGImages for the software path, created on first use and cached until the generation changes.
     var images: [UInt32: CGImage] {
         lock.lock(); defer { lock.unlock() }
-        return entries.mapValues(\.image)
+        var result: [UInt32: CGImage] = [:]
+        for (id, entry) in table {
+            if let image = entry.image { result[id] = image; continue }
+            guard let image = Self.makeImage(entry.rgba, width: entry.width, height: entry.height) else { continue }
+            table[id]?.image = image; result[id] = image
+        }
+        return result
     }
     func sync(_ placements: [ImagePlacement], session: TerminalSession) {
         var wanted: [UInt32: ImagePlacement] = [:]
         for placement in placements { wanted[placement.id] = placement }
         for (id, placement) in wanted {
-            lock.lock(); let current = entries[id]?.generation; lock.unlock()
+            lock.lock(); let current = table[id]?.generation; lock.unlock()
             guard current != placement.gen,
-                  let pixels = session.imagePixels(id, width: placement.w, height: placement.h),
-                  let image = Self.makeImage(pixels, width: placement.w, height: placement.h) else { continue }
-            lock.lock(); entries[id] = (placement.gen, image); lock.unlock()
+                  let pixels = session.imagePixels(id, width: placement.w, height: placement.h) else { continue }
+            lock.lock()
+            // Converted here, off the main thread, so the Metal path only uploads.
+            table[id] = Entry(generation: placement.gen, width: placement.w, height: placement.h, rgba: pixels,
+                              device: Self.devicePixels(pixels, width: placement.w, height: placement.h))
+            lock.unlock()
         }
-        lock.lock(); entries = entries.filter { wanted[$0.key] != nil }; lock.unlock()
+        lock.lock(); table = table.filter { wanted[$0.key] != nil }; lock.unlock()
+    }
+    /// The pixels as the CPU path composites them: drawn into a device-RGB premultiplied BGRA bitmap, the format of the
+    /// layer bitmaps, so a Metal texture made from them matches the software frame.
+    static func devicePixels(_ rgba: Data, width: Int, height: Int) -> Data? {
+        guard width > 0, height > 0, rgba.count >= width * height * 4, let image = makeImage(rgba, width: width, height: height) else { return nil }
+        var out = Data(count: width * height * 4)
+        let drawn: Bool = out.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? out : nil
     }
     static func makeImage(_ pixels: Data, width: Int, height: Int) -> CGImage? {
         guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
@@ -132,11 +354,17 @@ final class GridRasterizer: @unchecked Sendable {
         /// Bitmap pixel rows (top-down, as stored) that changed since the previous frame, or nil when everything may have.
         let damage: Range<Int>?
     }
+    /// The layered Metal frame: same damage tracking, but the text is split into two transparent bitmaps.
+    struct LayeredFrame {
+        let background: CGContext
+        let foreground: CGContext
+        let damage: Range<Int>?
+    }
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
     }
     private struct GlyphKey: Hashable { var style: UInt8, fg: UInt32, text: String }
-    private static let margin: CGFloat = 8
+    static let margin: CGFloat = 8
     private static let maxGlyphs = 8192
     /// Kitty's lowest z layer: images below this draw under non-default cell backgrounds.
     static let underlayZ = -1_073_741_824
@@ -154,6 +382,13 @@ final class GridRasterizer: @unchecked Sendable {
     private var lastCursorRow: Int?
     private var lastComposition = ""
     private var lastHadImages = false
+    /// What this instance paints: everything, or one of the two transparent layers of the Metal image path.
+    enum Layer { case all, background, foreground }
+    private let layer: Layer
+    init(layer: Layer = .all) { self.layer = layer }
+    /// The layer passes, created on first use and kept for their bitmaps and damage state.
+    private lazy var backgroundPass = GridRasterizer(layer: .background)
+    private lazy var foregroundPass = GridRasterizer(layer: .foreground)
 
     static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
         try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context
@@ -167,7 +402,8 @@ final class GridRasterizer: @unchecked Sendable {
             throw AkittyError.core("Terminal bitmap exceeds rendering limits")
         }
         let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows)
-        let hasImages = !(snapshot.images ?? []).isEmpty
+        // Only the all-in-one bitmap draws images, so only it must repaint fully around them.
+        let hasImages = layer == .all && !(snapshot.images ?? []).isEmpty
         var rows = damage
         if !reuse || context == nil || layout != wanted || hasImages || lastHadImages { rows = nil }
 
@@ -200,8 +436,11 @@ final class GridRasterizer: @unchecked Sendable {
         let cursorRow = snapshot.cursor.row
         if var set = rows {
             // The cursor and any composition text are drawn over the row, so both its old and new rows need repainting.
-            if let last = lastCursorRow { set.insert(last) }
-            set.insert(cursorRow)
+            // The background layer has no cursor; the foreground layer only repaints a cursor it draws.
+            if layer != .background {
+                if let last = lastCursorRow { set.insert(last) }
+                if layer == .all || snapshot.cursor.visible { set.insert(cursorRow) }
+            }
             rows = set.filter { (0..<snapshot.rows).contains($0) }
         }
         lastCursorRow = snapshot.cursor.visible ? cursorRow : nil
@@ -218,29 +457,37 @@ final class GridRasterizer: @unchecked Sendable {
 
         if let rows, rows.isEmpty { return Frame(context: context, damage: 0..<0) }
         context.saveGState(); defer { context.restoreGState() }
+        // Layer bitmaps start transparent, so the Metal clear colour and the images below them show through.
+        if layer != .all { context.setBlendMode(.copy) }
+        context.setFillColor(layer == .all ? background : CGColor(gray: 0, alpha: 0))
         let cells: [Cell]
         if let rows {
             context.clip(to: rows.map(band))
-            context.setFillColor(background); context.fill(rows.map(band))
+            context.fill(rows.map(band))
             cells = snapshot.cells.filter { rows.contains($0.row) }
         } else {
-            context.setFillColor(background); context.fill(CGRect(origin: .zero, size: size))
+            context.fill(CGRect(origin: .zero, size: size))
             cells = snapshot.cells
         }
+        context.setBlendMode(.normal)
+        // The background layer stops after the cell fills; the foreground layer skips them.
+        let fills = layer == .foreground ? [] : cells, text = layer == .background ? [] : cells
 
         // Kitty z-index ties keep snapshot order, so sort with the original offset as the tie-break.
         let placements = (snapshot.images ?? []).enumerated().sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
         let gridRect = CGRect(x: Self.margin, y: gridTop - CGFloat(snapshot.rows) * cellSize.height, width: CGFloat(snapshot.cols) * cellSize.width, height: CGFloat(snapshot.rows) * cellSize.height)
         func drawImages(_ include: (ImagePlacement) -> Bool) {
+            guard layer == .all else { return }
             context.saveGState(); defer { context.restoreGState() }
             context.clip(to: gridRect)
             for placement in placements where include(placement) {
                 guard let image = images[placement.id] else { continue }
                 let source = placement.sourceRect
                 guard source.width > 0, source.height > 0 else { continue }
-                // Offsets are device pixels; the grid is drawn in points, so scale them down.
+                // Offsets and destination sizes are device pixels; the grid is drawn in points, so scale them down.
                 let ox = CGFloat(placement.ox ?? 0) / scale, oy = CGFloat(placement.oy ?? 0) / scale
-                let width = CGFloat(placement.cols) * cellSize.width - ox, height = CGFloat(placement.rows) * cellSize.height - oy
+                let boundW = CGFloat(placement.cols) * cellSize.width - ox, boundH = CGFloat(placement.rows) * cellSize.height - oy
+                let width = placement.dw.map { CGFloat($0) / scale } ?? boundW, height = placement.dh.map { CGFloat($0) / scale } ?? boundH
                 guard width > 0, height > 0 else { continue }
                 let full = source.minX == 0 && source.minY == 0 && source.width == CGFloat(image.width) && source.height == CGFloat(image.height)
                 let cropped = full ? image : (image.cropping(to: source) ?? image)
@@ -248,14 +495,14 @@ final class GridRasterizer: @unchecked Sendable {
                 let exact = Int((width * scale).rounded()) == Int(source.width) && Int((height * scale).rounded()) == Int(source.height)
                 context.interpolationQuality = exact ? .none : .high
                 context.draw(cropped, in: CGRect(x: Self.margin + CGFloat(placement.col) * cellSize.width + ox,
-                                                 y: gridTop - CGFloat(placement.row + placement.rows) * cellSize.height,
+                                                 y: gridTop - CGFloat(placement.row) * cellSize.height - oy - height,
                                                  width: width, height: height))
             }
         }
         // Images below z = -2^30 are drawn under every non-default cell background; default-background cells were
         // already painted by the fill above, so skipping them leaves those images visible.
         drawImages { $0.z < Self.underlayZ }
-        for cell in cells where cell.selected || cell.bg != Self.defaultBackground {
+        for cell in fills where cell.selected || cell.bg != Self.defaultBackground {
             context.setFillColor(cell.selected ? CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) : color(cell.bg)); context.fill(rect(cell))
         }
         // Remaining negative z-index images sit between the cell backgrounds and the text. Frames with images are always full.
@@ -263,7 +510,7 @@ final class GridRasterizer: @unchecked Sendable {
         // Draw glyphs after every background: a wide-cell spacer must never
         // paint over the second half of the preceding CJK/emoji glyph.
         let descent = CTFontGetDescent(base)
-        for item in GlyphClusters.merge(cells) {
+        for item in GlyphClusters.merge(text) {
             let cell = item.cell, text = item.text
             if text.isEmpty || text == " " { continue }
             var box = rect(cell); box.size.width = cellSize.width * CGFloat(item.columns)
@@ -291,7 +538,7 @@ final class GridRasterizer: @unchecked Sendable {
         }
         // Decorations are drawn per cell so blank cells can still carry underlines and strikethrough.
         let baseline = descent + 2
-        for cell in cells where cell.underline || cell.strike == true {
+        for cell in text where cell.underline || cell.strike == true {
             let box = rect(cell)
             let lineColor = color(cell.ucolor ?? cell.fg)
             if cell.underline { Self.underline(context, style: cell.ustyle ?? 1, rect: box, baseline: box.minY + baseline, color: lineColor) }
@@ -302,7 +549,7 @@ final class GridRasterizer: @unchecked Sendable {
             }
         }
         drawImages { $0.z >= 0 }
-        if snapshot.cursor.visible, rows == nil || rows!.contains(cursorRow) {
+        if layer != .background, snapshot.cursor.visible, rows == nil || rows!.contains(cursorRow) {
             let box = CGRect(x: Self.margin + CGFloat(snapshot.cursor.col) * cellSize.width, y: gridTop - CGFloat(cursorRow + 1) * cellSize.height, width: cellSize.width, height: cellSize.height)
             context.setStrokeColor(CGColor(red: 0.6, green: 0.8, blue: 1, alpha: 1)); context.setLineWidth(1); context.stroke(box.insetBy(dx: 0.5, dy: 0.5))
             if !composition.isEmpty {
@@ -318,6 +565,20 @@ final class GridRasterizer: @unchecked Sendable {
             pixels = max(0, top)..<min(height, max(top, bottom))
         } else if rows != nil { pixels = 0..<0 }
         return Frame(context: context, damage: pixels)
+    }
+
+    /// The layered Metal frame: the drawing code and damage tracking of `render`, split into a transparent background
+    /// bitmap (cell fills and selection) and a transparent foreground bitmap (glyphs, decorations, cursor) so the GPU can
+    /// composite images between them. Images are never drawn here, so an image change needs no text repaint.
+    func renderLayers(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", reuse: Bool = true) throws -> LayeredFrame {
+        let back = try backgroundPass.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
+        let front = try foregroundPass.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
+        // Both layers upload the same rows, so the damage is the span covering both.
+        var span: Range<Int>?
+        if let a = back.damage, let b = front.damage {
+            span = a.isEmpty ? b : b.isEmpty ? a : min(a.lowerBound, b.lowerBound)..<max(a.upperBound, b.upperBound)
+        }
+        return LayeredFrame(background: back.context, foreground: front.context, damage: span)
     }
     static func underline(_ context: CGContext, style: UInt8, rect: CGRect, baseline: CGFloat, color: CGColor) {
         context.saveGState(); defer { context.restoreGState() }

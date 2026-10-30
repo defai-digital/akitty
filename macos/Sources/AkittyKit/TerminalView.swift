@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import QuartzCore
 import os
 
 @MainActor public final class TerminalView: NSView, @preconcurrency NSTextInputClient {
@@ -11,12 +12,15 @@ import os
     public private(set) var health = RendererHealth()
     public var onStatus: ((String) -> Void)?
     public var onTitle: ((String) -> Void)?
+    var onChrome: ((ChromeDocument?) -> Void)?
     private var presenter: MetalPresenter?
     private var bitmap: CGContext?
     private let snapshotQueue = DispatchQueue(label: "com.defai.akitty.snapshot", qos: .userInteractive)
     private let rasterQueue = DispatchQueue(label: "com.defai.akitty.raster", qos: .userInteractive)
     /// Keeps the bitmap between frames; only touched on `rasterQueue`.
     private let rasterizer = GridRasterizer()
+    /// Whether the last frame went through the layered Metal path.
+    private var lastLayered = false
     /// Grid rows changed since the last raster started; nil means unknown (repaint everything).
     private var pendingDamage: Set<Int>? = nil
     private var pollInFlight = false
@@ -25,6 +29,11 @@ import os
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
     private var timer: Timer?
+    /// Polls at the display rate while graphics move; paused, not invalidated, while the view is idle.
+    private var refreshLink: CADisplayLink?
+    /// Uptime seconds of the last image generation change; a fresh frame keeps the fast poll going briefly.
+    private var lastImageChange: Double = 0
+    private var imageGenerations: [UInt32: UInt64] = [:]
     private var composition = Composition()
     private var tracking: NSTrackingArea?
     private var selectionStart: (Int, Int)?
@@ -39,6 +48,7 @@ import os
     /// Physical modifier keys currently down; a flags change alone cannot say which one moved.
     private var heldModifierKeys: Set<UInt16> = []
     private var stopped = false
+    private let shutdownGroup = DispatchGroup()
     private var fontSize: CGFloat = 14
     private var preferences = TerminalPreferences.load()
     private var font: NSFont {
@@ -61,6 +71,7 @@ import os
         // NSView must be initialized before a throwing operation can unwind it.
         sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback)
         preferences = initial; fontSize = initial.fontSize
+        try syncProgramChrome()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
         wantsLayer = true
         do {
@@ -73,27 +84,41 @@ import os
         } catch { renderFailed(error.localizedDescription) }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
         RunLoop.main.add(timer!, forMode: .common)
+        // The 30 Hz timer stays the idle fallback; the display link only adds polls while frames move.
         setAccessibilityIdentifier("akitty-terminal")
     }
     required init?(coder: NSCoder) { nil }
-    deinit { timer?.invalidate(); NotificationCenter.default.removeObserver(self) }
+    deinit { timer?.invalidate(); refreshLink?.invalidate(); NotificationCenter.default.removeObserver(self) }
     @objc private func preferencesChanged() {
         preferences = TerminalPreferences.load(); fontSize = preferences.fontSize
-        // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row rather than a damage set.
+        do { try syncProgramChrome() } catch { show(error) }
+        // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row.
         pendingDamage = nil
         resizeTerminal(); redraw()
     }
     public func shutdown(completion: @escaping @Sendable () -> Void = {}) {
-        guard !stopped else { completion(); return }; stopped = true
-        timer?.invalidate(); timer = nil
-        let session = self.session
-        DispatchQueue.global(qos: .userInitiated).async {
-            defer { completion() }
-            do { try session.close() } catch { Logger(subsystem: "com.defai.akitty", category: "pty").error("PTY close failed: \(error.localizedDescription, privacy: .public)") }
+        if !stopped {
+            stopped = true
+            timer?.invalidate(); timer = nil
+            stopRefreshLink()
+            pendingClipboard.removeAll()
+            let session = self.session, group = shutdownGroup
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { group.leave() }
+                do { try session.close() } catch { Logger(subsystem: "com.defai.akitty", category: "pty").error("PTY close failed: \(error.localizedDescription, privacy: .public)") }
+            }
         }
+        // A second caller (for example Quit during window close) waits for the same cleanup.
+        shutdownGroup.notify(queue: .global(qos: .userInitiated), execute: completion)
     }
     public override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
-    public override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); resizeTerminal(); poll(); showClipboardRequest() }
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // The display link belongs to the view's display, so it is dropped with the window.
+        if window == nil { stopRefreshLink() } else { updatePolling() }
+        resizeTerminal(); poll(); showClipboardRequest()
+    }
     public override func layout() { super.layout(); presenter?.view.frame = bounds; resizeTerminal(); redraw() }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
@@ -109,6 +134,29 @@ import os
         do { _ = try session.call("resize", ["cols": cols, "rows": rows]); lastGrid = (cols, rows) }
         catch { show(error) }
     }
+    /// Display-rate polling pays off only while an animation runs or a frame changed within the last second.
+    nonisolated static func wantsFastPolling(animating: Bool, changedAt: Double, now: Double) -> Bool {
+        if animating { return true }
+        return now - changedAt < 1
+    }
+    private func updatePolling() {
+        setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastImageChange, now: ProcessInfo.processInfo.systemUptime))
+    }
+    /// The link is only created inside a window; without one the idle timer keeps polling.
+    private func setFastPolling(_ fast: Bool) {
+        guard fast, !stopped, window != nil else { refreshLink?.isPaused = true; return }
+        if refreshLink == nil {
+            let link = displayLink(target: self, selector: #selector(displayTick(_:)))
+            link.add(to: .main, forMode: .common)
+            refreshLink = link
+        }
+        refreshLink?.isPaused = false
+    }
+    private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
+    @objc private func displayTick(_ link: CADisplayLink) {
+        guard !stopped, window != nil else { link.isPaused = true; return }
+        poll()
+    }
     public func poll() {
         guard !stopped, !pollInFlight else { return }
         pollInFlight = true
@@ -122,13 +170,28 @@ import os
                 self.pollInFlight = false
                 guard !self.stopped else { return }
                 self.applySnapshot(result)
+                self.updatePolling()
             }
         }
+    }
+    /// Applies a preference set the same way a settings change does, including the program-chrome switch.
+    func applyPreferences(_ next: TerminalPreferences) {
+        preferences = next; fontSize = next.fontSize
+        do { try syncProgramChrome() } catch { show(error) }
+        resizeTerminal(); redraw()
+    }
+    private func syncProgramChrome() throws {
+        _ = try session.call("program_chrome", ["enabled": preferences.programChrome])
     }
     private func applySnapshot(_ result: Result<Snapshot?, Error>) {
         do {
             if let next = try result.get() {
+                let previous = snapshot
                 snapshot = next
+                // A generation change means this frame may already be superseded by the next animation frame.
+                var generations: [UInt32: UInt64] = [:]
+                for image in next.images ?? [] { generations[image.id] = image.gen }
+                if generations != imageGenerations { imageGenerations = generations; lastImageChange = ProcessInfo.processInfo.systemUptime }
                 if next.exited, next.error == nil, next.exit_code == 0, !exitHandled {
                     exitHandled = true
                     DispatchQueue.main.async { [weak self] in self?.onExit?() }
@@ -136,14 +199,16 @@ import os
                 if let error = next.error { onStatus?(error) }
                 else if let failure = health.failure { onStatus?("Software rendering: \(failure)") }
                 else if next.exited { onStatus?("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
+                else if let presentation = next.chrome?.presentation { onStatus?(presentation) }
                 else { onStatus?("\(next.cols) cols × \(next.rows) rows") }
                 onTitle?(next.title)
+                onChrome?(next.chrome)
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
                 ringBell(next.bell == true)
                 if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
-                redraw()
+                redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
                 NSAccessibility.post(element: self, notification: .valueChanged)
             }
             showClipboardRequest()
@@ -156,16 +221,58 @@ import os
         Logger(subsystem: "com.defai.akitty", category: "renderer").error("Metal disabled: \(message, privacy: .public)")
         needsDisplay = true
     }
-    private func redraw() {
+    /// A partial snapshot with no dirty rows and an identical cursor carries only image changes (a generation
+    /// bump, placements moved, added or removed): the text layers are still valid, so no CPU raster is needed.
+    nonisolated static func isImageOnlyUpdate(previous: Snapshot?, next: Snapshot) -> Bool {
+        guard let previous, next.partial == true, let dirty = next.dirty, dirty.isEmpty,
+              previous.cursor.row == next.cursor.row, previous.cursor.col == next.cursor.col,
+              previous.cursor.visible == next.cursor.visible else { return false }
+        return true
+    }
+    private func redraw(imageOnly: Bool = false) {
         guard let snapshot, bounds.width > 0, bounds.height > 0, !stopped else { return }
+        // An image-only frame goes straight to the GPU: new placements and textures, redraw, no text work.
+        if imageOnly, let presenter, presenter.layered, !(snapshot.images ?? []).isEmpty, pendingDamage == [], !rasterInFlight {
+            do {
+                try presenter.updateImages(placements: snapshot.images ?? [], pixels: imageStore.entries,
+                                           grid: GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cellSize, scale: window?.backingScaleFactor ?? 2))
+            } catch { renderFailed(error.localizedDescription) }
+            return
+        }
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
-        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text, images = imageStore.images
+        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
+        // With Metal, frames that show images split the text into two layers and let the GPU composite each image from
+        // its own texture, so an animation frame re-uploads one texture instead of repainting the window. Frames without
+        // images (and the software fallback) keep the single bitmap.
+        let layered = presenter != nil && !(snapshot.images ?? []).isEmpty
+        var damage = pendingDamage
+        // The other path's retained bitmaps went stale while it was idle.
+        if layered != lastLayered { damage = nil; lastLayered = layered }
+        let rasterizer = self.rasterizer, images = layered ? [:] : imageStore.images
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
-        let damage = pendingDamage, rasterizer = self.rasterizer, reuse = presenter != nil
+        let reuse = presenter != nil
+        let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
         rasterQueue.async { [weak self] in
+            if layered {
+                let result = Result { try rasterizer.renderLayers(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName) }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.rasterInFlight = false
+                    guard !self.stopped else { return }
+                    do {
+                        let frame = try result.get()
+                        if size == self.bounds.size, let presenter = self.presenter {
+                            try presenter.updateLayers(background: frame.background, foreground: frame.foreground, damage: frame.damage, grid: grid,
+                                                       placements: self.snapshot?.images ?? snapshot.images ?? [], pixels: self.imageStore.entries)
+                        } else { self.pendingDamage = nil }
+                    } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
+                    if self.rasterPending { self.redraw() }
+                }
+                return
+            }
             let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse) }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -198,6 +305,7 @@ import os
     }
     private func show(_ error: Error) { onStatus?(error.localizedDescription); NSSound.beep() }
     public func send(_ text: String, paste: Bool = false) {
+        guard !stopped else { return }
         do { try session.input(text, paste: paste) } catch { show(error) }
     }
     /// Kitty keyboard protocol: bytes for this event when the running program asked for them.
@@ -360,6 +468,7 @@ import os
         if snapshot?.mouse_motion == true { _ = reportMouse(event, button: 35) }
     }
     private func reportMouse(_ event: NSEvent, button: Int, release: Bool = false) -> Bool {
+        guard !stopped else { return true }
         guard let snapshot, snapshot.mouse_mode, !event.modifierFlags.contains(.option) else { return false }
         let cell = position(convert(event.locationInWindow, from: nil))
         let modifiers = (event.modifierFlags.contains(.shift) ? 4 : 0) + (event.modifierFlags.contains(.control) ? 16 : 0)
@@ -378,6 +487,7 @@ import os
         return true
     }
     private func updateSelection() {
+        guard !stopped else { return }
         guard let start = selectionStart, let end = selectionEnd else { return }
         do {
             let data = try session.call("select", ["start_row": start.0, "start_col": start.1, "end_row": end.0, "end_col": end.1])
@@ -386,6 +496,7 @@ import os
         } catch { show(error) }
     }
     public override func scrollWheel(with event: NSEvent) {
+        guard !stopped else { return }
         let delta = event.scrollingDeltaY
         guard delta != 0 else { return }
         if reportMouse(event, button: delta > 0 ? 64 : 65) { return }
@@ -400,6 +511,7 @@ import os
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(selectedText, forType: .string)
     }
     @objc public func paste(_ sender: Any?) {
+        guard !stopped else { return }
         guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { onStatus?("Paste requires plain text up to 64 KiB"); return }
         if ClipboardPolicy.needsPasteConfirmation(text), let window {
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"
@@ -409,7 +521,7 @@ import os
         } else { send(text, paste: true) }
     }
     private func showClipboardRequest() {
-        guard !clipboardPromptOpen, !pendingClipboard.isEmpty, let window else { return }
+        guard !stopped, !clipboardPromptOpen, !pendingClipboard.isEmpty, let window, window.attachedSheet == nil else { return }
         let text = pendingClipboard.removeFirst()
         guard ClipboardPolicy.acceptsText(text) else { showClipboardRequest(); return }
         clipboardPromptOpen = true
