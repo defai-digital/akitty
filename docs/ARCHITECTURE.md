@@ -21,6 +21,12 @@ port and does not promise Ghostty protocol or configuration parity.
   (plus the old and new cursor rows); a new size, font or scale, any image, or an unknown change repaints everything.
   The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
   frames are always full.
+  Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
+  the cell box rather than through the font (rows are taller than glyphs, so font strokes leave gaps). Other
+  non-ASCII text is fitted into its cell: wide glyphs are centred and shrunk to fit, and `GlyphClusters` joins emoji
+  ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
+  ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
+  font preference or the system language.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval; images are unsupported, so confirmation never decodes images.
 - TypeScript ranks native commands through bundled JavaScriptCore code. Swift is

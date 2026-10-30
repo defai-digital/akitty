@@ -59,13 +59,19 @@ contributors for the work that helped make AkiTTY possible.
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
 - Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
   a window whose tabs and splits begin in that folder; a file opens in its folder.
-- Native **Settings… (⌘,)** for font/size, shell, starting directory, scrollback,
+- Native **Settings… (⌘,)** for font/size, a separate CJK font, shell, starting directory, scrollback,
   Option-as-Alt and update checks. Appearance changes apply to open terminals;
-  shell, directory and scrollback changes apply to new terminals.
+  shell, directory and scrollback changes apply to new terminals. Any installed fixed-pitch font can be chosen.
 - Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.
 - CoreText text rasterization and Metal presentation, with visible software
   fallback when Metal fails. Snapshot processing and rasterization run off the UI thread.
+- Box drawing, block elements and braille (U+2500–U+259F, U+2800–U+28FF) are drawn from geometry to the exact cell,
+  so borders, tables and block graphics join across rows without gaps.
+- Chinese, Japanese and Korean text on a two-column grid: the CJK font follows the system language (or the CJK font
+  setting) so unified Han characters take regional shapes, and wide glyphs are centred and fitted inside their cells.
+  Emoji ZWJ sequences and flags are drawn as one glyph; layout stays on wcwidth rules (grapheme-cluster mode 2027 is
+  reported as unsupported), so cursor maths in apps stays aligned.
 - IME marked text, accessible terminal text/selection, text copy/paste, clipboard
   write approval, scrollback search and font-size controls.
 - SGR and legacy mouse reporting; hold Option to select/scroll locally.
