@@ -15,7 +15,7 @@ final class RasterizerTests: XCTestCase {
 
     private func edit(_ rng: inout Lcg) -> String {
         let row = rng.next(rows) + 1, col = rng.next(cols - 4) + 1
-        switch rng.next(9) {
+        switch rng.next(12) {
         case 0: return "\u{1b}[\(row);\(col)H\u{1b}[3\(rng.next(7) + 1)mword\u{1b}[0m"
         case 1: return "\u{1b}[\(row);\(col)H\u{1b}[1;4mBold\u{1b}[0m"
         case 2: return "\u{1b}[\(row);1H\u{1b}[2K"
@@ -24,6 +24,9 @@ final class RasterizerTests: XCTestCase {
         case 5: return "\u{1b}[\(rows);1H\r\nscroll \(rng.next(100))"
         case 6: return "\u{1b}[\(row);\(col)H\u{1b}[4:3m\u{1b}[58;2;255;0;0mcurly\u{1b}[0m"
         case 7: return "\u{1b}[\(row);\(col)H\u{1b}[9mgone\u{1b}[0m"
+        case 8: return "\u{1b}[\(row);\(col)H╭─┬╮│┃╬▀▄█░▒▓⣿⠁"
+        case 9: return "\u{1b}[\(row);\(col)H👨\u{200D}👩\u{200D}👧🇯🇵❤\u{FE0F}x"
+        case 10: return "\u{1b}[\(row);\(col)H한글かな中\u{1b}[7m╰┴╯\u{1b}[0m"
         default: return rng.next(6) == 0 ? "\u{1b}[2J" : "\u{1b}[\(row);\(col)H\u{1b}[48;5;\(rng.next(200))m   \u{1b}[0m"
         }
     }

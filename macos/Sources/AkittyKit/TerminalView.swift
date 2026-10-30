@@ -78,6 +78,8 @@ import os
     deinit { timer?.invalidate(); NotificationCenter.default.removeObserver(self) }
     @objc private func preferencesChanged() {
         preferences = TerminalPreferences.load(); fontSize = preferences.fontSize
+        // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row rather than a damage set.
+        pendingDamage = nil
         resizeTerminal(); redraw()
     }
     public func shutdown(completion: @escaping @Sendable () -> Void = {}) {
@@ -157,12 +159,12 @@ import os
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
-        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, marked = composition.text, images = imageStore.images
+        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text, images = imageStore.images
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
         let damage = pendingDamage, rasterizer = self.rasterizer, reuse = presenter != nil
         pendingDamage = []
         rasterQueue.async { [weak self] in
-            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, images: images, reuse: reuse) }
+            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false

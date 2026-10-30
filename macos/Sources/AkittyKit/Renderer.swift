@@ -133,7 +133,7 @@ final class GridRasterizer: @unchecked Sendable {
         let damage: Range<Int>?
     }
     private struct Layout: Equatable {
-        var width: Int, height: Int, scale: CGFloat, fontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
+        var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
     }
     private struct GlyphKey: Hashable { var style: UInt8, fg: UInt32, text: String }
     private static let margin: CGFloat = 8
@@ -147,24 +147,26 @@ final class GridRasterizer: @unchecked Sendable {
     private var layout: Layout?
     private var base: CTFont?
     private var faces: [CTFont] = []
-    private var glyphs: [GlyphKey: CTLine] = [:]
+    /// `ink` is set only for lines with non-ASCII text, which are fitted into their cell box; ASCII keeps the plain path.
+    private struct Glyph { let line: CTLine; let ink: CGRect? }
+    private var glyphs: [GlyphKey: Glyph] = [:]
     private var colors: [UInt32: CGColor] = [:]
     private var lastCursorRow: Int?
     private var lastComposition = ""
     private var lastHadImages = false
 
-    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, images: [UInt32: CGImage] = [:]) throws -> CGContext {
-        try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, images: images, reuse: false).context
+    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
+        try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context
     }
 
     /// `damage` lists the grid rows whose content changed since the last frame this instance rendered (nil: unknown, so
     /// repaint everything). With `reuse` false the bitmap is not kept, so the caller may hold it while the next frame renders.
-    func render(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
+    func render(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         guard width <= 16384, height <= 16384, width * height <= 33_554_432 else {
             throw AkittyError.core("Terminal bitmap exceeds rendering limits")
         }
-        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows)
+        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows)
         let hasImages = !(snapshot.images ?? []).isEmpty
         var rows = damage
         if !reuse || context == nil || layout != wanted || hasImages || lastHadImages { rows = nil }
@@ -183,10 +185,13 @@ final class GridRasterizer: @unchecked Sendable {
         if layout != wanted || base == nil {
             let font = CTFontCreateWithName(fontName as CFString, fontSize, nil)
             base = font
+            // Every face gets a CJK-first cascade so unified Han characters use the regional shapes the user expects.
+            let languages = Locale.preferredLanguages
             faces = [font,
                      CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .boldTrait, .boldTrait) ?? font,
                      CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .italicTrait, .italicTrait) ?? font,
                      CTFontCreateCopyWithSymbolicTraits(font, 0, nil, [.boldTrait, .italicTrait], [.boldTrait, .italicTrait]) ?? font]
+                .map { GlyphFonts.cascadeFont(base: $0, cjkFontName: cjkFontName, languages: languages) }
             glyphs.removeAll()
         }
         let base = self.base!
@@ -258,22 +263,31 @@ final class GridRasterizer: @unchecked Sendable {
         // Draw glyphs after every background: a wide-cell spacer must never
         // paint over the second half of the preceding CJK/emoji glyph.
         let descent = CTFontGetDescent(base)
-        for cell in cells {
-            if cell.text.isEmpty || cell.text == " " { continue }
+        for item in GlyphClusters.merge(cells) {
+            let cell = item.cell, text = item.text
+            if text.isEmpty || text == " " { continue }
+            var box = rect(cell); box.size.width = cellSize.width * CGFloat(item.columns)
+            // Box drawing, blocks and braille fill the cell exactly instead of going through the font, which leaves row gaps.
+            if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first, CellGlyphs.handles(scalar) {
+                CellGlyphs.draw(scalar, in: box, scale: scale, color: color(cell.fg), context: context); continue
+            }
             let style = (cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)
-            let key = GlyphKey(style: UInt8(style), fg: Self.pack(cell.fg), text: cell.text)
-            let line: CTLine
-            if let cached = glyphs[key] { line = cached }
+            let key = GlyphKey(style: UInt8(style), fg: Self.pack(cell.fg), text: text)
+            let glyph: Glyph
+            if let cached = glyphs[key] { glyph = cached }
             else {
                 let attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
-                line = CTLineCreateWithAttributedString(NSAttributedString(string: cell.text, attributes: attrs))
+                let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+                glyph = Glyph(line: line, ink: text.utf8.allSatisfy { $0 < 0x80 } ? nil : CTLineGetBoundsWithOptions(line, .useGlyphPathBounds))
                 if glyphs.count >= Self.maxGlyphs { glyphs.removeAll(keepingCapacity: true) }
-                glyphs[key] = line
+                glyphs[key] = glyph
             }
-            let box = rect(cell)
             context.saveGState(); context.clip(to: box)
-            context.textPosition = CGPoint(x: box.minX, y: box.minY + descent + 2)
-            CTLineDraw(line, context); context.restoreGState()
+            if let ink = glyph.ink {
+                let place = GlyphFonts.placement(ink: ink, box: box, baseline: box.minY + descent + 2, centre: item.columns == 2)
+                context.translateBy(x: place.origin.x, y: place.origin.y); context.scaleBy(x: place.scale, y: place.scale); context.textPosition = .zero
+            } else { context.textPosition = CGPoint(x: box.minX, y: box.minY + descent + 2) }
+            CTLineDraw(glyph.line, context); context.restoreGState()
         }
         // Decorations are drawn per cell so blank cells can still carry underlines and strikethrough.
         let baseline = descent + 2
