@@ -26,10 +26,17 @@ struct TerminalPreferences: Codable, Equatable {
         ["PingFang SC", "PingFang TC", "PingFang HK", "Hiragino Sans", "Apple SD Gothic Neo", "Songti SC", "STHeiti", "Sarasa Mono SC", "Noto Sans Mono CJK SC"].filter { NSFont(name: $0, size: 12) != nil }
     }
     private static func installed(_ name: String) -> Bool { name == "System Monospaced" || NSFont(name: name, size: 12) != nil }
+    private static func validShell(_ path: String) -> Bool {
+        if path.isEmpty { return true }
+        var isDirectory: ObjCBool = false
+        // Execute permission on a directory means traversal, not a runnable shell.
+        return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            && !isDirectory.boolValue && FileManager.default.isExecutableFile(atPath: path)
+    }
     func validated() throws -> Self {
         guard Self.installed(fontName), fontSize.isFinite, (9...36).contains(fontSize), (0...20000).contains(scrollback) else { throw AkittyError.core("Choose a supported font, size 9–36, and scrollback 0–20,000.") }
         guard cjkFont.isEmpty || NSFont(name: cjkFont, size: 12) != nil else { throw AkittyError.core("Choose an installed CJK font, or Automatic.") }
-        guard shell.isEmpty || (shell.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: shell)) else { throw AkittyError.core("Shell must be an absolute path to an executable, without arguments.") }
+        guard Self.validShell(shell) else { throw AkittyError.core("Shell must be an absolute path to an executable, without arguments.") }
         if !directory.isEmpty {
             var isDirectory: ObjCBool = false
             guard directory.hasPrefix("/"), FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else { throw AkittyError.core("Choose an existing absolute starting directory.") }
@@ -39,12 +46,14 @@ struct TerminalPreferences: Codable, Equatable {
     static func load(from defaults: UserDefaults = .standard) -> Self {
         guard let data = defaults.data(forKey: "terminalPreferences"), var value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
         if let valid = try? value.validated() { return valid }
-        // A deleted shell or directory should reset only itself, not every saved setting.
+        // Recover each invalid field independently, preserving other saved settings.
         let fallback = Self()
         var isDirectory: ObjCBool = false
         if !Self.installed(value.fontName) { value.fontName = fallback.fontName }
         if !value.cjkFont.isEmpty, NSFont(name: value.cjkFont, size: 12) == nil { value.cjkFont = fallback.cjkFont }
-        if !value.shell.isEmpty, !(value.shell.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: value.shell)) { value.shell = fallback.shell }
+        if !value.fontSize.isFinite || !(9...36).contains(value.fontSize) { value.fontSize = fallback.fontSize }
+        if !(0...20000).contains(value.scrollback) { value.scrollback = fallback.scrollback }
+        if !Self.validShell(value.shell) { value.shell = fallback.shell }
         if !value.directory.isEmpty, !(value.directory.hasPrefix("/") && FileManager.default.fileExists(atPath: value.directory, isDirectory: &isDirectory) && isDirectory.boolValue) { value.directory = fallback.directory }
         return (try? value.validated()) ?? fallback
     }
