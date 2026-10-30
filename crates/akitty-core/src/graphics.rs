@@ -797,7 +797,7 @@ impl Graphics {
             }
             return Outcome { reply: reply(&command, None, id), advance: None };
         }
-        if count as usize > MAX_FRAMES { return self.fail(&command, "ENOSPC", "too many animation frames"); }
+        if count as usize >= MAX_FRAMES { return self.fail(&command, "ENOSPC", "too many animation frames"); }
         if command.cols > count { return self.fail(&command, "EINVAL", "no such base frame"); }
         let frame_len = width as usize * height as usize * 4;
         // The first added frame also materializes frame 1 as a separate copy.
@@ -1338,15 +1338,16 @@ fn query_pixel_rule(width: u32, height: u32) -> Result<(), String> {
 }
 
 /// Unwraps one `f=100` payload to the PNG file bytes: base64, then optional zlib.
-/// For PNG the `S=` hint bounds the inflate; without it 32 MiB is allowed.
+/// Direct transfers use `S=` as the inflate bound; for files it is the compressed read window instead.
 /// Inflates `o=z` PNG data; `raw` is the payload after base64 or as read from a file or shared memory.
 fn png_bytes(command: &Command, raw: &[u8]) -> Result<Vec<u8>, String> {
     match command.compression {
         0 => Ok(raw.to_vec()),
         b'z' => {
-            let limit = match command.width {
-                0 => PNG_ZLIB_LIMIT,
-                hint => (hint as usize).min(PNG_ZLIB_LIMIT_MAX),
+            let limit = if command.medium == b'd' && command.read_size != 0 {
+                command.read_size.min(PNG_ZLIB_LIMIT_MAX as u64) as usize
+            } else {
+                PNG_ZLIB_LIMIT
             };
             miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(raw, limit)
                 .map_err(|_| "EINVAL:invalid or oversized zlib data".to_string())
@@ -1769,15 +1770,38 @@ mod tests {
     #[test]
     fn png_zlib_wrapped_transmit_honours_the_size_hint() {
         let mut graphics = Graphics::default();
-        let file = png_file(png::ColorType::Rgba, png::BitDepth::Eight, 1, 1, &[7, 8, 9, 10]);
+        let file = png_file(png::ColorType::Rgba, png::BitDepth::Eight, 2, 2, &[7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
         let packed = encode(&miniz_oxide::deflate::compress_to_vec_zlib(&file, 1));
-        // With the correct hint the image decodes; with a tiny hint the inflate refuses.
-        let ok = graphics.handle(format!("a=t,f=100,o=z,s={},i=1,q=2;{packed}", file.len()).as_bytes(), &context());
+        // s=/v= are pixel dimensions, not the inflate bound: only S= sizes the zlib output.
+        let ok = graphics.handle(format!("a=t,f=100,o=z,s=2,v=2,S={},i=1,q=2;{packed}", file.len()).as_bytes(), &context());
         assert!(ok.reply.is_empty());
-        assert_eq!(graphics.images[&1].rgba, vec![7, 8, 9, 10]);
-        let outcome = graphics.handle(format!("a=t,f=100,o=z,s=4,i=2;{packed}").as_bytes(), &context());
+        assert_eq!(graphics.images[&1].rgba, vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+        // A too-small S= still refuses even though s= is large enough.
+        let outcome = graphics.handle(format!("a=t,f=100,o=z,s=9999,v=9999,S=4,i=2;{packed}").as_bytes(), &context());
         assert!(String::from_utf8(outcome.reply).unwrap().contains("EINVAL"));
         assert!(!graphics.images.contains_key(&2));
+    }
+
+    #[test]
+    fn png_zlib_temp_file_size_selects_only_the_compressed_read_window() {
+        let mut graphics = Graphics::default();
+        let mut file = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut file, 64, 64);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::NoCompression);
+            encoder.write_header().unwrap().write_image_data(&vec![7; 64 * 64 * 4]).unwrap();
+        }
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&file, 1);
+        assert!(packed.len() < file.len());
+        let path = std::env::temp_dir().join(format!("tty-graphics-protocol-akitty-zlib-{}.png", std::process::id()));
+        std::fs::write(&path, &packed).unwrap();
+        let name = encode(path.as_os_str().as_encoded_bytes());
+        let outcome = graphics.handle(format!("a=T,t=t,f=100,o=z,S={},i=1,q=1;{name}", packed.len()).as_bytes(), &context());
+        assert!(outcome.reply.is_empty(), "{}", String::from_utf8_lossy(&outcome.reply));
+        assert_eq!(graphics.images[&1].rgba, vec![7; 64 * 64 * 4]);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -2140,6 +2164,22 @@ mod tests {
         // d=I on an image that was never placed still frees it.
         graphics.handle(b"a=d,d=I,i=1,q=2", &context());
         assert_eq!(graphics.images.keys().copied().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[test]
+    fn animation_frames_stop_at_the_documented_limit() {
+        let mut graphics = Graphics::default();
+        let pixel = encode(&[255, 0, 0, 255]);
+        graphics.handle(format!("a=T,f=32,s=1,v=1,i=1,q=2;{pixel}").as_bytes(), &context());
+        // The transmission is frame 1; append exactly up to the total frame limit.
+        for _ in 1..MAX_FRAMES {
+            let outcome = graphics.handle(format!("a=f,i=1,q=1;{pixel}").as_bytes(), &context());
+            assert!(outcome.reply.is_empty());
+        }
+        assert_eq!(graphics.images[&1].frame_count() as usize, MAX_FRAMES);
+        let outcome = graphics.handle(format!("a=f,i=1,q=1;{pixel}").as_bytes(), &context());
+        assert!(String::from_utf8_lossy(&outcome.reply).contains("ENOSPC"));
+        assert_eq!(graphics.images[&1].frame_count() as usize, MAX_FRAMES);
     }
 
     #[test]

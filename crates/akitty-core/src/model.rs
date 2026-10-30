@@ -243,18 +243,19 @@ impl Model {
     pub fn search(&mut self, text: &str, direction: FindDirection) -> Value {
         let top = self.term.grid().topmost_line().0;
         let bottom = self.term.grid().bottommost_line().0;
-        let origin = self.find.as_ref().filter(|mark| mark.query == text);
+        // A query change, or a grid scroll that moved other text onto the stored line, starts over.
+        let origin = self.find.as_ref().is_some_and(|mark| mark.query == text).then(|| self.current_mark()).flatten();
         let (hit, wrapped) = match direction {
             FindDirection::Latest => (last_match(&self.term, text, top, bottom), false),
             FindDirection::Next => match origin {
-                Some(mark) => match next_match(&self.term, text, mark.line, mark.start_col, top, bottom) {
+                Some((line, start_col, _)) => match next_match(&self.term, text, line, start_col, top, bottom) {
                     Some(hit) => (Some(hit), false),
                     None => (first_match(&self.term, text, top, bottom), true),
                 },
                 None => (last_match(&self.term, text, top, bottom), false),
             },
             FindDirection::Previous => match origin {
-                Some(mark) => match previous_match(&self.term, text, mark.line, mark.start_col, top, bottom) {
+                Some((line, start_col, _)) => match previous_match(&self.term, text, line, start_col, top, bottom) {
                     Some(hit) => (Some(hit), false),
                     None => (last_match(&self.term, text, top, bottom), true),
                 },
@@ -277,6 +278,21 @@ impl Model {
         self.revision = self.revision.saturating_add(1);
         let row = hit.0 + self.term.grid().display_offset() as i32;
         json!({"found": true, "line": hit.0, "row": row, "col": hit.1, "end_col": hit.2, "wrapped": wrapped})
+    }
+    /// The stored hit, when that grid line still contains it. Alacritty line numbers are slots in
+    /// a ring, so a scroll moves other text onto the same line and the old coordinates go stale.
+    fn current_mark(&self) -> Option<(i32, usize, usize)> {
+        let (query, line, start_col, end_col) = {
+            let mark = self.find.as_ref()?;
+            (mark.query.clone(), mark.line, mark.start_col, mark.end_col)
+        };
+        let top = self.term.grid().topmost_line().0;
+        let bottom = self.term.grid().bottommost_line().0;
+        if line < top || line > bottom { return None; }
+        line_matches(&self.term, Line(line), &query)
+            .into_iter()
+            .find(|(start, end)| *start == start_col && *end == end_col)
+            .map(|(start, end)| (line, start, end))
     }
     /// Match spans for each visible row, in viewport order. Empty when no find is active.
     fn visible_search_ranges(&self) -> Vec<Vec<(usize, usize)>> {
@@ -476,7 +492,7 @@ impl Model {
         self.reported_transient = transient;
         self.sync_graphics();
         let search_ranges = self.visible_search_ranges();
-        let active_mark = self.find.as_ref().map(|find| (find.line, find.start_col, find.end_col));
+        let active_mark = self.current_mark();
         let rows = self.size.rows;
         // Pass 1 hashes every row without allocating, to learn which rows differ from the
         // client's copy (the snapshot it was last sent, identified by `since`).
@@ -591,6 +607,7 @@ impl Model {
                 && cell.zerowidth().is_none()
                 && !selected
                 && !searched
+                && !active
                 && bg == DEFAULT_BACKGROUND
                 && cell.hyperlink().is_none()
                 && cell.underline_color().is_none()

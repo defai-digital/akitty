@@ -191,6 +191,33 @@ fn find_moves_between_literal_matches_and_highlights_the_current_one() {
     assert_eq!(response(json!({"op":"find","id":t.0,"text":""}))["ok"], false);
 }
 #[test]
+fn find_active_mark_does_not_stick_to_scrolled_in_text() {
+    let t = Terminal::new(20, 4);
+    t.feed("one two one");
+    assert_eq!(call(json!({"op":"find","id":t.0,"text":"one"}))["col"], 8);
+    // The ring scrolls the match into history and puts other text on its old line.
+    t.feed("\r\nzzzzzzzzzzzz\r\n\r\n\r\n");
+    let scrolled = t.snapshot();
+    let cells = scrolled["cells"].as_array().unwrap();
+    assert!(
+        cells.iter().all(|cell| cell[5].as_u64().unwrap() & 128 == 0),
+        "the active highlight must not stay on the line that scrolled in"
+    );
+    assert!(cells.iter().filter(|cell| cell[2] == "z").all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+    let again = call(json!({"op":"find","id":t.0,"text":"one","direction":"next"}));
+    assert_eq!(again["found"], true);
+    assert!((0..4).contains(&again["row"].as_i64().unwrap()), "next starts over and brings the match back");
+    let shown = t.snapshot();
+    let active: Vec<_> = shown["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|cell| cell[5].as_u64().unwrap() & 128 != 0)
+        .map(|cell| cell[2].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(active, vec!["o".to_string(), "n".to_string(), "e".to_string()]);
+}
+#[test]
 fn actual_pty_roundtrip_resize_and_bounded_shutdown() {
     let id = call(json!({"op":"create","cols":40,"rows":8,"shell":"/bin/sh","cwd":"/tmp"}))["id"]
         .as_u64()

@@ -54,7 +54,7 @@ as APC strings: queries (`a=q`), direct (`t=d`) raw RGB/RGBA (`f=24|32`) and PNG
 inside the first cell, spans derived from the source aspect ratio unless both `c`
 and `r` are given) and deletion (`a=d`). PNG is checked against the pixel limit
 from its header before any frame is allocated, normalized to RGBA8 from every
-colour type and bit depth, and APNG yields only the default image; `o=z` PNG
+colour type and bit depth, and APNG yields only the default image; direct `o=z` PNG
 inflates with the `S=` limit when given (else 32 MiB) and queries decode the
 header only. Files (`t=f`), temp files (`t=t`) and shared memory (`t=s`) follow
 Kitty's rules: the payload is the base64 path or object name, `O=`/`S=` select the
@@ -85,7 +85,7 @@ the limits the core first evicts images without placements (oldest first), then
 those whose placements are all in scrollback, before failing with `ENOSPC`;
 placement overflow evicts scrollback placements first. Images are at most 8 Mi
 pixels, one session holds at most 128 MiB of pixels and 256 placements, and zlib
-output is capped at the declared size. Deletes implement every `d=` mode
+output is capped at the declared size and a hard 128 MiB ceiling. Deletes implement every `d=` mode
 (a/A visible-only, i/I and n/N by id or number with optional `p=`, c/C at the
 cursor, p/P and q/Q at 1-based x=,y= coordinates (q adds z=), x/X by column,
 y/Y by row, z/Z by z-index, r/R by id range, f/F animation frames), affect only the

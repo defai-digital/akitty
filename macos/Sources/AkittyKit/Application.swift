@@ -417,10 +417,16 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         if wasHidden { findBar.field.currentEditor()?.selectAll(nil) }
     }
     func closeFind() {
-        findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0; searchedQuery = nil
-        if let terminal = active {
-            _ = try? terminal.session.call("find", ["clear": true]); terminal.poll()
-            window?.makeFirstResponder(terminal)
+        findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0
+        clearFindHighlights()
+        if let terminal = active { window?.makeFirstResponder(terminal) }
+    }
+    /// The bar is one per window, and a search can have highlighted any pane, so clear them all.
+    private func clearFindHighlights() {
+        searchedQuery = nil
+        for pane in panes {
+            _ = try? pane.terminal.session.call("find", ["clear": true])
+            pane.terminal.poll()
         }
     }
     /// `direction` is `latest`, `next`, or `previous`. An empty field clears the highlight.
@@ -428,7 +434,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         guard let terminal = active else { return }
         let text = findBar.query
         if text.isEmpty {
-            _ = try? terminal.session.call("find", ["clear": true]); searchedQuery = nil; findBar.status.stringValue = ""; terminal.poll(); return
+            clearFindHighlights(); findBar.status.stringValue = ""; return
         }
         let direction = direction == "previous" || text == searchedQuery ? direction : "latest"
         do {

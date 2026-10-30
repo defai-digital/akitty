@@ -575,6 +575,25 @@ final class AkittyTests: XCTestCase {
         let cleared = try XCTUnwrap(terminal.session.snapshot())
         XCTAssertTrue(cleared.cells.allSatisfy { !$0.search && !$0.activeSearch })
     }
+    @MainActor func testClosingFindClearsHighlightsInEveryPane() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let first = try XCTUnwrap(controller.active)
+        _ = try first.session.call("feed", ["text": "one two one"])
+        controller.perform(.find)
+        controller.findQuery = "one"
+        controller.runSearch("latest")
+        XCTAssertFalse(try XCTUnwrap(first.session.snapshot()).cells.filter(\.search).isEmpty)
+        controller.perform(.split)
+        XCTAssertEqual(controller.panes.count, 2)
+        controller.closeFind()
+        for pane in controller.panes {
+            let cells = try XCTUnwrap(pane.terminal.session.snapshot()).cells
+            XCTAssertTrue(cells.allSatisfy { !$0.search && !$0.activeSearch })
+        }
+    }
 
     @MainActor func testEveryTabHasACloseButtonThatClosesOnlyThatTab() async throws {
         _ = NSApplication.shared
