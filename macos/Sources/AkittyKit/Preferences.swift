@@ -105,41 +105,58 @@ extension TerminalPreferences {
     }
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section("Appearance") {
-                    Picker("Font", selection: $draft.fontName) { ForEach(fontChoices, id: \.self) { Text($0) } }
-                    Picker("CJK font", selection: $draft.cjkFont) {
-                        Text("Automatic").tag("")
-                        ForEach(cjkChoices, id: \.self) { Text($0).tag($0) }
-                    }
-                    Text("Chinese, Japanese and Korean text. Automatic follows your system language.").font(.caption).foregroundStyle(.secondary)
-                    Stepper("Font size: \(Int(draft.fontSize)) pt", value: $draft.fontSize, in: 9...36)
-                    Text("Applies to open terminals. ⌘+ and ⌘− adjust an individual pane.").font(.caption).foregroundStyle(.secondary)
-                }
-                Section("New Terminals") {
-                    TextField("Shell", text: $draft.shell, prompt: Text("Default login shell"))
-                    HStack {
-                        TextField("Starting directory", text: $draft.directory, prompt: Text("Home directory"))
-                        Button("Choose…") {
-                            let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-                            if panel.runModal() == .OK { draft.directory = panel.url?.path ?? "" }
+            TabView {
+                Form {
+                    Section("Appearance") {
+                        Picker("Font", selection: $draft.fontName) { ForEach(fontChoices, id: \.self) { Text($0) } }
+                        Picker("CJK font", selection: $draft.cjkFont) {
+                            Text("Automatic").tag("")
+                            ForEach(cjkChoices, id: \.self) { Text($0).tag($0) }
                         }
+                        Text("Chinese, Japanese and Korean text. Automatic follows your system language.").font(.caption).foregroundStyle(.secondary)
+                        Stepper("Font size: \(Int(draft.fontSize)) pt", value: $draft.fontSize, in: 9...36)
+                        Text("Applies to open terminals. ⌘+ and ⌘− adjust an individual pane.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Stepper("Scrollback: \(draft.scrollback) lines", value: $draft.scrollback, in: 0...20000, step: 1000)
-                    Text("Shell, directory and scrollback changes apply to new tabs and splits.").font(.caption).foregroundStyle(.secondary)
-                }
-                Section("Keyboard") {
-                    Toggle("Use Option as Alt", isOn: $draft.optionAsAlt)
-                    Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
-                    Toggle("Allow programs to set the status bar", isOn: $draft.programChrome)
-                    Text("Programs can show a status line, progress, and a small title-bar mark. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
-                }
-                Section("Updates") {
-                    Toggle("Check for updates automatically", isOn: $automaticChecks)
-                    Text("Available updates appear in the title bar. Downloads and restarts require your action.").font(.caption).foregroundStyle(.secondary)
-                    Button("Check for Updates…") { updater.checkForUpdates(nil) }
-                }
-            }.formStyle(.grouped)
+                }.formStyle(.grouped)
+                    .tabItem { Text("Appearance") }
+                Form {
+                    Section("New Terminals") {
+                        TextField("Shell", text: $draft.shell, prompt: Text("Default login shell"))
+                        HStack {
+                            TextField("Starting directory", text: $draft.directory, prompt: Text("Home directory"))
+                                .accessibilityIdentifier("starting-directory")
+                            Button("Clear") { draft.directory = "" }
+                                .disabled(draft.directory.isEmpty)
+                                .help("Use your home directory for new terminals")
+                                .accessibilityIdentifier("clear-starting-directory")
+                            Button("Choose…") {
+                                let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+                                if panel.runModal() == .OK { draft.directory = panel.url?.path ?? "" }
+                            }
+                        }
+                        Stepper("Scrollback: \(draft.scrollback) lines", value: $draft.scrollback, in: 0...20000, step: 1000)
+                        Text("Shell, directory and scrollback changes apply to new tabs and splits.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }.formStyle(.grouped)
+                    .tabItem { Text("Sessions") }
+                Form {
+                    Section("Keyboard") {
+                        Toggle("Use Option as Alt", isOn: $draft.optionAsAlt)
+                        Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
+                        Toggle("Allow programs to set the status bar", isOn: $draft.programChrome)
+                        Text("Programs can show a status line, progress, and a small title-bar mark. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }.formStyle(.grouped)
+                    .tabItem { Text("Keyboard") }
+                Form {
+                    Section("Updates") {
+                        Toggle("Check for updates automatically", isOn: $automaticChecks)
+                        Text("Available updates appear in the title bar. Downloads and restarts require your action.").font(.caption).foregroundStyle(.secondary)
+                        Button("Check for Updates…") { updater.checkForUpdates(nil) }
+                    }
+                }.formStyle(.grouped)
+                    .tabItem { Text("Updates") }
+            }.padding([.top, .horizontal])
             HStack {
                 Text(error).foregroundStyle(.red).font(.caption).accessibilityIdentifier("settings-error")
                 Spacer()
@@ -148,13 +165,13 @@ extension TerminalPreferences {
                     catch { self.error = error.localizedDescription }
                 }.keyboardShortcut(.defaultAction)
             }.padding()
-        }.frame(width: 560, height: 730)
+        }.frame(width: 560, height: 430)
     }
 }
 
 @MainActor final class PreferencesWindow: NSWindowController {
     init(updater: UpdateController) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 430), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"; window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater))
         window.center(); super.init(window: window)

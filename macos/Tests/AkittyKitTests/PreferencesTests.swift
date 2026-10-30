@@ -3,6 +3,32 @@ import AppKit
 @testable import AkittyKit
 
 final class PreferencesTests: XCTestCase {
+    @MainActor func testSettingsDirectoryCanBeSelectedClearedAndSavedWithKeyboard() throws {
+        _ = NSApplication.shared
+        let previousMenu = NSApp.mainMenu
+        defer { NSApp.mainMenu = previousMenu }
+        let app = AkittyApplication(); app.makeMenu()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let field = NSTextField(string: FileManager.default.homeDirectoryForCurrentUser.path)
+        field.frame = NSRect(x: 10, y: 30, width: 380, height: 24)
+        window.contentView?.addSubview(field); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(field)
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
+        XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: event))
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: (field.stringValue as NSString).length))
+        editor.deleteBackward(nil); window.makeFirstResponder(nil)
+        XCTAssertEqual(field.stringValue, "")
+        let suite = "akitty-tests-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var preferences = TerminalPreferences(); preferences.directory = FileManager.default.homeDirectoryForCurrentUser.path
+        try preferences.save(to: defaults)
+        preferences.directory = field.stringValue; try preferences.save(to: defaults)
+        XCTAssertEqual(TerminalPreferences.load(from: defaults).directory, "", "clearing restores the default directory after reload")
+    }
+
     func testDecodingPreferencesSavedBeforeCJKFontExistedKeepsEveryValue() throws {
         let json = #"{"fontName":"Menlo","fontSize":14,"shell":"","directory":"","scrollback":5000,"optionAsAlt":false}"#
         let preferences = try JSONDecoder().decode(TerminalPreferences.self, from: Data(json.utf8))
