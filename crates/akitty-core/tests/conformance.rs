@@ -145,6 +145,52 @@ fn selection_and_find() {
     );
 }
 #[test]
+fn find_moves_between_literal_matches_and_highlights_the_current_one() {
+    let t = Terminal::new(20, 4);
+    t.feed("one two one\r\nnope\r\nwide 界 end");
+    let latest = call(json!({"op":"find","id":t.0,"text":"one"}));
+    assert_eq!(latest["col"], 8, "the latest hit is the rightmost one");
+    assert_eq!(latest["end_col"], 11);
+    assert_eq!(latest["wrapped"], false);
+    let marked = |row: i64, col: i64| {
+        t.snapshot()["cells"].as_array().unwrap().iter().find(|cell| cell[0] == row && cell[1] == col).unwrap()[5].as_u64().unwrap()
+    };
+    let row = latest["row"].as_i64().unwrap();
+    assert_eq!(marked(row, 8) & 192, 192, "the current hit is the active highlight");
+    assert_eq!(marked(row, 0) & 192, 64, "an earlier hit on the same row is highlighted, not active");
+    assert_eq!(marked(row, 4) & 64, 0, "text that is not the query stays unmarked");
+    let previous = call(json!({"op":"find","id":t.0,"text":"one","direction":"previous"}));
+    assert_eq!(previous["col"], 0);
+    assert_eq!(previous["wrapped"], false);
+    let wrapped = call(json!({"op":"find","id":t.0,"text":"one","direction":"previous"}));
+    assert_eq!(wrapped["col"], 8);
+    assert_eq!(wrapped["wrapped"], true);
+    let next = call(json!({"op":"find","id":t.0,"text":"one","direction":"next"}));
+    assert_eq!(next["col"], 0);
+    assert_eq!(next["wrapped"], true);
+    assert_eq!(call(json!({"op":"find","id":t.0,"text":"One"}))["found"], false, "matching stays case sensitive");
+    let wide = call(json!({"op":"find","id":t.0,"text":"界"}));
+    assert_eq!(wide["found"], true);
+    assert_eq!(wide["end_col"].as_u64().unwrap() - wide["col"].as_u64().unwrap(), 2, "a wide hit covers both columns");
+    let wide_row = wide["row"].as_i64().unwrap();
+    let wide_col = wide["col"].as_i64().unwrap();
+    assert_eq!(marked(wide_row, wide_col) & 192, 192);
+    assert_eq!(marked(wide_row, wide_col + 1) & 64, 64, "the wide spacer is highlighted too");
+    t.feed("\r\n");
+    for _ in 0..6 { t.feed("pad\r\n"); }
+    let buried = call(json!({"op":"find","id":t.0,"text":"needle-absent"}));
+    assert_eq!(buried["found"], false);
+    let brought = call(json!({"op":"find","id":t.0,"text":"wide"}));
+    assert_eq!(brought["found"], true);
+    let shown = brought["row"].as_i64().unwrap();
+    assert!((0..4).contains(&shown), "a hit in scrollback is scrolled into view");
+    assert_eq!(call(json!({"op":"find","id":t.0,"clear":true}))["found"], false);
+    let cleared = t.snapshot();
+    assert!(cleared["cells"].as_array().unwrap().iter().all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+    assert_eq!(response(json!({"op":"find","id":t.0,"text":"one","direction":"sideways"}))["ok"], false);
+    assert_eq!(response(json!({"op":"find","id":t.0,"text":""}))["ok"], false);
+}
+#[test]
 fn actual_pty_roundtrip_resize_and_bounded_shutdown() {
     let id = call(json!({"op":"create","cols":40,"rows":8,"shell":"/bin/sh","cwd":"/tmp"}))["id"]
         .as_u64()

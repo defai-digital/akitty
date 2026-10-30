@@ -26,7 +26,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | resize | id, cols, rows | Resize kernel PTY and terminal state in worker order |
 | scroll | id, lines | Bounded scrollback movement |
 | select | id, start_row, start_col, end_row, end_col | Visible cell coordinates; return selected text |
-| find | id, text | Latest literal matching line in history; bounded query |
+| find | id; text, or clear; optional direction | Literal search. `latest` (default) lands on the rightmost hit of the bottom-most matching line; `next` and `previous` move and wrap. `clear` drops the highlight. Query is 1–256 bytes, case sensitive, and does not cross a row |
 | feed | id, text | Parser input for headless sessions only |
 | cell_size | id, width, height | Cell size in pixels (1–256 by 1–512), used for graphics placement and size reports |
 | chrome | id; optional clear, status, mark, progress, sprite | Replace the session chrome document. Applies even when program chrome is off |

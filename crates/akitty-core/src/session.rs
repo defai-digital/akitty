@@ -1,7 +1,7 @@
 use crate::child::{ChildGuard, ChildSlot};
 use crate::model::{Model, Size};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::index::{Column, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{TermMode, viewport_to_point};
 use portable_pty::{CommandBuilder, PtySize};
@@ -235,26 +235,24 @@ impl Session {
         model.revision += 1;
         Ok(json!({"text": model.term.selection_to_string().unwrap_or_default()}))
     }
-    pub fn find(&self, text: &str) -> Result<Value, String> {
+    pub fn find(&self, text: &str, direction: Option<&str>, clear: bool) -> Result<Value, String> {
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        if clear {
+            if model.find.take().is_some() {
+                model.revision = model.revision.saturating_add(1);
+            }
+            return Ok(json!({"found": false}));
+        }
         if text.is_empty() || text.len() > 256 {
             return Err("search must contain 1..256 bytes".into());
         }
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-        let top = model.term.grid().topmost_line().0;
-        let bottom = model.term.grid().bottommost_line().0;
-        let cols = model.size.cols;
-        for row in (top..=bottom).rev() {
-            let line = model.term.bounds_to_string(
-                Point::new(Line(row), Column(0)),
-                Point::new(Line(row), Column(cols - 1)),
-            );
-            if line.contains(text) {
-                model.term.scroll_to_point(Point::new(Line(row), Column(0)));
-                model.revision += 1;
-                return Ok(json!({"found": true}));
-            }
-        }
-        Ok(json!({"found": false}))
+        let direction = match direction {
+            None | Some("latest") => crate::model::FindDirection::Latest,
+            Some("next") => crate::model::FindDirection::Next,
+            Some("previous") => crate::model::FindDirection::Previous,
+            Some(_) => return Err("unknown find direction".into()),
+        };
+        Ok(model.search(text, direction))
     }
     pub fn set_chrome(&self, input: crate::chrome::ChromeInput) -> Result<(), String> {
         self.model.lock().map_err(|_| "terminal unavailable")?.set_chrome(input)

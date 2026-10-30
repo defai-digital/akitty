@@ -15,6 +15,8 @@ export const commands: readonly Command[] = Object.freeze([
   { id: "copy", title: "Copy Selection", shortcut: "⌘C", keywords: ["clipboard"] },
   { id: "paste", title: "Paste Text", shortcut: "⌘V", keywords: ["clipboard"] },
   { id: "find", title: "Find in Scrollback", shortcut: "⌘F", keywords: ["search", "history"] },
+  { id: "find-next", title: "Find Next", shortcut: "⌘G", keywords: ["search", "next"] },
+  { id: "find-previous", title: "Find Previous", shortcut: "⌘⇧G", keywords: ["search", "previous"] },
   { id: "font-increase", title: "Increase Font Size", shortcut: "⌘+", keywords: ["zoom", "larger"] },
   { id: "font-decrease", title: "Decrease Font Size", shortcut: "⌘−", keywords: ["zoom", "smaller"] },
   { id: "font-reset", title: "Reset Font Size", shortcut: "⌘0", keywords: ["zoom", "default"] },

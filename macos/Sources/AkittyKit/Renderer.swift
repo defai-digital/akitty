@@ -511,8 +511,12 @@ final class GridRasterizer: @unchecked Sendable {
         // Images below z = -2^30 are drawn under every non-default cell background; default-background cells were
         // already painted by the fill above, so skipping them leaves those images visible.
         drawImages { $0.z < Self.underlayZ }
-        for cell in fills where cell.selected || cell.bg != Self.defaultBackground {
-            context.setFillColor(cell.selected ? CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) : color(cell.bg)); context.fill(rect(cell))
+        for cell in fills where cell.selected || cell.search || cell.bg != Self.defaultBackground {
+            let fill: CGColor = if cell.selected { CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) }
+                else if cell.activeSearch { CGColor(red: 0.62, green: 0.46, blue: 0.12, alpha: 1) }
+                else if cell.search { CGColor(red: 0.40, green: 0.32, blue: 0.10, alpha: 1) }
+                else { color(cell.bg) }
+            context.setFillColor(fill); context.fill(rect(cell))
         }
         // Remaining negative z-index images sit between the cell backgrounds and the text. Frames with images are always full.
         drawImages { $0.z >= Self.underlayZ && $0.z < 0 }

@@ -117,8 +117,8 @@ instead of repainting the window. `kitten icat` (every transfer mode and `--unic
 exercised by `cargo test --test real_tools -- --ignored` when installed, and AX Code's opening and ending scenes run; OSC 8
 hyperlinks open with Command-click, and underline styles and strikethrough render.
 The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
-modifier-only keys); base-layout alternate keys are reported only for US-position keys. Search currently finds the
-latest literal match. Full external esctest qualification, VoiceOver user testing,
+modifier-only keys); base-layout alternate keys are reported only for US-position keys. Find keeps a bar open,
+highlights every visible literal match, and moves to the next or previous one. Full external esctest qualification, VoiceOver user testing,
 performance parity and testing on every supported Mac version remain separate work.
 
 ## Build and run
@@ -149,6 +149,7 @@ the Settings starting directory or an opened folder.
 | Command palette | Command-Shift-P |
 | Copy / paste | Command-C / Command-V |
 | Find in scrollback | Command-F |
+| Find next / previous | Command-G / Command-Shift-G |
 | Font larger / smaller / reset | Command-Plus / Command-Minus / Command-0 |
 
 Closing a live terminal asks for confirmation. Terminal-initiated clipboard reads

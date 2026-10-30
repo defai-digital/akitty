@@ -75,7 +75,14 @@ enum Request {
     },
     Find {
         id: u64,
+        #[serde(default)]
         text: String,
+        /// `latest` (default), `next`, or `previous`.
+        #[serde(default)]
+        direction: Option<String>,
+        /// Drop the current highlight. `text` is ignored.
+        #[serde(default)]
+        clear: bool,
     },
     /// Replace the session chrome document. `clear` removes it. This entry
     /// applies even when program chrome is off.
@@ -248,7 +255,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                     end_col,
                     ..
                 } => session.select(start_row, start_col, end_row, end_col),
-                Request::Find { text, .. } => session.find(&text),
+                Request::Find { text, direction, clear, .. } => session.find(&text, direction.as_deref(), clear),
                 Request::Chrome { clear, status, mark, progress, sprite, .. } => {
                     session.set_chrome(chrome::ChromeInput { clear, status, mark, progress, sprite: sprite.map(|value| *value) })?;
                     Ok(json!({}))

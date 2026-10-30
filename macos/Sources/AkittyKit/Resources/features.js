@@ -32,6 +32,8 @@ var AkittyFeatures = (() => {
     { id: "copy", title: "Copy Selection", shortcut: "\u2318C", keywords: ["clipboard"] },
     { id: "paste", title: "Paste Text", shortcut: "\u2318V", keywords: ["clipboard"] },
     { id: "find", title: "Find in Scrollback", shortcut: "\u2318F", keywords: ["search", "history"] },
+    { id: "find-next", title: "Find Next", shortcut: "\u2318G", keywords: ["search", "next"] },
+    { id: "find-previous", title: "Find Previous", shortcut: "\u2318\u21E7G", keywords: ["search", "previous"] },
     { id: "font-increase", title: "Increase Font Size", shortcut: "\u2318+", keywords: ["zoom", "larger"] },
     { id: "font-decrease", title: "Decrease Font Size", shortcut: "\u2318\u2212", keywords: ["zoom", "smaller"] },
     { id: "font-reset", title: "Reset Font Size", shortcut: "\u23180", keywords: ["zoom", "default"] }

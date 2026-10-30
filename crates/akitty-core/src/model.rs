@@ -4,7 +4,8 @@ use crate::chrome::{self, Chrome, Filter as ChromeFilter, Segment as ChromeSegme
 use crate::graphics::{self, ApcFilter, Graphics, Segment};
 use crate::placeholder;
 use crate::tracker::{Tracker, Tracking};
-use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::Flags};
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::{Flags, LineLength}};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -78,6 +79,9 @@ const ATTR_UNDERLINE: u16 = 4;
 const ATTR_SELECTED: u16 = 8;
 const ATTR_WIDE: u16 = 16;
 const ATTR_STRIKE: u16 = 32;
+/// Bits 6 and 7. Underline style occupies bits 8–10, so these stay clear of it.
+const ATTR_SEARCH: u16 = 64;
+const ATTR_ACTIVE_SEARCH: u16 = 128;
 const ATTR_USTYLE_SHIFT: u16 = 8;
 
 impl Serialize for CellOut {
@@ -183,6 +187,22 @@ pub struct Model {
     pub error: Option<String>,
     pub exited: bool,
     pub exit_code: Option<u32>,
+    /// Literal find. Visible hits use `query`; `line` and the column span are the current hit.
+    pub find: Option<FindMark>,
+}
+
+/// One literal hit. `end_col` is exclusive and stays on `line` (a hit does not cross a row).
+pub struct FindMark {
+    pub query: String,
+    pub line: i32,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
+pub enum FindDirection {
+    Latest,
+    Next,
+    Previous,
 }
 impl Model {
     pub fn new(size: Size, scrollback: usize) -> Self {
@@ -216,8 +236,57 @@ impl Model {
             error: None,
             exited: false,
             exit_code: None,
+            find: None,
         }
     }
+    /// Move to a literal hit and remember it for the next snapshot. `text` is 1..=256 bytes.
+    pub fn search(&mut self, text: &str, direction: FindDirection) -> Value {
+        let top = self.term.grid().topmost_line().0;
+        let bottom = self.term.grid().bottommost_line().0;
+        let origin = self.find.as_ref().filter(|mark| mark.query == text);
+        let (hit, wrapped) = match direction {
+            FindDirection::Latest => (last_match(&self.term, text, top, bottom), false),
+            FindDirection::Next => match origin {
+                Some(mark) => match next_match(&self.term, text, mark.line, mark.start_col, top, bottom) {
+                    Some(hit) => (Some(hit), false),
+                    None => (first_match(&self.term, text, top, bottom), true),
+                },
+                None => (last_match(&self.term, text, top, bottom), false),
+            },
+            FindDirection::Previous => match origin {
+                Some(mark) => match previous_match(&self.term, text, mark.line, mark.start_col, top, bottom) {
+                    Some(hit) => (Some(hit), false),
+                    None => (last_match(&self.term, text, top, bottom), true),
+                },
+                None => (last_match(&self.term, text, top, bottom), false),
+            },
+        };
+        let Some(hit) = hit else {
+            if self.find.take().is_some() {
+                self.revision = self.revision.saturating_add(1);
+            }
+            return json!({"found": false});
+        };
+        self.find = Some(FindMark {
+            query: text.to_string(),
+            line: hit.0,
+            start_col: hit.1,
+            end_col: hit.2,
+        });
+        self.term.scroll_to_point(Point::new(Line(hit.0), Column(hit.1)));
+        self.revision = self.revision.saturating_add(1);
+        let row = hit.0 + self.term.grid().display_offset() as i32;
+        json!({"found": true, "line": hit.0, "row": row, "col": hit.1, "end_col": hit.2, "wrapped": wrapped})
+    }
+    /// Match spans for each visible row, in viewport order. Empty when no find is active.
+    fn visible_search_ranges(&self) -> Vec<Vec<(usize, usize)>> {
+        let Some(find) = &self.find else { return Vec::new() };
+        let offset = self.term.grid().display_offset() as i32;
+        (0..self.size.rows)
+            .map(|row| line_matches(&self.term, Line(row as i32 - offset), &find.query))
+            .collect()
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut overflowed = false;
@@ -406,6 +475,8 @@ impl Model {
         }
         self.reported_transient = transient;
         self.sync_graphics();
+        let search_ranges = self.visible_search_ranges();
+        let active_mark = self.find.as_ref().map(|find| (find.line, find.start_col, find.end_col));
         let rows = self.size.rows;
         // Pass 1 hashes every row without allocating, to learn which rows differ from the
         // client's copy (the snapshot it was last sent, identified by `since`).
@@ -422,9 +493,10 @@ impl Model {
                 }
                 let cell = indexed.cell;
                 let selected = content.selection.as_ref().is_some_and(|s| s.contains(indexed.point));
+                let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.point.column.0, indexed.point.line.0);
                 let mut hash = mix(hashes[row as usize], u64::from(cell.c) | u64::from(cell.flags.bits()) << 32);
                 hash = mix(hash, pack(resolve(cell.fg, content.colors)) << 32 | pack(resolve(cell.bg, content.colors)));
-                hash = mix(hash, u64::from(selected));
+                hash = mix(hash, u64::from(selected) | u64::from(searched) << 1 | u64::from(active) << 2);
                 if let Some(extra) = cell.zerowidth() {
                     for ch in extra {
                         hash = mix(hash, u64::from(*ch));
@@ -510,6 +582,7 @@ impl Model {
                 .selection
                 .as_ref()
                 .is_some_and(|s| s.contains(indexed.point));
+            let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.point.column.0, indexed.point.line.0);
             text[row as usize].push_str(&value);
             // Blank cells that draw as the clear colour carry no information beyond `lines`;
             // skipping them shrinks a quiet screen's snapshot by more than 90%.
@@ -517,6 +590,7 @@ impl Model {
                 && cell.c == ' '
                 && cell.zerowidth().is_none()
                 && !selected
+                && !searched
                 && bg == DEFAULT_BACKGROUND
                 && cell.hyperlink().is_none()
                 && cell.underline_color().is_none()
@@ -529,6 +603,8 @@ impl Model {
                 | flag(cell.flags.contains(Flags::ITALIC), ATTR_ITALIC)
                 | flag(cell.flags.intersects(Flags::ALL_UNDERLINES), ATTR_UNDERLINE)
                 | flag(selected, ATTR_SELECTED)
+                | flag(searched, ATTR_SEARCH)
+                | flag(active, ATTR_ACTIVE_SEARCH)
                 | flag(cell.flags.contains(Flags::WIDE_CHAR), ATTR_WIDE)
                 | flag(cell.flags.contains(Flags::STRIKEOUT), ATTR_STRIKE)
                 | u16::from(ustyle.unwrap_or(0)) << ATTR_USTYLE_SHIFT;
@@ -677,6 +753,78 @@ pub fn palette(index: usize) -> Rgb {
         b: rgb[2],
     }
 }
+fn search_marks(ranges: &[Vec<(usize, usize)>], active: Option<(i32, usize, usize)>, row: i32, col: usize, line: i32) -> (bool, bool) {
+    let Some(spans) = usize::try_from(row).ok().and_then(|row| ranges.get(row)) else { return (false, false) };
+    let searched = spans.iter().any(|(start, end)| col >= *start && col < *end);
+    let active = active.is_some_and(|(mark_line, start, end)| line == mark_line && col >= start && col < end);
+    (searched, active)
+}
+/// Literal hits on one grid line: `(start_col, end_col)` with `end_col` exclusive.
+/// The text is the cell characters a person sees (primary plus zero-width), one row at a time.
+fn line_matches(term: &Term<Events>, line: Line, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() { return Vec::new(); }
+    let grid = term.grid();
+    let row = &grid[line];
+    let limit = row.line_length().0.min(grid.columns());
+    let mut text = String::new();
+    // Byte offset of each glyph, its column, and how many columns it occupies.
+    let mut glyphs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut col = 0usize;
+    while col < limit {
+        let cell = &row[Column(col)];
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            col += 1;
+            continue;
+        }
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        glyphs.push((text.len(), col, width));
+        text.push(cell.c);
+        if let Some(extra) = cell.zerowidth() {
+            for ch in extra { text.push(*ch); }
+        }
+        col += 1;
+    }
+    let mut found = Vec::new();
+    let mut from = 0usize;
+    while from < text.len() {
+        let Some(pos) = text[from..].find(query) else { break };
+        let start = from + pos;
+        let end = start + query.len();
+        let start_glyph = glyphs.iter().rev().find(|glyph| glyph.0 <= start);
+        let end_glyph = glyphs.iter().rev().find(|glyph| glyph.0 < end);
+        if let (Some((_, col, _)), Some((_, end_col, width))) = (start_glyph, end_glyph) {
+            found.push((*col, end_col + width));
+        }
+        if end <= from { break; }
+        from = end;
+    }
+    found
+}
+fn first_match(term: &Term<Events>, query: &str, top: i32, bottom: i32) -> Option<(i32, usize, usize)> {
+    if top > bottom { return None; }
+    (top..=bottom).find_map(|line| line_matches(term, Line(line), query).into_iter().next().map(|(start, end)| (line, start, end)))
+}
+fn last_match(term: &Term<Events>, query: &str, top: i32, bottom: i32) -> Option<(i32, usize, usize)> {
+    if top > bottom { return None; }
+    (top..=bottom).rev().find_map(|line| line_matches(term, Line(line), query).into_iter().next_back().map(|(start, end)| (line, start, end)))
+}
+fn next_match(term: &Term<Events>, query: &str, line: i32, col: usize, top: i32, bottom: i32) -> Option<(i32, usize, usize)> {
+    if (top..=bottom).contains(&line)
+        && let Some((start, end)) = line_matches(term, Line(line), query).into_iter().find(|(start, _)| *start > col)
+    {
+        return Some((line, start, end));
+    }
+    first_match(term, query, line.saturating_add(1).max(top), bottom)
+}
+fn previous_match(term: &Term<Events>, query: &str, line: i32, col: usize, top: i32, bottom: i32) -> Option<(i32, usize, usize)> {
+    if (top..=bottom).contains(&line)
+        && let Some((start, end)) = line_matches(term, Line(line), query).into_iter().rev().find(|(start, _)| *start < col)
+    {
+        return Some((line, start, end));
+    }
+    last_match(term, query, top, line.saturating_sub(1).min(bottom))
+}
+
 /// Cheap order-dependent 64-bit mixing for row signatures; a collision only delays one row's repaint.
 #[inline]
 fn mix(hash: u64, value: u64) -> u64 {
@@ -704,6 +852,12 @@ fn expand_cell(cell: &Value) -> Value {
     }
     if attrs & ATTR_STRIKE != 0 {
         fields.insert("strike".into(), json!(true));
+    }
+    if attrs & ATTR_SEARCH != 0 {
+        fields.insert("search".into(), json!(true));
+    }
+    if attrs & ATTR_ACTIVE_SEARCH != 0 {
+        fields.insert("active_search".into(), json!(true));
     }
     if let Some(link) = cell.get(7) {
         fields.insert("link".into(), link.clone());

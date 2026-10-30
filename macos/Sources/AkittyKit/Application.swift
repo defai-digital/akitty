@@ -124,6 +124,51 @@ import AppKit
 /// A tab menu entry that remembers which tabs it acts on.
 final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
 
+/// The find bar. Return moves to the next hit, Shift-Return to the previous, and Escape closes it.
+@MainActor final class FindBar: NSView, NSTextFieldDelegate {
+    let field = NSTextField()
+    let status = NSTextField(labelWithString: "")
+    var onChange: (() -> Void)?, onSubmit: ((Bool) -> Void)?, onCancel: (() -> Void)?, onStep: ((Bool) -> Void)?
+    var query: String { field.stringValue }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        field.placeholderString = "Find in scrollback"; field.delegate = self
+        field.setAccessibilityLabel("Find in scrollback"); field.setAccessibilityIdentifier("find-query")
+        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
+        status.setAccessibilityIdentifier("find-status")
+        let previous = button("chevron.left", "Find previous", identifier: "find-previous", action: #selector(stepBackward(_:)))
+        let next = button("chevron.right", "Find next", identifier: "find-next", action: #selector(stepForward(_:)))
+        let close = button("xmark", "Close find", identifier: "find-close", action: #selector(closeClicked(_:)))
+        let stack = NSStackView(views: [field, previous, next, status, close])
+        stack.orientation = .horizontal; stack.spacing = 6; stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        status.setContentHuggingPriority(.required, for: .horizontal)
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 160)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
+    func controlTextDidChange(_ obj: Notification) { onChange?() }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if selector == #selector(NSResponder.insertNewline(_:)) { onSubmit?(NSApp.currentEvent?.modifierFlags.contains(.shift) == true); return true }
+        if selector == #selector(NSResponder.cancelOperation(_:)) { onCancel?(); return true }
+        return false
+    }
+    @objc private func stepBackward(_ sender: Any?) { onStep?(true) }
+    @objc private func stepForward(_ sender: Any?) { onStep?(false) }
+    @objc private func closeClicked(_ sender: Any?) { onCancel?() }
+    private func button(_ symbol: String, _ label: String, identifier: String, action: Selector) -> NSButton {
+        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!, target: self, action: action)
+        button.bezelStyle = .smallSquare; button.imageScaling = .scaleProportionallyDown
+        button.toolTip = label; button.setAccessibilityLabel(label); button.setAccessibilityIdentifier(identifier)
+        return button
+    }
+}
+
 @MainActor final class TerminalWindow: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
     let tabs = NSTabView()
     private let tabStrip = NSStackView()
@@ -142,6 +187,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     weak var app: AkittyApplication?
     private var palette: PaletteController?
     private let closeConfirmation = CloseConfirmation()
+    let findBar = FindBar()
+    private var findBarHeight: NSLayoutConstraint!
+    private var findBarGap: NSLayoutConstraint!
+    /// The query last sent to the core. Return advances when the field still holds it.
+    private var searchedQuery: String?
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
     init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
@@ -162,12 +212,26 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         plus.bezelStyle = .circular; plus.contentTintColor = .labelColor; plus.toolTip = "New tab (⌘T)"; plus.setAccessibilityIdentifier("new-terminal-tab")
         plus.setContentHuggingPriority(.required, for: .horizontal)
         bar.addArrangedSubview(tabStrip); bar.addArrangedSubview(plus)
-        for view in [bar, tabs] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
+        findBar.isHidden = true
+        findBar.onChange = { [weak self] in self?.runSearch("latest") }
+        findBar.onSubmit = { [weak self] shift in
+            guard let self else { return }
+            let direction = if shift { "previous" } else if self.findBar.query == self.searchedQuery { "next" } else { "latest" }
+            self.runSearch(direction)
+        }
+        findBar.onStep = { [weak self] previous in self?.runSearch(previous ? "previous" : "next") }
+        findBar.onCancel = { [weak self] in self?.closeFind() }
+        for view in [bar, findBar, tabs] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
+        findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
+        // A hidden bar adds nothing between the tab strip and the terminals.
+        findBarGap = tabs.topAnchor.constraint(equalTo: findBar.bottomAnchor)
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: content.topAnchor, constant: 4), bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), bar.heightAnchor.constraint(equalToConstant: 28),
             plus.widthAnchor.constraint(equalToConstant: 30), tabStrip.heightAnchor.constraint(equalTo: bar.heightAnchor),
-            tabs.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4), tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            findBar.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4), findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), findBarHeight, findBarGap,
+            tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         window.contentView = content
@@ -276,9 +340,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             case .newTab: try newTab()
             case .split: if let split = tabs.selectedTabViewItem?.view as? NSSplitView { try addPane(to: split) }
             case .closePane: if let terminal { close(terminal) }
-            case .copy: terminal?.copy(nil)
-            case .paste: terminal?.paste(nil)
-            case .find: if let terminal { find(terminal) }
+            case .copy: if self.editingFind { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) } else { terminal?.copy(nil) }
+            case .paste: if self.editingFind { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) } else { terminal?.paste(nil) }
+            case .find: showFind()
+            case .findNext: showFind(); runSearch(findBar.query == searchedQuery ? "next" : "latest")
+            case .findPrevious: showFind(); runSearch("previous")
             case .fontIncrease: terminal?.changeFont(1)
             case .fontDecrease: terminal?.changeFont(-1)
             case .fontReset: terminal?.changeFont(nil)
@@ -339,19 +405,40 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         refreshTabs()
         if tabs.numberOfTabViewItems == 0 { window?.close() } else { window?.makeFirstResponder(active) }
     }
-    private func find(_ terminal: TerminalView) {
-        guard let window else { return }
-        let alert = NSAlert(); alert.messageText = "Find in scrollback"; alert.addButton(withTitle: "Find"); alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0,y: 0,width: 320,height: 26)); field.placeholderString = "Text to find"; alert.accessoryView = field
-        alert.beginSheetModal(for: window) { response in
-            guard response == .alertFirstButtonReturn, !field.stringValue.isEmpty else { return }
-            do {
-                let data = try terminal.session.call("find", ["text": field.stringValue])
-                let found = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["found"] as? Bool ?? false
-                terminal.poll(); if !found { terminal.onStatus?("No matching text") }
-            } catch { terminal.onStatus?(error.localizedDescription) }
+    private var editingFind: Bool { window?.firstResponder is NSTextView && findBar.window != nil && !findBar.isHidden }
+    var findQuery: String { get { findBar.query } set { findBar.field.stringValue = newValue } }
+    var findStatus: String { findBar.status.stringValue }
+    var findBarVisible: Bool { !findBar.isHidden }
+    func showFind() {
+        let wasHidden = findBar.isHidden
+        findBar.isHidden = false; findBarHeight.constant = 28; findBarGap.constant = 4
+        window?.layoutIfNeeded()
+        window?.makeFirstResponder(findBar.field)
+        if wasHidden { findBar.field.currentEditor()?.selectAll(nil) }
+    }
+    func closeFind() {
+        findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0; searchedQuery = nil
+        if let terminal = active {
+            _ = try? terminal.session.call("find", ["clear": true]); terminal.poll()
+            window?.makeFirstResponder(terminal)
         }
-        alert.window.makeFirstResponder(field)
+    }
+    /// `direction` is `latest`, `next`, or `previous`. An empty field clears the highlight.
+    func runSearch(_ direction: String) {
+        guard let terminal = active else { return }
+        let text = findBar.query
+        if text.isEmpty {
+            _ = try? terminal.session.call("find", ["clear": true]); searchedQuery = nil; findBar.status.stringValue = ""; terminal.poll(); return
+        }
+        let direction = direction == "previous" || text == searchedQuery ? direction : "latest"
+        do {
+            let data = try terminal.session.call("find", ["text": text, "direction": direction])
+            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let found = object?["found"] as? Bool ?? false
+            findBar.status.stringValue = found ? ((object?["wrapped"] as? Bool == true) ? "Wrapped" : "") : "Not found"
+            searchedQuery = text
+            terminal.poll()
+        } catch { findBar.status.stringValue = error.localizedDescription }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if panes.isEmpty || panes.allSatisfy({ $0.terminal.snapshot?.exited == true }) { return true }
@@ -527,9 +614,13 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("Shell"), edit = menu("Edit"), view = menu("View")
-        func add(_ command: NativeCommand, key: String, to menu: NSMenu) { let item = menu.addItem(withTitle: command.title, action: #selector(self.command(_:)), keyEquivalent: key); item.target = self; item.representedObject = command.rawValue }
+        func add(_ command: NativeCommand, key: String, modifiers: NSEvent.ModifierFlags = [.command], to menu: NSMenu) {
+            let item = menu.addItem(withTitle: command.title, action: #selector(self.command(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers; item.target = self; item.representedObject = command.rawValue
+        }
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         add(.copy,key: "c",to: edit); add(.paste,key: "v",to: edit); add(.find,key: "f",to: edit)
+        add(.findNext,key: "g",to: edit); add(.findPrevious,key: "g",modifiers: [.command, .shift],to: edit)
         let paletteItem = view.addItem(withTitle: "Command Palette…", action: #selector(palette(_:)), keyEquivalent: "p"); paletteItem.keyEquivalentModifierMask = [.command,.shift]; paletteItem.target = self
         add(.fontIncrease,key: "+",to: view); add(.fontDecrease,key: "-",to: view); add(.fontReset,key: "0",to: view)
         let window = menu("Window"); NSApp.windowsMenu = window

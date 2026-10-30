@@ -44,6 +44,9 @@ public struct Cell: Codable, Sendable {
     public let italic: Bool
     public let underline: Bool
     public let selected: Bool
+    /// A visible literal find hit. `activeSearch` is the hit next/previous last landed on.
+    public let search: Bool
+    public let activeSearch: Bool
     public let wide: Bool
     /// 1 single, 2 double, 3 curly, 4 dotted, 5 dashed; absent when the cell is not underlined.
     public let ustyle: UInt8?
@@ -53,36 +56,39 @@ public struct Cell: Codable, Sendable {
     public let link: Int?
     /// The core sends a cell as `[row, col, text, fg, bg, attrs]`, then `ucolor` (or null) and `link` when set.
     /// Colours are packed 0xRRGGBB; `attrs` bits are 1 bold, 2 italic, 4 underline, 8 selected, 16 wide,
-    /// 32 strike, with the underline style in bits 8-10. Positional cells decode several times faster than keyed ones.
+    /// 32 strike, 64 search, 128 active search, with the underline style in bits 8-10.
+    /// Positional cells decode several times faster than keyed ones.
     public init(from decoder: Decoder) throws {
         var c = try decoder.unkeyedContainer()
-        row = try c.decode(Int.self)
-        col = try c.decode(Int.self)
-        text = try c.decode(String.self)
-        fg = Self.rgb(try c.decode(UInt32.self))
-        bg = Self.rgb(try c.decode(UInt32.self))
-        let attrs = try c.decode(UInt16.self)
+        let row = try c.decode(Int.self), col = try c.decode(Int.self), text = try c.decode(String.self)
+        let fg = Self.rgb(try c.decode(UInt32.self)), bg = Self.rgb(try c.decode(UInt32.self)), attrs = try c.decode(UInt16.self)
+        let ucolor = c.isAtEnd ? nil : try c.decodeNil() ? nil : Self.rgb(try c.decode(UInt32.self))
+        self.init(row: row, col: col, text: text, fg: fg, bg: bg, attrs: attrs, ucolor: ucolor, link: c.isAtEnd ? nil : try c.decode(Int.self))
+    }
+    /// A cell from its wire fields. The positional decoder and a hand-written reader share this mapping.
+    init(row: Int, col: Int, text: String, fg: [UInt8], bg: [UInt8], attrs: UInt16, ucolor: [UInt8]?, link: Int?) {
+        self.row = row; self.col = col; self.text = text; self.fg = fg; self.bg = bg; self.ucolor = ucolor; self.link = link
         bold = attrs & 1 != 0
         italic = attrs & 2 != 0
         underline = attrs & 4 != 0
         selected = attrs & 8 != 0
+        search = attrs & 64 != 0
+        activeSearch = attrs & 128 != 0
         wide = attrs & 16 != 0
         strike = attrs & 32 != 0 ? true : nil
         let style = UInt8(attrs >> 8 & 7)
         ustyle = style == 0 ? nil : style
-        ucolor = c.isAtEnd ? nil : try c.decodeNil() ? nil : Self.rgb(try c.decode(UInt32.self))
-        link = c.isAtEnd ? nil : try c.decode(Int.self)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.unkeyedContainer()
         try c.encode(row); try c.encode(col); try c.encode(text); try c.encode(Self.packed(fg)); try c.encode(Self.packed(bg))
         let attrs: UInt16 = (bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0) | (selected ? 8 : 0) | (wide ? 16 : 0)
-            | (strike == true ? 32 : 0) | UInt16(ustyle ?? 0) << 8
+            | (strike == true ? 32 : 0) | (search ? 64 : 0) | (activeSearch ? 128 : 0) | UInt16(ustyle ?? 0) << 8
         try c.encode(attrs)
         if ucolor != nil || link != nil { if let ucolor { try c.encode(Self.packed(ucolor)) } else { try c.encodeNil() } }
         if let link { try c.encode(link) }
     }
-    private static func rgb(_ value: UInt32) -> [UInt8] { [UInt8(value >> 16 & 255), UInt8(value >> 8 & 255), UInt8(value & 255)] }
+    static func rgb(_ value: UInt32) -> [UInt8] { [UInt8(value >> 16 & 255), UInt8(value >> 8 & 255), UInt8(value & 255)] }
     private static func packed(_ rgb: [UInt8]) -> UInt32 { rgb.prefix(3).reduce(0) { $0 << 8 | UInt32($1) } }
 }
 

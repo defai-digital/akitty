@@ -18,6 +18,7 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(full.fg, [1, 2, 3]); XCTAssertEqual(full.bg, [4, 5, 6]); XCTAssertEqual(full.ucolor, [7, 8, 9])
         // 831 = bold, italic, underline, selected, wide, strike, underline style 3.
         XCTAssertTrue(full.bold && full.italic && full.underline && full.selected && full.wide)
+        XCTAssertFalse(full.search || full.activeSearch)
         XCTAssertEqual(full.strike, true); XCTAssertEqual(full.ustyle, 3); XCTAssertEqual(full.link, 3)
         XCTAssertNil(cells[1].ucolor); XCTAssertEqual(cells[1].link, 0)
         let plain = cells[2]
@@ -25,6 +26,10 @@ final class AkittyTests: XCTestCase {
         XCTAssertNil(plain.strike); XCTAssertNil(plain.ustyle); XCTAssertNil(plain.ucolor); XCTAssertNil(plain.link)
         // Encoding writes the same wire form back.
         XCTAssertEqual(String(decoding: try JSONEncoder().encode(cells), as: UTF8.self), json)
+        // 192 = search (64) and active search (128). Neither bit is selection.
+        let marked = try JSONDecoder().decode([Cell].self, from: Data(#"[[0,1,"a",0,0,192]]"#.utf8))
+        XCTAssertTrue(marked[0].search && marked[0].activeSearch && !marked[0].selected)
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(marked), as: UTF8.self), #"[[0,1,"a",0,0,192]]"#)
     }
     func testSessionSnapshotAndUTF16ColumnMapping() throws {
         let session = try TerminalSession(cols: 20, rows: 3, headless: true)
@@ -239,8 +244,8 @@ final class AkittyTests: XCTestCase {
         return value
     }
     /// A wire cell: `[row, col, text, fg, bg, attrs]` with packed 0xRRGGBB colours; attrs bit 8 is selected.
-    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], selected: Bool = false) -> [Any] {
-        [row, col, text, fg[0] << 16 | fg[1] << 8 | fg[2], bg[0] << 16 | bg[1] << 8 | bg[2], selected ? 8 : 0]
+    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], attrs: Int = 0, selected: Bool = false) -> [Any] {
+        [row, col, text, fg[0] << 16 | fg[1] << 8 | fg[2], bg[0] << 16 | bg[1] << 8 | bg[2], (selected ? 8 : 0) | attrs]
     }
     private func testSnapshot(rows: Int = 2, cols: Int = 6, cells: [[Any]] = [], images: [[String: Any]] = []) throws -> Snapshot {
         let object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
@@ -307,6 +312,17 @@ final class AkittyTests: XCTestCase {
         let context = try rasterize(snapshot, images: [1: image])
         XCTAssertEqual(sample(context, x: 22, yFromTop: 18), [255, 0, 0])
         XCTAssertEqual(sample(context, x: 12, yFromTop: 18), try renderedBackground(), "the offset leaves the start of the cell uncovered")
+    }
+    func testRasterizerPaintsTheCurrentFindHitBrighterThanOtherHits() throws {
+        let active = try rasterize(try testSnapshot(rows: 1, cols: 2, cells: [testCell(0, 0, attrs: 192)]), images: [:])
+        let other = try rasterize(try testSnapshot(rows: 1, cols: 2, cells: [testCell(0, 0, attrs: 64)]), images: [:])
+        let activePixel = sample(active, x: 13, yFromTop: 18), otherPixel = sample(other, x: 13, yFromTop: 18)
+        XCTAssertGreaterThan(activePixel[0], otherPixel[0], "the current hit is the brighter amber")
+        XCTAssertGreaterThan(activePixel[0], activePixel[2])
+        XCTAssertGreaterThan(otherPixel[0], otherPixel[2])
+        let selected = try rasterize(try testSnapshot(rows: 1, cols: 2, cells: [testCell(0, 0, attrs: 192, selected: true)]), images: [:])
+        let selection = try rasterize(try testSnapshot(rows: 1, cols: 2, cells: [testCell(0, 0, selected: true)]), images: [:])
+        XCTAssertEqual(sample(selected, x: 13, yFromTop: 18), sample(selection, x: 13, yFromTop: 18), "selection covers the find highlight")
     }
     func testRasterizerZLayerRespectsKittyThreshold() throws {
         let image = testImage(4, 4) { _, _ in [0, 0, 255] }
@@ -528,6 +544,36 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(reminder.title, "Update Available: 0.7.0")
         controller.refreshUpdateReminder(nil)
         XCTAssertTrue(controller.window!.titlebarAccessoryViewControllers.isEmpty)
+    }
+    @MainActor func testFindBarHighlightsMatchesAndMoves() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let terminal = try XCTUnwrap(controller.active)
+        _ = try terminal.session.call("feed", ["text": "one two one"])
+        controller.perform(.find)
+        XCTAssertTrue(controller.findBarVisible)
+        controller.findQuery = "one"
+        controller.runSearch("latest")
+        let snapshot = try XCTUnwrap(terminal.session.snapshot())
+        XCTAssertEqual(snapshot.cells.filter(\.activeSearch).map(\.col).sorted(), [8, 9, 10])
+        XCTAssertEqual(snapshot.cells.filter { $0.search && !$0.activeSearch }.map(\.col).sorted(), [0, 1, 2])
+        controller.perform(.findPrevious)
+        let earlier = try XCTUnwrap(terminal.session.snapshot())
+        XCTAssertEqual(earlier.cells.filter(\.activeSearch).map(\.col).sorted(), [0, 1, 2])
+        XCTAssertEqual(controller.findStatus, "")
+        controller.perform(.findPrevious)
+        XCTAssertEqual(controller.findStatus, "Wrapped")
+        let wrapped = try XCTUnwrap(terminal.session.snapshot())
+        XCTAssertEqual(wrapped.cells.filter(\.activeSearch).map(\.col).sorted(), [8, 9, 10])
+        controller.findQuery = "Nope"
+        controller.runSearch("latest")
+        XCTAssertEqual(controller.findStatus, "Not found")
+        controller.closeFind()
+        XCTAssertFalse(controller.findBarVisible)
+        let cleared = try XCTUnwrap(terminal.session.snapshot())
+        XCTAssertTrue(cleared.cells.allSatisfy { !$0.search && !$0.activeSearch })
     }
 
     @MainActor func testEveryTabHasACloseButtonThatClosesOnlyThatTab() async throws {
