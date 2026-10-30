@@ -43,6 +43,36 @@ Notable behavior:
 - `lineHeight` sets the row height as a multiple of the glyph height.
 - Empty, out-of-range and surrogate cell codepoints render as a space instead of throwing.
 
+## Reading terminals from agents
+
+Read-only access for programs that need the terminal's text rather than pixels (the canvas has no DOM text):
+
+```ts
+import { TerminalSessionRegistry, TerminalReader, createTerminalTools, registerWebMcpTools } from "@ax-code/akitty-web"
+
+const reader = new TerminalReader(term)
+reader.readScreen() // { rows' text, cursor, title, buffer: "normal" | "alternate", revision, ... }
+reader.readOutput({ lines: 100 }) // newest text incl. scrollback; page back with nextOffset
+
+const sessions = new TerminalSessionRegistry()
+const remove = sessions.add("tab-1", term, "build") // the host picks stable ids
+
+const tools = createTerminalTools(sessions) // list_sessions, read_screen, read_output, as plain JSON tools
+const webmcp = await registerWebMcpTools(sessions) // optional; no-op unless document.modelContext exists
+webmcp.dispose()
+```
+
+- Reads are bounded (at most 1000 rows and 100000 characters per call) and carry a `revision` that changes whenever
+  the terminal is written to, so a caller can tell whether two reads saw the same state. Paging through history while
+  output is still arriving is approximate.
+- Every tool result includes a notice that terminal text is untrusted, and the tools are marked `readOnlyHint` and
+  `untrustedContentHint`. Callers that give the text to a model must still treat it as data, not instructions.
+- There are deliberately no tools for sending input or running commands. `term.write()` draws output; it does not
+  execute anything. Execution needs the host's PTY service, an authorization check and a rule for who controls the
+  terminal, and that has to be enforced by the host, not by tool descriptions.
+- Command results (exit code, per-command output) need shell integration or backend events and are not provided.
+- WebMCP is a new browser API (`document.modelContext`); the adapter feature-detects it, and the tools work without it.
+
 ## Development
 
 Requires Node 22+. The package has its own `package-lock.json` and is installed separately from the repository root.

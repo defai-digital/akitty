@@ -99,6 +99,10 @@ xterm.js-style API. It started from coder/ghostty-web v0.4.0 and is now maintain
 - **Independence:** it is no longer a tracked fork. Nothing is synced from ghostty-web; fixes are made directly in
   `lib/`. `packages/akitty-web/PROVENANCE.md` records only the origin, licenses and the wasm/patch pins and hashes.
   Clipboard, link and mouse behavior has not had Akitty's native clipboard policy review.
+- **Agent access:** `lib/agent` gives programs bounded, read-only text access (`readScreen`, `readOutput`), plain JSON
+  tool definitions and an optional WebMCP adapter. Input and command execution are intentionally not offered: they need
+  a host PTY service, authorization and an input-control rule that the browser package cannot enforce. Terminal text
+  is untrusted and tool results say so.
 - **Verification:** type-check and Vitest run in `scripts/verify.sh`; there is no browser or end-to-end test in this repo.
 
 ## macOS folder opening

@@ -100,3 +100,6 @@ export { OSC8LinkProvider } from './providers/osc8-link-provider';
 export { UrlRegexProvider } from './providers/url-regex-provider';
 export { LinkDetector } from './link-detector';
 export type { ILink, ILinkProvider, IBufferCellPosition } from './types';
+
+// Read-only terminal access for agents (structured reads, tool definitions, optional WebMCP adapter)
+export * from './agent';
