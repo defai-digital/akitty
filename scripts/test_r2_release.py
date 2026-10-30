@@ -21,11 +21,26 @@ COMMIT = "a" * 40
 SIGNATURE = base64.b64encode(bytes(64)).decode()
 
 
-def appcast(url, *, length, version=VERSION, build=BUILD, signature=SIGNATURE, items=1):
+def appcast(
+    url,
+    *,
+    length,
+    version=VERSION,
+    build=BUILD,
+    signature=SIGNATURE,
+    items=1,
+    minimum="14.0",
+):
+    minimum_element = (
+        ""
+        if minimum is None
+        else f"<sparkle:minimumSystemVersion>{minimum}</sparkle:minimumSystemVersion>"
+    )
     entries = "".join(
         "<item>"
         f"<sparkle:version>{build}</sparkle:version>"
         f"<sparkle:shortVersionString>{version}</sparkle:shortVersionString>"
+        f"{minimum_element}"
         f'<enclosure url="{url}" length="{length}" type="application/octet-stream"'
         f' sparkle:edSignature="{signature}"/>'
         "</item>"
@@ -227,6 +242,12 @@ class DistributionTests(unittest.TestCase):
             "length": appcast(row["url"], length=row["size"] + 1),
             "version": appcast(row["url"], length=row["size"], version="0.11.0"),
             "build": appcast(row["url"], length=row["size"], build="1199"),
+            "minimum system version": appcast(
+                row["url"], length=row["size"], minimum="15.0"
+            ),
+            "missing minimum system version": appcast(
+                row["url"], length=row["size"], minimum=None
+            ),
             "unsigned": appcast(row["url"], length=row["size"], signature=""),
             "short signature": appcast(
                 row["url"], length=row["size"], signature="AAAA"
@@ -238,6 +259,13 @@ class DistributionTests(unittest.TestCase):
             with self.subTest(case=case):
                 with self.assertRaises(RuntimeError):
                     release.validate_appcast(data, row)
+        without_minimum = {
+            key: value for key, value in row.items() if key != "minimum_macos"
+        }
+        with self.assertRaises(RuntimeError):
+            release.validate_appcast(
+                appcast(row["url"], length=row["size"]), without_minimum
+            )
 
     def test_retry_accepts_only_the_identical_published_manifest(self):
         row = manifest()
@@ -283,6 +311,71 @@ class DistributionTests(unittest.TestCase):
 
 
 ARCHIVE_KEY = f"releases/download/{TAG}/{ARCHIVE}"
+
+
+class RecordingCloudflare:
+    def gateway(self, deploy):
+        assert deploy is False
+
+
+def github_api(command, *args, **kwargs):
+    """Answer the two read-only GitHub API calls made while publishing."""
+    assert command[:2] == ["gh", "api"], "unexpected command: " + repr(command)
+    target = command[-1]
+    if "/commits/" in target:
+        return json.dumps({"sha": COMMIT}).encode()
+    if "/contents/scripts/install.sh" in target:
+        return b"#!/bin/bash\ntag installer\n"
+    if "/releases/tags/" in target:
+        return b"{}"
+    raise AssertionError("unexpected command: " + repr(command))
+
+
+class InstallerSourceTests(unittest.TestCase):
+    def test_tag_file_reads_the_resolved_commit(self):
+        with patch.object(
+            release.subprocess, "check_output", return_value=b"bytes"
+        ) as call:
+            self.assertEqual(release.tag_file(COMMIT, "scripts/install.sh"), b"bytes")
+        command = call.call_args.args[0]
+        self.assertEqual(
+            command[-1],
+            f"repos/{release.REPO}/contents/scripts/install.sh?ref={COMMIT}",
+        )
+
+    def test_publish_uploads_the_tag_installer_not_the_worktree(self):
+        files = prepared()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            for name, data in files.items():
+                (source / name).write_bytes(data)
+            worktree = Path(directory) / "worktree"
+            (worktree / "scripts").mkdir(parents=True)
+            (worktree / "scripts" / "install.sh").write_bytes(
+                b"stale worktree installer"
+            )
+            uploaded = {}
+
+            def record(cloud, key, data, mutable=False):
+                uploaded[key] = data
+
+            with (
+                patch.object(release, "ROOT", worktree),
+                patch.object(release, "validate_assets"),
+                patch.object(release, "public", return_value=None),
+                patch.object(release, "put_verified", side_effect=record),
+                patch.object(release, "Cloudflare", return_value=RecordingCloudflare()),
+                patch.object(
+                    release.subprocess, "check_output", side_effect=github_api
+                ),
+            ):
+                release.publish(TAG, source)
+            self.assertEqual(uploaded["install"], b"#!/bin/bash\ntag installer\n")
+
+    def test_latest_absent_still_requires_an_integer_build(self):
+        with self.assertRaises(RuntimeError):
+            release.validate_latest(None, manifest(build="12a"))
 
 
 if __name__ == "__main__":

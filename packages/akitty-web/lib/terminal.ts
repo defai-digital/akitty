@@ -39,6 +39,208 @@ import { SelectionManager } from './selection-manager';
 import type { ILink, ILinkProvider } from './types';
 
 // ============================================================================
+// Title/Bell Scanner
+// ============================================================================
+
+/** Hard cap on the pending OSC payload retained while waiting for a terminator. */
+const MAX_OSC_PAYLOAD_LENGTH = 4096;
+
+/** ECMA-48 CAN and SUB: either one cancels whatever sequence is pending. */
+const CAN = 0x18;
+const SUB = 0x1a;
+
+type ScannerState =
+  | 'ground'
+  | 'escape'
+  | 'csi'
+  | 'osc'
+  | 'oscEscape'
+  | 'string'
+  | 'stringEscape';
+
+/**
+ * Stateful, bounded scanner for the two events Ghostty's WASM API does not surface: the window
+ * title (OSC 0/2) and the bell (BEL).
+ *
+ * Both arrive interleaved with ordinary output and may be split across writes at any byte, so the
+ * scanner keeps its parse state between writes. Bytes are decoded with a streaming TextDecoder, so
+ * a UTF-8 sequence split across writes is not corrupted. BEL rings in the ground state and, as an
+ * executable C0 control, in the escape and CSI states without ending them; every other executable
+ * C0 control also leaves the pending escape alive, and DEL is ignored (ECMA-48). Inside an OSC
+ * payload the only C0 control that matters is the BEL terminator (and CAN/SUB); every other C0
+ * control and DEL is ignored rather than collected, so it never appears in the title. Within a
+ * control string (OSC/DCS/APC/PM/SOS) a raw BEL is data, not a bell, and C0/DEL never abandon a
+ * pending `ESC \` ST either. A runaway OSC payload is capped; anything past the cap is discarded
+ * rather than buffered. Only `ESC \` ends a control string: any other ESC cancels it (ECMA-48) and
+ * the byte after it begins a new escape sequence, for OSC and for DCS/APC/PM/SOS alike. CAN and
+ * SUB cancel whatever sequence is pending and return to ground, dropping any retained payload.
+ */
+class TitleBellScanner {
+  private state: ScannerState = 'ground';
+  private readonly encoder = new TextEncoder();
+  private decoder = new TextDecoder();
+  private pending = '';
+  private overflowed = false;
+
+  constructor(
+    private readonly onTitle: (title: string) => void,
+    private readonly onBell: () => void
+  ) {}
+
+  /** Drop any partially parsed sequence, e.g. after Terminal.reset(). */
+  reset(): void {
+    this.state = 'ground';
+    this.decoder = new TextDecoder();
+    this.pending = '';
+    this.overflowed = false;
+  }
+
+  feed(data: string | Uint8Array): void {
+    if (data.length === 0) return;
+
+    // Encode strings too so all input flows through one byte stream: a Uint8Array write that ended
+    // mid-codepoint must be completed by whatever bytes arrive next, even if that is a string write.
+    const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
+    const text = this.decoder.decode(bytes, { stream: true });
+    if (text.length === 0) return;
+
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+
+      switch (this.state) {
+        case 'ground':
+          if (code === 0x1b) this.state = 'escape';
+          else if (code === 0x07) this.onBell();
+          break;
+
+        case 'escape':
+          if (code === CAN || code === SUB) this.cancelSequence();
+          else this.enterEscape(code);
+          break;
+
+        case 'csi':
+          if (code === 0x1b) this.state = 'escape';
+          else if (code === CAN || code === SUB) this.cancelSequence();
+          else if (code === 0x07) this.onBell(); // C0 executes without ending the CSI
+          else if (code >= 0x40 && code <= 0x7e) this.state = 'ground'; // final byte
+          break;
+
+        case 'osc':
+          if (code === 0x07) this.finishOsc(); // BEL terminator
+          else if (code === CAN || code === SUB) this.cancelSequence();
+          else if (code === 0x1b) this.state = 'oscEscape';
+          // ECMA-48: C0 controls other than the BEL terminator and CAN/SUB are ignored inside an
+          // OSC, as is DEL, so they are never collected into the title payload.
+          else if (code >= 0x20 && code !== 0x7f) this.appendOsc(code);
+          break;
+
+        case 'oscEscape':
+          if (code === 0x5c) this.finishOsc(); // ST
+          else if (code === 0x1b) this.state = 'oscEscape';
+          else if (code === CAN || code === SUB) this.cancelSequence();
+          // ECMA-48: a C0 control (including a raw BEL, which is data inside a control string) or
+          // DEL after the ESC is ignored and the pending ST survives, so `ESC DEL \` still ends the
+          // OSC. Only a printable byte proves the ESC was not ST; it cancels and redispatches.
+          else if (code >= 0x20 && code !== 0x7f) {
+            // An ESC that is not ST cancels the control string; the byte after it starts a new
+            // escape sequence, so `ESC ] 2 ; a ESC ] 2 ; b BEL` titles "b" rather than
+            // "a ESC ] 2 ; b". Dispatching through the escape state keeps every split of that
+            // boundary identical, including when the ESC ends one write and `]` starts the next.
+            this.cancelSequence();
+            this.state = 'escape';
+            this.enterEscape(code);
+          }
+          break;
+
+        case 'string':
+          if (code === 0x1b) this.state = 'stringEscape';
+          else if (code === CAN || code === SUB) this.cancelSequence();
+          break;
+
+        case 'stringEscape':
+          if (code === 0x5c) this.state = 'ground'; // ST
+          else if (code === 0x1b) this.state = 'stringEscape';
+          else if (code === CAN || code === SUB) this.cancelSequence();
+          // As for OSC: C0 controls (a raw BEL is data here) and DEL after the ESC are ignored and
+          // keep the ST pending; only a printable byte cancels the string and redispatches.
+          else if (code >= 0x20 && code !== 0x7f) {
+            // DCS/APC/PM/SOS end at ST only. Any other ESC cancels the string, exactly like an
+            // OSC, and the byte after it is redispatched: `ESC P ... ESC ] 2;Title BEL` titles
+            // instead of swallowing the OSC as DCS payload.
+            this.cancelSequence();
+            this.state = 'escape';
+            this.enterEscape(code);
+          }
+          break;
+      }
+    }
+  }
+
+  private beginOsc(): void {
+    this.state = 'osc';
+    this.pending = '';
+    this.overflowed = false;
+  }
+
+  /**
+   * Cancel the pending sequence (bare ESC that is not ST, or CAN/SUB) and return to ground,
+   * dropping any retained payload so a later BEL rings and later titles parse.
+   */
+  private cancelSequence(): void {
+    this.state = 'ground';
+    this.pending = '';
+    this.overflowed = false;
+  }
+
+  /** Consume the byte that follows an ESC, i.e. the body of the `escape` state. */
+  private enterEscape(code: number): void {
+    if (code === 0x1b) this.state = 'escape';
+    else if (code === 0x5b) this.state = 'csi'; // '['
+    else if (code === 0x5d) this.beginOsc(); // ']'
+    else if (code === 0x50 || code === 0x58 || code === 0x5e || code === 0x5f)
+      this.state = 'string'; // DCS 'P', SOS 'X', PM '^', APC '_'
+    // ECMA-48: an executable C0 control (BEL rings) does not abandon the pending escape, and DEL is
+    // ignored in every state. CAN and SUB never reach here; the caller cancels those first.
+    else if (code < 0x20 || code === 0x7f) {
+      if (code === 0x07) this.onBell();
+    } else this.state = 'ground';
+  }
+
+  private appendOsc(code: number): void {
+    if (this.overflowed) return;
+    if (this.pending.length >= MAX_OSC_PAYLOAD_LENGTH) {
+      // Keep consuming until the terminator, but stop retaining data.
+      this.overflowed = true;
+      this.pending = '';
+      return;
+    }
+    this.pending += String.fromCharCode(code);
+  }
+
+  private finishOsc(): void {
+    this.state = 'ground';
+
+    if (this.overflowed) {
+      this.overflowed = false;
+      this.pending = '';
+      return;
+    }
+
+    const payload = this.pending;
+    this.pending = '';
+
+    const separator = payload.indexOf(';');
+    if (separator < 0) return;
+
+    // OSC 0 sets icon + title; OSC 2 sets the title. OSC 1 is icon-only and must not become a title.
+    const command = payload.slice(0, separator);
+    if (command !== '0' && command !== '2') return;
+
+    this.onTitle(payload.slice(separator + 1));
+  }
+}
+
+// ============================================================================
 // Terminal Class
 // ============================================================================
 
@@ -125,6 +327,11 @@ export class Terminal implements ITerminalCore {
 
   // Phase 1: Title tracking
   private currentTitle: string = '';
+  /** Single streaming scanner for titles and bells; its parse state must persist across writes. */
+  private readonly titleBellScanner = new TitleBellScanner(
+    (title) => this.applyTitle(title),
+    () => this.bellEmitter.fire()
+  );
 
   // Phase 2: Viewport and scrolling state
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
@@ -474,6 +681,11 @@ export class Terminal implements ITerminalCore {
         (mode: number) => {
           // Query terminal mode state (e.g., mode 1 for application cursor mode)
           return this.wasmTerm?.getMode(mode, false) ?? false;
+        },
+        // Paste events that bubble to the container must share Terminal.paste() with the textarea
+        // path, so bracketed mode and ESC stripping are applied identically and only once.
+        (text: string) => {
+          this.paste(text);
         }
       );
 
@@ -499,7 +711,7 @@ export class Terminal implements ITerminalCore {
         e.stopPropagation(); // Prevent event from bubbling to parent (InputHandler)
         const text = e.clipboardData?.getData('text');
         if (text) {
-          // Use the paste() method which will handle bracketed paste mode in the future
+          // Share one paste path with the parent handler; bracketed mode and ESC stripping live there.
           this.paste(text);
         }
       });
@@ -568,20 +780,19 @@ export class Terminal implements ITerminalCore {
     // like clicking or typing, not by incoming data.
 
     // Write directly to WASM terminal (handles VT parsing internally)
+    const wasAlternate = this.wasmTerm!.isAlternateScreen();
     this.wasmTerm!.write(data);
     this.revision++;
+    this.notifyBufferChangeIfSwitched(wasAlternate);
 
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
 
-    // Check for bell character (BEL, \x07)
-    // WASM doesn't expose bell events, so we detect it in the data stream
-    if (typeof data === 'string' && data.includes('\x07')) {
-      this.bellEmitter.fire();
-    } else if (data instanceof Uint8Array && data.includes(0x07)) {
-      this.bellEmitter.fire();
-    }
+    // Titles and the bell are not surfaced by the WASM API; one bounded streaming scanner handles
+    // both. It keeps state across writes so an OSC sequence split across chunks is still recognised,
+    // and it suppresses BEL inside OSC/control strings while still ringing a bare BEL.
+    this.titleBellScanner.feed(data);
 
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
@@ -591,12 +802,6 @@ export class Terminal implements ITerminalCore {
       this.scrollToBottom();
     }
 
-    // Check for title changes (OSC 0, 1, 2 sequences)
-    // This is a simplified implementation - Ghostty WASM may provide this
-    if (typeof data === 'string' && data.includes('\x1b]')) {
-      this.checkForTitleChange(data);
-    }
-
     // Call callback if provided
     if (callback) {
       // Queue callback after next render
@@ -604,6 +809,18 @@ export class Terminal implements ITerminalCore {
     }
 
     // Render will happen on next animation frame
+  }
+
+  /**
+   * Notify buffer subscribers when a write or reset switched between the normal and alternate screens.
+   * Comparing the before/after state ties the event to real transitions and avoids duplicate events.
+   */
+  private notifyBufferChangeIfSwitched(wasAlternate: boolean): void {
+    const isAlternate = this.wasmTerm?.isAlternateScreen() ?? false;
+    if (isAlternate === wasAlternate) return;
+    (this.buffer as BufferNamespace)._fireBufferChange(
+      isAlternate ? this.buffer.alternate : this.buffer.normal
+    );
   }
 
   /**
@@ -635,8 +852,10 @@ export class Terminal implements ITerminalCore {
 
     // Check if terminal has bracketed paste mode enabled
     if (this.wasmTerm!.hasBracketedPaste()) {
-      // Wrap with bracketed paste sequences (DEC mode 2004)
-      this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
+      // Strip ESC by default so a pasted "\x1b[201~" cannot terminate the bracketed region early.
+      // This mirrors the native core (crates/akitty-core/src/session.rs input()).
+      const sanitized = data.replace(/\x1b/g, '');
+      this.dataEmitter.fire('\x1b[200~' + sanitized + '\x1b[201~');
     } else {
       // Send data directly
       this.dataEmitter.fire(data);
@@ -717,6 +936,9 @@ export class Terminal implements ITerminalCore {
   reset(): void {
     this.assertOpen();
 
+    // A fresh terminal starts on the normal screen, so remember the old screen to report a real switch below.
+    const wasAlternate = this.wasmTerm?.isAlternateScreen() ?? false;
+
     // Allocate first so a failed reset leaves the live terminal usable.
     const config = this.buildWasmConfig();
     const replacement = this.ghostty!.createTerminal(this.cols, this.rows, config);
@@ -744,7 +966,9 @@ export class Terminal implements ITerminalCore {
 
     // Reset title
     this.currentTitle = '';
+    this.titleBellScanner.reset();
     this.revision++;
+    this.notifyBufferChangeIfSwitched(wasAlternate);
     this.scrollEmitter.fire(0);
   }
 
@@ -1892,28 +2116,12 @@ export class Terminal implements ITerminalCore {
   }
 
   /**
-   * Check for title changes in written data (OSC sequences)
-   * Simplified implementation - looks for OSC 0, 1, 2
+   * Record a title reported by the scanner (OSC 0/2) and notify listeners when it actually changed.
    */
-  private checkForTitleChange(data: string): void {
-    // OSC sequences: ESC ] Ps ; Pt BEL or ESC ] Ps ; Pt ST
-    // OSC 0 = icon + title, OSC 1 = icon, OSC 2 = title
-    const oscRegex = /\x1b\]([012]);([^\x07\x1b]*?)(?:\x07|\x1b\\)/g;
-    let match: RegExpExecArray | null = null;
-
-    // biome-ignore lint/suspicious/noAssignInExpressions: Standard regex pattern
-    while ((match = oscRegex.exec(data)) !== null) {
-      const ps = match[1];
-      const pt = match[2];
-
-      // OSC 0 and OSC 2 set the title
-      if (ps === '0' || ps === '2') {
-        if (pt !== this.currentTitle) {
-          this.currentTitle = pt;
-          this.titleChangeEmitter.fire(pt);
-        }
-      }
-    }
+  private applyTitle(title: string): void {
+    if (title === this.currentTitle) return;
+    this.currentTitle = title;
+    this.titleChangeEmitter.fire(title);
   }
 
   // ============================================================================

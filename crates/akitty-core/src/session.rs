@@ -108,7 +108,7 @@ impl Session {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         // Real PTY sessions expire in the worker, which owns delivery of replies.
         if self.commands.is_none() { model.expire_sync(); }
-        Ok(model.snapshot_json(since, compact))
+        model.snapshot_json(since, compact)
     }
     pub fn feed(&self, bytes: &[u8]) -> Result<(), String> {
         if self.commands.is_some() {
@@ -184,18 +184,23 @@ impl Session {
         if !(1..=256).contains(&width) || !(1..=512).contains(&height) {
             return Err("cell size must be 1..256 by 1..512 pixels".into());
         }
-        let size = {
-            let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-            model.cell_px = (width, height);
-            model.size
-        };
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let previous = model.cell_px;
+        let size = model.size;
+        model.cell_px = (width, height);
         // Push a PTY resize so TIOCGWINSZ reports the new pixel size even
         // though the grid itself did not change. Headless sessions just store it.
-        if let Some(sender) = &self.commands {
-            sender
-                .try_send(Command::Resize(size))
-                .map_err(|e| format!("resize rejected: {e}"))?;
+        if let Some(sender) = &self.commands
+            && let Err(error) = sender.try_send(Command::Resize(size))
+        {
+            // The PTY did not accept the resize, so keep the grid's geometry
+            // consistent: restore the old pixel size and leave the revision alone.
+            model.cell_px = previous;
+            return Err(format!("resize rejected: {error}"));
         }
+        // Placeholder geometry is derived from cell_px, so a successful change must
+        // invalidate snapshots a client could otherwise serve from its cached revision.
+        model.revision += 1;
         Ok(())
     }
     pub fn read_image(&self, image: u32, out: &mut [u8]) -> usize {
@@ -508,5 +513,39 @@ mod tests {
             matches!(rx.try_recv(), Ok(Command::Resize(size)) if (size.cols, size.rows) == (20, 3))
         );
         assert_eq!(session.model.lock().unwrap().cell_px, (10, 20));
+    }
+
+    #[test]
+    fn set_cell_size_invalidates_the_snapshot_revision() {
+        let session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let since = first["revision"].as_u64();
+        session.set_cell_size(10, 20).unwrap();
+        let second: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        // The new pixel size feeds placeholder geometry, so a same-revision poll must
+        // still report a change instead of serving the stale placeholder layout.
+        assert_eq!(second["changed"], true, "{second}");
+        assert_eq!(session.model.lock().unwrap().cell_px, (10, 20));
+    }
+
+    #[test]
+    fn rejected_cell_size_send_rolls_back_pixels_without_a_revision_bump() {
+        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        session.set_cell_size(10, 20).unwrap();
+        let revision = session.model.lock().unwrap().revision;
+        // Fill the bounded command queue so the resize send is rejected.
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.try_send(Command::Input(vec![0])).unwrap();
+        session.commands = Some(tx);
+        let outcome = session.set_cell_size(12, 24);
+        assert!(outcome.is_err(), "{outcome:?}");
+        // A rejected resize must leave both the geometry and the revision untouched.
+        let model = session.model.lock().unwrap();
+        assert_eq!(model.cell_px, (10, 20));
+        assert_eq!(model.revision, revision);
+        drop(model);
+        // The queued input is the only message; no resize followed it.
+        assert!(matches!(rx.try_recv(), Ok(Command::Input(_))));
+        assert!(rx.try_recv().is_err());
     }
 }

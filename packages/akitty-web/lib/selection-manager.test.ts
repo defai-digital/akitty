@@ -584,3 +584,70 @@ describe('SelectionManager', () => {
     });
   });
 });
+
+describe('Programmatic selection in a scrolled viewport', () => {
+  let container: HTMLElement | null = null;
+
+  beforeEach(() => {
+    if (typeof document !== 'undefined') {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+    }
+  });
+
+  afterEach(() => {
+    if (container && container.parentNode) {
+      container.parentNode.removeChild(container);
+      container = null;
+    }
+  });
+
+  /**
+   * 100 numbered lines leave 77 lines of scrollback on a 24-row screen.
+   * Scrolling back 50 lines puts "Line 027" at the top visible row.
+   */
+  async function openScrolledTerminal(): Promise<Terminal> {
+    if (!container) throw new Error('test container missing');
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
+    term.open(container);
+    for (let i = 0; i < 100; i++) {
+      term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
+    }
+    term.scrollLines(-50);
+    expect(term.getViewportY()).toBe(50);
+    return term;
+  }
+
+  test('selectAll selects the visible rows instead of old scrollback', async () => {
+    const term = await openScrolledTerminal();
+
+    term.selectAll();
+
+    const lines = term.getSelection().split('\n');
+    expect(lines).toHaveLength(24);
+    expect(lines[0]).toBe('Line 027');
+    expect(lines[23]).toBe('Line 050');
+
+    term.dispose();
+  });
+
+  test('select maps viewport rows through the scrollback offset', async () => {
+    const term = await openScrolledTerminal();
+
+    term.select(0, 0, 9);
+
+    expect(term.getSelection()).toBe('Line 027');
+
+    term.dispose();
+  });
+
+  test('selectLines maps viewport rows through the scrollback offset', async () => {
+    const term = await openScrolledTerminal();
+
+    term.selectLines(0, 0);
+
+    expect(term.getSelection()).toBe('Line 027');
+
+    term.dispose();
+  });
+});

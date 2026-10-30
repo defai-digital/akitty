@@ -83,7 +83,8 @@ public enum ClipboardPolicy {
     public static let maximumBytes = 65536
     public static func acceptsText(_ text: String) -> Bool { text.utf8.count <= maximumBytes && !text.contains("\0") }
     public static func needsPasteConfirmation(_ text: String) -> Bool {
-        text.contains("\n") || text.contains("\r") || text.contains("\u{1b}") || text.contains("\u{7f}")
+        // Any control scalar (C0 incl. ESC/CR/LF, DEL, C1) except ordinary tab is dangerous in a paste.
+        text.unicodeScalars.contains { $0.value < 0x20 && $0.value != 0x09 || $0.value == 0x7f || ($0.value >= 0x80 && $0.value <= 0x9f) }
     }
 }
 public struct Composition {

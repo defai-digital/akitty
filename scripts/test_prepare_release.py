@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import importlib.util
 import json
@@ -18,6 +19,38 @@ VERSION = "9.9.9"
 BUILD = "9999"
 ARCHIVE = f"AkiTTY-{VERSION}-macOS-arm64.zip"
 PUBLISHED = {ARCHIVE, "release.json", "appcast.xml", "SHA256SUMS"}
+PUBLIC_KEY = "3HMi+FbZd4fKYjgadkLHPvU9z+3wD8Qq44gykDQ31lo="
+SIGNATURE = base64.b64encode(bytes(64)).decode()
+ARCHIVE_BYTES = b"notarized archive"
+ARCHIVE_URL = (
+    f"https://download.automatosx.com/akitty/releases/download/v{VERSION}/{ARCHIVE}"
+)
+
+
+def appcast(
+    build=BUILD,
+    version=VERSION,
+    signature=SIGNATURE,
+    url=ARCHIVE_URL,
+    length=len(ARCHIVE_BYTES),
+    minimum="14.0",
+):
+    minimum_element = (
+        ""
+        if minimum is None
+        else f"<sparkle:minimumSystemVersion>{minimum}</sparkle:minimumSystemVersion>"
+    )
+    return (
+        '<?xml version="1.0"?><rss '
+        'xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
+        f"<channel><title>Akitty</title><item>"
+        f"<sparkle:version>{build}</sparkle:version>"
+        f"<sparkle:shortVersionString>{version}</sparkle:shortVersionString>"
+        f"{minimum_element}"
+        f'<enclosure url="{url}" length="{length}" type="application/octet-stream"'
+        f' sparkle:edSignature="{signature}"/>'
+        "</item></channel></rss>"
+    ).encode()
 
 
 def workspace(root):
@@ -38,11 +71,12 @@ def workspace(root):
                 "CFBundleIdentifier": "com.defai.akitty",
                 "CFBundleShortVersionString": VERSION,
                 "CFBundleVersion": BUILD,
+                "SUPublicEDKey": PUBLIC_KEY,
             }
         )
     )
     (root / "build").mkdir()
-    (root / "build" / "Akitty-macOS.zip").write_bytes(b"notarized archive")
+    (root / "build" / "Akitty-macOS.zip").write_bytes(ARCHIVE_BYTES)
 
 
 def stamp(**overrides):
@@ -67,13 +101,17 @@ class Runner:
 
     def __call__(self, *args):
         self.calls.append(args)
+        tool = Path(str(args[0])).name
         if args[:2] == ("git", "rev-parse"):
             return HEAD
         if args[:2] == ("git", "status"):
             return self.status
-        if str(args[0]).endswith("generate_appcast"):
-            target = Path(args[-1])
-            (target / "appcast.xml").write_bytes(b"<rss/>")
+        if tool == "generate_keys":
+            return PUBLIC_KEY
+        if tool == "generate_appcast":
+            (Path(args[-1]) / "appcast.xml").write_bytes(appcast())
+            return ""
+        if tool == "sign_update":
             return ""
         raise AssertionError("unexpected command: " + " ".join(args))
 
@@ -81,6 +119,37 @@ class Runner:
 class BrokenRunner(Runner):
     def __call__(self, *args):
         if str(args[0]).endswith("generate_appcast"):
+            self.calls.append(args)
+            raise subprocess.CalledProcessError(1, args[0])
+        return super().__call__(*args)
+
+
+class AppcastRunner(Runner):
+    """Emit a signed feed with one field deliberately mismatched to the manifest."""
+
+    def __init__(self, **overrides):
+        super().__init__()
+        self.overrides = overrides
+
+    def __call__(self, *args):
+        if Path(str(args[0])).name == "generate_appcast":
+            self.calls.append(args)
+            (Path(args[-1]) / "appcast.xml").write_bytes(appcast(**self.overrides))
+            return ""
+        return super().__call__(*args)
+
+
+class WrongKeyRunner(Runner):
+    def __call__(self, *args):
+        if Path(str(args[0])).name == "generate_keys":
+            self.calls.append(args)
+            return "b" * 44
+        return super().__call__(*args)
+
+
+class RejectingSignatureRunner(Runner):
+    def __call__(self, *args):
+        if Path(str(args[0])).name == "sign_update":
             self.calls.append(args)
             raise subprocess.CalledProcessError(1, args[0])
         return super().__call__(*args)
@@ -156,6 +225,56 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in (self.output / ("v" + VERSION)).iterdir()}, PUBLISHED
         )
+
+    def test_account_key_must_match_the_published_identity(self):
+        with self.assertRaises(prepare.ReleaseError):
+            self.prepare(run=WrongKeyRunner())
+        self.assertEqual([path.name for path in self.output.iterdir()], [])
+
+    def test_appcast_signature_must_verify_with_the_account(self):
+        with self.assertRaises(prepare.ReleaseError):
+            self.prepare(run=RejectingSignatureRunner())
+        self.assertEqual([path.name for path in self.output.iterdir()], [])
+        self.assertFalse((self.output / ("v" + VERSION)).exists())
+
+    def test_account_key_and_signature_are_checked_in_order(self):
+        runner = Runner()
+        self.prepare(run=runner)
+        tools = [Path(str(args[0])).name for args in runner.calls]
+        self.assertLess(tools.index("generate_keys"), tools.index("generate_appcast"))
+        self.assertLess(tools.index("generate_appcast"), tools.index("sign_update"))
+        sign = runner.calls[tools.index("sign_update")]
+        self.assertEqual(sign[1:4], ("--account", "akitty", "--verify"))
+        self.assertTrue(str(sign[4]).endswith(ARCHIVE))
+        self.assertEqual(sign[5], SIGNATURE)
+
+    def test_generated_appcast_must_match_the_manifest(self):
+        cases = {
+            "short version": {"version": "0.0.1"},
+            "sparkle version": {"build": "1"},
+            "minimum system version": {"minimum": "15.0"},
+            "missing minimum system version": {"minimum": None},
+            "enclosure url": {"url": "https://download.automatosx.com/other.zip"},
+            "enclosure length": {"length": "1"},
+        }
+        for case, overrides in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaises(prepare.ReleaseError):
+                    self.prepare(run=AppcastRunner(**overrides))
+                self.assertEqual([path.name for path in self.output.iterdir()], [])
+                self.assertFalse((self.output / ("v" + VERSION)).exists())
+
+    def test_appcast_requires_the_manifest_minimum_macos(self):
+        feed = self.root / "feed.xml"
+        feed.write_bytes(appcast())
+        row = {
+            "version": VERSION,
+            "build": BUILD,
+            "url": ARCHIVE_URL,
+            "size": len(ARCHIVE_BYTES),
+        }
+        with self.assertRaises(prepare.ReleaseError):
+            prepare.validate_appcast(feed, row)
 
     def test_stale_or_dirty_stamps_are_rejected(self):
         cases = {

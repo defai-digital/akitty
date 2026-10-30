@@ -518,6 +518,30 @@ fn snapshots_report_every_visible_placement_without_the_old_64_cap() {
     assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
 }
 
+#[test]
+fn placeholder_fragments_above_the_cap_fail_closed() {
+    let t = Terminal::new(512, 17);
+    call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
+    // A 1x1 image in a 1x1 virtual placement: each isolated placeholder cell is
+    // its own fragment, so 256 cells per row produce 256 visible fragments.
+    t.feed("\x1b_Ga=t,f=24,s=1,v=1,i=5,q=2;AAAA\x1b\\\x1b_Ga=p,U=1,i=5,c=1,r=1,q=2\x1b\\");
+    let line = format!("\x1b[38;2;0;0;5m{}", "\u{10EEEE} ".repeat(256));
+    for row in 1..=16 {
+        t.feed(&format!("\x1b[{row};1H{line}"));
+    }
+    // Exactly MAX_FRAGMENTS (4096) still serializes every visible image.
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 4096);
+    // Unresolved placeholders do not produce fragments and must not exhaust the cap.
+    t.feed("\x1b[17;1H\x1b[38;2;0;0;6m\u{10EEEE}");
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 4096);
+    // One more row would truncate silently before the fix; the bound must fail closed.
+    t.feed(&format!("\x1b[17;1H{line}"));
+    let over = response(json!({"op":"snapshot","id":t.0,"compact":true}));
+    let summary = format!("ok={} error={:?}", over["ok"], over["error"]);
+    assert_eq!(over["ok"], false, "{summary}");
+    assert!(over["error"].as_str().unwrap_or_default().contains("fragment"), "{summary}");
+}
+
 fn rgba(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }

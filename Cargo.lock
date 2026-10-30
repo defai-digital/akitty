@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "akitty-core"
-version = "0.12.2"
+version = "1.0.0"
 dependencies = [
  "alacritty_terminal",
  "base64",

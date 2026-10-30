@@ -17,24 +17,115 @@ BASE_URL="https://download.automatosx.com/akitty"
 
 # These are script-level so the EXIT trap still sees them after a failure inside
 # any function; they start empty and are filled in as the install progresses.
-work="" zip="" staging="" backup="" dest=""
+work="" zip="" staging="" backup="" dest="" lock="" lock_owned=""
+# Set only while acquire_lock() is between mkdir and recording ownership; signals
+# that arrive then are deferred so they cannot run cleanup before lock_owned is
+# assigned and leak a lock this process created.
+lock_acquiring=0 lock_signal=""
 
 die() { echo "akitty: $*" >&2; exit 1; }
 say() { echo "akitty: $*" >&2; }
 
-cleanup() {
-    if [ -n "$staging" ]; then rm -rf "$staging"; fi
-    if [ -n "$zip" ]; then rm -f "$zip"; fi
-    if [ -n "$work" ]; then rm -rf "$work"; fi
-    if [ -n "$backup" ]; then
-        # A failed replacement restores the previous app; a successful one
-        # removed the backup already and cleared this variable.
-        if [ -e "$dest/Akitty.app" ]; then rm -rf "$backup"
-        else mv "$backup" "$dest/Akitty.app" 2>/dev/null || true
-        fi
+acquire_lock() { # dest
+    # mkdir is atomic, so only one installer can hold the lock for a destination.
+    lock="$1/.akitty-install.lock"
+    lock_acquiring=1
+    if ! mkdir "$lock" 2>/dev/null; then
+        lock_acquiring=0
+        # A signal recorded during the failed mkdir must still terminate the
+        # installer by that signal. lock_owned was never set, so the foreign
+        # lock and its owner are left untouched by the cleanup below.
+        finalize_deferred_signal
+        local owner="" note=""
+        if [ -f "$lock/owner" ]; then owner="$(cat "$lock/owner" 2>/dev/null || true)"; fi
+        if [ -n "$owner" ]; then note=" (owner pid $owner)"; fi
+        die "another AkiTTY install is already running for $1$note; remove $lock only if no install is active"
     fi
+    lock_owned="$lock"
+    if ! printf '%s\n' "$$" > "$lock/owner"; then
+        # The redirect may already have created an empty owner file, so rmdir
+        # cannot be used here: remove the whole lock this process created.
+        lock_acquiring=0
+        rm -rf "$lock" || true
+        lock=""; lock_owned=""
+        # Lock cleanup and ownership are settled, so a signal deferred during a
+        # successful mkdir can now terminate the installer by itself.
+        finalize_deferred_signal
+        die "cannot record the install lock owner in $1"
+    fi
+    lock_acquiring=0
+    # Ownership is recorded now, so a deferred signal can be re-raised with the
+    # normal disposition; cleanup then releases the lock through release_lock.
+    finalize_deferred_signal
 }
-trap cleanup EXIT INT TERM
+
+release_lock() {
+    # Remove only the lock this process acquired, even if a signal interrupted
+    # owner initialization; a foreign or stale lock is never adopted.
+    [ -n "$lock_owned" ] || return 0
+    rm -rf "$lock_owned" || true
+    lock_owned=""; lock=""
+}
+
+cleanup() {
+    # Restore or preserve the previous app before any other cleanup, so a failure
+    # while deleting staging/zip/work can never strand the old app.
+    if [ -n "$backup" ] && [ -e "$backup/Akitty.app" ]; then
+        if [ -e "$dest/Akitty.app" ]; then
+            # The destination is occupied (a half-finished replacement or a
+            # concurrent install); keep the previous app rather than deleting it
+            # just because dest exists.
+            say "previous AkiTTY preserved at $backup/Akitty.app"
+        elif /usr/bin/perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+                "$backup/Akitty.app" "$dest/Akitty.app" 2>/dev/null; then
+            rmdir "$backup" 2>/dev/null || true
+        else
+            # rename(2) refuses an occupied destination, so a destination that
+            # appears after the check above can never nest the app inside it.
+            say "previous AkiTTY preserved at $backup/Akitty.app"
+        fi
+        # Cleanup runs again from the EXIT trap after a signal handler, so each
+        # step must be idempotent and report at most once.
+        backup=""
+    fi
+    # Everything below is best-effort: cleanup failures must not abort the trap.
+    if [ -n "$staging" ]; then rm -rf "$staging" || true; fi
+    if [ -n "$zip" ]; then rm -f "$zip" || true; fi
+    if [ -n "$work" ]; then rm -rf "$work" || true; fi
+    release_lock
+}
+# Cleanup belongs to EXIT only. An INT/TERM handler that merely ran cleanup would
+# let the installer resume and even print success after the signal, so those
+# handlers clean up, restore the default disposition, and re-raise the same
+# signal to terminate. EXIT then runs cleanup again; every step is idempotent.
+# While a lock is being acquired the signal is only recorded: cleanup would run
+# before lock_owned names the lock this process just created and leak it.
+on_signal() { # SIGNAME
+    local sig="$1"
+    if [ "$lock_acquiring" = 1 ]; then
+        lock_signal="$sig"
+        return 0
+    fi
+    cleanup
+    trap - "$sig"
+    kill -s "$sig" $$
+}
+
+# Finish a termination deferred while the lock was being acquired, once the lock
+# state is settled. The EXIT trap does not run when the shell dies by a signal,
+# so clean up first, restore the default disposition, and re-raise the recorded
+# signal so the installer terminates by it instead of resuming or exiting 1.
+finalize_deferred_signal() {
+    [ -n "$lock_signal" ] || return 0
+    local sig="$lock_signal"
+    lock_signal=""
+    cleanup
+    trap - "$sig"
+    kill -s "$sig" $$
+}
+trap cleanup EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 
 fetch() { # url destination
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error \
@@ -99,6 +190,10 @@ install_inner() {
     [ "$(wc -c < "$zip" | tr -d ' ')" = "$size" ] || die "archive size differs from the release manifest"
     [ "$(sha256_of "$zip")" = "$sha" ] || die "archive checksum differs from the release manifest"
 
+    # Serialize mutation of this destination before staging: a second installer
+    # with the same destination is rejected instead of racing the final moves.
+    acquire_lock "$dest"
+
     # Stage on the destination filesystem so the final move is a rename, never a copy.
     staging="$(mktemp -d "$dest/.akitty-install.XXXXXX")" || die "cannot stage the install in $dest"
     ditto -x -k "$zip" "$staging" || die "cannot extract the archive"
@@ -108,11 +203,21 @@ install_inner() {
         || die "Gatekeeper assessment failed; the app is not notarized"
 
     if [ -e "$dest/Akitty.app" ]; then
-        backup="$dest/.akitty-backup.$$"
-        mv "$dest/Akitty.app" "$backup" || die "cannot replace the existing $dest/Akitty.app"
+        # Exclusively created, so a leftover or attacker-planted path with a
+        # predictable name can never be adopted as the backup.
+        backup="$(mktemp -d "$dest/.akitty-backup.XXXXXX")" \
+            || die "cannot back up the existing $dest/Akitty.app"
+        if ! mv "$dest/Akitty.app" "$backup/Akitty.app"; then
+            rmdir "$backup" 2>/dev/null || true
+            backup=""
+            die "cannot replace the existing $dest/Akitty.app"
+        fi
     fi
     mv "$staging/Akitty.app" "$dest/Akitty.app" || die "cannot move the app into $dest"
-    if [ -n "$backup" ]; then rm -rf "$backup"; backup=""; fi
+    if [ -n "$backup" ]; then
+        rm -rf "$backup" || say "previous AkiTTY preserved at $backup/Akitty.app"
+        backup=""
+    fi
 
     say "installed AkiTTY $version; quit and relaunch Akitty if it is already running"
     printf '%s\n' "$dest/Akitty.app"

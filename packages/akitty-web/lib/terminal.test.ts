@@ -3288,3 +3288,533 @@ describe('Listener cleanup', () => {
     expect(afterSecondDispose.defaultPrevented).toBe(false);
   });
 });
+
+/**
+ * The title/bell scanner is stateful: an OSC sequence may be split across any number of writes,
+ * and writes may be strings or UTF-8 bytes. These tests pin the streaming contract.
+ */
+describe('Title and bell streaming scanner', () => {
+  let container: HTMLElement;
+  let term: Terminal;
+  let bells: number;
+  let titles: string[];
+
+  beforeEach(async () => {
+    if (typeof document === 'undefined') return;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    bells = 0;
+    titles = [];
+    term.onBell(() => {
+      bells++;
+    });
+    term.onTitleChange((title) => {
+      titles.push(title);
+    });
+  });
+
+  afterEach(() => {
+    if (term) term.dispose();
+    if (container && container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  test('OSC 2 title split across writes updates the title', () => {
+    if (!term) return;
+
+    term.write('\x1b]2;Split Ti');
+    expect(term.title).toBe('');
+
+    term.write('tle\x07');
+
+    expect(term.title).toBe('Split Title');
+    expect(titles).toEqual(['Split Title']);
+  });
+
+  test('OSC 0 title split across writes with an ST terminator split too', () => {
+    if (!term) return;
+
+    term.write('\x1b]0;ST Title');
+    term.write('\x1b');
+    expect(term.title).toBe('');
+
+    term.write('\\');
+
+    expect(term.title).toBe('ST Title');
+  });
+
+  test('OSC title delivered as bytes is recognised', () => {
+    if (!term) return;
+
+    term.write(new TextEncoder().encode('\x1b]2;Byte Title\x07'));
+
+    expect(term.title).toBe('Byte Title');
+  });
+
+  test('a multi-byte UTF-8 title split across writes decodes correctly', () => {
+    if (!term) return;
+
+    const bytes = new TextEncoder().encode('\x1b]2;caf\u00e9\x07');
+    // The two bytes of "é" straddle the write boundary.
+    term.write(bytes.slice(0, 8));
+    term.write(bytes.slice(8));
+
+    expect(term.title).toBe('caf\u00e9');
+  });
+
+  test('OSC 1 (icon name) never becomes the title and its BEL does not ring', () => {
+    if (!term) return;
+
+    term.write('\x1b]1;Icon Only\x07');
+
+    expect(term.title).toBe('');
+    expect(titles).toEqual([]);
+    expect(bells).toBe(0);
+  });
+
+  test('a BEL terminator inside an OSC string does not ring the bell', () => {
+    if (!term) return;
+
+    term.write('\x1b]0;No Bell');
+    term.write('\x07');
+
+    expect(term.title).toBe('No Bell');
+    expect(bells).toBe(0);
+  });
+
+  test('a raw BEL inside another control string does not ring the bell', () => {
+    if (!term) return;
+
+    // DCS: ESC P ... ST, with a BEL in the payload.
+    term.write('\x1bP1;2;3q\x07raw\x1b\\');
+
+    expect(bells).toBe(0);
+  });
+
+  test('a bare BEL still rings, in strings and in bytes', () => {
+    if (!term) return;
+
+    term.write('\x07');
+    expect(bells).toBe(1);
+
+    term.write(new Uint8Array([0x07]));
+    expect(bells).toBe(2);
+  });
+
+  test('a BEL after a completed OSC rings again', () => {
+    if (!term) return;
+
+    term.write('\x1b]2;Done\x07');
+    expect(bells).toBe(0);
+
+    term.write('\x07');
+    expect(bells).toBe(1);
+  });
+
+  test('a BEL in the escape state rings and does not end the sequence', () => {
+    if (!term) return;
+
+    // ESC BEL is a C0 execution; the pending OSC introducer still parses, and the
+    // terminating BEL of that OSC must not ring a second time.
+    term.write('\x1b\x07]0;After BEL\x07');
+
+    expect(bells).toBe(1);
+    expect(term.title).toBe('After BEL');
+  });
+
+  test('a BEL inside a CSI sequence rings without aborting the sequence', () => {
+    if (!term) return;
+
+    // BEL executes in CSI; the final `m` still ends the sequence, so the SGR applies
+    // and the bytes after BEL are not printed as literal text.
+    term.write('\x1b[1\x07;31mHello');
+
+    expect(bells).toBe(1);
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('Hello');
+  });
+
+  test('an oversized complete OSC title is rejected instead of stored', () => {
+    if (!term) return;
+
+    term.write(`\x1b]2;${'x'.repeat(10_000)}\x07`);
+
+    expect(term.title).toBe('');
+    expect(titles).toEqual([]);
+  });
+
+  test('an oversized incomplete OSC stays bounded and does not poison later titles', () => {
+    if (!term) return;
+
+    // No terminator: the scanner must cap its pending buffer instead of growing it forever.
+    term.write(`\x1b]2;${'y'.repeat(50_000)}`);
+    expect(term.title).toBe('');
+
+    // Completing the oversized sequence discards it.
+    term.write('\x07');
+    expect(term.title).toBe('');
+
+    // A later, valid title is still parsed.
+    term.write('\x1b]2;Recovered\x07');
+    expect(term.title).toBe('Recovered');
+  });
+
+  test('a bare ESC aborts a pending OSC and the next byte starts a new escape sequence', () => {
+    if (!term) return;
+
+    // Only `ESC \` is ST. A lone ESC cancels the control string, so the `]2;fresh` that follows
+    // must be parsed as a fresh OSC rather than appended to the aborted payload.
+    term.write('\x1b]2;stale\x1b]2;fresh\x07');
+
+    expect(term.title).toBe('fresh');
+    expect(titles).toEqual(['fresh']);
+    expect(bells).toBe(0);
+  });
+
+  test('an OSC aborted at a write boundary still parses the following sequence', () => {
+    if (!term) return;
+
+    // The aborting ESC ends one write and the `]` that carries the new sequence starts the next.
+    term.write('\x1b]2;stale\x1b');
+    expect(term.title).toBe('');
+    expect(titles).toEqual([]);
+
+    term.write(']2;fresh\x07');
+
+    expect(term.title).toBe('fresh');
+    expect(titles).toEqual(['fresh']);
+    expect(bells).toBe(0);
+  });
+
+  // ECMA-48: only `ESC \` is ST. A bare ESC cancels a control string (DCS/APC/PM/SOS) exactly as it
+  // cancels an OSC, and the byte after the ESC starts a new escape sequence. Treating that ESC as
+  // "still inside the string" made `ESC P ... ESC ] 2;Title BEL` swallow the title as DCS payload.
+  const controlStringIntroducers: ReadonlyArray<readonly [string, string]> = [
+    ['DCS', 'P'],
+    ['SOS', 'X'],
+    ['PM', '^'],
+    ['APC', '_'],
+  ];
+
+  for (const [stringName, introducer] of controlStringIntroducers) {
+    test(`a bare ESC aborts a pending ${stringName} string and redispatches the next byte`, () => {
+      if (!term) return;
+
+      term.write(`\x1b${introducer}payload\x1b]2;After ${stringName}\x07`);
+
+      expect(term.title).toBe(`After ${stringName}`);
+      expect(titles).toEqual([`After ${stringName}`]);
+      expect(bells).toBe(0);
+    });
+
+    test(`a ${stringName} string aborted at a write boundary still parses the next title`, () => {
+      if (!term) return;
+
+      // The aborting ESC ends one write; the `]` that opens the new OSC starts the next.
+      term.write(`\x1b${introducer}payload\x1b`);
+      expect(term.title).toBe('');
+      expect(titles).toEqual([]);
+
+      term.write(`]2;After ${stringName}\x07`);
+
+      expect(term.title).toBe(`After ${stringName}`);
+      expect(titles).toEqual([`After ${stringName}`]);
+      expect(bells).toBe(0);
+    });
+  }
+
+  // ECMA-48 CAN (0x18) and SUB (0x1a) cancel any pending sequence and return to ground. For a
+  // control string that also has to drop the buffered payload, so the next BEL rings and later
+  // titles still parse instead of completing the cancelled sequence.
+  for (const [cancelName, cancel] of [
+    ['CAN', '\x18'],
+    ['SUB', '\x1a'],
+  ] as const) {
+    test(`${cancelName} aborts a pending OSC and returns to ground`, () => {
+      if (!term) return;
+
+      term.write(`\x1b]2;stale${cancel}`);
+
+      expect(term.title).toBe('');
+      expect(titles).toEqual([]);
+
+      term.write('\x07');
+      expect(bells).toBe(1);
+
+      term.write('\x1b]2;fresh\x07');
+      expect(term.title).toBe('fresh');
+      expect(titles).toEqual(['fresh']);
+    });
+
+    test(`${cancelName} aborts a pending OSC across a write boundary`, () => {
+      if (!term) return;
+
+      term.write('\x1b]2;stale');
+      term.write(cancel);
+
+      term.write('\x07');
+      expect(bells).toBe(1);
+      expect(titles).toEqual([]);
+
+      term.write('\x1b]2;fresh\x07');
+      expect(term.title).toBe('fresh');
+    });
+
+    test(`${cancelName} discards an overflowed OSC payload and recovers`, () => {
+      if (!term) return;
+
+      term.write(`\x1b]2;${'y'.repeat(50_000)}${cancel}`);
+      expect(term.title).toBe('');
+
+      // Back in ground: this BEL is a bell, not the terminator of the cancelled OSC.
+      term.write('\x07');
+      expect(bells).toBe(1);
+
+      term.write('\x1b]2;Recovered\x07');
+      expect(term.title).toBe('Recovered');
+      expect(titles).toEqual(['Recovered']);
+    });
+
+    test(`${cancelName} aborts every pending control string and returns to ground`, () => {
+      if (!term) return;
+
+      for (const [stringName, introducer] of controlStringIntroducers) {
+        const bellsBefore = bells;
+        term.write(`\x1b${introducer}payload${cancel}`);
+
+        term.write('\x07');
+        expect(bells, `${stringName} should abort on ${cancelName}`).toBe(bellsBefore + 1);
+
+        term.write(`\x1b]2;After ${stringName}\x07`);
+        expect(term.title).toBe(`After ${stringName}`);
+      }
+    });
+
+    test(`${cancelName} aborts a DCS string across a write boundary`, () => {
+      if (!term) return;
+
+      term.write('\x1bPpayload');
+      term.write(cancel);
+
+      term.write('\x07');
+      expect(bells).toBe(1);
+
+      term.write('\x1b]2;fresh\x07');
+      expect(term.title).toBe('fresh');
+      expect(titles).toEqual(['fresh']);
+    });
+  }
+
+  // ECMA-48 / xterm: a C0 control inside an escape sequence executes (only BEL has a visible effect
+  // here) without abandoning the sequence, and DEL is ignored in every state. Only CAN and SUB
+  // cancel. Sending the other C0 bytes to ground dropped the pending introducer, so
+  // `ESC LF ]2;Lost BEL` printed the OSC bytes literally and rang the BEL instead of setting a title.
+  const escapeStatePassthroughControls: ReadonlyArray<readonly [string, string]> = [
+    ['NUL', '\x00'],
+    ['BS', '\x08'],
+    ['HT', '\x09'],
+    ['LF', '\x0a'],
+    ['CR', '\x0d'],
+    ['DEL', '\x7f'],
+  ];
+
+  for (const [controlName, control] of escapeStatePassthroughControls) {
+    test(`a contiguous ${controlName} in the escape state keeps the pending OSC title`, () => {
+      if (!term) return;
+
+      term.write(`\x1b${control}]2;After ${controlName}\x07`);
+
+      expect(term.title).toBe(`After ${controlName}`);
+      expect(titles).toEqual([`After ${controlName}`]);
+      expect(bells).toBe(0);
+    });
+
+    test(`a ${controlName} in the escape state across a write boundary keeps the pending OSC title`, () => {
+      if (!term) return;
+
+      // The ESC ends one write and the C0 control opens the next.
+      term.write('\x1b');
+      expect(term.title).toBe('');
+      expect(titles).toEqual([]);
+
+      term.write(`${control}]2;Split ${controlName}\x07`);
+
+      expect(term.title).toBe(`Split ${controlName}`);
+      expect(titles).toEqual([`Split ${controlName}`]);
+      expect(bells).toBe(0);
+    });
+  }
+
+  // ECMA-48 / DEC: inside an OSC control string, C0 controls that neither terminate it (BEL) nor
+  // cancel it (CAN/SUB) are ignored, as is DEL; they are never part of the title payload. Sending
+  // them to appendOsc leaked them into the title, so `ESC ]2;a DEL b BEL` titled "a\u007fb".
+  const oscIgnoredControls: ReadonlyArray<readonly [string, string]> = [
+    ['NUL', '\x00'],
+    ['BS', '\x08'],
+    ['HT', '\x09'],
+    ['LF', '\x0a'],
+    ['CR', '\x0d'],
+    ['DEL', '\x7f'],
+  ];
+
+  for (const [controlName, control] of oscIgnoredControls) {
+    test(`a contiguous ${controlName} in an OSC payload is ignored`, () => {
+      if (!term) return;
+
+      term.write(`\x1b]2;a${control}b\x07`);
+
+      expect(term.title).toBe('ab');
+      expect(titles).toEqual(['ab']);
+      expect(bells).toBe(0);
+    });
+
+    test(`a ${controlName} split inside an OSC payload is ignored`, () => {
+      if (!term) return;
+
+      term.write('\x1b]2;a');
+      term.write(`${control}b`);
+      term.write('\x07');
+
+      expect(term.title).toBe('ab');
+      expect(titles).toEqual(['ab']);
+      expect(bells).toBe(0);
+    });
+  }
+
+  // After an ESC inside an OSC, DEL and the other non-CAN/SUB C0 controls must not abandon the
+  // pending ST: `ESC ]2;Title ESC DEL \` still ends the OSC at ST and titles "Title". The buggy
+  // path cancelled the OSC and redispatched the DEL, so the following `\` was consumed as an
+  // escape body and the title was lost.
+  for (const [controlName, control] of oscIgnoredControls) {
+    test(`a contiguous ${controlName} between an OSC ESC and ST keeps the pending title`, () => {
+      if (!term) return;
+
+      term.write(`\x1b]2;Title\x1b${control}\\`);
+
+      expect(term.title).toBe('Title');
+      expect(titles).toEqual(['Title']);
+      expect(bells).toBe(0);
+    });
+
+    test(`a ${controlName} split between an OSC ESC and ST keeps the pending title`, () => {
+      if (!term) return;
+
+      term.write('\x1b]2;Title\x1b');
+      expect(term.title).toBe('');
+      expect(titles).toEqual([]);
+
+      term.write(`${control}\\`);
+
+      expect(term.title).toBe('Title');
+      expect(titles).toEqual(['Title']);
+      expect(bells).toBe(0);
+    });
+  }
+
+  // A raw BEL inside a control string is data, not a bell, even in the escape sub-state after an
+  // ESC: it must not ring or abandon the pending ST, so the following `\` still terminates the OSC.
+  test('a BEL between an OSC ESC and ST is data and does not ring', () => {
+    if (!term) return;
+
+    term.write('\x1b]2;Title\x1b\x07\\');
+
+    expect(term.title).toBe('Title');
+    expect(titles).toEqual(['Title']);
+    expect(bells).toBe(0);
+  });
+
+  // Same rule for the other control strings (DCS here): a BEL or DEL after the ESC keeps the ST
+  // pending instead of aborting the string and ringing the BEL through the redispatched escape.
+  test('a BEL after an ESC inside a DCS string is data and does not ring', () => {
+    if (!term) return;
+
+    term.write('\x1bPpayload\x1b\x07\\');
+    expect(bells).toBe(0);
+
+    term.write('\x1b]2;After DCS BEL\x07');
+    expect(term.title).toBe('After DCS BEL');
+  });
+
+  test('a DEL after an ESC inside a DCS string keeps the pending ST', () => {
+    if (!term) return;
+
+    term.write('\x1bPpayload\x1b\x7f\\');
+    expect(bells).toBe(0);
+
+    term.write('\x1b]2;After DCS DEL\x07');
+    expect(term.title).toBe('After DCS DEL');
+  });
+});
+
+/**
+ * Bracketed paste must match the native core: escape characters are stripped from the payload so a
+ * pasted `ESC [ 2 0 1 ~` can never close the bracketed region early. Both the textarea path and the
+ * parent-container InputHandler path must share that behaviour and emit exactly once.
+ */
+describe('Bracketed paste safety', () => {
+  let container: HTMLElement;
+  let term: Terminal;
+  let received: string[];
+
+  beforeEach(async () => {
+    if (typeof document === 'undefined') return;
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    received = [];
+    term.onData((data) => {
+      received.push(data);
+    });
+    term.write('\x1b[?2004h');
+  });
+
+  afterEach(() => {
+    if (term) term.dispose();
+    if (container && container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  function createPasteEvent(text: string): Event {
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { getData: () => text, setData: () => {} },
+    });
+    return event;
+  }
+
+  function payloadOf(data: string): string {
+    const open = '\x1b[200~';
+    const close = '\x1b[201~';
+    expect(data.startsWith(open)).toBe(true);
+    expect(data.endsWith(close)).toBe(true);
+    return data.slice(open.length, data.length - close.length);
+  }
+
+  test('Terminal.paste strips ESC so an embedded 201 marker cannot break out', () => {
+    if (!term) return;
+
+    term.paste('\x1b[201~evil');
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toBe('\x1b[200~[201~evil\x1b[201~');
+    expect(payloadOf(received[0]!)).not.toContain('\x1b');
+  });
+
+  test('the textarea paste path shares bracketed behaviour exactly once', () => {
+    if (!term || !term.textarea) return;
+
+    term.textarea.dispatchEvent(createPasteEvent('\x1b[201~evil'));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toBe('\x1b[200~[201~evil\x1b[201~');
+  });
+
+  test('the parent-container paste path shares bracketed behaviour exactly once', () => {
+    if (!term) return;
+
+    container.dispatchEvent(createPasteEvent('\x1b[201~evil'));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toBe('\x1b[200~[201~evil\x1b[201~');
+  });
+});

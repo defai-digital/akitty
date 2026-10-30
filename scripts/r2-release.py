@@ -247,6 +247,23 @@ def tag_commit(tag):
     return json.loads(raw).get("sha")
 
 
+def tag_file(commit, path):
+    """Read a file from the resolved tag commit, never the mutable worktree."""
+    try:
+        return subprocess.check_output(
+            [
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/vnd.github.raw",
+                f"repos/{REPO}/contents/{path}?ref={commit}",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        raise RuntimeError(f"Cannot read {path} at the published tag commit") from None
+
+
 def validate_manifest(tag, version, files):
     try:
         manifest = json.loads(files["release.json"])
@@ -319,6 +336,15 @@ def validate_appcast(appcast, manifest):
         and item.findtext(SPARKLE + "version") == str(manifest["build"]),
         "Appcast version differs from the release manifest",
     )
+    minimum = manifest.get("minimum_macos")
+    require(
+        isinstance(minimum, str) and bool(minimum),
+        "Release manifest has no minimum macOS version",
+    )
+    require(
+        item.findtext(SPARKLE + "minimumSystemVersion") == minimum,
+        "Appcast minimumSystemVersion differs from the release manifest",
+    )
     enclosures = item.findall("enclosure")
     require(len(enclosures) == 1, "Appcast must publish exactly one enclosure")
     enclosure = enclosures[0]
@@ -361,6 +387,9 @@ def parse_version(value):
 
 def validate_latest(existing, manifest):
     """A new release must not move the version back or reuse a build number."""
+    # Validate the new build even on the first publication, where latest.json is
+    # absent and the comparison below would otherwise be skipped entirely.
+    build = parse_build(manifest.get("build"), "Release build")
     if not existing:
         return
     try:
@@ -375,11 +404,9 @@ def validate_latest(existing, manifest):
     # A retry after latest.json advanced must still be able to finish the feed.
     # Only the identical manifest can reuse a build; changed bytes remain denied.
     if current == manifest:
-        parse_build(manifest.get("build"), "Release build")
         return
     require(
-        parse_build(manifest.get("build"), "Release build")
-        > parse_build(current.get("build"), "Published build"),
+        build > parse_build(current.get("build"), "Published build"),
         "Refusing to publish a build number that does not increase",
     )
 
@@ -414,7 +441,12 @@ def publish(tag, source):
     manifest = validate_manifest(tag, version, files)
     validate_checksums(source, files, names)
     validate_appcast(files["appcast.xml"], manifest)
-    validate_tag_commit(manifest, tag_commit(tag))
+    commit = tag_commit(tag)
+    validate_tag_commit(manifest, commit)
+    # The served installer must be the reviewed bytes of the published tag, not
+    # whatever happens to be in the current worktree at publication time.
+    installer = tag_file(commit, "scripts/install.sh")
+    require(installer.startswith(b"#!"), "Published installer is malformed")
     release = json.loads(
         subprocess.check_output(["gh", "api", f"repos/{REPO}/releases/tags/{tag}"])
     )
@@ -439,9 +471,7 @@ def publish(tag, source):
     )
     put_verified(cloud, prefix + "release-ready.json", ready)
     put_verified(cloud, "latest.json", files["release.json"], mutable=True)
-    put_verified(
-        cloud, "install", (ROOT / "scripts/install.sh").read_bytes(), mutable=True
-    )
+    put_verified(cloud, "install", installer, mutable=True)
     # The signed feed is the updater's discovery point. Publish it last.
     put_verified(cloud, "appcast.xml", files["appcast.xml"], mutable=True)
     print("R2 publication complete:", tag)

@@ -190,6 +190,9 @@ pub struct Model {
     /// Whether the last snapshot reported status text or progress, so an expiry
     /// can refresh a client that polls with `since` equal to the revision.
     reported_transient: bool,
+    /// Whether the last snapshot reported a running animation, so a finite
+    /// animation parking on its loop count refreshes a `since`-equal poll.
+    reported_animating: bool,
     /// Pixel size of one cell as reported by the host; (0, 0) until known.
     pub cell_px: (u32, u32),
     in_alt: bool,
@@ -241,6 +244,7 @@ impl Model {
             chrome_filter: ChromeFilter::default(),
             program_chrome: true,
             reported_transient: false,
+            reported_animating: false,
             cell_px: (0, 0),
             in_alt: false,
             tracking: Tracking::new(size.cols, size.rows),
@@ -506,7 +510,8 @@ impl Model {
     /// [`expand_cell`]); the wire path uses [`Self::snapshot_json`].
     #[cfg(test)]
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
-        let mut snapshot: Value = serde_json::from_str(&self.snapshot_json(since, true)).expect("snapshot is valid JSON");
+        let mut snapshot: Value =
+            serde_json::from_str(&self.snapshot_json(since, true).expect("snapshot serializes")).expect("snapshot is valid JSON");
         if let Some(cells) = snapshot.get_mut("cells").and_then(Value::as_array_mut) {
             for cell in cells {
                 *cell = expand_cell(cell);
@@ -515,18 +520,31 @@ impl Model {
         snapshot
     }
     /// The snapshot JSON, serialized once from typed rows.
-    pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> String {
+    pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> Result<String, String> {
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
             self.revision = self.revision.saturating_add(1);
         }
         let now = chrome::now_ms();
         let transient = self.chrome.transient_visible(now);
-        if since == Some(self.revision) && self.clipboard.is_empty() && !self.bell && transient == self.reported_transient {
-            return r#"{"changed":false}"#.into();
+        // A finite animation parks without a new displayed frame, so `tick` reports
+        // no change and the revision stays put; the transition still has to reach a
+        // client polling with `since` equal to the revision it already holds.
+        let animating = self.graphics.animating();
+        if since == Some(self.revision)
+            && self.clipboard.is_empty()
+            && !self.bell
+            && transient == self.reported_transient
+            && animating == self.reported_animating
+        {
+            return Ok(r#"{"changed":false}"#.into());
         }
-        self.reported_transient = transient;
         self.sync_graphics();
+        // The tracker sync above may drop a placement, so record the value this snapshot
+        // actually carries. Commit it, along with `reported_transient`, only after the
+        // snapshot builds: a failed build must not consume a transition the client never
+        // received, or a later `since`-equal poll would answer `changed:false`.
+        let reported_animating = self.graphics.animating();
         let search_ranges = self.visible_search_ranges();
         let active_mark = self.current_mark();
         let rows = self.size.rows;
@@ -692,11 +710,13 @@ impl Model {
             })
             .collect();
         // Placeholder rows of virtual placements decode into fragment entries;
-        // the bound keeps a hostile screen from bloating the snapshot.
+        // the bound keeps a hostile screen from bloating the snapshot. Going over
+        // it is an error, never a silent omission of visible images.
         let cell_px = if self.cell_px.0 > 0 { self.cell_px } else { (8, 16) };
         let mut fragments = 0usize;
+        let mut over_cap = false;
         for (row, cells) in placeholders.iter().enumerate() {
-            if cells.is_empty() || fragments >= MAX_FRAGMENTS { continue; }
+            if cells.is_empty() { continue; }
             let mut resolve = |image: u32, placement: u32| -> Option<placeholder::Grid> {
                 let placed = self.graphics.virtual_placement(image, placement, alternate)?;
                 let data = self.graphics.images.get(&image)?;
@@ -708,17 +728,34 @@ impl Model {
                 })
             };
             for (fragment, placement) in placeholder::decode_row(row, cells, cell_px, &mut resolve) {
-                if fragments >= MAX_FRAGMENTS { break; }
+                if fragments >= MAX_FRAGMENTS { over_cap = true; break; }
                 let (Some(placed), Some(data)) =
                     (self.graphics.virtual_placement(fragment.image, placement, alternate), self.graphics.images.get(&fragment.image))
-                else { break; };
+                else {
+                    // decode_row just resolved this fragment with the same lookups, so
+                    // failing here is an internal inconsistency, not a benign omission:
+                    // fail closed rather than silently dropping a visible image.
+                    if partial { self.links = links; }
+                    return Err("placeholder fragment no longer resolves".into());
+                };
                 images.push(json!({"id": fragment.image, "gen": data.generation, "w": data.width, "h": data.height,
                     "row": fragment.row, "col": fragment.col, "cols": fragment.cols, "rows": 1, "z": placed.z,
                     "sx": fragment.sx, "sy": fragment.sy, "sw": fragment.sw, "sh": fragment.sh,
                     "ox": fragment.ox, "oy": fragment.oy, "dw": fragment.dw, "dh": fragment.dh}));
                 fragments += 1;
             }
+            if over_cap { break; }
         }
+        if over_cap {
+            // Restore the partially borrowed link table so a retry (or a smaller
+            // screen) still serializes unchanged rows correctly.
+            if partial { self.links = links; }
+            return Err(format!("placeholder fragments exceed the {MAX_FRAGMENTS} per-snapshot limit"));
+        }
+        // The snapshot will be returned: this is the point at which the reported flags
+        // may advance to match what the client is about to receive.
+        self.reported_transient = transient;
+        self.reported_animating = reported_animating;
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
@@ -735,7 +772,7 @@ impl Model {
             lines,
             links: &self.links,
             images,
-            animating: self.graphics.animating(),
+            animating: reported_animating,
             cursor: CursorOut { row: cursor_row, col: content.cursor.point.column.0, visible: cursor_visible },
             bracketed_paste: content.mode.contains(TermMode::BRACKETED_PASTE),
             app_cursor: content.mode.contains(TermMode::APP_CURSOR),
@@ -765,7 +802,7 @@ impl Model {
             cols: self.size.cols,
             hashes,
         });
-        json
+        Ok(json)
     }
 }
 
@@ -1192,7 +1229,7 @@ mod tests {
     fn plain_snapshots_omit_optional_fields() {
         let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
         model.feed(b"hi");
-        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true)).unwrap();
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
         assert_eq!(snapshot["links"], json!([]));
         // Positional cells: [row, col, text, fg, bg, attrs] with nothing trailing when unset.
         assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x12161d, 0]));
@@ -1201,7 +1238,7 @@ mod tests {
     fn wire_cells_pack_attributes_and_trail_ucolor_then_link() {
         let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
         model.feed("\x1b[1;3;9;4:3;58;2;1;2;3mA\x1b[0m\x1b]8;;https://a.test\x07B\x1b]8;;\x07界".as_bytes());
-        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true)).unwrap();
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
         let cells = &snapshot["cells"];
         let attrs = ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE | ATTR_STRIKE | 3 << ATTR_USTYLE_SHIFT;
         assert_eq!(cells[0], json!([0, 0, "A", 0xdae2ef, 0x12161d, attrs, 0x010203]));
@@ -1257,6 +1294,78 @@ mod tests {
             model.feed(b"\x1b[?1049l");
             assert_eq!(model.snapshot(None)["images"][0]["z"], 3);
         }
+    }
+
+    #[test]
+    fn finite_animation_reports_parking_through_snapshot_polling() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        model.cell_px = (8, 16);
+        // Two frames with 100 ms gaps playing one loop (`v=2`), placed on screen.
+        model.feed(format!("\x1b_Ga=T,f=24,s=2,v=2,i=5,q=2,C=1;{PIXEL}\x1b\\").as_bytes());
+        model.feed(b"\x1b_Ga=f,i=5,f=24,s=1,v=1,z=100;AP8A\x1b\\");
+        model.feed(b"\x1b_Ga=a,i=5,r=1,z=100\x1b\\");
+        model.feed(b"\x1b_Ga=a,i=5,s=3,v=2\x1b\\");
+        let first = model.snapshot(None);
+        assert_eq!(first["animating"], true, "{first}");
+        let since = first["revision"].as_u64();
+        // Run the animation to its loop count without a snapshot in between, as a
+        // client polling slower than the display rate would.
+        let mut at = std::time::Instant::now();
+        for _ in 0..8 {
+            if !model.graphics.animating() { break; }
+            at += std::time::Duration::from_millis(250);
+            model.graphics.tick(at);
+        }
+        assert!(!model.graphics.animating(), "the finite animation should park");
+        // Polling with the revision the client holds must report the transition,
+        // otherwise the client keeps believing the image is still animating.
+        let parked = model.snapshot(since);
+        assert_eq!(parked["changed"], true, "{parked}");
+        assert_eq!(parked["animating"], false, "{parked}");
+        // The transition is reported once; the quiet state early-returns again.
+        assert_eq!(model.snapshot(parked["revision"].as_u64())["changed"], false);
+    }
+
+    #[test]
+    fn failed_snapshot_does_not_consume_the_animation_transition() {
+        let mut model = Model::new(Size::validate(512, 17).unwrap(), 100);
+        model.cell_px = (8, 16);
+        // A finite one-loop animation, plus a 1x1 image used by virtual placeholders.
+        model.feed(format!("\x1b_Ga=T,f=24,s=2,v=2,i=7,q=2,C=1;{PIXEL}\x1b\\").as_bytes());
+        model.feed(b"\x1b_Ga=f,i=7,f=24,s=1,v=1,z=100;AP8A\x1b\\");
+        model.feed(b"\x1b_Ga=a,i=7,r=1,z=100\x1b\\");
+        model.feed(b"\x1b_Ga=a,i=7,s=3,v=2\x1b\\");
+        model.feed(b"\x1b_Ga=t,f=24,s=1,v=1,i=5,q=2;AAAA\x1b\\");
+        model.feed(b"\x1b_Ga=p,U=1,i=5,c=1,r=1,q=2\x1b\\");
+        // Isolated placeholder cells (a space between) decode to one fragment each:
+        // 256 per row, so 16 rows sit exactly at the 4096-fragment cap.
+        let placeholders = format!("\x1b[38;2;0;0;5m{}", "\u{10EEEE} ".repeat(256));
+        for row in 1..=16 {
+            model.feed(format!("\x1b[{row};1H{placeholders}").as_bytes());
+        }
+        let first = model.snapshot(None);
+        assert_eq!(first["animating"], true, "{first}");
+        // Park the animation without a snapshot in between; the revision holds.
+        let mut at = std::time::Instant::now();
+        for _ in 0..8 {
+            if !model.graphics.animating() { break; }
+            at += std::time::Duration::from_millis(250);
+            model.graphics.tick(at);
+        }
+        assert!(!model.graphics.animating(), "the finite animation should park");
+        // One more placeholder row overflows the cap at a fresh revision.
+        model.feed(format!("\x1b[17;1H{placeholders}").as_bytes());
+        let revision = model.revision;
+        assert!(model.snapshot_json(Some(revision), true).is_err(), "the over-cap build must fail closed");
+        // The failure must not consume the parked transition. Shrink the grid back under
+        // the cap (no revision change) and poll again: the client must see the parked
+        // animation, not `changed:false`.
+        let fits = Size::validate(512, 16).unwrap();
+        model.term.resize(fits);
+        model.size = fits;
+        let parked: Value = serde_json::from_str(&model.snapshot_json(Some(revision), true).unwrap()).unwrap();
+        assert_eq!(parked["changed"], true, "{parked}");
+        assert_eq!(parked["animating"], false, "{parked}");
     }
 
     /// A 2x2 RGB frame, base64 of 12 zero bytes; small enough to inline.

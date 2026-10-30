@@ -113,6 +113,11 @@ updates without a grid change. Before a host reports cell metrics, `CSI 14 t`
 full dimensions even when they exceed 16-bit values; the kernel ioctl remains
 clamped to its 16-bit fields.
 
+Each snapshot allows up to 4096 resolved Unicode placeholder fragments. A screen
+that exceeds this bound returns an error rather than omitting visible images;
+unresolved placeholders do not count toward the limit. Successful `cell_size`
+changes invalidate the snapshot revision so cached placeholder geometry refreshes.
+
 **Program chrome.** A session holds one chrome document: a one-line status, a mark, a progress value, and an optional sprite. Two entries share one validator. A program sends `OSC 771` as `ESC ] 771 ; <json> BEL` or `ESC ] 771 ; <json> ST` (`ESC \`). The JSON is the document itself (no `op` or `id`). A host sends the same fields to `akitty_request_v1` as `{ "op": "chrome", "id", ... }`. `OSC 771` is removed from the byte stream before the terminal parser, including when it is rejected or its body exceeds 64 KiB, so it never appears as grid text. That cap applies only to `OSC 771`. Every other OSC sequence, including title `OSC 0` and `OSC 2` and a clipboard `OSC 52` whose base64 is larger than 64 KiB, passes through unchanged. The shell title stays the window title and the tab label; chrome text does not replace it. There is no video decoder and no plugin or script runtime.
 
 Each accepted update replaces the whole document. Omitted fields clear the previous ones. `"clear": true` removes the document and skips the other checks. An empty update is an error and does not replace anything. A rejected update, from either entry, leaves the previous document in place. `OSC 771` that fails validation is consumed and reported only by leaving the document unchanged. The ABI returns `{ "ok": false, "error" }`.

@@ -10,9 +10,11 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
+import xml.etree.ElementTree as ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 STAMP_PATH = Path("Contents/Resources/akitty-build.json")
+SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
 
 # The packaged identity must agree with the checked-in plist.
 IDENTITY_KEYS = [
@@ -80,6 +82,94 @@ def verify_package(archive, expected, version, private, run=run):
         return actual, stamp
 
 
+def validate_account_key(tools, key_account, expected, run=run):
+    """The signing account must be the identity Info.plist publishes."""
+    try:
+        actual = run(str(tools / "generate_keys"), "--account", key_account, "-p")
+    except (OSError, subprocess.CalledProcessError):
+        raise ReleaseError("Cannot read the Sparkle signing account") from None
+    if not actual or actual.strip() != expected.get("SUPublicEDKey"):
+        raise ReleaseError("Sparkle account key differs from Info.plist SUPublicEDKey")
+
+
+def appcast_signature(path):
+    """Extract the single enclosure signature generate_appcast produced."""
+    path = Path(path)
+    if not path.is_file():
+        raise ReleaseError("generate_appcast produced no appcast.xml")
+    try:
+        root = ElementTree.fromstring(path.read_bytes())
+    except ElementTree.ParseError:
+        raise ReleaseError("Generated appcast.xml is not valid XML") from None
+    items = root.findall("./channel/item")
+    if len(items) != 1:
+        raise ReleaseError("Generated appcast.xml must describe exactly one release")
+    enclosures = items[0].findall("enclosure")
+    if len(enclosures) != 1:
+        raise ReleaseError("Generated appcast.xml must publish exactly one enclosure")
+    signature = enclosures[0].get(SPARKLE + "edSignature") or ""
+    if not signature:
+        raise ReleaseError("Generated appcast.xml is not signed")
+    return signature
+
+
+def validate_appcast(path, manifest):
+    """The generated feed must describe the release.json manifest being published."""
+    path = Path(path)
+    if not path.is_file():
+        raise ReleaseError("generate_appcast produced no appcast.xml")
+    try:
+        root = ElementTree.fromstring(path.read_bytes())
+    except ElementTree.ParseError:
+        raise ReleaseError("Generated appcast.xml is not valid XML") from None
+    items = root.findall("./channel/item")
+    if len(items) != 1:
+        raise ReleaseError("Generated appcast.xml must describe exactly one release")
+    item = items[0]
+    enclosures = item.findall("enclosure")
+    if len(enclosures) != 1:
+        raise ReleaseError("Generated appcast.xml must publish exactly one enclosure")
+    enclosure = enclosures[0]
+    if (item.findtext(SPARKLE + "shortVersionString") or "") != manifest["version"]:
+        raise ReleaseError(
+            "Generated appcast.xml shortVersionString differs from release.json"
+        )
+    if (item.findtext(SPARKLE + "version") or "") != str(manifest["build"]):
+        raise ReleaseError("Generated appcast.xml version differs from release.json")
+    if (enclosure.get("url") or "") != manifest["url"]:
+        raise ReleaseError(
+            "Generated appcast.xml enclosure URL differs from release.json"
+        )
+    if (enclosure.get("length") or "") != str(manifest["size"]):
+        raise ReleaseError(
+            "Generated appcast.xml enclosure length differs from release.json"
+        )
+    minimum = manifest.get("minimum_macos")
+    if not minimum:
+        raise ReleaseError("release.json has no minimum_macos")
+    if (item.findtext(SPARKLE + "minimumSystemVersion") or "") != minimum:
+        raise ReleaseError(
+            "Generated appcast.xml minimumSystemVersion differs from release.json"
+        )
+
+
+def verify_appcast_signature(tools, key_account, archive, signature, run=run):
+    """Sparkle must verify the feed signature with the release account key."""
+    try:
+        run(
+            str(tools / "sign_update"),
+            "--account",
+            key_account,
+            "--verify",
+            str(archive),
+            signature,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        raise ReleaseError(
+            "Appcast signature does not verify with the signing account"
+        ) from None
+
+
 def prepare(
     key_account,
     *,
@@ -137,6 +227,7 @@ def prepare(
             version=version,
             build=actual.get("CFBundleVersion"),
         )
+        validate_account_key(tools, key_account, expected, run=run)
         prefix = f"https://download.automatosx.com/akitty/releases/download/v{version}/"
         shutil.copyfile(notes, archive.with_suffix(".md"))
         run(
@@ -151,6 +242,13 @@ def prepare(
             "--link",
             "https://github.com/defai-digital/akitty",
             str(work),
+        )
+        verify_appcast_signature(
+            tools,
+            key_account,
+            archive,
+            appcast_signature(work / "appcast.xml"),
+            run=run,
         )
         archive.with_suffix(".md").unlink()
         content = archive.read_bytes()
@@ -167,6 +265,7 @@ def prepare(
             "size": len(content),
             "sha256": hashlib.sha256(content).hexdigest(),
         }
+        validate_appcast(work / "appcast.xml", manifest)
         (work / "release.json").write_text(json.dumps(manifest, indent=2) + "\n")
         checksums = []
         for file in [archive, work / "release.json", work / "appcast.xml"]:

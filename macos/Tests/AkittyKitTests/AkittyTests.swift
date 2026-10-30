@@ -86,7 +86,10 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(ClipboardPolicy.acceptsText("\0"))
         XCTAssertFalse(ClipboardPolicy.acceptsText(String(repeating:"a",count:65537)))
         XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("hello"))
+        XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("a\tb"))
+        XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("\t"))
         for value in ["a\nb", "a\rb", "\u{1b}[201~", "\u{7f}"] { XCTAssertTrue(ClipboardPolicy.needsPasteConfirmation(value)) }
+        for value in ["\u{3}", "\u{4}", "a\u{3}b", "a\u{4}b", "\u{1}", "\u{2}", "\u{1f}"] { XCTAssertTrue(ClipboardPolicy.needsPasteConfirmation(value)) }
     }
     func testCompositionCommitAndCancel() {
         var composition = Composition()
