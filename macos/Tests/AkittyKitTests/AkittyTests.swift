@@ -530,6 +530,120 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(controller.window!.titlebarAccessoryViewControllers.isEmpty)
     }
 
+    @MainActor func testEveryTabHasACloseButtonThatClosesOnlyThatTab() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        try controller.newTab()
+        try controller.newTab()
+        XCTAssertEqual(controller.tabChips.count, 3)
+        XCTAssertEqual(controller.tabChips.map(\.isSelected), [false, false, true])
+        // The selected tab shows its close button; the others show theirs on hover, but every one is there to click.
+        XCTAssertEqual(controller.tabChips.map { $0.closeButton.alphaValue }, [0, 0, 1])
+        XCTAssertEqual(controller.tabChips[0].closeButton.accessibilityIdentifier(), "close-terminal-tab")
+        XCTAssertEqual(controller.tabChips.map(\.shortcut), ["⌘1", "⌘2", "⌘3"])
+        // Tabs share the bar equally, like native tabs, and follow the window's width.
+        window.contentView?.layoutSubtreeIfNeeded()
+        let widths = controller.tabChips.map(\.frame.width)
+        XCTAssertEqual(widths.max()! - widths.min()!, 0, accuracy: 1)
+        XCTAssertGreaterThan(widths[0], 250)
+        window.setContentSize(NSSize(width: 600, height: 400)); window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertLessThan(controller.tabChips[0].frame.width, widths[0])
+        controller.selectTab(at: 0); XCTAssertEqual(controller.tabChips.map(\.isSelected), [true, false, false])
+        controller.selectTab(at: 7); XCTAssertEqual(controller.tabChips.map(\.isSelected), [true, false, false])
+        controller.selectTab(at: 8); XCTAssertEqual(controller.tabChips.map(\.isSelected), [false, false, true], "⌘9 is the last tab")
+        controller.selectTab(at: 0)
+        controller.selectTab(at: 2)
+        let first = controller.tabs.tabViewItems[0], middle = controller.tabs.tabViewItems[1]
+        let doomed = try XCTUnwrap(((middle.view as? NSSplitView)?.arrangedSubviews.first as? TerminalPane)?.terminal)
+
+        // A running shell asks first, and cancelling keeps it.
+        controller.tabChips[1].closeButton.performClick(nil)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+        for _ in 0..<50 where window.attachedSheet != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 3)
+        XCTAssertNoThrow(try doomed.session.snapshot())
+
+        controller.tabChips[1].closeButton.performClick(nil)
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
+        for _ in 0..<50 where controller.tabs.numberOfTabViewItems == 3 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 2)
+        XCTAssertFalse(controller.tabs.tabViewItems.contains(middle))
+        XCTAssertEqual(controller.tabChips.count, 2)
+        XCTAssertThrowsError(try doomed.session.snapshot(), "closing the tab stops its session")
+
+        // Clicking a chip selects its tab.
+        controller.tabChips[0].mouseDown(with: try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
+        XCTAssertTrue(controller.tabs.selectedTabViewItem === first)
+        XCTAssertEqual(controller.tabChips.map(\.isSelected), [true, false])
+    }
+
+    @MainActor func testDraggingATabReordersItAndKeepsItsSession() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        try controller.newTab(); try controller.newTab()
+        for (index, name) in ["one", "two", "three"].enumerated() { controller.tabs.tabViewItems[index].label = name }
+        controller.selectTab(at: 0)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let terminal = try XCTUnwrap(controller.active)
+        func mouse(_ type: NSEvent.EventType, _ chip: TabChip, x: CGFloat) throws -> NSEvent {
+            let point = chip.superview!.convert(NSPoint(x: x, y: chip.frame.midY), to: nil)
+            return try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        let first = controller.tabChips[0], start = first.frame.midX
+        first.mouseDown(with: try mouse(.leftMouseDown, first, x: start))
+        // A 2-point wobble is still a click.
+        first.mouseDragged(with: try mouse(.leftMouseDragged, first, x: start + 2))
+        XCTAssertEqual(controller.tabChips.map(\.label), ["one", "two", "three"])
+        // Drag past the last tab: events keep going to the chip that got the mouse-down, as in AppKit.
+        first.mouseDragged(with: try mouse(.leftMouseDragged, first, x: controller.tabChips[1].frame.midX))
+        XCTAssertEqual(controller.tabChips.map(\.label), ["two", "one", "three"])
+        first.mouseDragged(with: try mouse(.leftMouseDragged, first, x: controller.tabChips[2].frame.maxX + 40))
+        first.mouseUp(with: try mouse(.leftMouseUp, first, x: controller.tabChips[2].frame.maxX + 40))
+        XCTAssertEqual(controller.tabChips.map(\.label), ["two", "three", "one"])
+        XCTAssertEqual(controller.tabChips.map(\.isSelected), [false, false, true])
+        XCTAssertEqual(controller.tabChips.map(\.shortcut), ["⌘1", "⌘2", "⌘3"], "shortcuts follow position")
+        XCTAssertTrue(controller.active === terminal)
+        XCTAssertNoThrow(try terminal.session.snapshot())
+        _ = try terminal.session.call("feed", ["text": "stillhere"])
+        let cells = try XCTUnwrap(try terminal.session.snapshot()).cells
+        XCTAssertEqual(String(cells.filter { $0.row == 0 }.sorted { $0.col < $1.col }.map(\.text).joined().suffix(9)), "stillhere")
+    }
+
+    @MainActor func testTabContextMenuClosesOtherTabsAndTabsToTheRight() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        for _ in 0..<9 { try controller.newTab() }
+        for (index, item) in controller.tabs.tabViewItems.enumerated() { item.label = "t\(index)" }
+        XCTAssertEqual(controller.tabChips.map(\.shortcut), ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "", "⌘9"])
+        func choose(_ title: String, on index: Int) throws {
+            let menu = try XCTUnwrap(controller.tabChips[index].contextMenu?())
+            let entry = try XCTUnwrap(menu.items.first { $0.title == title })
+            XCTAssertTrue(entry.isEnabled)
+            menu.performActionForItem(at: menu.index(of: entry))
+            let sheet = try XCTUnwrap(window.attachedSheet)
+            XCTAssertNotNil((sheet.contentView.map(buttons) ?? []).first { $0.title == "Close" })
+            window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        }
+        func buttons(_ view: NSView) -> [NSButton] { (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(buttons) }
+        let count = controller.tabs.numberOfTabViewItems
+        try choose("Close Tabs to the Right", on: 6)
+        for _ in 0..<100 where controller.tabs.numberOfTabViewItems == count { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.tabChips.map(\.label), ["t0", "t1", "t2", "t3", "t4", "t5", "t6"])
+        XCTAssertFalse(controller.tabChips[6].contextMenu!().items.first { $0.title == "Close Tabs to the Right" }!.isEnabled)
+        try choose("Close Other Tabs", on: 2)
+        for _ in 0..<100 where controller.tabs.numberOfTabViewItems > 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.tabChips.map(\.label), ["t2"])
+        XCTAssertFalse(controller.tabChips[0].contextMenu!().items.first { $0.title == "Close Other Tabs" }!.isEnabled)
+    }
+
     @MainActor func testCloseRequestsShareOneSheetAndCancelKeepsTerminalAlive() async throws {
         _ = NSApplication.shared
         let app = AkittyApplication()
@@ -717,7 +831,7 @@ final class AkittyTests: XCTestCase {
         }
         XCTAssertEqual(controller.window?.title, "vim — Akitty")
         XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "vim")
-        XCTAssertEqual(segmentLabel(controller), "vim")
+        XCTAssertEqual(tabLabel(controller), "vim")
         XCTAssertFalse(controller.window?.title.contains("building") == true)
         XCTAssertEqual(pane.status.stringValue.contains("building"), true)
         XCTAssertEqual(pane.status.stringValue.contains("50%"), true)
@@ -727,7 +841,7 @@ final class AkittyTests: XCTestCase {
         try await waitUntil(pane.terminal, timeout: 3) { controller.window?.title == "Akitty" }
         XCTAssertEqual(controller.window?.title, "Akitty")
         XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "Akitty")
-        XCTAssertEqual(segmentLabel(controller), "Akitty")
+        XCTAssertEqual(tabLabel(controller), "Akitty")
         XCTAssertEqual(pane.status.stringValue.contains("building"), true)
     }
 
@@ -837,15 +951,7 @@ final class AkittyTests: XCTestCase {
         }
     }
 
-    @MainActor private func segmentLabel(_ controller: TerminalWindow) -> String? {
-        guard let content = controller.window?.contentView else { return nil }
-        func walk(_ view: NSView) -> NSSegmentedControl? {
-            if let control = view as? NSSegmentedControl { return control }
-            for subview in view.subviews { if let found = walk(subview) { return found } }
-            return nil
-        }
-        return walk(content)?.label(forSegment: 0)
-    }
+    @MainActor private func tabLabel(_ controller: TerminalWindow) -> String? { controller.tabChips.first?.label }
 
     @MainActor private func chromeMark(_ controller: TerminalWindow) -> ChromeMarkAccessory? {
         controller.window?.titlebarAccessoryViewControllers.compactMap { $0 as? ChromeMarkAccessory }.first

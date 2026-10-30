@@ -46,9 +46,91 @@ import AppKit
     }
     required init?(coder: NSCoder) { nil }
 }
+/// One tab in the bar, laid out like a native macOS tab (Ghostty's): a close button on the left, the centred title,
+/// and the ⌘-number that selects it on the right. The close button shows on the selected tab and on hover; clicking
+/// anywhere else selects the tab, and dragging sideways reorders it.
+@MainActor final class TabChip: NSView {
+    let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!, target: nil, action: nil)
+    private let title = NSTextField(labelWithString: "")
+    private let shortcutLabel = NSTextField(labelWithString: "")
+    var shortcut: String { get { shortcutLabel.stringValue } set { shortcutLabel.stringValue = newValue } }
+    var onSelect: (() -> Void)?, onClose: (() -> Void)?, contextMenu: (() -> NSMenu)?
+    /// The pointer's x in the tab strip while this tab is dragged.
+    var onDrag: ((CGFloat) -> Void)?
+    private var dragStart: CGFloat?, dragging = false
+    var label: String { get { title.stringValue } set { title.stringValue = newValue; closeButton.setAccessibilityLabel("Close \(newValue)") } }
+    var isSelected = false { didSet { refresh() } }
+    private var hovering = false { didSet { refresh() } }
+    init() {
+        super.init(frame: .zero)
+        closeButton.isBordered = false; closeButton.imageScaling = .scaleProportionallyDown; closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Close tab"; closeButton.setAccessibilityIdentifier("close-terminal-tab")
+        closeButton.target = self; closeButton.action = #selector(closeClicked(_:))
+        title.font = .systemFont(ofSize: 12); title.alignment = .center
+        // Like Ghostty, keep the end of a long title: the deepest directory or the command's arguments.
+        title.lineBreakMode = .byTruncatingHead
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        shortcutLabel.font = .systemFont(ofSize: 11); shortcutLabel.textColor = .tertiaryLabelColor; shortcutLabel.alignment = .right
+        shortcutLabel.setAccessibilityElement(false)
+        for view in [closeButton, title, shortcutLabel] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        NSLayoutConstraint.activate([
+            closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 16), closeButton.heightAnchor.constraint(equalToConstant: 16),
+            title.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 4), title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -26),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            shortcutLabel.widthAnchor.constraint(equalToConstant: 20)
+        ])
+        setAccessibilityElement(true); setAccessibilityRole(.radioButton)
+        refresh()
+    }
+    required init?(coder: NSCoder) { nil }
+    private func refresh() {
+        closeButton.alphaValue = isSelected || hovering ? 1 : 0
+        // A narrow tab gives its room to the title first.
+        shortcutLabel.isHidden = bounds.width < 120
+        title.textColor = isSelected ? .labelColor : .secondaryLabelColor
+        setAccessibilityLabel(label); setAccessibilityValue(isSelected)
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        guard isSelected || hovering else { return }
+        (isSelected ? NSColor.quaternaryLabelColor : NSColor.quinaryLabelColor).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+    }
+    override func layout() { super.layout(); refresh() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) { dragStart = event.locationInWindow.x; dragging = false; onSelect?() }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStart, let strip = superview else { return }
+        // A few points of slack so a slightly shaky click is still a click.
+        if !dragging, abs(event.locationInWindow.x - start) < 4 { return }
+        dragging = true
+        onDrag?(strip.convert(event.locationInWindow, from: nil).x)
+    }
+    override func mouseUp(with event: NSEvent) { dragStart = nil; dragging = false }
+    override func otherMouseUp(with event: NSEvent) { if event.buttonNumber == 2 { onClose?() } }
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+    override func accessibilityPerformPress() -> Bool { onSelect?(); return true }
+    @objc private func closeClicked(_ sender: Any?) { onClose?() }
+}
+
+/// A tab menu entry that remembers which tabs it acts on.
+final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
+
 @MainActor final class TerminalWindow: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
     let tabs = NSTabView()
-    private let tabButtons = NSSegmentedControl()
+    private let tabStrip = NSStackView()
+    private(set) var tabChips: [TabChip] = []
+    /// The tab being dragged. Chips are reused by position, so after a move the chip under the pointer shows a
+    /// different tab; the drag follows the tab, not the chip.
+    private weak var draggedTab: NSTabViewItem?
     private let headless: Bool
     /// Starting directory for every tab and split in this window; nil uses the Settings directory.
     let directory: String?
@@ -71,18 +153,20 @@ import AppKit
         super.init(window: window)
         window.delegate = self; tabs.delegate = self; tabs.tabViewType = .noTabsNoBorder
         let content = NSView()
-        let bar = NSStackView(); bar.orientation = .horizontal; bar.spacing = 6
-        tabButtons.segmentStyle = .texturedRounded; tabButtons.trackingMode = .selectOne
-        tabButtons.target = self; tabButtons.action = #selector(selectTab(_:))
-        tabButtons.setAccessibilityLabel("Terminal tabs")
+        let bar = NSStackView(); bar.orientation = .horizontal; bar.spacing = 6; bar.distribution = .fill
+        // Like native tabs, every tab gets an equal share of the bar and Auto Layout keeps it so as the window resizes.
+        tabStrip.orientation = .horizontal; tabStrip.spacing = 2; tabStrip.distribution = .fillEqually
+        tabStrip.setHuggingPriority(.defaultLow, for: .horizontal)
+        tabStrip.setAccessibilityElement(true); tabStrip.setAccessibilityRole(.tabGroup); tabStrip.setAccessibilityLabel("Terminal tabs")
         let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New terminal tab")!, target: self, action: #selector(addTab(_:)))
         plus.bezelStyle = .circular; plus.contentTintColor = .labelColor; plus.toolTip = "New tab (⌘T)"; plus.setAccessibilityIdentifier("new-terminal-tab")
-        bar.addArrangedSubview(tabButtons); bar.addArrangedSubview(plus)
+        plus.setContentHuggingPriority(.required, for: .horizontal)
+        bar.addArrangedSubview(tabStrip); bar.addArrangedSubview(plus)
         for view in [bar, tabs] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: content.topAnchor, constant: 4), bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), bar.heightAnchor.constraint(equalToConstant: 28),
-            plus.widthAnchor.constraint(equalToConstant: 30),
+            plus.widthAnchor.constraint(equalToConstant: 30), tabStrip.heightAnchor.constraint(equalTo: bar.heightAnchor),
             tabs.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4), tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
@@ -125,17 +209,42 @@ import AppKit
         window?.makeFirstResponder(pane.terminal)
     }
     @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
-    @objc private func selectTab(_ sender: NSSegmentedControl) {
-        guard tabs.tabViewItems.indices.contains(sender.selectedSegment) else { return }
-        tabs.selectTabViewItem(at: sender.selectedSegment)
-    }
     private func refreshTabs() {
-        tabButtons.segmentCount = tabs.numberOfTabViewItems
-        let width = min(220, max(44, ((window?.contentView?.bounds.width ?? 900) - 60) / CGFloat(max(1, tabs.numberOfTabViewItems))))
-        for (index, item) in tabs.tabViewItems.enumerated() { tabButtons.setLabel(item.label, forSegment: index); tabButtons.setWidth(width, forSegment: index) }
-        if let selected = tabs.selectedTabViewItem { tabButtons.selectedSegment = tabs.indexOfTabViewItem(selected) }
+        // Chips are reused, not rebuilt, so a title change under the pointer keeps the hover state.
+        while tabChips.count > tabs.numberOfTabViewItems { tabChips.removeLast().removeFromSuperview() }
+        while tabChips.count < tabs.numberOfTabViewItems {
+            let chip = TabChip(); chip.translatesAutoresizingMaskIntoConstraints = false
+            chip.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            // Soft, so many tabs truncate their titles instead of forcing the window wider.
+            let minimum = chip.widthAnchor.constraint(greaterThanOrEqualToConstant: 64); minimum.priority = .defaultHigh; minimum.isActive = true
+            tabStrip.addArrangedSubview(chip); tabChips.append(chip)
+        }
+        for (index, (chip, item)) in zip(tabChips, tabs.tabViewItems).enumerated() {
+            chip.label = item.label; chip.isSelected = item === tabs.selectedTabViewItem
+            chip.shortcut = shortcut(forTab: index)
+            chip.onSelect = { [weak self, weak item] in if let item { self?.draggedTab = item; self?.tabs.selectTabViewItem(item) } }
+            chip.onDrag = { [weak self] x in
+                guard let self, let dragged = self.draggedTab, let target = self.tabChips.firstIndex(where: { x < $0.frame.maxX }) ?? self.tabChips.indices.last else { return }
+                self.moveTab(dragged, to: target)
+            }
+            chip.onClose = { [weak self, weak item] in if let item { self?.closeTab(item) } }
+            chip.contextMenu = { [weak self, weak item] in self.flatMap { owner in item.map(owner.tabMenu) } ?? NSMenu() }
+        }
     }
-    func windowDidResize(_ notification: Notification) { refreshTabs() }
+    /// Moves a tab to a new position, keeping it selected if it was.
+    func moveTab(_ item: NSTabViewItem, to index: Int) {
+        let from = tabs.indexOfTabViewItem(item)
+        guard from != NSNotFound, from != index, tabs.tabViewItems.indices.contains(index) else { return }
+        let selected = tabs.selectedTabViewItem === item
+        tabs.removeTabViewItem(item); tabs.insertTabViewItem(item, at: index)
+        if selected { tabs.selectTabViewItem(item) }
+        refreshTabs()
+    }
+    /// ⌘1 to ⌘8 select that tab and ⌘9 the last one; an index past the last tab does nothing.
+    func selectTab(at index: Int) {
+        let target = index == 8 ? tabs.numberOfTabViewItems - 1 : index
+        if tabs.tabViewItems.indices.contains(target) { tabs.selectTabViewItem(at: target) }
+    }
     func refreshUpdateReminder(_ version: String?) {
         if let old = updateReminder, let index = window?.titlebarAccessoryViewControllers.firstIndex(of: old) { window?.removeTitlebarAccessoryViewController(at: index) }
         updateReminder = nil
@@ -189,6 +298,39 @@ import AppKit
         closeConfirmation.present(in: window, title: "Close this terminal?", message: "Running processes will be stopped.") { [weak self, weak terminal] approved in
             if approved, let terminal { self?.remove(terminal) }
         }
+    }
+    func closeTab(_ item: NSTabViewItem) { closeTabs([item], title: "Close Tab?") }
+    /// Closes every pane in the given tabs, after one confirmation if any of them is still running (as Ghostty does).
+    func closeTabs(_ items: [NSTabViewItem], title: String) {
+        let terminals = items.flatMap { (($0.view as? NSSplitView)?.arrangedSubviews ?? []).compactMap { ($0 as? TerminalPane)?.terminal } }
+        if terminals.allSatisfy({ $0.snapshot?.exited == true }) { terminals.forEach(remove); return }
+        guard let window else { return }
+        let message = items.count == 1 ? "The terminal still has a running process. If you close the tab the process will be stopped." : "A terminal still has a running process. If you close these tabs the processes will be stopped."
+        closeConfirmation.present(in: window, title: title, message: message) { [weak self] approved in
+            if approved { terminals.forEach { self?.remove($0) } }
+        }
+    }
+    /// The tab's right-click menu, with Ghostty's (and Safari's) close actions.
+    func tabMenu(for item: NSTabViewItem) -> NSMenu {
+        let menu = NSMenu(), index = tabs.indexOfTabViewItem(item), all = tabs.tabViewItems
+        func add(_ title: String, _ items: [NSTabViewItem]) {
+            let entry = TabMenuItem(title: title, action: #selector(closeTabsFromMenu(_:)), keyEquivalent: ""); entry.target = self
+            entry.tabs = items; entry.isEnabled = !items.isEmpty; entry.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
+            menu.addItem(entry)
+        }
+        menu.autoenablesItems = false
+        add("Close Tab", [item])
+        add("Close Other Tabs", all.filter { $0 !== item })
+        add("Close Tabs to the Right", index == NSNotFound ? [] : Array(all.dropFirst(index + 1)))
+        return menu
+    }
+    @objc private func closeTabsFromMenu(_ sender: TabMenuItem) {
+        let items = sender.tabs.filter { tabs.indexOfTabViewItem($0) != NSNotFound }
+        if !items.isEmpty { closeTabs(items, title: items.count == 1 ? "Close Tab?" : "\(sender.title)?") }
+    }
+    /// ⌘1 to ⌘8 name the first eight tabs and ⌘9 the last, as in Ghostty, Safari and Terminal.
+    private func shortcut(forTab index: Int) -> String {
+        index == tabs.numberOfTabViewItems - 1 && index >= 8 ? "⌘9" : index < 8 ? "⌘\(index + 1)" : ""
     }
     private func remove(_ terminal: TerminalView) {
         guard let pane = panes.first(where: { $0.terminal === terminal }), let split = pane.superview as? NSSplitView else { return }
@@ -370,6 +512,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         window.perform(command)
     }
+    @objc private func selectTab(_ sender: NSMenuItem) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.selectTab(at: sender.tag) }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
     @objc private func settings(_ sender: Any?) {
         if settingsWindow == nil { settingsWindow = PreferencesWindow(updater: updates) }
@@ -392,5 +535,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let window = menu("Window"); NSApp.windowsMenu = window
         window.addItem(withTitle: "Minimize",action: #selector(NSWindow.performMiniaturize(_:)),keyEquivalent: "m")
         window.addItem(withTitle: "Enter Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "")
+        window.addItem(.separator())
+        for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
     }
 }

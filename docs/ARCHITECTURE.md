@@ -111,7 +111,11 @@ fallback still composites images in the CPU bitmap.
 
 The deliberately small settings surface covers appearance, new-terminal startup,
 scrollback and Option-key behavior. Preferences remain in local UserDefaults.
-Native tab controls expose an accessible plus button. Successful shell exit closes
+The tab bar follows native macOS tabs (as Ghostty uses): tabs share the bar's width
+equally, each has a close button (confirming when a process is running), drags to
+reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and shows
+its ⌘1–⌘8 shortcut (⌘9 is the last tab). The plus button and close buttons are
+accessible. Successful shell exit closes
 the associated pane and any empty tab/window; failed startup remains visible.
 
 Sparkle owns signed update verification and installation. A gentle titlebar reminder
