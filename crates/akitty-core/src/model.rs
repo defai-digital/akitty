@@ -257,6 +257,18 @@ impl Model {
                 .as_ref()
                 .is_some_and(|s| s.contains(indexed.point));
             text[row as usize].push_str(&value);
+            // Blank cells that draw as the clear colour carry no information beyond `lines`;
+            // skipping them shrinks a quiet screen's snapshot by more than 90%.
+            if cell.flags.is_empty()
+                && cell.c == ' '
+                && cell.zerowidth().is_none()
+                && !selected
+                && bg == DEFAULT_BACKGROUND
+                && cell.hyperlink().is_none()
+                && cell.underline_color().is_none()
+            {
+                continue;
+            }
             let mut entry = json!({"row": row, "col": indexed.point.column.0, "text": value,
                 "fg": fg, "bg": bg, "bold": cell.flags.contains(Flags::BOLD),
                 "italic": cell.flags.contains(Flags::ITALIC), "underline": cell.flags.intersects(Flags::ALL_UNDERLINES),
@@ -360,6 +372,8 @@ pub fn palette(index: usize) -> Rgb {
         b: rgb[2],
     }
 }
+/// Resolved default background; the host clears to this colour, so matching cells need no entry.
+const DEFAULT_BACKGROUND: [u8; 3] = [18, 22, 29];
 /// Active Kitty keyboard flags: 1 disambiguate, 2 event types, 4 alternate keys,
 /// 8 all keys as escape codes, 16 associated text.
 fn kitty_flags(mode: TermMode) -> u8 {
@@ -498,6 +512,28 @@ mod tests {
         assert_eq!(model.snapshot(None)["kitty_flags"], 31);
         model.feed(b"\x1b[?1049l");
         assert_eq!(model.snapshot(None)["kitty_flags"], 5);
+    }
+    #[test]
+    fn blank_default_cells_are_omitted_but_meaningful_blanks_are_kept() {
+        let mut model = Model::new(Size::validate(10, 3).unwrap(), 100);
+        model.feed(b"hi\x1b[2;1H\x1b[44m \x1b[0m\x1b[3;1H\x1b[4m \x1b[0m");
+        let snapshot = model.snapshot(None);
+        let cells = snapshot["cells"].as_array().unwrap();
+        let at = |row: i64, col: i64| cells.iter().find(|c| c["row"] == row && c["col"] == col);
+        assert_eq!(cells.len(), 4, "h, i, a blue-background space and an underlined space");
+        assert!(at(1, 0).is_some() && at(2, 0).is_some());
+        assert!(at(0, 5).is_none());
+        assert_eq!(snapshot["lines"][0], "hi        ", "lines still hold every column");
+        let point = alacritty_terminal::index::Point::new(alacritty_terminal::index::Line(0), alacritty_terminal::index::Column(4));
+        let mut selection = alacritty_terminal::selection::Selection::new(
+            alacritty_terminal::selection::SelectionType::Simple,
+            point,
+            alacritty_terminal::index::Side::Left,
+        );
+        selection.update(point, alacritty_terminal::index::Side::Right);
+        model.term.selection = Some(selection);
+        let selected = model.snapshot(None);
+        assert!(selected["cells"].as_array().unwrap().iter().any(|c| c["row"] == 0 && c["col"] == 4 && c["selected"] == true));
     }
     #[test]
     fn plain_snapshots_omit_optional_fields() {

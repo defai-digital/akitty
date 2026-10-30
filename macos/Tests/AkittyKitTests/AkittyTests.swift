@@ -305,6 +305,18 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(snapshot.hyperlink(row: 0, col: 1)?.absoluteString, "https://wide.test/")
         XCTAssertNil(snapshot.hyperlink(row: 0, col: 2))
     }
+    func testTextOffsetCountsOmittedBlankCells() throws {
+        let session = try TerminalSession(cols: 10, rows: 3, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "ab\r\n中c"])
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        XCTAssertEqual(snapshot.cells.count, 5, "a, b, the wide char with its spacer, and c; no blank cells")
+        XCTAssertEqual(snapshot.textOffset(row: 0, col: 2), 2)
+        XCTAssertEqual(snapshot.textOffset(row: 0, col: 7), 7, "trailing blanks are one unit each")
+        XCTAssertEqual(snapshot.textOffset(row: 0, col: 99), 10, "clamped to the line width")
+        XCTAssertEqual(snapshot.textOffset(row: 1, col: 3), 11 + 2)
+        XCTAssertEqual(snapshot.textOffset(row: 2, col: 4), 11 + 10 + 4, "row 1 is 中, c and 7 blanks: 9 units plus a newline")
+    }
     func testStalePathsResetOnlyThemselvesOnLoad() throws {
         let suite = "akitty-tests-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

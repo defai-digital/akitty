@@ -7,7 +7,8 @@ public enum AkittyError: Error, LocalizedError {
 }
 
 public enum CoreBridge {
-    public static func call(_ request: [String: Any]) throws -> Data {
+    /// The core's response envelope, after size and ABI checks, without any JSON parsing.
+    static func raw(_ request: [String: Any]) throws -> Data {
         guard akitty_abi_version() == 1 else { throw AkittyError.core("Incompatible Akitty core ABI") }
         let bytes = try JSONSerialization.data(withJSONObject: request)
         guard bytes.count <= 1_048_576 else { throw AkittyError.core("Request too large") }
@@ -18,7 +19,10 @@ public enum CoreBridge {
         guard let pointer = buffer.data, buffer.len > 0, buffer.len <= 8 * 1_048_576 else {
             throw AkittyError.core("Invalid core response")
         }
-        let data = Data(bytes: pointer, count: buffer.len)
+        return Data(bytes: pointer, count: buffer.len)
+    }
+    public static func call(_ request: [String: Any]) throws -> Data {
+        let data = try raw(request)
         guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               envelope["version"] as? Int == 1, let ok = envelope["ok"] as? Bool else {
             throw AkittyError.core("Invalid core response schema")
@@ -70,6 +74,20 @@ public struct ImagePlacement: Codable, Sendable, Equatable {
     public let rows: Int
     public let z: Int
 }
+private struct SnapshotReply: Decodable {
+    let version: Int
+    let ok: Bool
+    let error: String?
+    let data: Payload?
+    enum Payload: Decodable {
+        case unchanged, full(Snapshot)
+        private enum Key: String, CodingKey { case changed }
+        init(from decoder: Decoder) throws {
+            let unchanged = try decoder.container(keyedBy: Key.self).decode(Bool.self, forKey: .changed) == false
+            self = unchanged ? .unchanged : .full(try Snapshot(from: decoder))
+        }
+    }
+}
 public struct Cursor: Codable, Sendable { public let row: Int; public let col: Int; public let visible: Bool }
 public struct Snapshot: Codable, Sendable {
     public let changed: Bool
@@ -109,9 +127,12 @@ public struct Snapshot: Codable, Sendable {
         return LinkPolicy.url(for: links[index])
     }
     public func textOffset(row: Int, col: Int) -> Int {
-        let row = min(max(0, row), max(0, rows - 1))
+        let row = min(max(0, row), max(0, rows - 1)), col = min(max(0, col), cols)
         let before = lines.prefix(row).reduce(0) { $0 + $1.utf16.count + 1 }
-        return before + cells.lazy.filter { $0.row == row && $0.col < col }.reduce(0) { $0 + $1.text.utf16.count }
+        // The core omits blank default cells; each one is a single space, so count the gaps as one unit each.
+        var present = 0, units = 0
+        for cell in cells where cell.row == row && cell.col < col { present += 1; units += cell.text.utf16.count }
+        return before + units + (col - present)
     }
 }
 
@@ -142,10 +163,23 @@ public final class TerminalSession: @unchecked Sendable {
         var request = values; request["op"] = op; request["id"] = id
         return try CoreBridge.call(request)
     }
+    /// Snapshots are megabytes on a busy screen, so the envelope is decoded once, directly into `Snapshot`.
     public func snapshot(since: UInt64? = nil) throws -> Snapshot? {
-        let data = try call("snapshot", since.map { ["since": $0] } ?? [:])
-        if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], object["changed"] as? Bool == false { return nil }
-        return try JSONDecoder().decode(Snapshot.self, from: data)
+        let data: Data = try {
+            lock.lock(); defer { lock.unlock() }
+            guard !closed else { throw AkittyError.core("Session is closed") }
+            var request: [String: Any] = ["op": "snapshot", "id": id]
+            if let since { request["since"] = since }
+            return try CoreBridge.raw(request)
+        }()
+        let reply = try JSONDecoder().decode(SnapshotReply.self, from: data)
+        guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
+        guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
+        switch reply.data {
+        case .full(let snapshot): return snapshot
+        case .unchanged: return nil
+        case nil: throw AkittyError.core("Missing response data")
+        }
     }
     /// RGBA pixels of a stored graphics image, or nil if it changed size or was removed meanwhile.
     public func imagePixels(_ image: UInt32, width: Int, height: Int) -> Data? {
