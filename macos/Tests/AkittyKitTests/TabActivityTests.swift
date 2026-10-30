@@ -87,4 +87,20 @@ final class TabActivityTests: XCTestCase {
         XCTAssertFalse(try document(#"{"mark":"idle"}"#).isWorking)
         XCTAssertFalse(try document(#"{"status":{"text":"x","tone":"info"}}"#).isWorking)
     }
+
+    func testPixelArtStaysCrispAndDetailedSpritesAreSmoothed() {
+        XCTAssertEqual(TabActivityMark.interpolation(edge: 4, devicePixels: 28), NSImageInterpolation.none)
+        XCTAssertEqual(TabActivityMark.interpolation(edge: 28, devicePixels: 28), NSImageInterpolation.none)
+        XCTAssertEqual(TabActivityMark.interpolation(edge: 28, devicePixels: 14), .high)
+        XCTAssertEqual(TabActivityMark.interpolation(edge: 16, devicePixels: 28), .high)
+    }
+
+    @MainActor func testSpriteAlphaIsStraightNotPremultiplied() throws {
+        // Half-transparent pure blue: a premultiplied reading would treat 0xFF over 0x80 as out of range.
+        let rep = try XCTUnwrap(TabActivityMark.bitmap(pixels: Data([0, 0, 0xFF, 0x80]), width: 1, height: 1))
+        XCTAssertTrue(rep.bitmapFormat.contains(.alphaNonpremultiplied))
+        let color = try XCTUnwrap(rep.colorAt(x: 0, y: 0))
+        XCTAssertEqual(color.blueComponent, 1, accuracy: 0.01)
+        XCTAssertEqual(color.alphaComponent, 0x80 / 255, accuracy: 0.01)
+    }
 }

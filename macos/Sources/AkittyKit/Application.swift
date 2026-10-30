@@ -74,15 +74,20 @@ enum TabActivity: Equatable {
         setAccessibilityElement(true); setAccessibilityRole(.image); setAccessibilityIdentifier("tab-activity")
     }
     required init?(coder: NSCoder) { nil }
-    /// Copies one RGBA8 frame into a bitmap; nil when the size does not match.
+    /// Copies one straight-alpha RGBA8 frame into a bitmap; nil when the size does not match.
     static func bitmap(pixels: Data, width: Int, height: Int) -> NSBitmapImageRep? {
         guard width > 0, height > 0, pixels.count == width * height * 4,
-              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32),
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bitmapFormat: .alphaNonpremultiplied, bytesPerRow: width * 4, bitsPerPixel: 32),
               let destination = rep.bitmapData else { return nil }
         pixels.withUnsafeBytes { raw in
             if let source = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) { destination.update(from: source, count: pixels.count) }
         }
         return rep
+    }
+    /// Whole-number enlargement keeps pixel art crisp; any other scale (a detailed sprite on a 1x display) is smoothed.
+    nonisolated static func interpolation(edge: Int, devicePixels: CGFloat) -> NSImageInterpolation {
+        let ratio = devicePixels / CGFloat(max(1, edge))
+        return ratio >= 1 && ratio.rounded() == ratio ? .none : .high
     }
     private static func image(for activity: TabActivity) -> NSBitmapImageRep? {
         guard case let .working(pixels?, width, height) = activity else { return nil }
@@ -101,13 +106,14 @@ enum TabActivity: Equatable {
                 NSBezierPath(ovalIn: NSRect(x: bounds.midX - 3.5, y: bounds.midY - 3.5, width: 7, height: 7)).fill()
                 return
             }
-            // Pixel art: scale by whole device pixels without smoothing, centred.
             let side = min(bounds.width, bounds.height)
-            let scale = side / CGFloat(max(image.pixelsWide, image.pixelsHigh))
+            let edge = max(image.pixelsWide, image.pixelsHigh)
+            let scale = side / CGFloat(edge)
             let size = NSSize(width: CGFloat(image.pixelsWide) * scale, height: CGFloat(image.pixelsHigh) * scale)
             let rect = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
-            NSGraphicsContext.current?.imageInterpolation = .none
-            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.none.rawValue)])
+            let interpolation = Self.interpolation(edge: edge, devicePixels: side * (window?.backingScaleFactor ?? 2))
+            NSGraphicsContext.current?.imageInterpolation = interpolation
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSNumber(value: interpolation.rawValue)])
         }
     }
 }
