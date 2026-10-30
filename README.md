@@ -33,8 +33,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v0.12.1 ZIP](https://download.automatosx.com/akitty/releases/download/v0.12.1/AkiTTY-0.12.1-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.12.1).
+You can also [download the v0.12.2 ZIP](https://download.automatosx.com/akitty/releases/download/v0.12.2/AkiTTY-0.12.2-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.12.2).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## Why AkiTTY exists
@@ -106,7 +106,7 @@ browser suite. Details are in [the package README](packages/akitty-web/README.md
 **AkiTTY Web** (`packages/akitty-web`) is the Windows, Linux, and in-browser terminal
 described in [Windows and Linux](#windows-and-linux). It is a private source package.
 
-**Status: early 0.12.1 implementation.** This is not a drop-in Ghostty replacement.
+**Status: early 0.12.2 implementation.** This is not a drop-in Ghostty replacement.
 Sixel, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick terminal and
 third-party plugins are not implemented. The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
 and chunking over direct, file, temp-file and shared-memory transfer, image numbers, source rectangles and cell offsets, z-index
