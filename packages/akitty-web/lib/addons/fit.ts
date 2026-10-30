@@ -41,6 +41,7 @@ export class FitAddon implements ITerminalAddon {
   private _terminal?: ITerminalCore;
   private _resizeObserver?: ResizeObserver;
   private _resizeDebounceTimer?: ReturnType<typeof setTimeout>;
+  private _resizeSettleTimer?: ReturnType<typeof setTimeout>;
   private _isResizing: boolean = false;
 
   /**
@@ -66,6 +67,11 @@ export class FitAddon implements ITerminalAddon {
       this._resizeDebounceTimer = undefined;
     }
 
+    if (this._resizeSettleTimer !== undefined) {
+      clearTimeout(this._resizeSettleTimer);
+      this._resizeSettleTimer = undefined;
+    }
+    this._isResizing = false;
     this._terminal = undefined;
   }
 
@@ -110,7 +116,8 @@ export class FitAddon implements ITerminalAddon {
       }
     } finally {
       // Clear flag after a short delay to allow DOM to settle
-      setTimeout(() => {
+      this._resizeSettleTimer = setTimeout(() => {
+        this._resizeSettleTimer = undefined;
         this._isResizing = false;
       }, 50);
     }

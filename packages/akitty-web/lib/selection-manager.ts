@@ -118,8 +118,14 @@ export class SelectionManager {
   // ==========================================================================
 
   /**
-   * Get the selected text as a string
+   * Retarget selection after a successful terminal reset.
    */
+  setTerminal(wasmTerm: GhosttyTerminal): void {
+    this.clearSelection();
+    this.wasmTerm = wasmTerm;
+  }
+
+  /** Get the selected text as a string. */
   getSelection(): string {
     if (!this.selectionStart || !this.selectionEnd) return '';
 

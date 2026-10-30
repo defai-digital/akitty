@@ -139,6 +139,18 @@ describe('FitAddon', () => {
     expect(terminal.rows).toBe(originalRows);
   });
 
+  test('reused addon can fit immediately after disposal', () => {
+    addon.activate(terminal as any);
+    addon.proposeDimensions = () => ({ cols: 90, rows: 30 });
+    addon.fit();
+    expect(terminal.cols).toBe(90);
+    addon.dispose();
+    addon.activate(terminal as any);
+    addon.proposeDimensions = () => ({ cols: 100, rows: 40 });
+    addon.fit();
+    expect(terminal.cols).toBe(100);
+  });
+
   test('fit() prevents feedback loops by tracking dimensions', () => {
     addon.activate(terminal as any);
 

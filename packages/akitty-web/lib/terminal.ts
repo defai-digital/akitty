@@ -539,8 +539,9 @@ export class Terminal implements ITerminalCore {
     } catch (error) {
       // Clean up on error
       this.isOpen = false;
-      this.cleanupComponents();
-      throw new Error(`Failed to open terminal: ${error}`);
+      const cleanupFailures = this.cleanupComponents();
+      const detail = cleanupFailures.length ? `; cleanup failed: ${cleanupFailures.map(String).join("; ")}` : "";
+      throw new Error(`Failed to open terminal: ${error}${detail}`);
     }
   }
 
@@ -716,12 +717,14 @@ export class Terminal implements ITerminalCore {
   reset(): void {
     this.assertOpen();
 
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
+    // Allocate first so a failed reset leaves the live terminal usable.
     const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+    const replacement = this.ghostty!.createTerminal(this.cols, this.rows, config);
+    const previous = this.wasmTerm;
+    this.selectionManager?.setTerminal(replacement);
+    this.wasmTerm = replacement;
+    previous?.free();
+    this.linkDetector?.invalidateCache();
 
     // Clear renderer
     this.renderer!.clear();
@@ -760,6 +763,7 @@ export class Terminal implements ITerminalCore {
    * Load an addon
    */
   loadAddon(addon: ITerminalAddon): void {
+    if (this.isDisposed) throw new Error('Terminal has been disposed');
     addon.activate(this);
     this.addons.push(addon);
   }
@@ -1068,7 +1072,8 @@ export class Terminal implements ITerminalCore {
   // ==========================================================================
 
   /**
-   * Dispose terminal and clean up resources
+   * Dispose terminal and clean up resources. Addon failures do not interrupt
+   * cleanup; the first failure is rethrown after terminal resources are freed.
    */
   dispose(): void {
     if (this.isDisposed) {
@@ -1097,14 +1102,20 @@ export class Terminal implements ITerminalCore {
     }
     this.pendingMouseMove = undefined;
 
-    // Dispose addons
+    // An external addon must not strand the remaining addons or WASM allocation.
+    const cleanupFailures: unknown[] = [];
     for (const addon of this.addons) {
-      addon.dispose();
+      try {
+        addon.dispose();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
     }
     this.addons = [];
 
     // Clean up components
-    this.cleanupComponents();
+    cleanupFailures.push(...this.cleanupComponents());
+    this.ghostty = undefined;
 
     // Dispose event emitters
     this.dataEmitter.dispose();
@@ -1116,6 +1127,9 @@ export class Terminal implements ITerminalCore {
     this.scrollEmitter.dispose();
     this.renderEmitter.dispose();
     this.cursorMoveEmitter.dispose();
+    if (cleanupFailures.length > 0) {
+      throw cleanupFailures[0];
+    }
   }
 
   // ==========================================================================
@@ -1209,22 +1223,26 @@ export class Terminal implements ITerminalCore {
   /**
    * Clean up components (called on dispose or error)
    */
-  private cleanupComponents(): void {
+  private cleanupComponents(): unknown[] {
+    const failures: unknown[] = [];
+    const release = (cleanup: () => void) => {
+      try { cleanup(); } catch (error) { failures.push(error); }
+    };
     // Dispose selection manager
     if (this.selectionManager) {
-      this.selectionManager.dispose();
+      release(() => this.selectionManager!.dispose());
       this.selectionManager = undefined;
     }
 
     // Dispose input handler
     if (this.inputHandler) {
-      this.inputHandler.dispose();
+      release(() => this.inputHandler!.dispose());
       this.inputHandler = undefined;
     }
 
     // Dispose renderer
     if (this.renderer) {
-      this.renderer.dispose();
+      release(() => this.renderer!.dispose());
       this.renderer = undefined;
     }
 
@@ -1274,20 +1292,20 @@ export class Terminal implements ITerminalCore {
 
     // Dispose link detector
     if (this.linkDetector) {
-      this.linkDetector.dispose();
+      release(() => this.linkDetector!.dispose());
       this.linkDetector = undefined;
     }
 
     // Free WASM terminal
     if (this.wasmTerm) {
-      this.wasmTerm.free();
+      release(() => this.wasmTerm!.free());
       this.wasmTerm = undefined;
     }
 
     // Clear references
-    this.ghostty = undefined;
     this.element = undefined;
     this.textarea = undefined;
+    return failures;
   }
 
   /**
@@ -1425,6 +1443,7 @@ export class Terminal implements ITerminalCore {
     this.linkDetector
       .getLinkAt(x, bufferRow)
       .then((link) => {
+        if (this.isDisposed || !this.isOpen) return;
         // Update hover state for cursor changes and click handling
         if (link !== this.currentHoveredLink) {
           // Notify old link we're leaving
@@ -1540,7 +1559,14 @@ export class Terminal implements ITerminalCore {
     }
 
     // Get the link at this position
-    const link = await this.linkDetector.getLinkAt(x, bufferRow);
+    let link: ILink | undefined;
+    try {
+      link = await this.linkDetector.getLinkAt(x, bufferRow);
+    } catch (error) {
+      console.warn('Link detection error:', error);
+      return;
+    }
+    if (this.isDisposed || !this.isOpen) return;
 
     if (link) {
       // Activate link
@@ -1570,6 +1596,7 @@ export class Terminal implements ITerminalCore {
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
 
     if (isAltScreen) {
+      if (this.options.disableStdin) return;
       // Alternate screen: send arrow keys to the application
       // Applications like vim handle scrolling internally
       // Standard: ~3 arrow presses per wheel "click"

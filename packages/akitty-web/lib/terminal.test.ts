@@ -316,6 +316,103 @@ describe('Terminal', () => {
     });
   });
 
+  describe('Lifecycle recovery', () => {
+    test('open can recover after WASM creation fails', async () => {
+      const term = await createIsolatedTerminal();
+      const ghostty = (term as any).ghostty;
+      const create = ghostty.createTerminal;
+      ghostty.createTerminal = () => { throw new Error('allocation failed'); };
+      expect(() => term.open(container)).toThrow('allocation failed');
+      ghostty.createTerminal = create;
+      expect(() => term.open(container)).not.toThrow();
+      term.write('recovered');
+      term.dispose();
+    });
+
+    test('reset allocation failure preserves the live terminal', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      term.write('before');
+      const previous = term.wasmTerm!;
+      const free = previous.free.bind(previous);
+      let freed = false;
+      previous.free = () => { freed = true; free(); };
+      const ghostty = (term as any).ghostty;
+      const create = ghostty.createTerminal;
+      ghostty.createTerminal = () => { throw new Error('allocation failed'); };
+      expect(() => term.reset()).toThrow('allocation failed');
+      ghostty.createTerminal = create;
+      expect(freed).toBe(false);
+      expect(() => term.write(' after')).not.toThrow();
+      expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('before after');
+      term.dispose();
+    });
+
+    test('reset selection reads the replacement terminal', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      term.write('before');
+      term.reset();
+      term.write('after');
+      term.selectAll();
+      expect(term.getSelection().trim()).toBe('after');
+      term.dispose();
+    });
+
+    test('disposed terminals reject addons before activation', async () => {
+      const term = await createIsolatedTerminal();
+      term.dispose();
+      let activated = false;
+      expect(() => term.loadAddon({ activate() { activated = true; }, dispose() {} })).toThrow('disposed');
+      expect(activated).toBe(false);
+    });
+
+    test('disableStdin blocks alternate screen wheel input', async () => {
+      const term = await createIsolatedTerminal({ disableStdin: true });
+      term.open(container);
+      term.write('\x1b[?1049h');
+      let sent = '';
+      term.onData(data => { sent += data; });
+      container.dispatchEvent(new WheelEvent('wheel', { deltaY: 100 }));
+      expect(sent).toBe('');
+      term.options.disableStdin = false;
+      container.dispatchEvent(new WheelEvent('wheel', { deltaY: 100 }));
+      expect(sent).toBe('\x1b[B'.repeat(3));
+      term.dispose();
+    });
+
+    test('pending link activation and hover stop at disposal', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      const pending: ((link: any) => void)[] = [];
+      (term as any).linkDetector.getLinkAt = () => new Promise(resolve => pending.push(resolve));
+      let activated = false;
+      let hovered = false;
+      const link = { activate() { activated = true; }, hover() { hovered = true; },
+        range: { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } } };
+      const clicked = (term as any).handleClick(new MouseEvent('click'));
+      (term as any).processMouseMove(new MouseEvent('mousemove'));
+      expect(pending.length).toBe(2);
+      term.dispose();
+      pending.forEach(resolve => resolve(link));
+      await clicked;
+      await Promise.resolve();
+      expect(activated).toBe(false);
+      expect(hovered).toBe(false);
+    });
+
+    test('throwing link providers do not prevent terminal or later provider cleanup', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      let laterDisposed = false;
+      term.registerLinkProvider({ provideLinks() {}, dispose() { throw new Error('provider cleanup failed'); } });
+      term.registerLinkProvider({ provideLinks() {}, dispose() { laterDisposed = true; } });
+      expect(() => term.dispose()).toThrow('provider cleanup failed');
+      expect(laterDisposed).toBe(true);
+      expect(term.wasmTerm).toBeUndefined();
+    });
+  });
+
   describe('Addons', () => {
     test('loadAddon() accepts addon', async () => {
       const term = await createIsolatedTerminal();
@@ -352,6 +449,23 @@ describe('Terminal', () => {
       expect(activateCalled).toBe(true);
 
       term.dispose();
+    });
+
+    test('dispose() frees terminal resources even when an addon throws', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container!);
+      const failure = new Error('addon cleanup failed');
+      let laterAddonDisposed = false;
+      term.loadAddon({ activate() {}, dispose() { throw failure; } });
+      term.loadAddon({ activate() {}, dispose() { laterAddonDisposed = true; } });
+
+      expect(() => term.dispose()).toThrow(failure);
+      expect(laterAddonDisposed).toBe(true);
+      expect(term.wasmTerm).toBeUndefined();
+      expect(container.querySelector('canvas')).toBeNull();
+      expect(container.querySelector('textarea')).toBeNull();
+      expect(container.hasAttribute('contenteditable')).toBe(false);
+      expect(() => term.dispose()).not.toThrow();
     });
 
     test('dispose() calls addon dispose', async () => {
