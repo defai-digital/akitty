@@ -23,7 +23,7 @@ impl Terminal {
         call(json!({"op":"feed","id":self.0,"text":text}));
     }
     fn snapshot(&self) -> Value {
-        call(json!({"op":"snapshot","id":self.0}))
+        call(json!({"op":"snapshot","id":self.0,"compact":true}))
     }
 }
 impl Drop for Terminal {
@@ -31,6 +31,29 @@ impl Drop for Terminal {
         call(json!({"op":"close","id":self.0}));
     }
 }
+#[test]
+fn schema_one_snapshots_keep_keyed_cells_unless_compact_is_requested() {
+    let t = Terminal::new(20, 4);
+    t.feed("\x1b[1;3;4:3;9;38;2;1;2;3;58;2;4;5;6mA\x1b[0m");
+    let old = call(json!({"op":"snapshot","id":t.0}));
+    let cell = &old["cells"][0];
+    assert!(cell.is_object(), "schema 1 defaults to the published keyed cell shape");
+    assert_eq!(cell["text"], "A");
+    assert_eq!(cell["fg"], json!([1, 2, 3]));
+    assert_eq!(cell["ucolor"], json!([4, 5, 6]));
+    assert_eq!(cell["ustyle"], 3);
+    for flag in ["bold", "italic", "underline", "strike"] { assert_eq!(cell[flag], true); }
+    assert_eq!(old["links"], json!([]));
+    let compact = call(json!({"op":"snapshot","id":t.0,"compact":true}));
+    assert!(compact["cells"][0].is_array());
+    assert_eq!(compact["cells"][0][2], "A");
+    assert_eq!(compact["cells"][0][3], 0x010203);
+    t.feed("B");
+    let delta = call(json!({"op":"snapshot","id":t.0,"since":compact["revision"],"compact":false}));
+    assert_eq!(delta["partial"], true);
+    assert!(delta["cells"][0].is_object());
+}
+
 #[test]
 fn cursor_erase_and_truecolor() {
     let t = Terminal::new(20, 4);
@@ -363,7 +386,7 @@ fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     let t = Terminal::new(512, 64);
     let uri = "https://example.com/a/fairly/long/path/to/make/the/link/table/entry/realistic?query=1";
     t.feed(&format!("\x1b[4:3;58;2;1;2;3;9;1;3m\x1b]8;;{uri}\x07{}", "x".repeat(512 * 64)));
-    let request = serde_json::to_vec(&json!({"op":"snapshot","id":t.0})).unwrap();
+    let request = serde_json::to_vec(&json!({"op":"snapshot","id":t.0,"compact":true})).unwrap();
     let buffer = unsafe { akitty_core::akitty_request_v1(request.as_ptr(), request.len()) };
     assert!(!buffer.data.is_null());
     let bytes = unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) }.to_vec();
@@ -372,7 +395,7 @@ fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     assert_eq!(response["ok"], true, "{}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]));
     assert!(bytes.len() < 8 * 1024 * 1024);
     // The ABI splices pre-serialized snapshot JSON into the envelope; it must match the value path exactly.
-    assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0})));
+    assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0,"compact":true})));
     // Bold, italic, underline, strike and underline style 3 in attrs, then the underline colour and link index.
     assert_eq!(response["data"]["cells"][0], json!([0, 0, "x", 0xdae2ef, 0x12161d, 1 | 2 | 4 | 32 | 3 << 8, 0x010203, 0]));
     eprintln!("worst-case snapshot: {} bytes", bytes.len());

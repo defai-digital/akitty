@@ -20,10 +20,10 @@ final class HotpathProbe: XCTestCase {
             for c in 0..<cols { text.unicodeScalars.append(UnicodeScalar(UInt8(97 + (r + c) % 26))) }
         }
         _ = try session.call("feed", ["text": text])
-        try time("raw CoreBridge.call(snapshot) incl. parse+reserialize", 30) { _ = try session.call("snapshot") }
+        try time("raw CoreBridge.call(snapshot) incl. parse+reserialize", 30) { _ = try session.call("snapshot", ["compact": true]) }
         try time("session.snapshot() (single-pass decode)", 30) { _ = try session.snapshot() }
         let snapshot = try XCTUnwrap(try session.snapshot())
-        let data = try session.call("snapshot")
+        let data = try session.call("snapshot", ["compact": true])
         try time("JSONDecoder.decode(Snapshot) alone", 30) { _ = try JSONDecoder().decode(Snapshot.self, from: data) }
         let cell = CGSize(width: 8, height: 18), size = CGSize(width: 1616, height: 916)
         try time("GridRasterizer.make 200x50 @2x", 20) {

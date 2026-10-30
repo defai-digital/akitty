@@ -33,7 +33,7 @@ fn probe() {
     let n = 100;
     let t = Instant::now();
     let mut size = 0;
-    let snapshot = serde_json::to_vec(&json!({"op":"snapshot","id":id})).unwrap();
+    let snapshot = serde_json::to_vec(&json!({"op":"snapshot","id":id,"compact":true})).unwrap();
     for _ in 0..n {
         // The C ABI path the app takes: one serialization, no parse.
         // SAFETY: the request slice is live for the call, and the buffer is freed once.
@@ -44,9 +44,9 @@ fn probe() {
     let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
     println!("SNAPSHOT full {}x{}: {:.2} ms each (build + serialize), {} bytes", cols, rows, per, size);
     // Unchanged-poll cost (the idle 30 Hz case).
-    let rev = call(json!({"op":"snapshot","id":id}))["revision"].as_u64().unwrap();
+    let rev = call(json!({"op":"snapshot","id":id,"compact":true}))["revision"].as_u64().unwrap();
     let t = Instant::now();
-    for _ in 0..10000 { call(json!({"op":"snapshot","id":id,"since":rev})); }
+    for _ in 0..10000 { call(json!({"op":"snapshot","id":id,"compact":true,"since":rev})); }
     println!("IDLE poll: {:.1} us each", t.elapsed().as_secs_f64() * 1e6 / 10000.0);
     call(json!({"op":"close","id":id}));
 }

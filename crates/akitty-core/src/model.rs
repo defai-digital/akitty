@@ -56,12 +56,11 @@ impl EventListener for Events {
     }
 }
 
-/// One cell of a snapshot, sent as a positional array:
-/// `[row, col, text, fg, bg, attrs]`, then `ucolor` and `link` when either is set.
-/// Colours are packed `0xRRGGBB`. Serialized directly, never through a `Value`, and
-/// positional because a busy screen has thousands of cells: keyed objects cost the
-/// client several times more to decode.
+/// One schema-1 cell, serialized directly as a keyed object by default.
+/// Opt-in compact cells use `[row, col, text, fg, bg, attrs]` with packed colours,
+/// followed by `ucolor` and `link` when set, to reduce native decoding work.
 struct CellOut {
+    compact: bool,
     row: i32,
     col: usize,
     text: String,
@@ -86,7 +85,28 @@ const ATTR_USTYLE_SHIFT: u16 = 8;
 
 impl Serialize for CellOut {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeSeq;
+        use serde::ser::{SerializeMap, SerializeSeq};
+        if !self.compact {
+            // Schema 1 predates positional cells; the faster layout is explicitly negotiated.
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_entry("row", &self.row)?;
+            map.serialize_entry("col", &self.col)?;
+            map.serialize_entry("text", &self.text)?;
+            map.serialize_entry("fg", &self.fg)?;
+            map.serialize_entry("bg", &self.bg)?;
+            for (key, flag) in [("bold", ATTR_BOLD), ("italic", ATTR_ITALIC), ("underline", ATTR_UNDERLINE),
+                ("selected", ATTR_SELECTED), ("wide", ATTR_WIDE)] {
+                map.serialize_entry(key, &(self.attrs & flag != 0))?;
+            }
+            let style = self.attrs >> ATTR_USTYLE_SHIFT;
+            if style != 0 { map.serialize_entry("ustyle", &style)?; }
+            if let Some(color) = self.ucolor { map.serialize_entry("ucolor", &color)?; }
+            if let Some(link) = self.link { map.serialize_entry("link", &link)?; }
+            for (key, flag) in [("strike", ATTR_STRIKE), ("search", ATTR_SEARCH), ("active_search", ATTR_ACTIVE_SEARCH)] {
+                if self.attrs & flag != 0 { map.serialize_entry(key, &true)?; }
+            }
+            return map.end();
+        }
         let len = if self.link.is_some() { 8 } else if self.ucolor.is_some() { 7 } else { 6 };
         let mut seq = serializer.serialize_seq(Some(len))?;
         seq.serialize_element(&self.row)?;
@@ -121,7 +141,6 @@ struct SnapshotOut<'a> {
     title: &'a str,
     cells: Vec<CellOut>,
     lines: Vec<&'a str>,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
     links: &'a [String],
     images: Vec<Value>,
     animating: bool,
@@ -470,7 +489,7 @@ impl Model {
     /// [`expand_cell`]); the wire path uses [`Self::snapshot_json`].
     #[cfg(test)]
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
-        let mut snapshot: Value = serde_json::from_str(&self.snapshot_json(since)).expect("snapshot is valid JSON");
+        let mut snapshot: Value = serde_json::from_str(&self.snapshot_json(since, true)).expect("snapshot is valid JSON");
         if let Some(cells) = snapshot.get_mut("cells").and_then(Value::as_array_mut) {
             for cell in cells {
                 *cell = expand_cell(cell);
@@ -479,7 +498,7 @@ impl Model {
         snapshot
     }
     /// The snapshot JSON, serialized once from typed rows.
-    pub fn snapshot_json(&mut self, since: Option<u64>) -> String {
+    pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> String {
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
             self.revision = self.revision.saturating_add(1);
@@ -626,6 +645,7 @@ impl Model {
                 | flag(cell.flags.contains(Flags::STRIKEOUT), ATTR_STRIKE)
                 | u16::from(ustyle.unwrap_or(0)) << ATTR_USTYLE_SHIFT;
             cells.push(CellOut {
+                compact,
                 row,
                 col: indexed.point.column.0,
                 text: value,
@@ -1147,8 +1167,8 @@ mod tests {
     fn plain_snapshots_omit_optional_fields() {
         let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
         model.feed(b"hi");
-        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None)).unwrap();
-        assert!(snapshot.get("links").is_none());
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true)).unwrap();
+        assert_eq!(snapshot["links"], json!([]));
         // Positional cells: [row, col, text, fg, bg, attrs] with nothing trailing when unset.
         assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x12161d, 0]));
     }
@@ -1156,7 +1176,7 @@ mod tests {
     fn wire_cells_pack_attributes_and_trail_ucolor_then_link() {
         let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
         model.feed("\x1b[1;3;9;4:3;58;2;1;2;3mA\x1b[0m\x1b]8;;https://a.test\x07B\x1b]8;;\x07界".as_bytes());
-        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None)).unwrap();
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true)).unwrap();
         let cells = &snapshot["cells"];
         let attrs = ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE | ATTR_STRIKE | 3 << ATTR_USTYLE_SHIFT;
         assert_eq!(cells[0], json!([0, 0, "A", 0xdae2ef, 0x12161d, attrs, 0x010203]));

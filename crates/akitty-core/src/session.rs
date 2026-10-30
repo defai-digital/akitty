@@ -104,12 +104,12 @@ impl Session {
         })
     }
     /// Snapshot JSON, already serialized; see [`Model::snapshot_json`].
-    pub fn snapshot(&self, since: Option<u64>) -> Result<String, String> {
+    pub fn snapshot(&self, since: Option<u64>, compact: bool) -> Result<String, String> {
         Ok(self
             .model
             .lock()
             .map_err(|_| "terminal unavailable")?
-            .snapshot_json(since))
+            .snapshot_json(since, compact))
     }
     pub fn feed(&self, bytes: &[u8]) -> Result<(), String> {
         if self.commands.is_some() {

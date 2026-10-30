@@ -110,7 +110,7 @@ enum CellScanner {
             let start = i
             var value = 0
             while i < end, p[i] >= 0x30, p[i] <= 0x39 { value = value &* 10 &+ Int(p[i] - 0x30); i += 1 }
-            guard i > start, i - start <= 18 else { return nil }
+            guard i > start, i - start <= 18, i - start == 1 || p[start] != 0x30 else { return nil }
             if i < end, p[i] == UInt8(ascii: ".") || p[i] == UInt8(ascii: "e") || p[i] == UInt8(ascii: "E") { return nil }
             return negative ? -value : value
         }
@@ -122,7 +122,7 @@ enum CellScanner {
                 switch p[i] {
                 case UInt8(ascii: "\""):
                     defer { i += 1 }
-                    return String(decoding: UnsafeBufferPointer(start: p + start, count: i - start), as: UTF8.self)
+                    return String(bytes: UnsafeBufferPointer(start: p + start, count: i - start), encoding: .utf8)
                 case UInt8(ascii: "\\"):
                     i = start
                     return escapedString()
@@ -141,7 +141,7 @@ enum CellScanner {
             while i < end {
                 let byte = p[i]; i += 1
                 switch byte {
-                case UInt8(ascii: "\""): return String(decoding: bytes, as: UTF8.self)
+                case UInt8(ascii: "\""): return String(bytes: bytes, encoding: .utf8)
                 case 0..<0x20: return nil
                 case UInt8(ascii: "\\"):
                     guard i < end else { return nil }
@@ -192,7 +192,8 @@ enum CellScanner {
         }
 
         /// Skips one value of any type.
-        mutating func skip() -> Bool {
+        mutating func skip(depth: Int = 0) -> Bool {
+            guard depth < 128 else { return false }
             ws()
             guard i < end else { return false }
             switch p[i] {
@@ -200,12 +201,12 @@ enum CellScanner {
             case UInt8(ascii: "{"):
                 i += 1
                 if eat(UInt8(ascii: "}")) { return true }
-                repeat { guard string() != nil, eat(UInt8(ascii: ":")), skip() else { return false } } while eat(UInt8(ascii: ","))
+                repeat { guard string() != nil, eat(UInt8(ascii: ":")), skip(depth: depth + 1) else { return false } } while eat(UInt8(ascii: ","))
                 return eat(UInt8(ascii: "}"))
             case UInt8(ascii: "["):
                 i += 1
                 if eat(UInt8(ascii: "]")) { return true }
-                repeat { guard skip() else { return false } } while eat(UInt8(ascii: ","))
+                repeat { guard skip(depth: depth + 1) else { return false } } while eat(UInt8(ascii: ","))
                 return eat(UInt8(ascii: "]"))
             default:
                 // A number, true, false or null; JSONDecoder validates it when it reads the rest.

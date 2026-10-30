@@ -95,7 +95,7 @@ import AppKit
     }
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected || hovering else { return }
-        (isSelected ? NSColor.quaternaryLabelColor : NSColor.quinaryLabelColor).setFill()
+        (isSelected ? NSColor.quaternaryLabelColor : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)).setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
     }
     override func layout() { super.layout(); refresh() }

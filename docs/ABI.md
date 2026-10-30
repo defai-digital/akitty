@@ -20,7 +20,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | version | none | Version/platform information |
 | create | cols, rows; optional shell, cwd, headless | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
-| snapshot | id; optional since | Current snapshot, changed=false, or a partial snapshot (below) |
+| snapshot | id; optional since, compact | Current snapshot, changed=false, or a partial snapshot (below) |
 | input | id, text; optional paste | UTF-8 input with optional bracketed-paste protection |
 | input_bytes | id, bytes | Raw byte input for terminal protocols, bounded to 64 KiB + delimiters |
 | resize | id, cols, rows | Resize kernel PTY and terminal state in worker order |
@@ -134,16 +134,27 @@ selection, links), so a hash collision at worst delays one row's repaint. Any ot
 client that lost state can always recover by asking again without `since`. The `links`
 table is complete in every snapshot and keeps its indices across partial ones.
 
-Each cell is a positional array, `[row, col, text, fg, bg, attrs]`, because a busy
-screen has thousands of them and keyed objects cost the client several times more to
-decode. `fg` and `bg` are packed `0xRRGGBB` integers. `attrs` bits are 1 bold,
-2 italic, 4 underline, 8 selected, 16 wide and 32 strikethrough. Bits 8–10 hold the
-underline style: 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. The
+By default, every cell is a keyed object with `row`, `col`, `text`, `fg`, `bg`,
+`bold`, `italic`, `underline`, `selected`, and `wide`. Colours are three-byte RGB
+arrays. This remains the schema-1 format used by existing clients. Optional fields
+are `ustyle` (1 single, 2 double, 3 curly, 4 dotted, 5 dashed), `ucolor` (RGB),
+`strike`, `link`, `search`, and `active_search`. The last two mark visible literal
+find hits and the active hit; absent boolean fields mean false.
+
+A client may explicitly request `"compact": true` to receive positional cells:
+`[row, col, text, fg, bg, attrs]`. The native app uses this faster format. Here `fg`
+and `bg` are packed `0xRRGGBB` integers; `attrs` bits are 1 bold, 2 italic,
+4 underline, 8 selected, 16 wide, 32 strikethrough, 64 search, and 128 active search.
+Bits 8–10 hold the underline style (0 none, otherwise the values above). The
 underline bit stays set for any style. Two optional elements follow only when set:
 `ucolor`, the packed underline colour (`null` when only a link is present), then
-`link`, an index into the snapshot `links` array of OSC 8 targets. `links` holds at most 256 unique targets of at most 2,048
-bytes with no control characters; others are dropped. The core does not judge
-schemes: Swift opens only http, https and mailto targets, and only on Command-click.
+`link`. Omitting `compact` or setting it to false always selects keyed cells,
+including in partial snapshots.
+
+`link` indexes the complete snapshot `links` array, which is present even when empty.
+It holds at most 256 unique OSC 8 targets of at most 2,048 bytes with no control
+characters; others are dropped. The core does not judge schemes: Swift opens only
+http, https and mailto targets, and only on Command-click.
 
 Calls may move between threads. The registry lock only looks up/creates/removes
 handles; session state is separately protected. Closing removes future lookup

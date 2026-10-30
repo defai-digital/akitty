@@ -31,7 +31,7 @@ final class CellScannerTests: XCTestCase {
         ]
         for text in screens {
             _ = try session.call("feed", ["text": "\u{1b}[2J\u{1b}[H" + text])
-            try assertMatchesJSONDecoder(try CoreBridge.raw(["op": "snapshot", "id": session.id]))
+            try assertMatchesJSONDecoder(try CoreBridge.raw(["op": "snapshot", "id": session.id, "compact": true]))
         }
         // Through the session too: the decoded snapshot carries the scanned cells.
         _ = try session.call("feed", ["text": "\u{1b}[2J\u{1b}[H" + screens[4]])
@@ -53,6 +53,36 @@ final class CellScannerTests: XCTestCase {
         XCTAssertEqual(cells[1].fg, [255, 255, 255]); XCTAssertTrue(cells[1].bold)
         XCTAssertEqual(cells[3].link, 0); XCTAssertNil(cells[3].ucolor)
         XCTAssertEqual(cells[4].ucolor, [255, 0, 0]); XCTAssertEqual(cells[4].ustyle, 3)
+    }
+
+    func testDefaultSchemaOneCellsDecodeLikeOptInCompactCells() throws {
+        let session = try TerminalSession(cols: 20, rows: 3, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}[1;3;4:3;9;58;2;1;2;3mA\u{1b}[0m界"])
+        let legacy = try CoreBridge.raw(["op": "snapshot", "id": session.id])
+        let compact = try CoreBridge.raw(["op": "snapshot", "id": session.id, "compact": true])
+        XCTAssertNil(CellScanner.split(legacy))
+        let decoder = JSONDecoder()
+        XCTAssertEqual(try wire(decoder.decode(Reply.self, from: legacy).data.cells), try wire(decoder.decode(Reply.self, from: compact).data.cells))
+    }
+
+    func testMalformedCellBytesDoNotBypassJSONValidation() {
+        for number in ["01", "-00"] {
+            let data = Data("{\"data\":{\"cells\":[[\(number),0,\"a\",1,0,0]]}}".utf8)
+            XCTAssertNil(CellScanner.split(data), "JSON integers cannot have leading zeroes")
+        }
+        for suffix in ["", "\\n"] {
+            var data = Data(#"{"data":{"cells":[[0,0,""#.utf8)
+            data.append(0xff)
+            data.append(contentsOf: (suffix + #"",1,0,0]]}}"#).utf8)
+            XCTAssertNil(CellScanner.split(data), "invalid UTF-8 must not be replaced silently")
+        }
+    }
+
+    func testDeepUnknownValuesFallBackBeforeExhaustingTheStack() {
+        let nested = String(repeating: "[", count: 256) + "0" + String(repeating: "]", count: 256)
+        let data = Data("{\"extra\":\(nested),\"data\":{\"cells\":[]}}".utf8)
+        XCTAssertNil(CellScanner.split(data))
     }
 
     func testAnythingUnexpectedFallsBackToJSONDecoder() {

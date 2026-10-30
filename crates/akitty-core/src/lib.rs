@@ -40,6 +40,7 @@ enum Request {
     Snapshot {
         id: u64,
         since: Option<u64>,
+        compact: Option<bool>,
     },
     Input {
         id: u64,
@@ -226,7 +227,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             match request {
-                Request::Snapshot { since, .. } => return session.snapshot(since).map(Reply::Json),
+                Request::Snapshot { since, compact, .. } => return session.snapshot(since, compact.unwrap_or(false)).map(Reply::Json),
                 Request::Input { text, paste, .. } => {
                     session.input(text, paste.unwrap_or(false))?;
                     Ok(json!({}))

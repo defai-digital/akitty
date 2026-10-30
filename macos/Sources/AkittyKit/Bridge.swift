@@ -58,7 +58,23 @@ public struct Cell: Codable, Sendable {
     /// Colours are packed 0xRRGGBB; `attrs` bits are 1 bold, 2 italic, 4 underline, 8 selected, 16 wide,
     /// 32 strike, 64 search, 128 active search, with the underline style in bits 8-10.
     /// Positional cells decode several times faster than keyed ones.
+    private enum CodingKeys: String, CodingKey { case row, col, text, fg, bg, bold, italic, underline, selected, wide, strike, search, active_search, ustyle, ucolor, link }
     public init(from decoder: Decoder) throws {
+        if let c = try? decoder.container(keyedBy: CodingKeys.self) {
+            var attrs: UInt16 = 0
+            for (key, flag): (CodingKeys, UInt16) in [(.bold, 1), (.italic, 2), (.underline, 4), (.selected, 8), (.wide, 16)] {
+                if try c.decode(Bool.self, forKey: key) { attrs |= flag }
+            }
+            for (key, flag): (CodingKeys, UInt16) in [(.strike, 32), (.search, 64), (.active_search, 128)] {
+                if try c.decodeIfPresent(Bool.self, forKey: key) == true { attrs |= flag }
+            }
+            attrs |= UInt16(try c.decodeIfPresent(UInt8.self, forKey: .ustyle) ?? 0) << 8
+            self.init(row: try c.decode(Int.self, forKey: .row), col: try c.decode(Int.self, forKey: .col),
+                      text: try c.decode(String.self, forKey: .text), fg: try c.decode([UInt8].self, forKey: .fg),
+                      bg: try c.decode([UInt8].self, forKey: .bg), attrs: attrs,
+                      ucolor: try c.decodeIfPresent([UInt8].self, forKey: .ucolor), link: try c.decodeIfPresent(Int.self, forKey: .link))
+            return
+        }
         var c = try decoder.unkeyedContainer()
         let row = try c.decode(Int.self), col = try c.decode(Int.self), text = try c.decode(String.self)
         let fg = Self.rgb(try c.decode(UInt32.self)), bg = Self.rgb(try c.decode(UInt32.self)), attrs = try c.decode(UInt16.self)
@@ -398,7 +414,7 @@ public final class TerminalSession: @unchecked Sendable {
         let data: Data = try {
             lock.lock(); defer { lock.unlock() }
             guard !closed else { throw AkittyError.core("Session is closed") }
-            var request: [String: Any] = ["op": "snapshot", "id": id]
+            var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true]
             if let since { request["since"] = since }
             return try CoreBridge.raw(request)
         }()
