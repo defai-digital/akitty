@@ -2,6 +2,8 @@
 """Isolated R2 delivery: immutable assets, byte verification, then update feed."""
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -12,6 +14,7 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://download.automatosx.com/akitty"
@@ -19,6 +22,8 @@ BUCKET = "akitty-releases"
 WORKER = "akitty-downloads"
 ROUTE = "download.automatosx.com/akitty/*"
 REPO = "defai-digital/akitty"
+SPARKLE = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+IMMUTABLE_PREFIX = "releases/download/"
 
 
 def require(condition, message):
@@ -39,7 +44,7 @@ def credential():
     return token
 
 
-def fetch(url, *, method="GET", data=None, headers=None, missing=False):
+def fetch(url, *, method="GET", data=None, headers=None, missing=False, conflict=False):
     request = urllib.request.Request(
         url, method=method, data=data, headers=headers or {}
     )
@@ -47,6 +52,10 @@ def fetch(url, *, method="GET", data=None, headers=None, missing=False):
         with urllib.request.urlopen(request, timeout=240) as response:
             return response.read()
     except urllib.error.HTTPError as error:
+        # A failed precondition means another writer won the creation race; the
+        # caller compares bytes instead of treating it as a hard failure.
+        if conflict and error.code in (409, 412):
+            return None
         if missing and error.code == 404:
             return None
         # Never print response bodies or authorization headers.
@@ -156,7 +165,7 @@ class Cloudflare:
         require(before["domain"] == after["domain"], "Shared download domain changed")
         print("Gateway verified:", WORKER, BUCKET, ROUTE)
 
-    def storage(self, key, data=None):
+    def storage(self, key, data=None, create_only=False):
         require(
             re.fullmatch(r"[A-Za-z0-9/_.-]+", key) and ".." not in key.split("/"),
             "Invalid object key",
@@ -170,12 +179,19 @@ class Cloudflare:
             if key.endswith(".zip")
             else "text/plain"
         )
+        headers = {"Authorization": "Bearer " + self.token, "Content-Type": kind}
+        conditional = create_only and data is not None
+        if conditional:
+            # `If-None-Match: *` creates only if the key is still absent, which
+            # closes the check-then-put race for immutable objects.
+            headers["If-None-Match"] = "*"
         return fetch(
             f"https://api.cloudflare.com/client/v4/accounts/{self.account}/r2/buckets/{BUCKET}/objects/{key}",
             method="GET" if data is None else "PUT",
             data=data,
             missing=data is None,
-            headers={"Authorization": "Bearer " + self.token, "Content-Type": kind},
+            headers=headers,
+            conflict=conditional,
         )
 
 
@@ -194,7 +210,11 @@ def put_verified(cloud, key, data, mutable=False):
         "Refusing to replace immutable object: " + key,
     )
     if previous != data:
-        cloud.storage(key, data)
+        stored = cloud.storage(key, data, create_only=previous is None)
+        if stored is None:
+            # Lost the creation race: acceptable only when the winner wrote the
+            # exact bytes we intended to publish.
+            require(cloud.storage(key) == data, "Concurrent write differs: " + key)
     require(cloud.storage(key) == data, "Stored bytes differ: " + key)
     require(public(key) == data, "Public bytes differ: " + key)
     print("Verified:", key, flush=True)
@@ -218,47 +238,206 @@ def validate_assets(release, tag, files):
         )
 
 
-def publish(tag, source):
-    require(re.fullmatch(r"v\d+\.\d+\.\d+", tag), "Expected vX.Y.Z")
-    version = tag[1:]
-    names = [
+def asset_names(version):
+    return [
         f"AkiTTY-{version}-macOS-arm64.zip",
         "SHA256SUMS",
         "release.json",
         "appcast.xml",
     ]
+
+
+def object_url(tag, name):
+    return f"{BASE}/{IMMUTABLE_PREFIX}{tag}/{name}"
+
+
+def tag_commit(tag):
+    """Resolve the commit a published GitHub tag points at."""
+    try:
+        raw = subprocess.check_output(
+            ["gh", "api", f"repos/{REPO}/commits/{tag}"], stderr=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.CalledProcessError):
+        raise RuntimeError("Cannot resolve the published commit for " + tag) from None
+    return json.loads(raw).get("sha")
+
+
+def validate_manifest(tag, version, files):
+    try:
+        manifest = json.loads(files["release.json"])
+    except json.JSONDecodeError:
+        raise RuntimeError("release.json is not valid JSON") from None
+    require(isinstance(manifest, dict), "release.json is not an object")
+    archive = f"AkiTTY-{version}-macOS-arm64.zip"
+    require(
+        manifest.get("version") == version,
+        "Release manifest version differs from the tag",
+    )
+    require(
+        isinstance(manifest.get("commit"), str)
+        and re.fullmatch(r"[a-f0-9]{40}", manifest["commit"]),
+        "Invalid release identity",
+    )
+    require(manifest.get("name") == archive, "Release manifest names another artifact")
+    require(
+        manifest.get("url") == object_url(tag, archive),
+        "Release manifest URL differs from its tag",
+    )
+    require(
+        manifest.get("sha256") == hashlib.sha256(files[archive]).hexdigest()
+        and manifest.get("size") == len(files[archive]),
+        "Release manifest differs from archive",
+    )
+    return manifest
+
+
+def validate_checksums(source, files, names):
+    """SHA256SUMS must cover exactly the published assets, with matching digests."""
+    listed = {}
+    for line in files["SHA256SUMS"].decode("utf-8").splitlines():
+        digest, separator, name = line.partition("  ")
+        require(
+            separator and re.fullmatch(r"[a-f0-9]{64}", digest) and name not in listed,
+            "Malformed SHA256SUMS",
+        )
+        listed[name] = digest
+    require(
+        set(listed) == set(names) - {"SHA256SUMS"},
+        "SHA256SUMS does not list exactly the prepared assets",
+    )
+    for name, digest in listed.items():
+        require(
+            digest == hashlib.sha256(files[name]).hexdigest(),
+            "SHA256SUMS digest differs: " + name,
+        )
+    extra = {
+        entry.name for entry in Path(source).iterdir() if not entry.name.startswith(".")
+    } - set(names)
+    require(
+        not extra, "Unexpected files in the release source: " + ", ".join(sorted(extra))
+    )
+
+
+def validate_appcast(appcast, manifest):
+    """The signed feed must advertise this manifest's version, bytes and signature."""
+    try:
+        channel = ElementTree.fromstring(appcast).find("channel")
+    except ElementTree.ParseError:
+        raise RuntimeError("appcast.xml is not valid XML") from None
+    if channel is None:
+        raise RuntimeError("appcast.xml has no channel")
+    items = channel.findall("item")
+    require(len(items) == 1, "Appcast must describe exactly one release")
+    item = items[0]
+    require(
+        item.findtext(SPARKLE + "shortVersionString") == manifest["version"]
+        and item.findtext(SPARKLE + "version") == str(manifest["build"]),
+        "Appcast version differs from the release manifest",
+    )
+    enclosures = item.findall("enclosure")
+    require(len(enclosures) == 1, "Appcast must publish exactly one enclosure")
+    enclosure = enclosures[0]
+    require(
+        enclosure.get("url") == manifest["url"],
+        "Appcast enclosure URL differs from the release manifest",
+    )
+    require(
+        enclosure.get("length") == str(manifest["size"]),
+        "Appcast enclosure length differs from the archive",
+    )
+    signature = enclosure.get(SPARKLE + "edSignature") or ""
+    try:
+        decoded = base64.b64decode(signature, validate=True)
+    except (binascii.Error, ValueError):
+        raise RuntimeError("Appcast enclosure is not signed") from None
+    require(len(decoded) == 64, "Appcast enclosure signature is malformed")
+
+
+def parse_build(value, label):
+    if isinstance(value, bool):
+        raise RuntimeError(label + " is not an integer build number")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value):
+        number = int(value)
+    else:
+        raise RuntimeError(label + " is not an integer build number")
+    require(number >= 0, label + " is not an integer build number")
+    return number
+
+
+def parse_version(value):
+    require(
+        isinstance(value, str) and re.fullmatch(r"\d+\.\d+\.\d+", value),
+        "Invalid release version",
+    )
+    return tuple(int(part) for part in value.split("."))
+
+
+def validate_latest(existing, manifest):
+    """A new release must not move the version back or reuse a build number."""
+    if not existing:
+        return
+    try:
+        current = json.loads(existing)
+    except json.JSONDecodeError:
+        raise RuntimeError("latest.json is not valid JSON") from None
+    require(isinstance(current, dict), "latest.json is not an object")
+    require(
+        parse_version(current.get("version")) <= parse_version(manifest["version"]),
+        "Refusing to move latest backwards",
+    )
+    # A retry after latest.json advanced must still be able to finish the feed.
+    # Only the identical manifest can reuse a build; changed bytes remain denied.
+    if current == manifest:
+        parse_build(manifest.get("build"), "Release build")
+        return
+    require(
+        parse_build(manifest.get("build"), "Release build")
+        > parse_build(current.get("build"), "Published build"),
+        "Refusing to publish a build number that does not increase",
+    )
+
+
+def validate_tag_commit(manifest, commit):
+    """The prepared artifact must belong to the commit the published tag names."""
+    require(
+        isinstance(commit, str) and re.fullmatch(r"[a-f0-9]{40}", commit),
+        "Cannot resolve the published tag commit",
+    )
+    require(
+        manifest.get("commit") == commit,
+        "Release manifest commit differs from the published tag commit",
+    )
+
+
+def publish(tag, source):
+    require(re.fullmatch(r"v\d+\.\d+\.\d+", tag), "Expected vX.Y.Z")
+    source = Path(source)
+    version = tag[1:]
+    names = asset_names(version)
+    missing = [name for name in names if not (source / name).is_file()]
+    require(
+        not missing, "Release source is missing prepared assets: " + ", ".join(missing)
+    )
     # Capture exact bytes before any network mutation.
     files = {name: (source / name).read_bytes() for name in names}
     require(
         all(len(data) < 300 * 1024 * 1024 for data in files.values()),
         "Asset exceeds REST upload limit",
     )
-    manifest = json.loads(files["release.json"])
-    require(
-        manifest["version"] == version
-        and re.fullmatch(r"[a-f0-9]{40}", manifest["commit"]),
-        "Invalid release identity",
-    )
-    archive = names[0]
-    require(
-        manifest["sha256"] == hashlib.sha256(files[archive]).hexdigest()
-        and manifest["size"] == len(files[archive]),
-        "Release manifest differs from archive",
-    )
+    manifest = validate_manifest(tag, version, files)
+    validate_checksums(source, files, names)
+    validate_appcast(files["appcast.xml"], manifest)
+    validate_tag_commit(manifest, tag_commit(tag))
     release = json.loads(
         subprocess.check_output(["gh", "api", f"repos/{REPO}/releases/tags/{tag}"])
     )
     validate_assets(release, tag, files)
+    validate_latest(public("latest.json"), manifest)
     cloud = Cloudflare()
     cloud.gateway(False)
-    existing = public("latest.json")
-    if existing:
-        current = json.loads(existing)["version"]
-        require(
-            tuple(map(int, current.split("."))) <= tuple(map(int, version.split("."))),
-            "Refusing to move latest backwards",
-        )
-    prefix = "releases/download/" + tag + "/"
+    prefix = IMMUTABLE_PREFIX + tag + "/"
     for name, data in files.items():
         put_verified(cloud, prefix + name, data)
     ready = (

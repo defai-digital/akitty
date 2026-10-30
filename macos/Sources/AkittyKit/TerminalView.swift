@@ -181,6 +181,7 @@ import os
     }
     /// Applies a preference set the same way a settings change does, including the program-chrome switch.
     func applyPreferences(_ next: TerminalPreferences) {
+        guard !stopped else { return }
         preferences = next; fontSize = next.fontSize
         do { try syncProgramChrome() } catch { show(error) }
         resizeTerminal(); redraw()

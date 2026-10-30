@@ -356,7 +356,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     }
     func showPalette() {
         guard let window else { return }
-        let target = active
+        let target = editingFind ? findTarget ?? active : active
         palette = PaletteController { [weak self, weak target] command in self?.perform(command, target: target) }
         if let panel = palette?.window { window.beginSheet(panel) }
     }
@@ -414,10 +414,12 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     var findBarVisible: Bool { !findBar.isHidden }
     func showFind(_ target: TerminalView? = nil) {
         let wasHidden = findBar.isHidden
+        let previous = findTarget
         // Capture before the field takes focus; a visible bar keeps the pane it already owns.
         if let target { findTarget = target }
         else if wasHidden { findTarget = active }
         else if let current = findTarget, !panes.contains(where: { $0.terminal === current }) { findTarget = active }
+        if previous !== findTarget { clearFindHighlights(); findBar.status.stringValue = "" }
         findBar.isHidden = false; findBarHeight.constant = 28; findBarGap.constant = 4
         window?.layoutIfNeeded()
         window?.makeFirstResponder(findBar.field)

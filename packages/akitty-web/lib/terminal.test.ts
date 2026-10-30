@@ -2990,3 +2990,143 @@ describe('Synchronous open()', () => {
     term.dispose();
   });
 });
+
+// ==========================================================================
+// Listener Cleanup Tests
+// ==========================================================================
+
+describe('Listener cleanup', () => {
+  let container: HTMLElement | null = null;
+
+  beforeEach(() => {
+    if (typeof document !== 'undefined') {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+    }
+  });
+
+  afterEach(() => {
+    if (container && container.parentNode) {
+      container.parentNode.removeChild(container);
+      container = null;
+    }
+  });
+
+  /** Record add/removeEventListener calls on a target for identity assertions */
+  const spyListeners = (target: EventTarget) => {
+    const added: Array<[string, EventListenerOrEventListenerObject, any]> = [];
+    const removed: Array<[string, EventListenerOrEventListenerObject, any]> = [];
+    const origAdd = target.addEventListener;
+    const origRemove = target.removeEventListener;
+    target.addEventListener = function (this: EventTarget, type: string, listener: any, options?: any) {
+      added.push([type, listener, options]);
+      return origAdd.call(this, type, listener, options);
+    } as typeof target.addEventListener;
+    target.removeEventListener = function (this: EventTarget, type: string, listener: any, options?: any) {
+      removed.push([type, listener, options]);
+      return origRemove.call(this, type, listener, options);
+    } as typeof target.removeEventListener;
+    const restore = () => {
+      target.addEventListener = origAdd;
+      target.removeEventListener = origRemove;
+    };
+    return { added, removed, restore };
+  };
+
+  const captureOf = (options: unknown): boolean =>
+    options === true || (typeof options === 'object' && options !== null && (options as any).capture === true);
+
+  test('dispose() removes the document mouseup handlers with the identical references', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    const spy = spyListeners(document);
+    try {
+      term.open(container);
+      term.dispose();
+    } finally {
+      spy.restore();
+    }
+
+    const mouseupAdds = spy.added.filter(([type]) => type === 'mouseup');
+    const mouseupRemoves = spy.removed.filter(([type]) => type === 'mouseup');
+    expect(mouseupAdds.length).toBeGreaterThan(0);
+    // dispose() clears isOpen before cleanup; the document mouseup must
+    // still be removed (both the scrollbar-drag and selection handlers)
+    expect(mouseupRemoves.length).toBe(mouseupAdds.length);
+    for (const [, handler] of mouseupAdds) {
+      expect(mouseupRemoves.some(([, removedHandler]) => removedHandler === handler)).toBe(true);
+    }
+  });
+
+  test('wheel listener is removed with the capture flag it was registered with', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    const spy = spyListeners(container);
+    try {
+      term.open(container);
+      term.dispose();
+    } finally {
+      spy.restore();
+    }
+
+    const wheelAdds = spy.added.filter(([type]) => type === 'wheel');
+    const wheelRemoves = spy.removed.filter(([type]) => type === 'wheel');
+    expect(wheelAdds.length).toBe(1);
+    expect(wheelRemoves.length).toBe(1);
+    expect(wheelRemoves[0]![1]).toBe(wheelAdds[0]![1]);
+    expect(captureOf(wheelAdds[0]![2])).toBe(true);
+    expect(captureOf(wheelRemoves[0]![2])).toBe(true);
+  });
+
+  test('a reused container is not affected by a leaked wheel handler', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+    term.dispose();
+
+    // A leaked capture-phase wheel handler would still preventDefault
+    const afterDispose = new WheelEvent('wheel', { cancelable: true, bubbles: true, deltaY: 1 });
+    container.dispatchEvent(afterDispose);
+    expect(afterDispose.defaultPrevented).toBe(false);
+
+    // Reusing the same container for a new terminal works as before
+    const term2 = await createIsolatedTerminal();
+    term2.open(container);
+    const whileOpen = new WheelEvent('wheel', { cancelable: true, bubbles: true, deltaY: 1 });
+    container.dispatchEvent(whileOpen);
+    expect(whileOpen.defaultPrevented).toBe(true);
+
+    term2.dispose();
+    const afterSecondDispose = new WheelEvent('wheel', { cancelable: true, bubbles: true, deltaY: 1 });
+    container.dispatchEvent(afterSecondDispose);
+    expect(afterSecondDispose.defaultPrevented).toBe(false);
+  });
+
+  test('dispose() removes the parent beforeinput handler so a reused container is not affected', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+    term.dispose();
+
+    // The pre-fix anonymous beforeinput handler could never be removed and
+    // kept preventing input on the container forever
+    const afterDispose = new Event('beforeinput', { cancelable: true });
+    container.dispatchEvent(afterDispose);
+    expect(afterDispose.defaultPrevented).toBe(false);
+
+    const term2 = await createIsolatedTerminal();
+    term2.open(container);
+    const whileOpen = new Event('beforeinput', { cancelable: true });
+    container.dispatchEvent(whileOpen);
+    expect(whileOpen.defaultPrevented).toBe(true);
+
+    term2.dispose();
+    const afterSecondDispose = new Event('beforeinput', { cancelable: true });
+    container.dispatchEvent(afterSecondDispose);
+    expect(afterSecondDispose.defaultPrevented).toBe(false);
+  });
+});

@@ -234,3 +234,105 @@ describe('Dimension Calculation', () => {
     expect(dims).toEqual({ cols: 88, rows: 24 });
   });
 });
+
+// ==========================================================================
+// External Resize Tests
+// ==========================================================================
+
+describe('External resize refit', () => {
+  let addon: FitAddon;
+
+  beforeEach(() => {
+    addon = new FitAddon();
+  });
+
+  afterEach(() => {
+    addon.dispose();
+  });
+
+  const createFittableTerminal = () => {
+    // FitAddon subtracts 15px for scrollbar: (900 - 15) / 9 = 98 cols, 480 / 16 = 30 rows
+    const mockElement = document.createElement('div');
+    Object.defineProperty(mockElement, 'clientWidth', { value: 900, configurable: true });
+    Object.defineProperty(mockElement, 'clientHeight', { value: 480, configurable: true });
+
+    let resizeCallCount = 0;
+    const mockTerminal = {
+      cols: 80,
+      rows: 24,
+      element: mockElement,
+      renderer: {
+        getMetrics: () => ({ width: 9, height: 16, baseline: 12 }),
+      },
+      resize: (cols: number, rows: number) => {
+        resizeCallCount++;
+        mockTerminal.cols = cols;
+        mockTerminal.rows = rows;
+      },
+    };
+
+    return { mockTerminal, getResizeCallCount: () => resizeCallCount };
+  };
+
+  const settleGuard = () => new Promise((resolve) => setTimeout(resolve, 60));
+
+  test('fit() refits after the 50ms guard when an external resize diverged from the proposal', async () => {
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal();
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+    expect(mockTerminal.cols).toBe(98);
+    expect(mockTerminal.rows).toBe(30);
+
+    // External terminal.resize diverges from the container-derived proposal
+    mockTerminal.cols = 50;
+    mockTerminal.rows = 20;
+
+    // Feedback protection retained: fit() stays quiet while the 50ms
+    // re-entrancy guard from the previous resize is active
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    // Current dimensions are authoritative once the guard expires: the
+    // proposal must be applied again even though it matches the last fit
+    await settleGuard();
+    addon.fit();
+    expect(getResizeCallCount()).toBe(2);
+    expect(mockTerminal.cols).toBe(98);
+    expect(mockTerminal.rows).toBe(30);
+  });
+
+  test('fit() is a no-op when current dimensions already match the proposal', async () => {
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal();
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    await settleGuard();
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+  });
+
+  test('fit() refits again after a later external resize beyond the first guard window', async () => {
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal();
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    await settleGuard();
+
+    mockTerminal.cols = 50;
+    mockTerminal.rows = 20;
+    addon.fit();
+    expect(getResizeCallCount()).toBe(2);
+
+    await settleGuard();
+    mockTerminal.cols = 40;
+    mockTerminal.rows = 10;
+    addon.fit();
+    expect(getResizeCallCount()).toBe(3);
+    expect(mockTerminal.cols).toBe(98);
+    expect(mockTerminal.rows).toBe(30);
+  });
+});

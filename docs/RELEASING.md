@@ -24,11 +24,11 @@ Credentials, receipts and private deployment notes never belong in Git.
 3. Run `scripts/notarize.sh` with `AKITTY_SIGNING_IDENTITY` and
    `AKITTY_NOTARY_PROFILE` set. Verify the actual app and its extracted ZIP.
 4. Run `python3 scripts/prepare-release.py`. It snapshots the notarized ZIP,
-   validates its identity and signature, generates a signed appcast, and records
+   validates its identity, source build stamp and signature, generates a signed appcast, and records
    the source SHA, archive size and SHA-256. Output is `build/release/vX.Y.Z/`.
 5. Tag that exact commit. Publish the four prepared assets (ZIP, SHA256SUMS,
    release.json and appcast.xml) on the corresponding GitHub release.
-6. For first deployment only, run `python3 scripts/r2-release.py gateway-deploy`.
+6. For the first deployment or after changing `distribution/worker.mjs`, run `python3 scripts/r2-release.py gateway-deploy`.
    This creates only AkiTTY's isolated bucket, Worker and route, after ownership checks.
 7. Run `python3 scripts/r2-release.py publish --tag vX.Y.Z --source build/release/vX.Y.Z`.
    It checks GitHub's published digest metadata before reading the Cloudflare token,

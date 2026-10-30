@@ -598,6 +598,10 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(first.session.snapshot()).cells.filter(\.search).isEmpty)
         controller.perform(.split)
         XCTAssertEqual(controller.panes.count, 2)
+        let second = controller.panes[1].terminal
+        _ = try second.session.call("feed", ["text": "one second"])
+        _ = try second.session.call("find", ["text": "one", "direction": "latest"])
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
         controller.closeFind()
         for pane in controller.panes {
             let cells = try XCTUnwrap(pane.terminal.session.snapshot()).cells
@@ -627,6 +631,13 @@ final class AkittyTests: XCTestCase {
         controller.perform(.findNext)
         XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.activeSearch).isEmpty)
         XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.activeSearch })
+        // Retargeting a visible bar must clear the previous pane, including its active hit.
+        controller.showFind(first)
+        controller.runSearch("latest")
+        XCTAssertTrue(try XCTUnwrap(second.session.snapshot()).cells.allSatisfy { !$0.search && !$0.activeSearch })
+        XCTAssertFalse(try XCTUnwrap(first.session.snapshot()).cells.filter(\.search).isEmpty)
+        controller.showFind(second)
+        controller.runSearch("latest")
         controller.closeFind()
         XCTAssertTrue(window.firstResponder === second)
         // A palette command names its pane even while another pane holds focus.
@@ -878,6 +889,7 @@ final class AkittyTests: XCTestCase {
         var messages: [String] = []
         terminal.onStatus = { messages.append($0) }
         NotificationCenter.default.post(name: .terminalPreferencesChanged, object: nil)
+        terminal.applyPreferences(TerminalPreferences())
         XCTAssertTrue(messages.isEmpty)
     }
 

@@ -529,4 +529,58 @@ describe('SelectionManager', () => {
       term.dispose();
     });
   });
+
+  describe('Document listener cleanup', () => {
+    test('dispose() removes the document mousedown tracker with the identical reference', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+
+      const added: Array<[string, EventListenerOrEventListenerObject]> = [];
+      const removed: Array<[string, EventListenerOrEventListenerObject]> = [];
+      const origAdd = document.addEventListener;
+      const origRemove = document.removeEventListener;
+      document.addEventListener = function (this: EventTarget, type: string, listener: any, options?: any) {
+        added.push([type, listener]);
+        return origAdd.call(this, type, listener, options);
+      } as typeof document.addEventListener;
+      document.removeEventListener = function (this: EventTarget, type: string, listener: any, options?: any) {
+        removed.push([type, listener]);
+        return origRemove.call(this, type, listener, options);
+      } as typeof document.removeEventListener;
+      try {
+        term.open(container);
+        term.dispose();
+      } finally {
+        document.addEventListener = origAdd;
+        document.removeEventListener = origRemove;
+      }
+
+      const mousedownAdds = added.filter(([type]) => type === 'mousedown');
+      const mousedownRemoves = removed.filter(([type]) => type === 'mousedown');
+      expect(mousedownAdds.length).toBeGreaterThan(0);
+      expect(mousedownRemoves.length).toBe(mousedownAdds.length);
+      for (const [, handler] of mousedownAdds) {
+        expect(mousedownRemoves.some(([, removedHandler]) => removedHandler === handler)).toBe(true);
+      }
+    });
+
+    test('a reused document is not affected by a leaked mousedown tracker', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      const selMgr = (term as any).selectionManager;
+      expect(selMgr).toBeDefined();
+      term.dispose();
+
+      // The pre-fix anonymous tracker kept mutating the disposed manager's
+      // mouseDownTarget on every document mousedown
+      const outside = document.createElement('div');
+      document.body.appendChild(outside);
+      document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      outside.remove();
+      expect(selMgr.mouseDownTarget).toBeNull();
+    });
+  });
 });

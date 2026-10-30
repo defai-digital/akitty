@@ -385,7 +385,7 @@ export class Terminal implements ITerminalCore {
       // this as an input element and don't intercept keyboard events.
       parent.setAttribute('contenteditable', 'true');
       // Prevent actual content editing - we handle input ourselves
-      parent.addEventListener('beforeinput', (e) => e.preventDefault());
+      parent.addEventListener('beforeinput', this.handleBeforeInput);
 
       // Add accessibility attributes for screen readers and extensions
       parent.setAttribute('role', 'textbox');
@@ -1242,7 +1242,8 @@ export class Terminal implements ITerminalCore {
 
     // Remove event listeners
     if (this.element) {
-      this.element.removeEventListener('wheel', this.handleWheel);
+      this.element.removeEventListener('beforeinput', this.handleBeforeInput);
+      this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
       this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
@@ -1255,8 +1256,10 @@ export class Terminal implements ITerminalCore {
       this.element.removeAttribute('aria-multiline');
     }
 
-    // Remove document-level listeners (only if opened)
-    if (this.isOpen && typeof document !== 'undefined') {
+    // Remove document-level listeners unconditionally when document exists:
+    // dispose() clears isOpen before cleanup, so gating on isOpen would leak
+    // the scrollbar-drag mouseup handler onto the document
+    if (typeof document !== 'undefined') {
       document.removeEventListener('mouseup', this.handleMouseUp);
     }
 
@@ -1298,6 +1301,14 @@ export class Terminal implements ITerminalCore {
       throw new Error('Terminal must be opened before use. Call terminal.open(parent) first.');
     }
   }
+
+  /**
+   * Prevent actual content editing on the contenteditable parent
+   * (input is handled through the hidden textarea instead)
+   */
+  private handleBeforeInput = (e: Event): void => {
+    e.preventDefault();
+  };
 
   /**
    * Handle mouse move for link hover detection and scrollbar dragging
