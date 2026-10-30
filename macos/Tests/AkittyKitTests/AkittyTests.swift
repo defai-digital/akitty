@@ -132,4 +132,40 @@ final class AkittyTests: XCTestCase {
         XCTAssertNil(MouseEncoding.encode(button: 0, row: -1, col: 0, release: false, sgr: true))
     }
 
+    func testPreferencesValidateAndPersistWithoutExecutingShellText() throws {
+        let suite = "akitty-tests-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var value = TerminalPreferences(); value.fontName = "Menlo"; value.fontSize = 18; value.scrollback = 1000; value.optionAsAlt = true
+        try value.save(to: defaults)
+        XCTAssertEqual(TerminalPreferences.load(from: defaults), value)
+        value.shell = "/bin/sh -c echo"
+        XCTAssertThrowsError(try value.validated())
+        value.shell = ""; value.fontSize = .infinity
+        XCTAssertThrowsError(try value.validated())
+        defaults.set(Data("bad".utf8), forKey: "terminalPreferences")
+        XCTAssertEqual(TerminalPreferences.load(from: defaults), TerminalPreferences())
+    }
+    @MainActor func testVisiblePlusButtonCreatesTabAndReminderHasVersion() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let plus = try XCTUnwrap(descendants(controller.window!.contentView!).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "new-terminal-tab" })
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 1)
+        plus.performClick(nil)
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 2)
+        controller.refreshUpdateReminder("0.7.0")
+        let reminder = try XCTUnwrap(controller.window?.titlebarAccessoryViewControllers.last?.view as? NSButton)
+        XCTAssertEqual(reminder.title, "Update Available: 0.7.0")
+        controller.refreshUpdateReminder(nil)
+        XCTAssertTrue(controller.window!.titlebarAccessoryViewControllers.isEmpty)
+    }
+
+    @MainActor func testFailedShellStartupThrowsWithoutUninitializedNSViewCrash() async {
+        var preferences = TerminalPreferences(); preferences.shell = "/does-not-exist/akitty-test-shell"
+        XCTAssertThrowsError(try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences))
+    }
+
 }

@@ -26,6 +26,7 @@ enum Request {
         shell: Option<String>,
         cwd: Option<String>,
         headless: Option<bool>,
+        scrollback: Option<usize>,
     },
     Close {
         id: u64,
@@ -102,6 +103,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
             shell,
             cwd,
             headless,
+            scrollback,
         } => {
             model::Size::validate(cols, rows)?;
             if registry.sessions.len() >= 64 {
@@ -119,6 +121,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 shell,
                 cwd,
                 headless.unwrap_or(false),
+                scrollback.unwrap_or(5000),
             )?);
             let mut registry = REGISTRY
                 .get()

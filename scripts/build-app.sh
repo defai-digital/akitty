@@ -27,6 +27,9 @@ import pathlib, re, sys
 if re.search(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/', pathlib.Path(sys.argv[1]).read_bytes()):
     raise SystemExit('Packaged executable contains private build paths')
 PYSCAN
+mkdir -p "$app/Contents/Frameworks"
+ditto macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app/Contents/Frameworks/Sparkle.framework"
+cp third_party/sparkle/LICENSE "$app/Contents/Resources/SPARKLE_LICENSE"
 cp macos/Sources/AkittyKit/Resources/features.js "$app/Contents/Resources/features.js"
 swift scripts/build-icons.swift
 iconutil -c icns build/Akitty.iconset -o "$app/Contents/Resources/Akitty.icns"

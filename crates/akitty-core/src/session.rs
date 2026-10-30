@@ -30,9 +30,11 @@ impl Session {
         shell: Option<String>,
         cwd: Option<String>,
         headless: bool,
+        scrollback: usize,
     ) -> Result<Self, String> {
+        if scrollback > 20000 { return Err("scrollback exceeds 20000 lines".into()); }
         let size = Size::validate(cols, rows)?;
-        let model = Arc::new(Mutex::new(Model::new(size)));
+        let model = Arc::new(Mutex::new(Model::new(size, scrollback)));
         let stop = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(AtomicUsize::new(0));
         if headless {
@@ -386,6 +388,7 @@ fn run(
     }
     if let Ok(mut state) = model.lock() {
         state.exited = true;
+        state.exit_code = child.exit_code;
         state.error = io_error.clone();
         state.revision += 1;
     }
@@ -402,6 +405,7 @@ struct ChildGuard {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     fd: i32,
     reaped: bool,
+    exit_code: Option<u32>,
 }
 impl ChildGuard {
     fn new(child: Box<dyn portable_pty::Child + Send + Sync>, fd: i32) -> Self {
@@ -409,12 +413,14 @@ impl ChildGuard {
             child,
             fd,
             reaped: false,
+            exit_code: None,
         }
     }
     fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
         let result = self.child.try_wait()?;
-        if result.is_some() {
+        if let Some(status) = &result {
             self.reaped = true;
+            self.exit_code = Some(status.exit_code());
         }
         Ok(result)
     }
@@ -428,6 +434,7 @@ impl ChildGuard {
             self.reaped = true;
             return Ok(());
         };
+        if self.try_wait().map_err(|e| e.to_string())?.is_some() { return Ok(()); }
         // fd might already have closed if thread creation failed; tcgetpgrp then
         // fails safely. The still-owned child's PID cannot have been recycled.
         let foreground = unsafe { libc::tcgetpgrp(self.fd) };
@@ -458,7 +465,8 @@ impl ChildGuard {
         // Try both signals and reaping even if a concurrent exit makes kill fail.
         let kill = self.child.kill();
         let wait = self.child.wait();
-        if wait.is_ok() {
+        if let Ok(status) = &wait {
+            self.exit_code = Some(status.exit_code());
             self.reaped = true;
             return Ok(());
         }
@@ -477,7 +485,7 @@ mod tests {
 
     #[test]
     fn input_backpressure_bounds_bytes_and_rolls_back_rejected_messages() {
-        let mut session = Session::new(20, 3, None, None, true).unwrap();
+        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
         let (tx, rx) = mpsc::sync_channel(1);
         session.commands = Some(tx);
         session.input_bytes(vec![0xff; 65536]).unwrap();

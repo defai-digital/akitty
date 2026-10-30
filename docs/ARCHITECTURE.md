@@ -62,3 +62,17 @@ public extension ecosystem. Kitty keyboard extensions are not advertised until
 native encoding is implemented. CoreText rendering is not a claim of Ghostty's
 performance or shaping parity. Full esctest results are not inferred from the
 curated conformance suite.
+
+## macOS 0.6 release additions
+
+The deliberately small settings surface covers appearance, new-terminal startup,
+scrollback and Option-key behavior. Preferences remain in local UserDefaults.
+Native tab controls expose an accessible plus button. Successful shell exit closes
+the associated pane and any empty tab/window; failed startup remains visible.
+
+Sparkle owns signed update verification and installation. A gentle titlebar reminder
+keeps scheduled checks out of the user's typing flow. Automatic downloads/installations
+are disabled, and live terminal sessions retain their termination confirmation.
+AkiTTY has its own R2 bucket and route under the shared download hostname. AX Code
+and Desktop informed immutable artifact/readback gates; their implementation and
+cross-platform release policy are not imported. See RELEASING.md for publication order.

@@ -3,7 +3,10 @@ import MetalKit
 import os
 
 @MainActor public final class TerminalView: NSView, @preconcurrency NSTextInputClient {
-    public let session: TerminalSession
+    private var sessionStorage: TerminalSession?
+    public var session: TerminalSession { sessionStorage! }
+    public var onExit: (() -> Void)?
+    private var exitHandled = false
     public private(set) var snapshot: Snapshot?
     public private(set) var health = RendererHealth()
     public var onStatus: ((String) -> Void)?
@@ -26,15 +29,25 @@ import os
     private var lastGrid: (Int, Int) = (0, 0)
     private var stopped = false
     private var fontSize: CGFloat = 14
-    private var font: NSFont { .monospacedSystemFont(ofSize: fontSize, weight: .regular) }
+    private var preferences = TerminalPreferences.load()
+    private var font: NSFont {
+        if preferences.fontName != "System Monospaced", let selected = NSFont(name: preferences.fontName, size: fontSize) { return selected }
+        return .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
     public var cellSize: CGSize {
         CGSize(width: ceil(("M" as NSString).size(withAttributes: [.font: font]).width), height: ceil(font.ascender - font.descender + font.leading + 4))
     }
     public override var acceptsFirstResponder: Bool { true }
     public override var isFlipped: Bool { true }
-    public init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false) throws {
-        session = try TerminalSession(headless: headless)
+    public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false) throws {
+        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: TerminalPreferences.load())
+    }
+    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences) throws {
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        // NSView must be initialized before a throwing operation can unwind it.
+        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback)
+        preferences = initial; fontSize = initial.fontSize
+        NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
         wantsLayer = true
         do {
             let renderer = try MetalPresenter(forceFailure: forceSoftware || ProcessInfo.processInfo.environment["AKITTY_FORCE_METAL_UNAVAILABLE"] == "1", forceShaderFailure: forceShaderFailure)
@@ -49,7 +62,11 @@ import os
         setAccessibilityIdentifier("akitty-terminal")
     }
     required init?(coder: NSCoder) { nil }
-    deinit { timer?.invalidate() }
+    deinit { timer?.invalidate(); NotificationCenter.default.removeObserver(self) }
+    @objc private func preferencesChanged() {
+        preferences = TerminalPreferences.load(); fontSize = preferences.fontSize
+        resizeTerminal(); redraw()
+    }
     public func shutdown(completion: @escaping @Sendable () -> Void = {}) {
         guard !stopped else { completion(); return }; stopped = true
         timer?.invalidate(); timer = nil
@@ -89,10 +106,14 @@ import os
         do {
             if let next = try result.get() {
                 snapshot = next
+                if next.exited, next.error == nil, next.exit_code == 0, !exitHandled {
+                    exitHandled = true
+                    DispatchQueue.main.async { [weak self] in self?.onExit?() }
+                }
                 if let error = next.error { onStatus?(error) }
                 else if let failure = health.failure { onStatus?("Software rendering: \(failure)") }
                 else if next.exited { onStatus?("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
-                else { onStatus?("\(next.cols) × \(next.rows)  ·  \(presenter == nil ? "CoreText" : "Metal")") }
+                else { onStatus?("\(next.cols) cols × \(next.rows) rows") }
                 onTitle?(next.title)
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
@@ -162,6 +183,9 @@ import os
         }
         let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS"]
         if !hasMarkedText(), let text = special[event.keyCode] { send(event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text); return }
+        if preferences.optionAsAlt, event.modifierFlags.contains(.option), !hasMarkedText(), let text = event.charactersIgnoringModifiers, !text.isEmpty {
+            send("\u{1b}" + text); return
+        }
         interpretKeyEvents([event])
     }
     public override func doCommand(by selector: Selector) {
@@ -301,7 +325,7 @@ import os
             self.clipboardPromptOpen = false; self.showClipboardRequest()
         }
     }
-    public func changeFont(_ delta: CGFloat?) { fontSize = delta.map { min(36,max(9,fontSize + $0)) } ?? 14; resizeTerminal(); redraw() }
+    public func changeFont(_ delta: CGFloat?) { fontSize = delta.map { min(36,max(9,fontSize + $0)) } ?? preferences.fontSize; resizeTerminal(); redraw() }
     public override func isAccessibilityElement() -> Bool { true }
     public override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
     public override func accessibilityLabel() -> String? { "Akitty terminal" }

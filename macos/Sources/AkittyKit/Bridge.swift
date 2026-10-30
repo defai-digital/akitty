@@ -78,8 +78,11 @@ public final class TerminalSession: @unchecked Sendable {
     private let lock = NSLock()
     public let id: UInt64
     private var closed = false
-    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false) throws {
-        let data = try CoreBridge.call(["op": "create", "cols": cols, "rows": rows, "headless": headless])
+    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000) throws {
+        var request: [String: Any] = ["op": "create", "cols": cols, "rows": rows, "headless": headless, "scrollback": scrollback]
+        if let shell, !shell.isEmpty { request["shell"] = shell }
+        if let directory, !directory.isEmpty { request["cwd"] = directory }
+        let data = try CoreBridge.call(request)
         let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let id = value?["id"] as? UInt64 else { throw AkittyError.core("No terminal handle") }
         self.id = id

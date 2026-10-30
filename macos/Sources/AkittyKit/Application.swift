@@ -1,11 +1,12 @@
 import AppKit
 
 @MainActor final class TerminalPane: NSView {
-    let terminal: TerminalView
+    private var terminalStorage: TerminalView?
+    var terminal: TerminalView { terminalStorage! }
     let status = NSTextField(labelWithString: "Starting shell…")
-    init(createSession: Bool = true) throws {
-        terminal = try TerminalView()
+    init(headless: Bool = false) throws {
         super.init(frame: .zero)
+        terminalStorage = try TerminalView(headless: headless)
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         terminal.translatesAutoresizingMaskIntoConstraints = false; status.translatesAutoresizingMaskIntoConstraints = false
@@ -22,29 +23,55 @@ import AppKit
 }
 @MainActor final class TerminalWindow: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
     let tabs = NSTabView()
+    private let tabButtons = NSSegmentedControl()
+    private let headless: Bool
+    private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
-    init(app: AkittyApplication) throws {
+    init(app: AkittyApplication, headless: Bool = false) throws {
+        self.headless = headless
         self.app = app
         let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "Akitty"; window.minSize = NSSize(width: 400,height: 250); window.center()
         super.init(window: window)
-        window.delegate = self; tabs.delegate = self; tabs.tabViewType = .topTabsBezelBorder
-        window.contentView = tabs
-        try newTab()
+        window.delegate = self; tabs.delegate = self; tabs.tabViewType = .noTabsNoBorder
+        let content = NSView()
+        let bar = NSStackView(); bar.orientation = .horizontal; bar.spacing = 6
+        tabButtons.segmentStyle = .texturedRounded; tabButtons.trackingMode = .selectOne
+        tabButtons.target = self; tabButtons.action = #selector(selectTab(_:))
+        tabButtons.setAccessibilityLabel("Terminal tabs")
+        let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New terminal tab")!, target: self, action: #selector(addTab(_:)))
+        plus.bezelStyle = .circular; plus.contentTintColor = .labelColor; plus.toolTip = "New tab (⌘T)"; plus.setAccessibilityIdentifier("new-terminal-tab")
+        bar.addArrangedSubview(tabButtons); bar.addArrangedSubview(plus)
+        for view in [bar, tabs] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: content.topAnchor, constant: 4), bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), bar.heightAnchor.constraint(equalToConstant: 28),
+            plus.widthAnchor.constraint(equalToConstant: 30),
+            tabs.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4), tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
+        window.contentView = content
+        try newTab(); refreshUpdateReminder(app.updates.availableVersion)
     }
     required init?(coder: NSCoder) { nil }
     func newTab() throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = "Terminal"; item.view = split
         tabs.addTabViewItem(item); tabs.selectTabViewItem(item)
-        try addPane(to: split)
+        do { try addPane(to: split) }
+        catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
+        refreshTabs()
     }
     private func addPane(to split: NSSplitView) throws {
         guard split.arrangedSubviews.count < 8 else { return }
-        let pane = try TerminalPane(); split.addArrangedSubview(pane)
+        let pane = try TerminalPane(headless: headless); split.addArrangedSubview(pane)
+        pane.terminal.onExit = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.close(pane.terminal)
+        }
         DispatchQueue.main.async { [weak split] in
             guard let split else { return }
             split.adjustSubviews()
@@ -54,11 +81,30 @@ import AppKit
         pane.terminal.onTitle = { [weak self, weak split] title in
             guard let self else { return }
             self.tabs.tabViewItems.first { $0.view === split }?.label = title
+            self.refreshTabs()
             if self.tabs.selectedTabViewItem?.view === split { self.window?.title = title == "Akitty" ? title : "\(title) — Akitty" }
         }
         window?.makeFirstResponder(pane.terminal)
     }
+    @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
+    @objc private func selectTab(_ sender: NSSegmentedControl) {
+        guard tabs.tabViewItems.indices.contains(sender.selectedSegment) else { return }
+        tabs.selectTabViewItem(at: sender.selectedSegment)
+    }
+    private func refreshTabs() {
+        tabButtons.segmentCount = tabs.numberOfTabViewItems
+        let width = min(220, max(44, ((window?.contentView?.bounds.width ?? 900) - 60) / CGFloat(max(1, tabs.numberOfTabViewItems))))
+        for (index, item) in tabs.tabViewItems.enumerated() { tabButtons.setLabel(item.label, forSegment: index); tabButtons.setWidth(width, forSegment: index) }
+        if let selected = tabs.selectedTabViewItem { tabButtons.selectedSegment = tabs.indexOfTabViewItem(selected) }
+    }
+    func windowDidResize(_ notification: Notification) { refreshTabs() }
+    func refreshUpdateReminder(_ version: String?) {
+        if let old = updateReminder, let index = window?.titlebarAccessoryViewControllers.firstIndex(of: old) { window?.removeTitlebarAccessoryViewController(at: index) }
+        updateReminder = nil
+        if let version, let updater = app?.updates { let reminder = UpdateReminder(version: version, updater: updater); window?.addTitlebarAccessoryViewController(reminder); updateReminder = reminder }
+    }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        refreshTabs()
         if let terminal = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.first as? TerminalPane { window?.makeFirstResponder(terminal.terminal) }
     }
     func perform(_ command: NativeCommand, target: TerminalView? = nil) {
@@ -89,6 +135,7 @@ import AppKit
         guard let pane = panes.first(where: { $0.terminal === terminal }), let split = pane.superview as? NSSplitView else { return }
         terminal.shutdown(); split.removeArrangedSubview(pane); pane.removeFromSuperview()
         if split.arrangedSubviews.isEmpty, let item = tabs.tabViewItems.first(where: { $0.view === split }) { tabs.removeTabViewItem(item) }
+        refreshTabs()
         if tabs.numberOfTabViewItems == 0 { window?.close() } else { window?.makeFirstResponder(active) }
     }
     private func find(_ terminal: TerminalView) {
@@ -168,8 +215,11 @@ import AppKit
 
 @MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
     private var windows: [TerminalWindow] = []
+    let updates = UpdateController()
+    private var settingsWindow: PreferencesWindow?
     public func applicationDidFinishLaunching(_ notification: Notification) {
-        makeMenu(); newWindow(nil); NSApp.activate(ignoringOtherApps: true)
+        updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
+        makeMenu(); newWindow(nil); NSApp.activate(ignoringOtherApps: true); updates.start()
     }
     @objc public func newWindow(_ sender: Any?) {
         do { let controller = try TerminalWindow(app: self); windows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil) }
@@ -193,11 +243,17 @@ import AppKit
         (NSApp.keyWindow?.windowController as? TerminalWindow)?.perform(command)
     }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
+    @objc private func settings(_ sender: Any?) {
+        if settingsWindow == nil { settingsWindow = PreferencesWindow(updater: updates) }
+        settingsWindow?.showWindow(nil); settingsWindow?.window?.makeKeyAndOrderFront(nil)
+    }
     private func makeMenu() {
         let bar = NSMenu(); NSApp.mainMenu = bar
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(); let submenu = NSMenu(title: title); item.submenu = submenu; bar.addItem(item); return submenu }
         let app = menu("Akitty")
         app.addItem(withTitle: "About Akitty", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let settings = app.addItem(withTitle: "Settings…", action: #selector(self.settings(_:)), keyEquivalent: ","); settings.target = self
+        let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("Shell"), edit = menu("Edit"), view = menu("View")
         func add(_ command: NativeCommand, key: String, to menu: NSMenu) { let item = menu.addItem(withTitle: command.title, action: #selector(self.command(_:)), keyEquivalent: key); item.target = self; item.representedObject = command.rawValue }

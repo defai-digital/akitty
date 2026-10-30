@@ -185,3 +185,26 @@ fn ffi_validates_buffers_and_schema() {
     assert_eq!(request(br#"{"op":"version","unknown":true}"#)["ok"], false);
     assert_eq!(request(&[0xff])["ok"], false);
 }
+
+#[test]
+fn configured_scrollback_is_enforced_and_invalid_limit_rejected() {
+    let id = call(json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":3}))["id"].as_u64().unwrap();
+    let t = Terminal(id);
+    t.feed(&"line\r\n".repeat(30));
+    assert!(t.snapshot()["history"].as_u64().unwrap() <= 3);
+    assert_eq!(request(&serde_json::to_vec(&json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":20001})).unwrap())["ok"], false);
+}
+
+#[test]
+fn normal_shell_exit_preserves_success_status_for_native_pane_cleanup() {
+    let id = call(json!({"op":"create","cols":30,"rows":3,"shell":"/bin/sh","cwd":"/tmp"}))["id"].as_u64().unwrap();
+    let t = Terminal(id);
+    call(json!({"op":"input","id":id,"text":"exit 0\r"}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = t.snapshot();
+        if snapshot["exited"] == true && snapshot["exit_code"] == 0 { break; }
+        assert!(Instant::now() < deadline, "exit status not propagated: {snapshot}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

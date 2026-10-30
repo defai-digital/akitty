@@ -6,10 +6,15 @@ cd "$(dirname "$0")/.."
 app="$PWD/build/Akitty.app"
 [[ -d $app ]] || { echo 'Build the release app first.' >&2; exit 1; }
 mkdir -p .internal/release
-# Sign nested resource bundles first; no blanket disable-library-validation entitlement.
-while IFS= read -r -d '' bundle; do
-    codesign --force --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$bundle"
-done < <(find "$app/Contents" -name '*.bundle' -type d -print0)
+# Sign Sparkle's helper code from the inside out, preserving helper entitlements.
+framework="$app/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$framework" ]]; then
+    codesign --force --options runtime --preserve-metadata=entitlements --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$framework/Versions/B/Autoupdate"
+    while IFS= read -r -d '' helper; do
+        codesign --force --options runtime --preserve-metadata=entitlements --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$helper"
+    done < <(find "$framework/Versions/B" -depth -type d \( -name '*.xpc' -o -name '*.app' \) -print0)
+    codesign --force --options runtime --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$framework"
+fi
 codesign --force --options runtime --entitlements macos/Release.entitlements --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 ditto -c -k --keepParent "$app" .internal/release/Akitty-submit.zip

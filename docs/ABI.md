@@ -44,3 +44,7 @@ recreated without disabling other sessions.
 Schema 1 is Akitty's contract, independent of the pinned terminal dependency.
 Removing or changing a documented field/semantic requires a new ABI/schema major.
 Additive response fields must be tolerated; unknown operations must fail.
+
+`create` accepts optional `scrollback` in the range 0..20000 lines (default 5000).
+Normal PTY termination reports the child exit code; the native UI closes successful
+sessions and leaves failures visible.

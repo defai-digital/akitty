@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Check the exact Git index (or committed tree) before public publication."""
 import argparse
+import hashlib
 import pathlib
 import re
 import subprocess
 import sys
 
 DENIED_DIRS = {'.internal', '.agents', '.agent', '.codex', '.claude', '.grok', '.muse', '.ax-code', '.ax-wiki', '.cursor', '.windsurf', 'node_modules', 'target', '.build'}
-DENIED_FILES = {'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', '.cursorrules', '.windsurfrules', '.ds_store', '.npmrc', '.netrc'}
+DENIED_FILES = {'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', '.cursorrules', '.windsurfrules', '.ds_store', '.npmrc', '.netrc', '.cf'}
 DENIED_SUFFIXES = {'.pem', '.key', '.p12', '.mobileprovision', '.dylib', '.a', '.log', '.jsonl'}
 PATTERNS = [
     re.compile(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/'),
@@ -19,6 +20,10 @@ PATTERNS = [
     re.compile(rb'[A-Za-z0-9._%+-]+@(?:icloud|gmail|hotmail|outlook)\.com', re.I),
 ]
 
+# Audited upstream license text includes public author email attribution.
+# Only the exact notice bytes are exempt from the personal-email heuristic.
+PUBLIC_NOTICE_HASHES = {"third_party/sparkle/LICENSE": "816be66341dd11b22806862dffd8392b240babaced1cdf24da2ff413ef00c3fd"}
+
 def violations(name, data):
     path = pathlib.PurePosixPath(name)
     parts = [p.lower() for p in path.parts]
@@ -27,7 +32,8 @@ def violations(name, data):
         errors.append('excluded private/generated filename')
     if path.suffix in {'.zig', '.zon'}:
         errors.append('Zig source is prohibited')
-    if any(pattern.search(data) for pattern in PATTERNS):
+    public_notice = PUBLIC_NOTICE_HASHES.get(name) == hashlib.sha256(data).hexdigest()
+    if any(pattern.search(data) for pattern in (PATTERNS[:-1] if public_notice else PATTERNS)):
         errors.append('possible credential or private machine/account data')
     return errors
 

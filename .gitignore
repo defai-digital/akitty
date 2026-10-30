@@ -30,3 +30,6 @@
 
 __pycache__/
 *.pyc
+
+.cf
+*.sparkle-private-key

@@ -17,4 +17,5 @@ clang -Wall -Wextra -Werror -mmacosx-version-min=14.0 -I include scripts/abi-smo
 build/abi-smoke
 swift test --package-path macos
 python3 scripts/test_public.py
+python3 scripts/test_r2_release.py
 if git rev-parse --verify HEAD >/dev/null 2>&1; then python3 scripts/check_public.py --revision HEAD; else python3 scripts/check_public.py; fi

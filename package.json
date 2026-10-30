@@ -1,13 +1,13 @@
 {
   "name": "akitty-features",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "private": true,
   "license": "MIT",
   "type": "module",
   "engines": {"node": ">=22"},
   "scripts": {
     "build": "tsc --noEmit && esbuild typescript/src/palette.ts --bundle --format=iife --global-name=AkittyFeatures --target=safari17 --outfile=macos/Sources/AkittyKit/Resources/features.js",
-    "test": "node --test typescript/test/*.test.mjs"
+    "test": "node --test typescript/test/*.test.mjs distribution/*.test.mjs"
   },
   "devDependencies": {"typescript": "5.9.3", "esbuild": "0.25.12"}
 }

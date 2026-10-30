@@ -18,3 +18,5 @@ Cargo.lock and package-lock.json pin the complete dependency graphs. The
 release build also includes THIRD_PARTY_LICENSES.txt, generated from the exact
 locally resolved Cargo sources and their license/notice files. TypeScript and
 esbuild are build tools, not runtime components of the Mac app.
+
+- Sparkle 2.10.1: MIT and bundled third-party notices; see `third_party/sparkle/LICENSE`. The app embeds its framework and update helpers.

@@ -63,10 +63,10 @@ pub struct Model {
     pub exit_code: Option<u32>,
 }
 impl Model {
-    pub fn new(size: Size) -> Self {
+    pub fn new(size: Size, scrollback: usize) -> Self {
         let events = Events::default();
         let config = Config {
-            scrolling_history: 5000,
+            scrolling_history: scrollback,
             osc52: Osc52::CopyPaste,
             kitty_keyboard: false,
             ..Config::default()
@@ -253,11 +253,11 @@ mod tests {
     #[test]
     fn split_every_byte_boundary_matches_whole_stream() {
         let stream = "abc\x1b[2;4H中e\u{301}😀\x1b[31mRED\x1b[0m".as_bytes();
-        let mut whole = Model::new(Size::validate(30, 5).unwrap());
+        let mut whole = Model::new(Size::validate(30, 5).unwrap(), 5000);
         whole.feed(stream);
         let expected = whole.snapshot(None);
         for split in 0..=stream.len() {
-            let mut model = Model::new(Size::validate(30, 5).unwrap());
+            let mut model = Model::new(Size::validate(30, 5).unwrap(), 5000);
             model.feed(&stream[..split]);
             model.feed(&stream[split..]);
             let got = model.snapshot(None);
@@ -267,7 +267,7 @@ mod tests {
     }
     #[test]
     fn cursor_report_and_device_status_reply() {
-        let mut model = Model::new(Size::validate(30, 5).unwrap());
+        let mut model = Model::new(Size::validate(30, 5).unwrap(), 5000);
         assert_eq!(model.feed(b"\x1b[2;4H\x1b[6n"), b"\x1b[2;4R");
         assert_eq!(model.feed(b"\x1b[5n"), b"\x1b[0n");
     }

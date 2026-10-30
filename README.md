@@ -7,10 +7,24 @@ with a Rust terminal core, native Swift/AppKit interface, and a small TypeScript
 feature layer. No Zig compiler or runtime is required. Windows and Linux are not
 application targets.
 
+## Download
+
+[Download AkiTTY 0.6.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip)
+(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.6.0).
+Unzip and move **Akitty.app** to **Applications** before opening it.
+
+Updates appear as a quiet, versioned titlebar reminder. **AkiTTY → Check for
+Updates…** checks manually. Sparkle verifies signed feeds and update archives;
+you choose when to install and restart. Automatic checks can be changed in Settings.
+
 ## What is implemented
 
-- Native windows, tabs and split panes with interactive login shells.
-- Rust-owned PTYs, bounded input, terminal parsing, 5,000-line scrollback, alternate
+- Native windows, tabs and split panes with interactive login shells; a visible
+  **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
+- Native **Settings… (⌘,)** for font/size, shell, starting directory, scrollback,
+  Option-as-Alt and update checks. Appearance changes apply to open terminals;
+  shell, directory and scrollback changes apply to new terminals.
+- Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.
 - CoreText text rasterization and Metal presentation, with visible software
   fallback when Metal fails. Snapshot processing and rasterization run off the UI thread.
@@ -22,7 +36,7 @@ application targets.
 - A versioned C ABI, explicit memory ownership, panic containment and tests across
   Rust, C, Swift and TypeScript.
 
-**Status: early 0.1.0 implementation.** This is not a drop-in Ghostty replacement.
+**Status: early 0.6.0 implementation.** This is not a drop-in Ghostty replacement.
 Kitty graphics, sixel, image clipboard protocols, Kitty keyboard extensions,
 custom shaders, Ghostty configuration compatibility, shell integration, quick
 terminal and third-party plugins are not implemented. Search currently finds the
@@ -49,6 +63,7 @@ Node or npm at runtime. It starts your login shell in your home directory.
 
 | Action | Shortcut |
 | --- | --- |
+| Settings | Command-Comma |
 | New window / tab | Command-N / Command-T |
 | Split / close pane | Command-D / Command-W |
 | Command palette | Command-Shift-P |
@@ -80,6 +95,8 @@ Distribution signing and notarization use existing local credentials:
 AKITTY_SIGNING_IDENTITY='Developer ID Application identity or certificate hash' \
 AKITTY_NOTARY_PROFILE='existing-keychain-profile' scripts/notarize.sh
 ```
+
+See [release and R2 delivery](docs/RELEASING.md) for the complete publication flow.
 
 The script signs, submits to Apple, verifies acceptance, staples and assesses the
 app, then writes `build/Akitty-macOS.zip`. Credentials and submission receipts are
