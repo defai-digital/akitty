@@ -91,14 +91,14 @@ cross-platform release policy are not imported. See RELEASING.md for publication
 
 `packages/akitty-web` is a separate terminal for AX Code Desktop's web UI. It does not use the Rust core, the C ABI or
 the Swift app. It renders to a canvas and uses Ghostty's VT parser as a prebuilt WebAssembly module, behind an
-xterm.js-style API (derived from coder/ghostty-web v0.4.0).
+xterm.js-style API. It started from coder/ghostty-web v0.4.0 and is now maintained independently.
 
 - **Scope:** it was migrated from `ax-code-desktop`, which keeps its own copy for now. Neither side syncs automatically.
 - **Distribution:** private source package, never published. Consumers compile its TypeScript.
 - **Zig:** only rebuilding the wasm needs Zig 0.15.2. The macOS app, the Rust core and the normal build do not.
-- **Provenance:** `packages/akitty-web/UPSTREAM.md` is authoritative for pins, hashes, local changes and unreviewed
-  upstream commits. Clipboard, link and mouse behavior follows ghostty-web and has not had Akitty's native clipboard
-  policy review.
+- **Independence:** it is no longer a tracked fork. Nothing is synced from ghostty-web; fixes are made directly in
+  `lib/`. `packages/akitty-web/PROVENANCE.md` records only the origin, licenses and the wasm/patch pins and hashes.
+  Clipboard, link and mouse behavior has not had Akitty's native clipboard policy review.
 - **Verification:** type-check and Vitest run in `scripts/verify.sh`; there is no browser or end-to-end test in this repo.
 
 ## macOS folder opening

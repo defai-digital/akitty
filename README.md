@@ -59,8 +59,8 @@ download the ZIP above and verify it with `shasum -a 256` against the same `rele
 - A versioned C ABI, explicit memory ownership, panic containment and tests across
   Rust, C, Swift and TypeScript.
 
-**AkiTTY Web** (`packages/akitty-web`) is a separate, browser-canvas terminal used by AX Code Desktop. It is derived
-from ghostty-web and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
+**AkiTTY Web** (`packages/akitty-web`) is a separate, browser-canvas terminal used by AX Code Desktop. It started
+from ghostty-web, is now maintained independently, and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
 package. See [its README](packages/akitty-web/README.md).
 
 **Status: early 0.8.0 implementation.** This is not a drop-in Ghostty replacement.
