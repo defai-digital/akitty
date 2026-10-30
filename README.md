@@ -32,8 +32,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v0.9.0 ZIP](https://download.automatosx.com/akitty/releases/download/v0.9.0/AkiTTY-0.9.0-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.9.0).
+You can also [download the v0.10.0 ZIP](https://download.automatosx.com/akitty/releases/download/v0.10.0/AkiTTY-0.10.0-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.10.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## Why AkiTTY exists
@@ -86,7 +86,7 @@ contributors for the work that helped make AkiTTY possible.
 from ghostty-web, is now maintained independently, and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
 package. See [its README](packages/akitty-web/README.md).
 
-**Status: early 0.9.0 implementation.** This is not a drop-in Ghostty replacement.
+**Status: early 0.10.0 implementation.** This is not a drop-in Ghostty replacement.
 Sixel, file/shared-memory and Unicode-placeholder Kitty graphics, Kitty animation frames, image clipboard protocols, custom shaders,
 Ghostty configuration compatibility, shell integration, quick terminal and third-party plugins are not implemented. A bounded Kitty
 graphics subset (direct raw RGB/RGBA and in-band PNG with zlib and chunking, image numbers, source rectangles and cell offsets,
