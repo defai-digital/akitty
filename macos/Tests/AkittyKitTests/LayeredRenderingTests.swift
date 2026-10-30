@@ -51,6 +51,30 @@ final class LayeredRenderingTests: XCTestCase {
         XCTAssertGreaterThan(edited.damage?.count ?? 0, 0)
     }
 
+    func testASingleBitmapFrameReleasesTheLayerBitmaps() throws {
+        let rasterizer = GridRasterizer()
+        _ = try rasterizer.renderLayers(snapshot: try snapshot(images: [placement(id: 1, gen: 1)]), damage: nil, size: size, scale: 1,
+                                        fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        XCTAssertTrue(rasterizer.hasLayerPasses, "a layered frame keeps its two bitmaps for the next one")
+        _ = try rasterizer.render(snapshot: try snapshot(), damage: nil, size: size, scale: 1, fontName: "Menlo", fontSize: 13,
+                                  cellSize: cell, composition: "")
+        XCTAssertFalse(rasterizer.hasLayerPasses, "once the last image goes, the layer bitmaps go with it")
+    }
+
+    func testTheColourCacheStaysBoundedUnderTruecolorOutput() throws {
+        let rasterizer = GridRasterizer()
+        // 100 frames of 72 distinct foreground and background colours name 14,400 colours, over three times the cap.
+        for frame in 0..<100 {
+            let cells = (0..<rows).flatMap { row in (0..<cols).map { col -> [Any] in
+                let n = (frame * rows + row) * cols + col
+                return self.cell(row, col, text: "x", fg: [n >> 8 & 255, n & 255, 7], bg: [9, n >> 8 & 255, n & 255])
+            } }
+            _ = try rasterizer.render(snapshot: try snapshot(cells: cells), damage: nil, size: size, scale: 1, fontName: "Menlo",
+                                      fontSize: 13, cellSize: cell, composition: "", reuse: false)
+            XCTAssertLessThanOrEqual(rasterizer.cachedColors, GridRasterizer.maxColors)
+        }
+    }
+
     func testImageOnlyUpdateDecision() throws {
         let previous = try snapshot()
         XCTAssertTrue(TerminalView.isImageOnlyUpdate(previous: previous, next: try snapshot(partial: [])),

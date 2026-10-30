@@ -366,6 +366,8 @@ final class GridRasterizer: @unchecked Sendable {
     private struct GlyphKey: Hashable { var style: UInt8, fg: UInt32, text: String }
     static let margin: CGFloat = 8
     private static let maxGlyphs = 8192
+    /// Truecolor output can name any of 16.7M colours, so the colour cache is capped like the glyph cache.
+    static let maxColors = 4096
     /// Kitty's lowest z layer: images below this draw under non-default cell backgrounds.
     static let underlayZ = -1_073_741_824
     /// The core's resolved default background, which the frame fill already paints.
@@ -395,9 +397,11 @@ final class GridRasterizer: @unchecked Sendable {
     /// Glyphs the last frame drew in batches rather than clipped one by one.
     private(set) var batchedGlyphs = 0
     init(layer: Layer = .all, batchesGlyphs: Bool = true) { self.layer = layer; self.batchesGlyphs = batchesGlyphs }
-    /// The layer passes, created on first use and kept for their bitmaps and damage state.
-    private lazy var backgroundPass = GridRasterizer(layer: .background, batchesGlyphs: batchesGlyphs)
-    private lazy var foregroundPass = GridRasterizer(layer: .foreground, batchesGlyphs: batchesGlyphs)
+    /// The layer passes, created on first layered frame and kept for their bitmaps and damage state while images show.
+    /// A single-bitmap frame drops them, so their two window-sized bitmaps do not outlive the last image.
+    private var layerPasses: (background: GridRasterizer, foreground: GridRasterizer)?
+    var hasLayerPasses: Bool { layerPasses != nil }
+    var cachedColors: Int { colors.count }
 
     static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
         try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context
@@ -406,6 +410,7 @@ final class GridRasterizer: @unchecked Sendable {
     /// `damage` lists the grid rows whose content changed since the last frame this instance rendered (nil: unknown, so
     /// repaint everything). With `reuse` false the bitmap is not kept, so the caller may hold it while the next frame renders.
     func render(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
+        if layer == .all { layerPasses = nil }
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         guard width <= 16384, height <= 16384, width * height <= 33_554_432 else {
             throw AkittyError.core("Terminal bitmap exceeds rendering limits")
@@ -605,8 +610,10 @@ final class GridRasterizer: @unchecked Sendable {
     /// bitmap (cell fills and selection) and a transparent foreground bitmap (glyphs, decorations, cursor) so the GPU can
     /// composite images between them. Images are never drawn here, so an image change needs no text repaint.
     func renderLayers(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", reuse: Bool = true) throws -> LayeredFrame {
-        let back = try backgroundPass.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
-        let front = try foregroundPass.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
+        let passes = layerPasses ?? (GridRasterizer(layer: .background, batchesGlyphs: batchesGlyphs), GridRasterizer(layer: .foreground, batchesGlyphs: batchesGlyphs))
+        layerPasses = passes
+        let back = try passes.background.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
+        let front = try passes.foreground.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
         // Both layers upload the same rows, so the damage is the span covering both.
         var span: Range<Int>?
         if let a = back.damage, let b = front.damage {
@@ -661,6 +668,7 @@ final class GridRasterizer: @unchecked Sendable {
     private func color(_ bytes: [UInt8]) -> CGColor {
         let key = Self.pack(bytes)
         if let cached = colors[key] { return cached }
+        if colors.count >= Self.maxColors { colors.removeAll(keepingCapacity: true) }
         let made = bytes.count == 3 ? CGColor(red: CGFloat(bytes[0])/255, green: CGFloat(bytes[1])/255, blue: CGFloat(bytes[2])/255, alpha: 1) : CGColor(gray: 1, alpha: 1)
         colors[key] = made
         return made

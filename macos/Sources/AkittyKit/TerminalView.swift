@@ -146,7 +146,8 @@ import os
     private func setFastPolling(_ fast: Bool) {
         guard fast, !stopped, window != nil else { refreshLink?.isPaused = true; return }
         if refreshLink == nil {
-            let link = displayLink(target: self, selector: #selector(displayTick(_:)))
+            // The link retains its target, so it targets a weak proxy rather than the view itself.
+            let link = displayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick(_:)))
             link.add(to: .main, forMode: .common)
             refreshLink = link
         }
@@ -155,7 +156,7 @@ import os
     /// Whether the display link is polling now, rather than only the 30 Hz idle timer.
     var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
-    @objc private func displayTick(_ link: CADisplayLink) {
+    fileprivate func displayTick(_ link: CADisplayLink) {
         guard !stopped, window != nil else { link.isPaused = true; return }
         poll()
     }
@@ -552,4 +553,13 @@ import os
     public override func accessibilityVisibleCharacterRange() -> NSRange { NSRange(location: 0, length: accessibilityNumberOfCharacters()) }
     public override func accessibilityString(for range: NSRange) -> String? { attributedSubstring(forProposedRange: range, actualRange: nil)?.string }
     public override func accessibilityInsertionPointLineNumber() -> Int { snapshot?.cursor.row ?? 0 }
+}
+
+/// Forwards display-link ticks without keeping the view alive; a released view leaves the link to its `deinit`.
+private final class DisplayLinkProxy: NSObject {
+    private weak var view: TerminalView?
+    init(_ view: TerminalView) { self.view = view }
+    @MainActor @objc func tick(_ link: CADisplayLink) {
+        if let view { view.displayTick(link) } else { link.invalidate() }
+    }
 }

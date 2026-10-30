@@ -858,6 +858,26 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(shell.pollsAtDisplayRate, "accepted input polls at display rate at once")
     }
 
+    @MainActor func testAViewWhoseWindowGoesAwayMidAnimationIsReleased() async throws {
+        weak var released: TerminalView?
+        var window: NSWindow? = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
+        window?.isReleasedWhenClosed = false
+        do {
+            let view = try TerminalView(headless: true, forceSoftware: true)
+            released = view
+            window?.contentView = view
+            for _ in 0..<100 where view.snapshot == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+            _ = try view.session.call("feed", ["text": "frames moving"])
+            view.poll()
+            for _ in 0..<100 where !view.pollsAtDisplayRate { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(view.pollsAtDisplayRate, "the display link is live")
+        }
+        // Drop the window and the view without `shutdown()`: neither the display link nor its run loop may keep the view alive.
+        window = nil
+        for _ in 0..<100 where released != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertNil(released, "a running display link does not keep its view alive")
+    }
+
     @MainActor func testFailedShellStartupThrowsWithoutUninitializedNSViewCrash() async {
         var preferences = TerminalPreferences(); preferences.shell = "/does-not-exist/akitty-test-shell"
         XCTAssertThrowsError(try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences))
