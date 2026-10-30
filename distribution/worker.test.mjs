@@ -4,8 +4,9 @@ import worker, { keyFor, rangeFor } from "./worker.mjs"
 test("gateway only exposes this product's public keys", () => {
   const key = path => keyFor(new URL("https://download.automatosx.com" + path))
   assert.equal(key("/akitty/appcast.xml"), "appcast.xml")
+  assert.equal(key("/akitty/install"), "install")
   assert.equal(key("/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"), "releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip")
-  for (const path of ["/ax-code/install", "/akitty/.internal/token", "/akitty/releases/download/v0.6.0/../secret", "/akitty/%2e%2e/secret", "/akitty/AGENTS.md"]) assert.equal(key(path), null)
+  for (const path of ["/ax-code/install", "/akitty/installer.sh", "/akitty/.internal/token", "/akitty/releases/download/v0.6.0/../secret", "/akitty/%2e%2e/secret", "/akitty/AGENTS.md"]) assert.equal(key(path), null)
   assert.equal(keyFor(new URL("https://example.com/akitty/latest.json")), null)
 })
 test("ranges reject malformed and unsatisfiable input", () => {

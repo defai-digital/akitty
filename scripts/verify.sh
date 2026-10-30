@@ -21,4 +21,5 @@ build/abi-smoke
 swift test --package-path macos
 python3 scripts/test_public.py
 python3 scripts/test_r2_release.py
+bash scripts/test_install.sh
 if git rev-parse --verify HEAD >/dev/null 2>&1; then python3 scripts/check_public.py --revision HEAD; else python3 scripts/check_public.py; fi

@@ -2,7 +2,7 @@
 export function keyFor(url) {
   if (url.hostname !== "download.automatosx.com" || !url.pathname.startsWith("/akitty/")) return null
   const key = url.pathname.slice("/akitty/".length)
-  if (["appcast.xml", "latest.json"].includes(key)) return key
+  if (["appcast.xml", "latest.json", "install"].includes(key)) return key
   return /^releases\/download\/v\d+\.\d+\.\d+\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key) ? key : null
 }
 export function rangeFor(header, size) {

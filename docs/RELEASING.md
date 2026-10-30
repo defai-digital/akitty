@@ -31,8 +31,17 @@ Credentials, receipts and private deployment notes never belong in Git.
 6. For first deployment only, run `python3 scripts/r2-release.py gateway-deploy`.
    This creates only AkiTTY's isolated bucket, Worker and route, after ownership checks.
 7. Run `python3 scripts/r2-release.py publish --tag vX.Y.Z --source build/release/vX.Y.Z`.
-   It checks GitHub's published digest metadata before reading the Cloudflare token.
-8. Independently download the public ZIP, compare SHA-256, extract it, and verify
+   It checks GitHub's published digest metadata before reading the Cloudflare token,
+   and also publishes `scripts/install.sh` at the mutable `install` key so the curl
+   installer always serves the committed copy.
+8. Read back the mutable installer and compare it with the committed file:
+   `curl -fsS https://download.automatosx.com/akitty/install | cmp - scripts/install.sh`
+   plus a `Cache-Control: no-store` header check. Immutability gates do not cover
+   mutable keys, so repeat this readback whenever `scripts/install.sh` changes.
+   The installer trusts `latest.json` only to name a version; the archive digest
+   comes from the immutable release manifest, so tampering with the mutable tier can
+   at worst roll an install back to an older signed release.
+9. Independently download the public ZIP, compare SHA-256, extract it, and verify
    Gatekeeper, the app version, and the updater feed. Test both current-version
    checks and an older test copy upgrading to the release.
 

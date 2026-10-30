@@ -151,6 +151,7 @@ def publish(tag, source):
     ready = json.dumps({'tag': tag, 'commit': manifest['commit'], 'verified': True, 'assets': len(files)}, sort_keys=True).encode() + b'\n'
     put_verified(cloud, prefix + 'release-ready.json', ready)
     put_verified(cloud, 'latest.json', files['release.json'], mutable=True)
+    put_verified(cloud, 'install', (ROOT / 'scripts/install.sh').read_bytes(), mutable=True)
     # The signed feed is the updater's discovery point. Publish it last.
     put_verified(cloud, 'appcast.xml', files['appcast.xml'], mutable=True)
     print('R2 publication complete:', tag)
