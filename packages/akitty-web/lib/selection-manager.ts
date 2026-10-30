@@ -122,6 +122,7 @@ export class SelectionManager {
    */
   setTerminal(wasmTerm: GhosttyTerminal): void {
     this.clearSelection();
+    this.mouseDownTarget = null;
     this.wasmTerm = wasmTerm;
   }
 
@@ -228,8 +229,6 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.hasSelection()) return;
-
     // Mark current selection rows as dirty for redraw
     const coords = this.normalizeSelection();
     if (coords) {
@@ -241,9 +240,10 @@ export class SelectionManager {
     this.selectionStart = null;
     this.selectionEnd = null;
     this.isSelecting = false;
+    this.stopAutoScroll();
 
     // Force redraw of previously selected lines to clear the overlay
-    this.requestRender();
+    if (coords) this.requestRender();
   }
 
   /**

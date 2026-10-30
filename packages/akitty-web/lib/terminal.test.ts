@@ -348,6 +348,50 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('reset clears a partial drag and stops selection autoscroll', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      const selection = (term as any).selectionManager;
+      selection.selectionStart = { col: 0, absoluteRow: 0 };
+      selection.selectionEnd = { col: 0, absoluteRow: 0 };
+      selection.isSelecting = true;
+      selection.startAutoScroll(1);
+      term.reset();
+      term.write('after');
+      expect(term.getSelection()).toBe('');
+      expect(selection.isSelecting).toBe(false);
+      expect(selection.autoScrollInterval).toBeNull();
+      term.dispose();
+    });
+
+    test('reset clears scrollback position and pending smooth scrolling', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
+      term.open(container);
+      term.write('line\r\n'.repeat(20));
+      (term as any).smoothScrollTo(10);
+      expect(term.getViewportY()).toBeGreaterThan(0);
+      expect((term as any).scrollAnimationFrame).toBeDefined();
+      term.reset();
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect((term as any).scrollAnimationFrame).toBeUndefined();
+      term.dispose();
+    });
+
+    test('dispose clears active link hover even if the hover callback throws', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      let hovered = true;
+      (term as any).currentHoveredLink = { hover(value: boolean) {
+        hovered = value;
+        throw new Error('hover cleanup failed');
+      } };
+      expect(() => term.dispose()).toThrow('hover cleanup failed');
+      expect(hovered).toBe(false);
+      expect((term as any).currentHoveredLink).toBeUndefined();
+      expect(term.wasmTerm).toBeUndefined();
+    });
+
     test('reset selection reads the replacement terminal', async () => {
       const term = await createIsolatedTerminal();
       term.open(container);

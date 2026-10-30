@@ -721,10 +721,23 @@ export class Terminal implements ITerminalCore {
     const config = this.buildWasmConfig();
     const replacement = this.ghostty!.createTerminal(this.cols, this.rows, config);
     const previous = this.wasmTerm;
-    this.selectionManager?.setTerminal(replacement);
+    try {
+      this.selectionManager?.setTerminal(replacement);
+    } catch (error) {
+      replacement.free();
+      throw error;
+    }
     this.wasmTerm = replacement;
     previous?.free();
     this.linkDetector?.invalidateCache();
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
+    this.scrollAnimationStartY = undefined;
+    this.viewportY = 0;
+    this.targetViewportY = 0;
 
     // Clear renderer
     this.renderer!.clear();
@@ -732,6 +745,7 @@ export class Terminal implements ITerminalCore {
     // Reset title
     this.currentTitle = '';
     this.revision++;
+    this.scrollEmitter.fire(0);
   }
 
   /**
@@ -1228,6 +1242,11 @@ export class Terminal implements ITerminalCore {
     const release = (cleanup: () => void) => {
       try { cleanup(); } catch (error) { failures.push(error); }
     };
+    // Clear ownership before notifying external hover handlers, which may throw.
+    const hoveredLink = this.currentHoveredLink;
+    this.currentHoveredLink = undefined;
+    if (this.element) this.element.style.cursor = 'text';
+    release(() => hoveredLink?.hover?.(false));
     // Dispose selection manager
     if (this.selectionManager) {
       release(() => this.selectionManager!.dispose());
