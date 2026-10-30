@@ -123,7 +123,10 @@ export class TerminalReader {
       let text = lineText(buffer, index);
       if (chars + text.length > maxChars) {
         // Always return something, but never more than the budget.
-        if (collected.length === 0) text = text.slice(-maxChars);
+        if (collected.length === 0) {
+          text = text.slice(-maxChars);
+          truncated = true;
+        }
         else {
           truncated = true;
           break;

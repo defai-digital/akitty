@@ -432,4 +432,12 @@ final class AkittyTests: XCTestCase {
         XCTAssertThrowsError(try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences))
     }
 
+    func testImagePixelReadRejectsOverflowingDimensions() throws {
+        let session = try TerminalSession(headless: true)
+        defer { try? session.close() }
+        for (width, height) in [(Int.max, 2), (2, Int.max), (Int.min, -1), (0, 1), (8_388_609, 1)] {
+            XCTAssertNil(session.imagePixels(0, width: width, height: height))
+        }
+    }
+
 }

@@ -95,7 +95,7 @@ export class Terminal implements ITerminalCore {
   }
 
   /**
-   * Counts writes (and resets) since the terminal was created. It changes whenever the content may have, so a reader
+   * Counts writes, clears, resizes and resets since the terminal was created. It changes whenever the content may have, so a reader
    * can tell whether two reads saw the same state.
    */
   public get writeRevision(): number {
@@ -681,6 +681,7 @@ export class Terminal implements ITerminalCore {
 
     // Resize WASM terminal
     this.wasmTerm!.resize(cols, rows);
+    this.revision++;
 
     // Resize renderer
     this.renderer!.resize(cols, rows);
@@ -706,6 +707,7 @@ export class Terminal implements ITerminalCore {
     this.assertOpen();
     // Send ANSI clear screen and cursor home sequences
     this.wasmTerm!.write('\x1b[2J\x1b[H');
+    this.revision++;
   }
 
   /**

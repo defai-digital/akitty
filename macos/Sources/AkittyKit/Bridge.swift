@@ -214,8 +214,9 @@ public final class TerminalSession: @unchecked Sendable {
     }
     /// RGBA pixels of a stored graphics image, or nil if it changed size or was removed meanwhile.
     public func imagePixels(_ image: UInt32, width: Int, height: Int) -> Data? {
+        // Check the pixel cap before multiplication so even Int.max input fails safely.
+        guard width > 0, height > 0, width <= (8 * 1_048_576) / height else { return nil }
         let count = width * height * 4
-        guard width > 0, height > 0, count <= 32 * 1_048_576 else { return nil }
         lock.lock(); defer { lock.unlock() }
         guard !closed else { return nil }
         var data = Data(count: count)

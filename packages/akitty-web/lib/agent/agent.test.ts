@@ -50,6 +50,21 @@ describe('TerminalReader.readScreen', () => {
     expect(screen.scrollbackLines).toBeGreaterThan(0);
   });
 
+  test('revision changes after clear and resize, but not a no-op resize', async () => {
+    const term = await makeTerminal();
+    term.write('content');
+    const reader = new TerminalReader(term);
+    const before = reader.readScreen().revision;
+    term.clear();
+    expect(reader.readScreen().revision).toBeGreaterThan(before);
+    const cleared = reader.readScreen().revision;
+    term.resize(30, 5);
+    expect(reader.readScreen().revision).toBeGreaterThan(cleared);
+    const resized = reader.readScreen().revision;
+    term.resize(30, 5);
+    expect(reader.readScreen().revision).toBe(resized);
+  });
+
   test('reports the alternate buffer', async () => {
     const term = await makeTerminal();
     term.write('normal text\x1b[?1049h\x1b[Halt text');
@@ -123,6 +138,7 @@ describe('TerminalReader.readOutput', () => {
     term.write('abcdefghijklmnopqrstuvwxyz0123456789');
     const page = new TerminalReader(term).readOutput({ maxChars: 5 });
     expect(page.lines.join('')).toBe('56789');
+    expect(page.truncated).toBe(true);
   });
 
   test('rejects out-of-range and non-integer options', async () => {
@@ -275,6 +291,28 @@ describe('registerWebMcpTools', () => {
     } finally {
       delete (document as any).modelContext;
     }
+  });
+
+  test('stops registering when aborted during an asynchronous registration', async () => {
+    const abort = new AbortController();
+    let finish!: () => void;
+    const registerTool = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const pending = registerWebMcpTools(new TerminalSessionRegistry(), { context: { registerTool }, signal: abort.signal });
+    abort.abort();
+    finish();
+    const registration = await pending;
+    expect(registration.tools).toEqual([]);
+    expect(registerTool).toHaveBeenCalledTimes(1);
+  });
+
+  test('disposal removes the listener from a long-lived external signal', async () => {
+    const abort = new AbortController();
+    const removed = vi.spyOn(abort.signal, 'removeEventListener');
+    const registration = await registerWebMcpTools(new TerminalSessionRegistry(), {
+      context: { registerTool: () => {} }, signal: abort.signal,
+    });
+    registration.dispose();
+    expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   test('backs out when a registration fails', async () => {

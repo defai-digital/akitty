@@ -57,24 +57,29 @@ export async function registerWebMcpTools(
 ): Promise<WebMcpRegistration> {
   const context = options.context ?? defaultContext();
   const controller = new AbortController();
-  const dispose = () => controller.abort();
+  const dispose = () => {
+    controller.abort();
+    options.signal?.removeEventListener('abort', dispose);
+  };
   const none: WebMcpRegistration = { tools: [], dispose };
   if (!context) return none;
 
   if (options.signal) {
-    if (options.signal.aborted) return none;
+    if (options.signal.aborted) { dispose(); return none; }
     options.signal.addEventListener('abort', dispose, { once: true });
   }
 
   const registered: string[] = [];
   try {
     for (const tool of createTerminalTools(source)) {
+      if (controller.signal.aborted) { dispose(); return none; }
       await context.registerTool(toWebMcpTool(tool), { signal: controller.signal });
+      if (controller.signal.aborted) { dispose(); return none; }
       registered.push(tool.name);
     }
   } catch (error) {
     // Partial registration would leave an agent with a confusing subset, so back out.
-    controller.abort();
+    dispose();
     console.warn('akitty-web: WebMCP registration failed', error);
     return { tools: [], dispose };
   }
