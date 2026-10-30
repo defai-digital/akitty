@@ -163,6 +163,43 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(controller.window!.titlebarAccessoryViewControllers.isEmpty)
     }
 
+    func testFolderOpenRequestResolvesFoldersAndCountsSkippedItems() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-open-\(UUID().uuidString)")
+        let folder = root.appendingPathComponent("project"); let file = folder.appendingPathComponent("README.md")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let request = folderOpenRequest(from: [folder, file, root.appendingPathComponent("missing"), URL(string: "https://example.com/")!])
+        // The file resolves to its folder, which is already requested, so it is not opened twice.
+        XCTAssertEqual(request, FolderOpenRequest(directories: [folder.standardizedFileURL.path], skipped: 2))
+        let many = try (0..<3).map { index -> URL in
+            let url = root.appendingPathComponent("many-\(index)"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url
+        }
+        XCTAssertEqual(folderOpenRequest(from: many, limit: 2), FolderOpenRequest(directories: many.prefix(2).map(\.standardizedFileURL.path), skipped: 1))
+    }
+    @MainActor func testOpenedFolderWindowStartsEveryTabInThatFolder() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: directory)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        XCTAssertEqual(controller.directory, directory)
+        try controller.newTab()
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 2)
+    }
+    @MainActor func testOpenedFolderReachesTheShell() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-cwd-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let terminal = try TerminalView(headless: false, forceSoftware: true, directory: directory.path)
+        defer { terminal.shutdown() }
+        try terminal.session.input("pwd -P > akitty-cwd.txt\r")
+        let marker = directory.appendingPathComponent("akitty-cwd.txt")
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: marker.path) { try await Task.sleep(nanoseconds: 50_000_000) }
+        let reported = try String(contentsOf: marker, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Both sides go through the same symlink normalization (the temp folder sits under the /var -> /private/var link).
+        XCTAssertEqual(URL(fileURLWithPath: reported).resolvingSymlinksInPath(), directory.resolvingSymlinksInPath())
+    }
+
     @MainActor func testFailedShellStartupThrowsWithoutUninitializedNSViewCrash() async {
         var preferences = TerminalPreferences(); preferences.shell = "/does-not-exist/akitty-test-shell"
         XCTAssertThrowsError(try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences))

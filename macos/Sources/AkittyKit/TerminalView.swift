@@ -39,8 +39,11 @@ import os
     }
     public override var acceptsFirstResponder: Bool { true }
     public override var isFlipped: Bool { true }
-    public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false) throws {
-        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: TerminalPreferences.load())
+    /// `directory` overrides the Settings starting directory for this terminal only (a folder opened from Finder, Dock or `open -a`).
+    public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil) throws {
+        var initial = TerminalPreferences.load()
+        if let directory { initial.directory = directory }
+        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial)
     }
     init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences) throws {
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))

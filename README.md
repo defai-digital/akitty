@@ -21,6 +21,8 @@ you choose when to install and restart. Automatic checks can be changed in Setti
 
 - Native windows, tabs and split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
+- Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
+  a window whose tabs and splits begin in that folder; a file opens in its folder.
 - Native **Settings… (⌘,)** for font/size, shell, starting directory, scrollback,
   Option-as-Alt and update checks. Appearance changes apply to open terminals;
   shell, directory and scrollback changes apply to new terminals.
@@ -57,7 +59,8 @@ open build/Akitty.app
 ```
 
 For a development build, use `scripts/build-app.sh debug`. The app does not need
-Node or npm at runtime. It starts your login shell in your home directory.
+Node or npm at runtime. It starts your login shell in your home directory, or in
+the Settings starting directory or an opened folder.
 
 ## Shortcuts
 

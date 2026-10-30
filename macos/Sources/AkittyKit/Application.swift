@@ -4,9 +4,9 @@ import AppKit
     private var terminalStorage: TerminalView?
     var terminal: TerminalView { terminalStorage! }
     let status = NSTextField(labelWithString: "Starting shell…")
-    init(headless: Bool = false) throws {
+    init(headless: Bool = false, directory: String? = nil) throws {
         super.init(frame: .zero)
-        terminalStorage = try TerminalView(headless: headless)
+        terminalStorage = try TerminalView(headless: headless, directory: directory)
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         terminal.translatesAutoresizingMaskIntoConstraints = false; status.translatesAutoresizingMaskIntoConstraints = false
@@ -25,13 +25,16 @@ import AppKit
     let tabs = NSTabView()
     private let tabButtons = NSSegmentedControl()
     private let headless: Bool
+    /// Starting directory for every tab and split in this window; nil uses the Settings directory.
+    let directory: String?
     private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
-    init(app: AkittyApplication, headless: Bool = false) throws {
+    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
         self.headless = headless
+        self.directory = directory
         self.app = app
         let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "Akitty"; window.minSize = NSSize(width: 400,height: 250); window.center()
@@ -67,7 +70,7 @@ import AppKit
     }
     private func addPane(to split: NSSplitView) throws {
         guard split.arrangedSubviews.count < 8 else { return }
-        let pane = try TerminalPane(headless: headless); split.addArrangedSubview(pane)
+        let pane = try TerminalPane(headless: headless, directory: directory); split.addArrangedSubview(pane)
         pane.terminal.onExit = { [weak self, weak pane] in
             guard let self, let pane else { return }
             self.close(pane.terminal)
@@ -213,16 +216,55 @@ import AppKit
     }
 }
 
+/// Folders requested by an open-documents event: Finder "Open With", a Dock drop, or `open -a Akitty <path>` (how
+/// AX Code Desktop hands a project over). A file opens in its folder, as in Terminal. Missing paths, non-file URLs and
+/// anything past `limit` are counted as skipped rather than dropped silently, and the limit keeps one event from
+/// starting an unbounded number of shells.
+struct FolderOpenRequest: Equatable {
+    var directories: [String] = []
+    var skipped = 0
+}
+func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
+    var request = FolderOpenRequest()
+    for url in urls {
+        var isDirectory: ObjCBool = false
+        let path = url.standardizedFileURL.path
+        guard url.isFileURL, FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { request.skipped += 1; continue }
+        let directory = isDirectory.boolValue ? path : (path as NSString).deletingLastPathComponent
+        if request.directories.contains(directory) { continue }
+        guard request.directories.count < limit else { request.skipped += 1; continue }
+        request.directories.append(directory)
+    }
+    return request
+}
+
 @MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
     private var windows: [TerminalWindow] = []
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
+    private var launched = false
+    private var openedFolderAtLaunch = false
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        launched = true
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
-        makeMenu(); newWindow(nil); NSApp.activate(ignoringOtherApps: true); updates.start()
+        makeMenu()
+        // A cold launch for a folder delivers application(_:open:) before this; that window replaces the default one.
+        if !openedFolderAtLaunch { newWindow(nil) }
+        NSApp.activate(ignoringOtherApps: true); updates.start()
     }
-    @objc public func newWindow(_ sender: Any?) {
-        do { let controller = try TerminalWindow(app: self); windows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil) }
+    public func application(_ sender: NSApplication, open urls: [URL]) {
+        let request = folderOpenRequest(from: urls)
+        for directory in request.directories { newWindow(directory: directory) }
+        if !launched, !windows.isEmpty { openedFolderAtLaunch = true }
+        if request.skipped > 0 {
+            let alert = NSAlert(); alert.messageText = request.skipped == 1 ? "One item was not opened." : "\(request.skipped) items were not opened."
+            alert.informativeText = "Akitty opens existing folders, at most 8 at a time."; alert.runModal()
+        }
+        if launched { NSApp.activate(ignoringOtherApps: true) }
+    }
+    @objc public func newWindow(_ sender: Any?) { newWindow(directory: nil) }
+    func newWindow(directory: String?) {
+        do { let controller = try TerminalWindow(app: self, directory: directory); windows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil) }
         catch { NSAlert(error: error).runModal() }
     }
     fileprivate func remove(_ controller: TerminalWindow) { windows.removeAll { $0 === controller } }
