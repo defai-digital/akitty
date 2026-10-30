@@ -58,6 +58,18 @@ public enum LinkPolicy {
         return url
     }
 }
+/// A Kitty graphics placement: pixels live in the core and are fetched by id and generation.
+public struct ImagePlacement: Codable, Sendable, Equatable {
+    public let id: UInt32
+    public let gen: UInt64
+    public let w: Int
+    public let h: Int
+    public let row: Int
+    public let col: Int
+    public let cols: Int
+    public let rows: Int
+    public let z: Int
+}
 public struct Cursor: Codable, Sendable { public let row: Int; public let col: Int; public let visible: Bool }
 public struct Snapshot: Codable, Sendable {
     public let changed: Bool
@@ -68,6 +80,7 @@ public struct Snapshot: Codable, Sendable {
     public let cells: [Cell]
     public let lines: [String]
     public let links: [String]?
+    public let images: [ImagePlacement]?
     public let cursor: Cursor
     public let bracketed_paste: Bool
     public let app_cursor: Bool
@@ -128,6 +141,18 @@ public final class TerminalSession: @unchecked Sendable {
         let data = try call("snapshot", since.map { ["since": $0] } ?? [:])
         if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], object["changed"] as? Bool == false { return nil }
         return try JSONDecoder().decode(Snapshot.self, from: data)
+    }
+    /// RGBA pixels of a stored graphics image, or nil if it changed size or was removed meanwhile.
+    public func imagePixels(_ image: UInt32, width: Int, height: Int) -> Data? {
+        let count = width * height * 4
+        guard width > 0, height > 0, count <= 32 * 1_048_576 else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return nil }
+        var data = Data(count: count)
+        let copied = data.withUnsafeMutableBytes { raw in
+            akitty_image_read_v1(id, image, raw.bindMemory(to: UInt8.self).baseAddress, count)
+        }
+        return copied == count ? data : nil
     }
     public func input(_ text: String, paste: Bool = false) throws { _ = try call("input", ["text": text, "paste": paste]) }
 }

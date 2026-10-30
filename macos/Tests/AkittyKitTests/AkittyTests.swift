@@ -164,6 +164,32 @@ final class AkittyTests: XCTestCase {
         XCTAssertNil(snapshot.hyperlink(row: 0, col: 3))
         _ = try GridRasterizer.make(snapshot: snapshot, size: CGSize(width: 200, height: 80), scale: 1, fontName: "Menlo", fontSize: 13, cellSize: CGSize(width: 8, height: 16), composition: "")
     }
+    func testKittyGraphicsFrameReachesTheRasterizedBitmap() throws {
+        let session = try TerminalSession(cols: 20, rows: 6, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("cell_size", ["width": 8, "height": 16])
+        // One opaque red 4x4 RGB image stretched over 2x2 cells at the cursor, above the text.
+        let red = Data([UInt8](repeating: 0, count: 0) + (0..<16).flatMap { _ in [UInt8(255), 0, 0] }).base64EncodedString()
+        _ = try session.call("feed", ["text": "ab\u{1b}_Ga=T,f=24,s=4,v=4,i=9,c=2,r=2,C=1,z=1,q=2;\(red)\u{1b}\\"])
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        let placement = try XCTUnwrap(snapshot.images?.first)
+        XCTAssertEqual([placement.id, UInt32(placement.cols), UInt32(placement.rows)], [9, 2, 2])
+        let store = ImageStore()
+        store.sync(snapshot.images ?? [], session: session)
+        XCTAssertEqual(store.images.count, 1)
+        let cell = CGSize(width: 8, height: 16), size = CGSize(width: 200, height: 120)
+        let context = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 1, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "", images: store.images)
+        let data = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+        // Image cell (row 0, col 2) centre in bitmap coordinates (origin bottom-left).
+        let x = 8 + 2 * 8 + 8, y = 120 - 8 - 16
+        let offset = (Int(size.height) - 1 - y) * context.bytesPerRow + x * 4
+        XCTAssertEqual([data[offset + 2], data[offset + 1], data[offset]], [255, 0, 0], "red image pixel (BGRA)")
+        // Replaced by deletion: the store drops the pixels with the placement.
+        _ = try session.call("feed", ["text": "\u{1b}_Ga=d,d=I,i=9\u{1b}\\"])
+        store.sync(try XCTUnwrap(try session.snapshot()).images ?? [], session: session)
+        XCTAssertTrue(store.images.isEmpty)
+        XCTAssertNil(session.imagePixels(9, width: 4, height: 4))
+    }
     func testStalePathsResetOnlyThemselvesOnLoad() throws {
         let suite = "akitty-tests-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

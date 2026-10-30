@@ -28,12 +28,27 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | select | id, start_row, start_col, end_row, end_col | Visible cell coordinates; return selected text |
 | find | id, text | Latest literal matching line in history; bounded query |
 | feed | id, text | Parser input for headless sessions only |
+| cell_size | id, width, height | Cell size in pixels (1–256 by 1–512), used for graphics placement and size reports |
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
 sessions and 5,000 scrollback lines per session. Input/reply queues are bounded.
 Snapshots include authoritative Rust cell coordinates, colors, flags, cursor,
 mode state, visible text, title, clipboard requests and lifecycle/error status.
 Swift converts cells to UTF-16 offsets only for macOS text/accessibility APIs.
+
+**Kitty graphics.** The core answers a subset of the Kitty graphics protocol sent
+as APC strings: queries (`a=q`), direct (`t=d`) raw RGB/RGBA (`f=24|32`)
+transmission with optional zlib (`o=z`) and `m=` chunking, placement (`a=T|p`)
+and deletion (`a=d`: all, by image id, by z-index; capitals also free image data).
+Files, shared memory and PNG are refused with `ENOTSUP`, so terminal output can
+never make the core read a local file. Images are at most 8 Mi pixels, one session
+holds at most 128 MiB of pixels and 256 placements, and zlib output is capped at the
+declared size. The snapshot lists visible placements in `images` (`id`, `gen`
+generation, pixel `w`/`h`, viewport `row`/`col`, `cols`/`rows` in cells, `z`; at most
+64). Pixels do not travel in JSON: `akitty_image_read_v1(session, image, out,
+capacity)` copies `w*h*4` RGBA bytes and returns the count, or 0 on any error.
+Placements on the main screen follow scrolling while scrollback grows; alternate
+screen images are removed when that screen is left.
 
 Optional per-cell fields are omitted when unset: `ustyle` (1 single, 2 double,
 3 curly, 4 dotted, 5 dashed; `underline` stays true for any of them), `ucolor`

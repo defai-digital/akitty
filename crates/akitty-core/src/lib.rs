@@ -3,6 +3,7 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Akitty supports macOS only");
 
+mod graphics;
 mod model;
 mod session;
 
@@ -53,6 +54,12 @@ enum Request {
     Scroll {
         id: u64,
         lines: i32,
+    },
+    /// Pixel size of one cell, used for graphics placement and size reports.
+    CellSize {
+        id: u64,
+        width: u32,
+        height: u32,
     },
     Select {
         id: u64,
@@ -152,6 +159,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 | Request::Feed { id, .. }
                 | Request::Resize { id, .. }
                 | Request::Scroll { id, .. }
+                | Request::CellSize { id, .. }
                 | Request::Select { id, .. }
                 | Request::Find { id, .. } => *id,
                 _ => unreachable!(),
@@ -179,6 +187,10 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 }
                 Request::Scroll { lines, .. } => {
                     session.scroll(lines)?;
+                    Ok(json!({}))
+                }
+                Request::CellSize { width, height, .. } => {
+                    session.set_cell_size(width, height)?;
                     Ok(json!({}))
                 }
                 Request::Select {
@@ -232,6 +244,34 @@ pub unsafe extern "C" fn akitty_request_v1(data: *const u8, len: usize) -> Akitt
         data: std::ptr::null_mut(),
         len: 0,
     })
+}
+
+/// Copies the RGBA pixels of a stored Kitty graphics image (width * height * 4
+/// bytes, row-major, straight alpha) into `out`. Returns the byte count, or 0 when
+/// the session or image is unknown, the image was replaced by a larger one, or
+/// `capacity` is too small. This avoids pushing megabytes through the JSON limit.
+///
+/// # Safety
+/// `out` must reference `capacity` writable bytes for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn akitty_image_read_v1(session: u64, image: u32, out: *mut u8, capacity: usize) -> usize {
+    catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || capacity == 0 {
+            return 0;
+        }
+        let Some(registry) = REGISTRY.get() else { return 0 };
+        let found = registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sessions
+            .get(&session)
+            .cloned();
+        let Some(found) = found else { return 0 };
+        // SAFETY: the caller guarantees `out` is writable for `capacity` bytes.
+        let target = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+        found.read_image(image, target)
+    }))
+    .unwrap_or(0)
 }
 
 /// # Safety

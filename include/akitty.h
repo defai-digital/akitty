@@ -17,6 +17,10 @@ typedef struct { uint8_t *data; size_t len; } AkittyBuffer;
 uint32_t akitty_abi_version(void);
 AkittyBuffer akitty_request_v1(const uint8_t *data, size_t len);
 void akitty_buffer_free_v1(AkittyBuffer buffer);
+/* Copies the RGBA pixels (width * height * 4 bytes, row-major) of a stored Kitty
+ * graphics image into `out`. Returns the byte count, or 0 for an unknown session
+ * or image, or when `capacity` is too small. Sizes come from the snapshot. */
+size_t akitty_image_read_v1(uint64_t session, uint32_t image, uint8_t *out, size_t capacity);
 #ifdef __cplusplus
 }
 #endif

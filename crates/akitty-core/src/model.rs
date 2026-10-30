@@ -1,5 +1,6 @@
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
+use crate::graphics::{self, ApcFilter, Graphics, Segment};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::Flags};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
 use serde_json::{Value, json};
@@ -51,6 +52,12 @@ impl EventListener for Events {
 }
 
 pub struct Model {
+    pub graphics: Graphics,
+    apc: ApcFilter,
+    /// Pixel size of one cell as reported by the host; (0, 0) until known.
+    pub cell_px: (u32, u32),
+    in_alt: bool,
+    last_history: usize,
     pub term: Term<Events>,
     pub parser: Processor,
     pub events: Events,
@@ -72,6 +79,11 @@ impl Model {
             ..Config::default()
         };
         Self {
+            graphics: Graphics::default(),
+            apc: ApcFilter::default(),
+            cell_px: (0, 0),
+            in_alt: false,
+            last_history: 0,
             term: Term::new(config, &size, events.clone()),
             parser: Processor::new(),
             events,
@@ -87,18 +99,10 @@ impl Model {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut overflowed = false;
-        // The event queue holds 128 entries and every event needs at least one input byte,
-        // so draining after each 64-byte slice guarantees none are dropped mid-chunk.
-        for slice in bytes.chunks(64) {
-            self.parser.advance(&mut self.term, slice);
-            let events: Vec<_> = self
-                .events
-                .0
-                .lock()
-                .map(|mut q| q.drain(..).collect())
-                .unwrap_or_default();
-            if !overflowed {
-                overflowed = self.handle_events(events, &mut replies);
+        for segment in self.apc.feed(bytes) {
+            match segment {
+                Segment::Pass(data) => self.advance(&data, &mut replies, &mut overflowed),
+                Segment::Apc(payload) => self.graphics_command(&payload, &mut replies, &mut overflowed),
             }
         }
         self.revision = self.revision.saturating_add(1);
@@ -106,6 +110,63 @@ impl Model {
             replies.clear();
         }
         replies
+    }
+    fn advance(&mut self, data: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
+        // The event queue holds 128 entries and every event needs at least one input byte,
+        // so draining after each 64-byte slice guarantees none are dropped mid-chunk.
+        for slice in data.chunks(64) {
+            self.parser.advance(&mut self.term, slice);
+            let events: Vec<_> = self
+                .events
+                .0
+                .lock()
+                .map(|mut q| q.drain(..).collect())
+                .unwrap_or_default();
+            if !*overflowed {
+                *overflowed = self.handle_events(events, replies);
+            }
+            self.track_screen();
+        }
+    }
+    /// Keeps image placements attached to their content as the screen scrolls or swaps.
+    fn track_screen(&mut self) {
+        let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let history = self.term.grid().history_size();
+        if alt != self.in_alt {
+            if self.in_alt {
+                self.graphics.leave_alternate_screen();
+            }
+            self.in_alt = alt;
+        } else if !alt && history > self.last_history {
+            self.graphics.scrolled((history - self.last_history) as i32, history);
+        }
+        self.last_history = history;
+    }
+    fn graphics_command(&mut self, payload: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
+        let point = self.term.grid().cursor.point;
+        let (width, height) = self.cell_px;
+        let context = graphics::Context {
+            line: point.line.0,
+            col: point.column.0,
+            alt: self.in_alt,
+            cell_width: if width > 0 { width } else { 8 },
+            cell_height: if height > 0 { height } else { 16 },
+        };
+        let outcome = self.graphics.handle(payload, &context);
+        self.revision = self.revision.saturating_add(1);
+        if !*overflowed {
+            replies.extend_from_slice(&outcome.reply);
+            if replies.len() > 65536 {
+                replies.clear();
+                self.error = Some("terminal reply limit exceeded".into());
+                *overflowed = true;
+            }
+        }
+        if let Some((rows, cols)) = outcome.advance {
+            // Kitty moves the cursor past the image: down by its rows, right by its columns.
+            let movement = format!("{}\x1b[{cols}C", "\n".repeat(rows.saturating_sub(1) as usize));
+            self.advance(movement.as_bytes(), replies, overflowed);
+        }
     }
     /// Applies parsed terminal events; returns true when the reply limit was exceeded.
     fn handle_events(&mut self, events: Vec<Event>, replies: &mut Vec<u8>) -> bool {
@@ -133,8 +194,8 @@ impl Model {
                     format(alacritty_terminal::event::WindowSize {
                         num_lines: self.size.rows as u16,
                         num_cols: self.size.cols as u16,
-                        cell_width: 0,
-                        cell_height: 0,
+                        cell_width: self.cell_px.0 as u16,
+                        cell_height: self.cell_px.1 as u16,
                     })
                     .as_bytes(),
                 ),
@@ -216,11 +277,28 @@ impl Model {
             }
             cells.push(entry);
         }
+        let alternate = content.mode.contains(TermMode::ALT_SCREEN);
+        let images: Vec<Value> = self
+            .graphics
+            .placements
+            .iter()
+            .filter(|p| p.alt == alternate)
+            .filter_map(|p| {
+                let image = self.graphics.images.get(&p.image)?;
+                let row = p.line + content.display_offset as i32;
+                if row + p.rows as i32 <= 0 || row >= self.size.rows as i32 {
+                    return None;
+                }
+                Some(json!({"id": p.image, "gen": image.generation, "w": image.width, "h": image.height,
+                    "row": row, "col": p.col, "cols": p.cols, "rows": p.rows, "z": p.z}))
+            })
+            .take(64)
+            .collect();
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
         json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
-            "title": self.title, "cells": cells, "lines": text, "links": links,
+            "title": self.title, "cells": cells, "lines": text, "links": links, "images": images,
             "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
             "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
             "app_cursor": content.mode.contains(TermMode::APP_CURSOR),
@@ -356,6 +434,27 @@ mod tests {
             assert_eq!(link_index(&mut links, &format!("https://h/{i}")), Some(i));
         }
         assert_eq!(link_index(&mut links, "https://overflow"), None);
+    }
+    #[test]
+    fn graphics_query_reply_reaches_the_pty_even_when_split() {
+        let query = b"\x1b_Gi=31337,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+        for split in 0..query.len() {
+            let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+            let mut replies = model.feed(&query[..split]);
+            replies.extend(model.feed(&query[split..]));
+            let text = String::from_utf8(replies).unwrap();
+            assert!(text.starts_with("\x1b_Gi=31337;OK\x1b\\"), "split {split}: {text:?}");
+            assert!(text.contains("\x1b[?"), "device attributes still answered: {text:?}");
+        }
+    }
+    #[test]
+    fn alternate_screen_images_disappear_when_it_is_left() {
+        let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+        model.feed(b"\x1b[?1049h\x1b_Ga=T,f=24,s=1,v=1,i=3,q=2;AAAA\x1b\\");
+        assert_eq!(model.snapshot(None)["images"].as_array().unwrap().len(), 1);
+        model.feed(b"\x1b[?1049l");
+        assert_eq!(model.snapshot(None)["images"].as_array().unwrap().len(), 0);
+        assert!(model.graphics.images.is_empty());
     }
     #[test]
     fn cursor_report_and_device_status_reply() {

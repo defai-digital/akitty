@@ -18,6 +18,8 @@ import os
     private var pollInFlight = false
     private var rasterInFlight = false
     private var rasterPending = false
+    private let imageStore = ImageStore()
+    private var lastCellPixels: (Int, Int) = (0, 0)
     private var timer: Timer?
     private var composition = Composition()
     private var tracking: NSTrackingArea?
@@ -87,6 +89,10 @@ import os
         guard bounds.width > 20, bounds.height > 20, !stopped else { return }
         let cols = min(512, max(2, Int((bounds.width - 16) / cellSize.width)))
         let rows = min(256, max(1, min(32768 / cols, Int((bounds.height - 16) / cellSize.height))))
+        // Programs sizing graphics ask for cell pixels (CSI 16 t); report device pixels.
+        let scale = window?.backingScaleFactor ?? 2
+        let pixels = (min(256, max(1, Int((cellSize.width * scale).rounded()))), min(512, max(1, Int((cellSize.height * scale).rounded()))))
+        if pixels != lastCellPixels, (try? session.call("cell_size", ["width": pixels.0, "height": pixels.1])) != nil { lastCellPixels = pixels }
         guard lastGrid != (cols, rows) else { return }
         do { _ = try session.call("resize", ["cols": cols, "rows": rows]); lastGrid = (cols, rows) }
         catch { show(error) }
@@ -94,9 +100,11 @@ import os
     public func poll() {
         guard !stopped, !pollInFlight else { return }
         pollInFlight = true
-        let session = self.session, since = snapshot?.revision
+        let session = self.session, since = snapshot?.revision, store = imageStore
         snapshotQueue.async { [weak self] in
             let result = Result { try session.snapshot(since: since) }
+            // Pixels are fetched here, off the main thread, before the frame is drawn.
+            if case let .success(.some(next)) = result { store.sync(next.images ?? [], session: session) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.pollInFlight = false
@@ -139,9 +147,9 @@ import os
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
-        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, marked = composition.text
+        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, marked = composition.text, images = imageStore.images
         rasterQueue.async { [weak self] in
-            let result = Result { try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked) }
+            let result = Result { try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, images: images) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false

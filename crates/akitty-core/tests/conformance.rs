@@ -227,3 +227,58 @@ fn rejected_input_does_not_move_the_viewport() {
     assert_eq!(before["offset"], after["offset"]);
     assert!(after["offset"].as_u64().unwrap() > 0);
 }
+#[test]
+fn ax_code_style_kitty_graphics_frames_are_placed_and_readable() {
+    use base64::Engine;
+    let t = Terminal::new(40, 10);
+    call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
+    t.feed("hi\x1b[3;5H");
+    let (w, h) = (64usize, 32usize);
+    let raw: Vec<u8> = (0..w * h * 3).map(|i| (i % 253) as u8).collect();
+    let packed = base64::engine::general_purpose::STANDARD
+        .encode(miniz_oxide::deflate::compress_to_vec_zlib(&raw, 1));
+    for frame in 0..3 {
+        let mut sequence = String::from("\x1b7\x1b[H");
+        let chunks: Vec<&str> = packed.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let more = u8::from(index + 1 < chunks.len());
+            let header = if index == 0 {
+                format!("a=T,f=24,o=z,s={w},v={h},i=7,p=1,c=8,r=2,C=1,z=1,q=2,")
+            } else {
+                String::new()
+            };
+            sequence.push_str(&format!("\x1b_G{header}m={more};{chunk}\x1b\\"));
+        }
+        sequence.push_str("\x1b8");
+        t.feed(&sequence);
+        let s = t.snapshot();
+        let images = s["images"].as_array().unwrap();
+        assert_eq!(images.len(), 1, "frame {frame}: placements must not accumulate");
+        assert_eq!(images[0]["id"], 7);
+        assert_eq!((images[0]["row"].as_i64(), images[0]["col"].as_i64()), (Some(0), Some(0)));
+        assert_eq!((images[0]["cols"].as_u64(), images[0]["rows"].as_u64(), images[0]["z"].as_i64()), (Some(8), Some(2), Some(1)));
+        assert_eq!(s["cursor"]["row"], 2, "ESC 8 and C=1 leave the cursor alone");
+        assert_eq!(s["cursor"]["col"], 4);
+    }
+    let mut out = vec![0u8; w * h * 4];
+    let copied = unsafe { akitty_core::akitty_image_read_v1(t.0, 7, out.as_mut_ptr(), out.len()) };
+    assert_eq!(copied, w * h * 4);
+    assert_eq!(&out[..8], &[raw[0], raw[1], raw[2], 255, raw[3], raw[4], raw[5], 255]);
+    // Too-small buffers, unknown images and unknown sessions copy nothing.
+    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(t.0, 7, out.as_mut_ptr(), 16) }, 0);
+    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(t.0, 99, out.as_mut_ptr(), out.len()) }, 0);
+    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(u64::MAX, 7, out.as_mut_ptr(), out.len()) }, 0);
+    t.feed("\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
+}
+#[test]
+fn graphics_without_c1_moves_cursor_below_the_image() {
+    use base64::Engine;
+    let t = Terminal::new(40, 10);
+    call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
+    let pixel = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+    t.feed(&format!("ab\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,q=2;{pixel}\x1b\\"));
+    let s = t.snapshot();
+    assert_eq!((s["cursor"]["row"].as_i64(), s["cursor"]["col"].as_i64()), (Some(1), Some(5)));
+    assert_eq!(s["images"][0]["col"], 2);
+}

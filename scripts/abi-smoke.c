@@ -15,5 +15,10 @@ int main(void) {
     AkittyBuffer invalid = akitty_request_v1(NULL, 0);
     assert(invalid.data != NULL);
     akitty_buffer_free_v1(invalid);
+    /* Unknown sessions, null buffers and zero capacity copy nothing. */
+    uint8_t pixel[4];
+    assert(akitty_image_read_v1(UINT64_MAX, 1, pixel, sizeof pixel) == 0);
+    assert(akitty_image_read_v1(1, 1, NULL, 4) == 0);
+    assert(akitty_image_read_v1(1, 1, pixel, 0) == 0);
     puts("C ABI version, response ownership, and invalid-buffer checks passed.");
 }

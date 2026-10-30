@@ -77,8 +77,37 @@ public struct RendererHealth {
     }
 }
 
+/// Decoded Kitty graphics images, refreshed from the core when a placement's generation changes.
+final class ImageStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [UInt32: (generation: UInt64, image: CGImage)] = [:]
+    var images: [UInt32: CGImage] {
+        lock.lock(); defer { lock.unlock() }
+        return entries.mapValues(\.image)
+    }
+    func sync(_ placements: [ImagePlacement], session: TerminalSession) {
+        var wanted: [UInt32: ImagePlacement] = [:]
+        for placement in placements { wanted[placement.id] = placement }
+        for (id, placement) in wanted {
+            lock.lock(); let current = entries[id]?.generation; lock.unlock()
+            guard current != placement.gen,
+                  let pixels = session.imagePixels(id, width: placement.w, height: placement.h),
+                  let image = Self.makeImage(pixels, width: placement.w, height: placement.h) else { continue }
+            lock.lock(); entries[id] = (placement.gen, image); lock.unlock()
+        }
+        lock.lock(); entries = entries.filter { wanted[$0.key] != nil }; lock.unlock()
+    }
+    static func makeImage(_ pixels: Data, width: Int, height: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
+                       decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+}
+
 enum GridRasterizer {
-    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String) throws -> CGContext {
+    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, images: [UInt32: CGImage] = [:]) throws -> CGContext {
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         guard width <= 16384, height <= 16384, width * height <= 33_554_432,
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
@@ -98,6 +127,20 @@ enum GridRasterizer {
                               width: cellSize.width*(cell.wide ? 2 : 1), height: cellSize.height)
             context.setFillColor(cell.selected ? CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) : color(cell.bg)); context.fill(rect)
         }
+        let placements = (snapshot.images ?? []).sorted { $0.z < $1.z }
+        let gridRect = CGRect(x: 8, y: size.height - 8 - CGFloat(snapshot.rows) * cellSize.height, width: CGFloat(snapshot.cols) * cellSize.width, height: CGFloat(snapshot.rows) * cellSize.height)
+        func drawImages(_ include: (ImagePlacement) -> Bool) {
+            context.saveGState(); defer { context.restoreGState() }
+            context.clip(to: gridRect); context.interpolationQuality = .high
+            for placement in placements where include(placement) {
+                guard let image = images[placement.id] else { continue }
+                context.draw(image, in: CGRect(x: 8 + CGFloat(placement.col) * cellSize.width,
+                                               y: size.height - 8 - CGFloat(placement.row + placement.rows) * cellSize.height,
+                                               width: CGFloat(placement.cols) * cellSize.width, height: CGFloat(placement.rows) * cellSize.height))
+            }
+        }
+        // Negative z-index images sit between the cell backgrounds and the text.
+        drawImages { $0.z < 0 }
         // Draw glyphs after every background: a wide-cell spacer must never
         // paint over the second half of the preceding CJK/emoji glyph.
         for cell in snapshot.cells {
@@ -130,6 +173,7 @@ enum GridRasterizer {
                 context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y)); context.strokePath()
             }
         }
+        drawImages { $0.z >= 0 }
         if snapshot.cursor.visible {
             let rect = CGRect(x: 8 + CGFloat(snapshot.cursor.col)*cellSize.width, y: size.height - 8 - CGFloat(snapshot.cursor.row+1)*cellSize.height, width: cellSize.width, height: cellSize.height)
             context.setStrokeColor(CGColor(red: 0.6, green: 0.8, blue: 1, alpha: 1)); context.setLineWidth(1); context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))

@@ -179,6 +179,23 @@ impl Session {
         }
         Ok(())
     }
+    pub fn set_cell_size(&self, width: u32, height: u32) -> Result<(), String> {
+        if !(1..=256).contains(&width) || !(1..=512).contains(&height) {
+            return Err("cell size must be 1..256 by 1..512 pixels".into());
+        }
+        self.model.lock().map_err(|_| "terminal unavailable")?.cell_px = (width, height);
+        Ok(())
+    }
+    pub fn read_image(&self, image: u32, out: &mut [u8]) -> usize {
+        let Ok(model) = self.model.lock() else { return 0 };
+        match model.graphics.images.get(&image) {
+            Some(found) if found.rgba.len() <= out.len() => {
+                out[..found.rgba.len()].copy_from_slice(&found.rgba);
+                found.rgba.len()
+            }
+            _ => 0,
+        }
+    }
     pub fn scroll(&self, lines: i32) -> Result<(), String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         model
