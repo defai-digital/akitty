@@ -134,10 +134,14 @@ selection, links), so a hash collision at worst delays one row's repaint. Any ot
 client that lost state can always recover by asking again without `since`. The `links`
 table is complete in every snapshot and keeps its indices across partial ones.
 
-Optional per-cell fields are omitted when unset: `ustyle` (1 single, 2 double,
-3 curly, 4 dotted, 5 dashed; `underline` stays true for any of them), `ucolor`
-(RGB underline colour), `strike`, and `link`, an index into the snapshot `links`
-array of OSC 8 targets. `links` holds at most 256 unique targets of at most 2,048
+Each cell is a positional array, `[row, col, text, fg, bg, attrs]`, because a busy
+screen has thousands of them and keyed objects cost the client several times more to
+decode. `fg` and `bg` are packed `0xRRGGBB` integers. `attrs` bits are 1 bold,
+2 italic, 4 underline, 8 selected, 16 wide and 32 strikethrough. Bits 8–10 hold the
+underline style: 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. The
+underline bit stays set for any style. Two optional elements follow only when set:
+`ucolor`, the packed underline colour (`null` when only a link is present), then
+`link`, an index into the snapshot `links` array of OSC 8 targets. `links` holds at most 256 unique targets of at most 2,048
 bytes with no control characters; others are dropped. The core does not judge
 schemes: Swift opens only http, https and mailto targets, and only on Command-click.
 

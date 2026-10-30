@@ -100,15 +100,15 @@ final class LayeredRenderingTests: XCTestCase {
     }
 
     private func cell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29],
-                      selected: Bool = false, underline: Bool = false, strike: Bool = false, bold: Bool = false) -> [String: Any] {
-        var value: [String: Any] = ["row": row, "col": col, "text": text, "fg": fg, "bg": bg, "bold": bold, "italic": false,
-                                    "underline": underline, "selected": selected, "wide": false]
-        if underline { value["ustyle"] = 1; value["ucolor"] = [255, 0, 0] }
-        if strike { value["strike"] = true }
+                      selected: Bool = false, underline: Bool = false, strike: Bool = false, bold: Bool = false) -> [Any] {
+        // The wire form: [row, col, text, fg, bg, attrs, ucolor?]; an underline here is single (style 1) in red.
+        let attrs = (bold ? 1 : 0) | (underline ? 4 | 1 << 8 : 0) | (selected ? 8 : 0) | (strike ? 32 : 0)
+        var value: [Any] = [row, col, text, fg[0] << 16 | fg[1] << 8 | fg[2], bg[0] << 16 | bg[1] << 8 | bg[2], attrs]
+        if underline { value.append(0xff0000) }
         return value
     }
 
-    private func snapshot(cells: [[String: Any]] = [], images: [ImagePlacement] = [], partial: [Int]? = nil,
+    private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], partial: [Int]? = nil,
                           cursor: [String: Any] = ["row": 4, "col": 2, "visible": false]) throws -> Snapshot {
         var object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
             "lines": Array(repeating: String(repeating: " ", count: cols), count: rows), "images": images.map { placement in

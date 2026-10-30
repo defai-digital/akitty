@@ -55,29 +55,50 @@ impl EventListener for Events {
     }
 }
 
-/// One cell of a snapshot. Serialized directly, never through a `Value`: a busy screen has
-/// thousands of these, and a map per cell cost most of the snapshot time.
-#[derive(Serialize)]
+/// One cell of a snapshot, sent as a positional array:
+/// `[row, col, text, fg, bg, attrs]`, then `ucolor` and `link` when either is set.
+/// Colours are packed `0xRRGGBB`. Serialized directly, never through a `Value`, and
+/// positional because a busy screen has thousands of cells: keyed objects cost the
+/// client several times more to decode.
 struct CellOut {
     row: i32,
     col: usize,
     text: String,
     fg: [u8; 3],
     bg: [u8; 3],
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    selected: bool,
-    wide: bool,
-    // Optional fields are omitted when unset to keep snapshots compact.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ustyle: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// [`ATTR_BOLD`] and the other attribute bits, with the underline style in bits 8-10.
+    attrs: u16,
     ucolor: Option<[u8; 3]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    strike: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     link: Option<usize>,
+}
+
+const ATTR_BOLD: u16 = 1;
+const ATTR_ITALIC: u16 = 2;
+const ATTR_UNDERLINE: u16 = 4;
+const ATTR_SELECTED: u16 = 8;
+const ATTR_WIDE: u16 = 16;
+const ATTR_STRIKE: u16 = 32;
+const ATTR_USTYLE_SHIFT: u16 = 8;
+
+impl Serialize for CellOut {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let len = if self.link.is_some() { 8 } else if self.ucolor.is_some() { 7 } else { 6 };
+        let mut seq = serializer.serialize_seq(Some(len))?;
+        seq.serialize_element(&self.row)?;
+        seq.serialize_element(&self.col)?;
+        seq.serialize_element(&self.text)?;
+        seq.serialize_element(&pack(self.fg))?;
+        seq.serialize_element(&pack(self.bg))?;
+        seq.serialize_element(&self.attrs)?;
+        if len > 6 {
+            seq.serialize_element(&self.ucolor.map(pack))?;
+        }
+        if let Some(link) = self.link {
+            seq.serialize_element(&link)?;
+        }
+        seq.end()
+    }
 }
 
 #[derive(Serialize)]
@@ -360,10 +381,17 @@ impl Model {
         }
         false
     }
-    /// The snapshot as a parsed value; the wire path uses [`Self::snapshot_json`].
+    /// The snapshot as a parsed value with cells expanded to keyed objects (see
+    /// [`expand_cell`]); the wire path uses [`Self::snapshot_json`].
     #[cfg(test)]
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
-        serde_json::from_str(&self.snapshot_json(since)).expect("snapshot is valid JSON")
+        let mut snapshot: Value = serde_json::from_str(&self.snapshot_json(since)).expect("snapshot is valid JSON");
+        if let Some(cells) = snapshot.get_mut("cells").and_then(Value::as_array_mut) {
+            for cell in cells {
+                *cell = expand_cell(cell);
+            }
+        }
+        snapshot
     }
     /// The snapshot JSON, serialized once from typed rows.
     pub fn snapshot_json(&mut self, since: Option<u64>) -> String {
@@ -496,20 +524,22 @@ impl Model {
                 continue;
             }
             let ustyle = underline_style(cell.flags);
+            let flag = |set: bool, bit: u16| if set { bit } else { 0 };
+            let attrs = flag(cell.flags.contains(Flags::BOLD), ATTR_BOLD)
+                | flag(cell.flags.contains(Flags::ITALIC), ATTR_ITALIC)
+                | flag(cell.flags.intersects(Flags::ALL_UNDERLINES), ATTR_UNDERLINE)
+                | flag(selected, ATTR_SELECTED)
+                | flag(cell.flags.contains(Flags::WIDE_CHAR), ATTR_WIDE)
+                | flag(cell.flags.contains(Flags::STRIKEOUT), ATTR_STRIKE)
+                | u16::from(ustyle.unwrap_or(0)) << ATTR_USTYLE_SHIFT;
             cells.push(CellOut {
                 row,
                 col: indexed.point.column.0,
                 text: value,
                 fg,
                 bg,
-                bold: cell.flags.contains(Flags::BOLD),
-                italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                selected,
-                wide: cell.flags.contains(Flags::WIDE_CHAR),
-                ustyle,
+                attrs,
                 ucolor: ustyle.and(cell.underline_color()).map(|color| resolve(color, content.colors)),
-                strike: cell.flags.contains(Flags::STRIKEOUT).then_some(true),
                 link: cell.hyperlink().and_then(|link| link_index(&mut links, link.uri())),
             });
         }
@@ -655,6 +685,30 @@ fn mix(hash: u64, value: u64) -> u64 {
 #[inline]
 fn pack(rgb: [u8; 3]) -> u64 {
     u64::from(rgb[0]) << 16 | u64::from(rgb[1]) << 8 | u64::from(rgb[2])
+}
+/// A positional wire cell as a keyed object, the way the Swift client decodes it:
+/// colours as RGB arrays, every flag present, optional fields only when set.
+#[cfg(test)]
+fn expand_cell(cell: &Value) -> Value {
+    let rgb = |v: &Value| v.as_u64().map(|c| json!([c >> 16 & 255, c >> 8 & 255, c & 255]));
+    let attrs = cell[5].as_u64().unwrap() as u16;
+    let mut out = json!({"row": cell[0], "col": cell[1], "text": cell[2], "fg": rgb(&cell[3]), "bg": rgb(&cell[4]),
+        "bold": attrs & ATTR_BOLD != 0, "italic": attrs & ATTR_ITALIC != 0, "underline": attrs & ATTR_UNDERLINE != 0,
+        "selected": attrs & ATTR_SELECTED != 0, "wide": attrs & ATTR_WIDE != 0});
+    let fields = out.as_object_mut().unwrap();
+    if attrs >> ATTR_USTYLE_SHIFT != 0 {
+        fields.insert("ustyle".into(), json!(attrs >> ATTR_USTYLE_SHIFT));
+    }
+    if let Some(color) = cell.get(6).and_then(rgb) {
+        fields.insert("ucolor".into(), color);
+    }
+    if attrs & ATTR_STRIKE != 0 {
+        fields.insert("strike".into(), json!(true));
+    }
+    if let Some(link) = cell.get(7) {
+        fields.insert("link".into(), link.clone());
+    }
+    out
 }
 /// Resolved default background; the host clears to this colour, so matching cells need no entry.
 const DEFAULT_BACKGROUND: [u8; 3] = [18, 22, 29];
@@ -922,12 +976,22 @@ mod tests {
     fn plain_snapshots_omit_optional_fields() {
         let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
         model.feed(b"hi");
-        let snapshot = model.snapshot(None);
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None)).unwrap();
         assert!(snapshot.get("links").is_none());
-        let cell = snapshot["cells"][0].as_object().unwrap();
-        for key in ["ustyle", "ucolor", "strike", "link"] {
-            assert!(!cell.contains_key(key), "{key}");
-        }
+        // Positional cells: [row, col, text, fg, bg, attrs] with nothing trailing when unset.
+        assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x12161d, 0]));
+    }
+    #[test]
+    fn wire_cells_pack_attributes_and_trail_ucolor_then_link() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed("\x1b[1;3;9;4:3;58;2;1;2;3mA\x1b[0m\x1b]8;;https://a.test\x07B\x1b]8;;\x07界".as_bytes());
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None)).unwrap();
+        let cells = &snapshot["cells"];
+        let attrs = ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE | ATTR_STRIKE | 3 << ATTR_USTYLE_SHIFT;
+        assert_eq!(cells[0], json!([0, 0, "A", 0xdae2ef, 0x12161d, attrs, 0x010203]));
+        // A link without an underline colour keeps the colour slot as null.
+        assert_eq!(cells[1], json!([0, 1, "B", 0xdae2ef, 0x12161d, 0, null, 0]));
+        assert_eq!(cells[2], json!([0, 2, "界", 0xdae2ef, 0x12161d, ATTR_WIDE]));
     }
     #[test]
     fn cursor_report_and_device_status_reply() {

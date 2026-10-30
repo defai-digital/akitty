@@ -37,7 +37,8 @@ fn cursor_erase_and_truecolor() {
     t.feed("abcdef\x1b[1;3H\x1b[K\x1b[38;2;1;2;3mZ");
     let s = t.snapshot();
     assert_eq!(s["lines"][0], "abZ                 ");
-    assert_eq!(s["cells"][2]["fg"], json!([1, 2, 3]));
+    // Cells are [row, col, text, fg, bg, attrs, ...] with 0xRRGGBB colours.
+    assert_eq!(s["cells"][2][3], 0x010203);
     assert_eq!(s["cursor"]["col"], 3);
 }
 #[test]
@@ -55,9 +56,9 @@ fn wide_and_combining_cells_keep_column_authority() {
     let t = Terminal::new(20, 3);
     t.feed("中e\u{301}😀");
     let s = t.snapshot();
-    assert_eq!(s["cells"][0]["wide"], true);
-    assert_eq!(s["cells"][1]["text"], "");
-    assert_eq!(s["cells"][2]["text"], "e\u{301}");
+    assert_eq!(s["cells"][0][5], 16, "wide");
+    assert_eq!(s["cells"][1][2], "");
+    assert_eq!(s["cells"][2][2], "e\u{301}");
     assert_eq!(s["cursor"]["col"], 5);
 }
 #[test]
@@ -299,9 +300,8 @@ fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     assert!(bytes.len() < 8 * 1024 * 1024);
     // The ABI splices pre-serialized snapshot JSON into the envelope; it must match the value path exactly.
     assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0})));
-    let cell = &response["data"]["cells"][0];
-    assert_eq!((cell["ustyle"].clone(), cell["ucolor"].clone(), cell["strike"].clone(), cell["link"].clone()),
-        (json!(3), json!([1, 2, 3]), json!(true), json!(0)));
+    // Bold, italic, underline, strike and underline style 3 in attrs, then the underline colour and link index.
+    assert_eq!(response["data"]["cells"][0], json!([0, 0, "x", 0xdae2ef, 0x12161d, 1 | 2 | 4 | 32 | 3 << 8, 0x010203, 0]));
     eprintln!("worst-case snapshot: {} bytes", bytes.len());
 }
 #[test]

@@ -10,6 +10,22 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(value?["abi"] as? Int, 1)
         XCTAssertThrowsError(try CoreBridge.call(["op":"snapshot", "id":UInt64.max]))
     }
+    func testPositionalCellsDecodePackedColoursAttributesAndTrailingFields() throws {
+        let json = #"[[1,2,"x",66051,263430,831,460809,3],[0,0,"B",0,1,0,null,0],[0,1,"c",255,0,16]]"#
+        let cells = try JSONDecoder().decode([Cell].self, from: Data(json.utf8))
+        let full = cells[0]
+        XCTAssertEqual([full.row, full.col], [1, 2])
+        XCTAssertEqual(full.fg, [1, 2, 3]); XCTAssertEqual(full.bg, [4, 5, 6]); XCTAssertEqual(full.ucolor, [7, 8, 9])
+        // 831 = bold, italic, underline, selected, wide, strike, underline style 3.
+        XCTAssertTrue(full.bold && full.italic && full.underline && full.selected && full.wide)
+        XCTAssertEqual(full.strike, true); XCTAssertEqual(full.ustyle, 3); XCTAssertEqual(full.link, 3)
+        XCTAssertNil(cells[1].ucolor); XCTAssertEqual(cells[1].link, 0)
+        let plain = cells[2]
+        XCTAssertTrue(plain.wide && !plain.bold && !plain.selected)
+        XCTAssertNil(plain.strike); XCTAssertNil(plain.ustyle); XCTAssertNil(plain.ucolor); XCTAssertNil(plain.link)
+        // Encoding writes the same wire form back.
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(cells), as: UTF8.self), json)
+    }
     func testSessionSnapshotAndUTF16ColumnMapping() throws {
         let session = try TerminalSession(cols: 20, rows: 3, headless: true)
         defer { try? session.close() }
@@ -222,11 +238,11 @@ final class AkittyTests: XCTestCase {
         if let ox { value["ox"] = ox }; if let oy { value["oy"] = oy }
         return value
     }
-    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], selected: Bool = false) -> [String: Any] {
-        ["row": row, "col": col, "text": text, "fg": fg, "bg": bg, "bold": false, "italic": false,
-         "underline": false, "selected": selected, "wide": false]
+    /// A wire cell: `[row, col, text, fg, bg, attrs]` with packed 0xRRGGBB colours; attrs bit 8 is selected.
+    private func testCell(_ row: Int, _ col: Int, text: String = "", fg: [Int] = [218, 226, 239], bg: [Int] = [18, 22, 29], selected: Bool = false) -> [Any] {
+        [row, col, text, fg[0] << 16 | fg[1] << 8 | fg[2], bg[0] << 16 | bg[1] << 8 | bg[2], selected ? 8 : 0]
     }
-    private func testSnapshot(rows: Int = 2, cols: Int = 6, cells: [[String: Any]] = [], images: [[String: Any]] = []) throws -> Snapshot {
+    private func testSnapshot(rows: Int = 2, cols: Int = 6, cells: [[Any]] = [], images: [[String: Any]] = []) throws -> Snapshot {
         let object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
             "lines": Array(repeating: String(repeating: " ", count: cols), count: rows), "links": [] as [String], "images": images,
             "cursor": ["row": 0, "col": 0, "visible": false], "bracketed_paste": false, "app_cursor": false, "mouse_mode": false,

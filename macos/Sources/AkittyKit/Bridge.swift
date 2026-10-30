@@ -51,6 +51,39 @@ public struct Cell: Codable, Sendable {
     public let strike: Bool?
     /// Index into `Snapshot.links` for OSC 8 hyperlinks.
     public let link: Int?
+    /// The core sends a cell as `[row, col, text, fg, bg, attrs]`, then `ucolor` (or null) and `link` when set.
+    /// Colours are packed 0xRRGGBB; `attrs` bits are 1 bold, 2 italic, 4 underline, 8 selected, 16 wide,
+    /// 32 strike, with the underline style in bits 8-10. Positional cells decode several times faster than keyed ones.
+    public init(from decoder: Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        row = try c.decode(Int.self)
+        col = try c.decode(Int.self)
+        text = try c.decode(String.self)
+        fg = Self.rgb(try c.decode(UInt32.self))
+        bg = Self.rgb(try c.decode(UInt32.self))
+        let attrs = try c.decode(UInt16.self)
+        bold = attrs & 1 != 0
+        italic = attrs & 2 != 0
+        underline = attrs & 4 != 0
+        selected = attrs & 8 != 0
+        wide = attrs & 16 != 0
+        strike = attrs & 32 != 0 ? true : nil
+        let style = UInt8(attrs >> 8 & 7)
+        ustyle = style == 0 ? nil : style
+        ucolor = c.isAtEnd ? nil : try c.decodeNil() ? nil : Self.rgb(try c.decode(UInt32.self))
+        link = c.isAtEnd ? nil : try c.decode(Int.self)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.unkeyedContainer()
+        try c.encode(row); try c.encode(col); try c.encode(text); try c.encode(Self.packed(fg)); try c.encode(Self.packed(bg))
+        let attrs: UInt16 = (bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0) | (selected ? 8 : 0) | (wide ? 16 : 0)
+            | (strike == true ? 32 : 0) | UInt16(ustyle ?? 0) << 8
+        try c.encode(attrs)
+        if ucolor != nil || link != nil { if let ucolor { try c.encode(Self.packed(ucolor)) } else { try c.encodeNil() } }
+        if let link { try c.encode(link) }
+    }
+    private static func rgb(_ value: UInt32) -> [UInt8] { [UInt8(value >> 16 & 255), UInt8(value >> 8 & 255), UInt8(value & 255)] }
+    private static func packed(_ rgb: [UInt8]) -> UInt32 { rgb.prefix(3).reduce(0) { $0 << 8 | UInt32($1) } }
 }
 
 /// OSC 8 targets come from untrusted terminal output; only inert schemes may be opened.
