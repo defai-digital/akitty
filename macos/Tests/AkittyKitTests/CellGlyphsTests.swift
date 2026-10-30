@@ -16,4 +16,16 @@ final class CellGlyphsTests: XCTestCase {
         XCTAssertEqual(GlyphGrid(rect: CGRect(x: 0, y: 0, width: 8, height: 16), scale: 2).light, 2)
         XCTAssertEqual(GlyphGrid(rect: CGRect(x: 0, y: 0, width: 8, height: 16), scale: 2).heavy, 4)
     }
+    func testGeometricGlyphsSurviveTinyAndOddCellSizesWithoutLeavingTheCell() {
+        let ranges: [ClosedRange<UInt32>] = [0x2500...0x259F, 0x2800...0x28FF]
+        for (w, h) in [(1, 1), (2, 3), (3, 5), (5, 7), (7, 13), (9, 19)] {
+            for scale in [1, 2, 3] {
+                for range in ranges { for code in range {
+                    guard let scalar = Unicode.Scalar(code) else { continue }
+                    let bitmap = GlyphBitmap(rows: [String(scalar), String(scalar)], cell: CGSize(width: w, height: h), scale: scale)
+                    XCTAssertTrue(bitmap.padIsEmpty, "U+\(String(code, radix: 16)) in \(w)x\(h) @\(scale)x")
+                } }
+            }
+        }
+    }
 }
