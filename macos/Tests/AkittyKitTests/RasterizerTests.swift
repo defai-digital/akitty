@@ -31,6 +31,33 @@ final class RasterizerTests: XCTestCase {
         }
     }
 
+    /// Batched glyphs skip the per-cell clip only where it cannot change a pixel, so every frame must match the
+    /// one-glyph-at-a-time path byte for byte, whatever the scale, font, style or layer.
+    func testBatchedGlyphsMatchClippedDrawingExactly() throws {
+        let session = try TerminalSession(cols: cols, rows: rows, headless: true)
+        defer { try? session.close() }
+        var rng = Lcg(state: 7)
+        for _ in 0..<60 { _ = try session.call("feed", ["text": edit(&rng)]) }
+        // Plain rows written last so no clear wipes them. Italic and underscores overhang their cells, so they take
+        // the clipped fallback.
+        for row in 1...4 {
+            _ = try session.call("feed", ["text": "\u{1b}[\(row);1Hplain ascii_text {}[]|/ 0123456789 MWmw \u{1b}[1mbold\u{1b}[0m \u{1b}[3mitalic\u{1b}[0m"])
+        }
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        for (scale, font) in [(CGFloat(2), "Menlo"), (1, "Menlo"), (2, "Courier New"), (3, "Menlo")] {
+            let batched = GridRasterizer(), clipped = GridRasterizer(batchesGlyphs: false)
+            let fast = try batched.render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: "", reuse: false)
+            let slow = try clipped.render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: "", reuse: false)
+            XCTAssertEqual(bytes(fast.context), bytes(slow.context), "\(font) @\(scale)x")
+            // At 1x a glyph nearly fills its 8-point cell, so few can skip the clip; Retina scales batch most of them.
+            XCTAssertGreaterThan(batched.batchedGlyphs, scale >= 2 ? 100 : 0, "\(font) @\(scale)x")
+            XCTAssertEqual(clipped.batchedGlyphs, 0)
+            let layers = try GridRasterizer().renderLayers(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: "", reuse: false)
+            let reference = try GridRasterizer(batchesGlyphs: false).renderLayers(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: "", reuse: false)
+            XCTAssertEqual(bytes(layers.foreground), bytes(reference.foreground), "layered \(font) @\(scale)x")
+        }
+    }
+
     func testIncrementalFramesMatchFullRepaint() throws {
         let session = try TerminalSession(cols: cols, rows: rows, headless: true)
         defer { try? session.close() }

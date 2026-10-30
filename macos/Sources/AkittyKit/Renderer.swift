@@ -376,7 +376,12 @@ final class GridRasterizer: @unchecked Sendable {
     private var base: CTFont?
     private var faces: [CTFont] = []
     /// `ink` is set only for lines with non-ASCII text, which are fitted into their cell box; ASCII keeps the plain path.
-    private struct Glyph { let line: CTLine; let ink: CGRect? }
+    /// `run` is the plain path's single font run, drawn in batches when its ink stays inside the cell (see `inside`).
+    private struct Glyph { let line: CTLine; let ink: CGRect?; let run: Run? }
+    private struct Run { let font: CTFont; let glyphs: [CGGlyph]; let positions: [CGPoint]; let bounds: CGRect }
+    /// Glyphs of one font and colour gathered for a single `CTFontDrawGlyphs` call.
+    private struct Batch { let font: CTFont; let color: CGColor; var glyphs: [CGGlyph] = []; var positions: [CGPoint] = [] }
+    private struct BatchKey: Hashable { let font: ObjectIdentifier; let fg: UInt32 }
     private var glyphs: [GlyphKey: Glyph] = [:]
     private var colors: [UInt32: CGColor] = [:]
     private var lastCursorRow: Int?
@@ -385,10 +390,14 @@ final class GridRasterizer: @unchecked Sendable {
     /// What this instance paints: everything, or one of the two transparent layers of the Metal image path.
     enum Layer { case all, background, foreground }
     private let layer: Layer
-    init(layer: Layer = .all) { self.layer = layer }
+    /// False draws every glyph through its own clipped `CTLineDraw`; tests compare the batched path against it.
+    let batchesGlyphs: Bool
+    /// Glyphs the last frame drew in batches rather than clipped one by one.
+    private(set) var batchedGlyphs = 0
+    init(layer: Layer = .all, batchesGlyphs: Bool = true) { self.layer = layer; self.batchesGlyphs = batchesGlyphs }
     /// The layer passes, created on first use and kept for their bitmaps and damage state.
-    private lazy var backgroundPass = GridRasterizer(layer: .background)
-    private lazy var foregroundPass = GridRasterizer(layer: .foreground)
+    private lazy var backgroundPass = GridRasterizer(layer: .background, batchesGlyphs: batchesGlyphs)
+    private lazy var foregroundPass = GridRasterizer(layer: .foreground, batchesGlyphs: batchesGlyphs)
 
     static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
         try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context
@@ -510,6 +519,7 @@ final class GridRasterizer: @unchecked Sendable {
         // Draw glyphs after every background: a wide-cell spacer must never
         // paint over the second half of the preceding CJK/emoji glyph.
         let descent = CTFontGetDescent(base)
+        var batches: [BatchKey: Batch] = [:]
         for item in GlyphClusters.merge(text) {
             let cell = item.cell, text = item.text
             if text.isEmpty || text == " " { continue }
@@ -525,16 +535,36 @@ final class GridRasterizer: @unchecked Sendable {
             else {
                 let attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
                 let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
-                glyph = Glyph(line: line, ink: text.utf8.allSatisfy { $0 < 0x80 } ? nil : CTLineGetBoundsWithOptions(line, .useGlyphPathBounds))
+                let ascii = text.utf8.allSatisfy { $0 < 0x80 }
+                glyph = Glyph(line: line, ink: ascii ? nil : CTLineGetBoundsWithOptions(line, .useGlyphPathBounds), run: ascii ? Self.run(of: line) : nil)
                 if glyphs.count >= Self.maxGlyphs { glyphs.removeAll(keepingCapacity: true) }
                 glyphs[key] = glyph
+            }
+            let origin = CGPoint(x: box.minX, y: box.minY + descent + 2)
+            // The per-cell clip changes nothing for a glyph whose ink stays inside its cell, so those skip it and
+            // are drawn together: the same bitmap at about half the cost of a full frame of text.
+            if batchesGlyphs, glyph.ink == nil, let run = glyph.run, Self.inside(run.bounds.offsetBy(dx: origin.x, dy: origin.y), box, scale: scale) {
+                let fg = Self.pack(cell.fg)
+                let key = BatchKey(font: ObjectIdentifier(run.font), fg: fg)
+                if batches[key] == nil { batches[key] = Batch(font: run.font, color: color(cell.fg)) }
+                batches[key]!.glyphs += run.glyphs
+                batches[key]!.positions += run.positions.map { CGPoint(x: $0.x + origin.x, y: $0.y + origin.y) }
+                continue
             }
             context.saveGState(); context.clip(to: box)
             if let ink = glyph.ink {
                 let place = GlyphFonts.placement(ink: ink, box: box, baseline: box.minY + descent + 2, centre: item.columns == 2)
                 context.translateBy(x: place.origin.x, y: place.origin.y); context.scaleBy(x: place.scale, y: place.scale); context.textPosition = .zero
-            } else { context.textPosition = CGPoint(x: box.minX, y: box.minY + descent + 2) }
+            } else { context.textPosition = origin }
             CTLineDraw(glyph.line, context); context.restoreGState()
+        }
+        // Batched glyphs never leave their cells, so drawing them after the clipped ones changes no pixel.
+        // Decorations still draw on top. Glyph positions are relative to the text position, so it is reset.
+        context.textPosition = .zero
+        batchedGlyphs = batches.values.reduce(0) { $0 + $1.glyphs.count }
+        for batch in batches.values {
+            context.setFillColor(batch.color)
+            CTFontDrawGlyphs(batch.font, batch.glyphs, batch.positions, batch.glyphs.count, context)
         }
         // Decorations are drawn per cell so blank cells can still carry underlines and strikethrough.
         let baseline = descent + 2
@@ -602,6 +632,24 @@ final class GridRasterizer: @unchecked Sendable {
             context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y))
         }
         context.strokePath()
+    }
+    /// The glyphs of a single-run line, with their ink bounds relative to the line origin; nil for anything else.
+    private static func run(of line: CTLine) -> Run? {
+        guard let runs = CTLineGetGlyphRuns(line) as? [CTRun], runs.count == 1, let run = runs.first,
+              let font = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] else { return nil }
+        let count = CTRunGetGlyphCount(run)
+        guard count > 0 else { return nil }
+        var glyphs = [CGGlyph](repeating: 0, count: count), positions = [CGPoint](repeating: .zero, count: count)
+        CTRunGetGlyphs(run, CFRange(location: 0, length: count), &glyphs)
+        CTRunGetPositions(run, CFRange(location: 0, length: count), &positions)
+        return Run(font: font as! CTFont, glyphs: glyphs, positions: positions, bounds: CTLineGetBoundsWithOptions(line, .useGlyphPathBounds))
+    }
+    /// Whether ink drawn at `ink` touches only device pixels that `box` covers completely. Antialiasing can reach one
+    /// pixel past the outline, so the ink is widened by a pixel each way; any glyph nearer the edge keeps its clip.
+    static func inside(_ ink: CGRect, _ box: CGRect, scale: CGFloat) -> Bool {
+        guard !ink.isNull else { return false }
+        return floor(ink.minX * scale) - 1 >= ceil(box.minX * scale) && floor(ink.minY * scale) - 1 >= ceil(box.minY * scale)
+            && ceil(ink.maxX * scale) + 1 <= floor(box.maxX * scale) && ceil(ink.maxY * scale) + 1 <= floor(box.maxY * scale)
     }
     private static func pack(_ bytes: [UInt8]) -> UInt32 {
         bytes.count == 3 ? UInt32(bytes[0]) << 16 | UInt32(bytes[1]) << 8 | UInt32(bytes[2]) : 0x100_0000
