@@ -2,6 +2,7 @@
 /build/
 /macos/.build/
 /node_modules/
+/packages/*/node_modules/
 .DS_Store
 .internal/
 .agents/

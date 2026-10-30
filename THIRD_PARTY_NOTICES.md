@@ -20,3 +20,7 @@ locally resolved Cargo sources and their license/notice files. TypeScript and
 esbuild are build tools, not runtime components of the Mac app.
 
 - Sparkle 2.10.1: MIT and bundled third-party notices; see `third_party/sparkle/LICENSE`. The app embeds its framework and update helpers.
+- **AkiTTY Web** (`packages/akitty-web`) — derived from coder/ghostty-web v0.4.0 (MIT, copyright 2025 Coder) and
+  includes its prebuilt `ghostty-vt.wasm`, built from Ghostty (MIT). Licenses are in `packages/akitty-web/LICENSE` and
+  `LICENSE-GHOSTTY`; provenance and local changes are in `packages/akitty-web/UPSTREAM.md`. Rebuilding the wasm needs
+  Zig 0.15.2, which is not required to build or run Akitty itself.

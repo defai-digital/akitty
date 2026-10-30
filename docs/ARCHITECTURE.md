@@ -76,3 +76,23 @@ are disabled, and live terminal sessions retain their termination confirmation.
 AkiTTY has its own R2 bucket and route under the shared download hostname. AX Code
 and Desktop informed immutable artifact/readback gates; their implementation and
 cross-platform release policy are not imported. See RELEASING.md for publication order.
+
+## AkiTTY Web
+
+`packages/akitty-web` is a separate terminal for AX Code Desktop's web UI. It does not use the Rust core, the C ABI or
+the Swift app. It renders to a canvas and uses Ghostty's VT parser as a prebuilt WebAssembly module, behind an
+xterm.js-style API (derived from coder/ghostty-web v0.4.0).
+
+- **Scope:** it was migrated from `ax-code-desktop`, which keeps its own copy for now. Neither side syncs automatically.
+- **Distribution:** private source package, never published. Consumers compile its TypeScript.
+- **Zig:** only rebuilding the wasm needs Zig 0.15.2. The macOS app, the Rust core and the normal build do not.
+- **Provenance:** `packages/akitty-web/UPSTREAM.md` is authoritative for pins, hashes, local changes and unreviewed
+  upstream commits. Clipboard, link and mouse behavior follows ghostty-web and has not had Akitty's native clipboard
+  policy review.
+- **Verification:** type-check and Vitest run in `scripts/verify.sh`; there is no browser or end-to-end test in this repo.
+
+## macOS folder opening
+
+Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per existing folder (a file uses its
+parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
+The folder applies to every tab and split in that window; Settings supplies the directory otherwise.

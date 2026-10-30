@@ -11,6 +11,9 @@ cargo test --locked
 npm ci --ignore-scripts
 npm run build
 npm test
+npm ci --ignore-scripts --prefix packages/akitty-web
+npm --prefix packages/akitty-web run type-check
+npm --prefix packages/akitty-web test
 cmp include/akitty.h macos/Bridge/akitty.h
 mkdir -p build
 clang -Wall -Wextra -Werror -mmacosx-version-min=14.0 -I include scripts/abi-smoke.c -L target/debug -lakitty_core -framework Security -framework Foundation -o build/abi-smoke

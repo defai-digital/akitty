@@ -9,8 +9,8 @@ application targets.
 
 ## Download
 
-[Download AkiTTY 0.6.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip)
-(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.6.0).
+[Download AkiTTY 0.7.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.7.0/AkiTTY-0.7.0-macOS-arm64.zip)
+(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.7.0).
 Unzip and move **Akitty.app** to **Applications** before opening it.
 
 Updates appear as a quiet, versioned titlebar reminder. **AkiTTY → Check for
@@ -33,12 +33,18 @@ you choose when to install and restart. Automatic checks can be changed in Setti
 - IME marked text, accessible terminal text/selection, text copy/paste, clipboard
   write approval, scrollback search and font-size controls.
 - SGR and legacy mouse reporting; hold Option to select/scroll locally.
+- Open a folder from Finder (**Open With**), a Dock drop or `open -a Akitty <path>` to start a window there. Files
+  open in their folder, and at most 8 folders open per request; skipped items are reported.
 - A native command palette ranked by bundled TypeScript through JavaScriptCore.
   It adapts AX TUI's fuzzy ranking without importing its Zig-backed renderer.
 - A versioned C ABI, explicit memory ownership, panic containment and tests across
   Rust, C, Swift and TypeScript.
 
-**Status: early 0.6.0 implementation.** This is not a drop-in Ghostty replacement.
+**AkiTTY Web** (`packages/akitty-web`) is a separate, browser-canvas terminal used by AX Code Desktop. It is derived
+from ghostty-web and runs Ghostty's VT parser as WebAssembly. It is not part of the Mac app and is not published as a
+package. See [its README](packages/akitty-web/README.md).
+
+**Status: early 0.7.0 implementation.** This is not a drop-in Ghostty replacement.
 Kitty graphics, sixel, image clipboard protocols, Kitty keyboard extensions,
 custom shaders, Ghostty configuration compatibility, shell integration, quick
 terminal and third-party plugins are not implemented. Search currently finds the
@@ -47,7 +53,8 @@ performance parity and testing on every supported Mac version remain separate wo
 
 ## Build and run
 
-Requires macOS 14+, Xcode/Command Line Tools with Swift 6, rustup and Node 22+.
+Requires macOS 14+, Xcode/Command Line Tools with Swift 6, rustup and Node 22+. Zig is not needed; it is only used
+to rebuild AkiTTY Web's prebuilt wasm file.
 Rust 1.99.1 and dependency lockfiles are pinned. Build scripts select the rustup
 compiler explicitly to avoid mixing in a different Homebrew Rust standard library.
 Builds target the current Mac architecture.
@@ -85,6 +92,7 @@ it has no shell, filesystem or network bridge.
 scripts/verify.sh
 ```
 
+This covers Rust, TypeScript, the C ABI, Swift, the release scripts and AkiTTY Web (type-check and tests).
 The macOS workflow runs all behavioral tests, lint, cross-language ABI checks and
 the public-file audit without suppressing failures. The curated conformance suite
 is a required check; passing it is not a claim of full xterm/esctest conformance.

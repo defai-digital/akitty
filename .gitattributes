@@ -1,0 +1,2 @@
+# Preserve the exact upstream patch bytes, including patch context whitespace.
+packages/akitty-web/patches/ghostty-wasm-api.patch whitespace=-blank-at-eol
