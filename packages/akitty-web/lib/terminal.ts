@@ -142,6 +142,10 @@ export class Terminal implements ITerminalCore {
 
   // Scrollbar visibility/auto-hide state
   private renderFailed: boolean = false;
+  // Off-screen terminals (hidden tab or pane) skip drawing; the next visible frame redraws everything.
+  private onScreen: boolean = true;
+  private redrawOnShow: boolean = false;
+  private visibilityObserver?: IntersectionObserver;
   private scrollbarVisible: boolean = false;
   private scrollbarOpacity: number = 0;
   private scrollbarHideTimeout?: number;
@@ -527,7 +531,8 @@ export class Terminal implements ITerminalCore {
       this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
 
       // Start render loop
-      this.startRenderLoop();
+      this.observeVisibility(parent);
+    this.startRenderLoop();
 
       // Focus input (auto-focus so user can start typing immediately)
       this.focus();
@@ -1120,7 +1125,7 @@ export class Terminal implements ITerminalCore {
    */
   private startRenderLoop(): void {
     const loop = () => {
-      if (!this.isDisposed && this.isOpen) {
+      if (!this.isDisposed && this.isOpen && this.onScreen) {
         // Render using WASM's native dirty tracking
         // The render() method:
         // 1. Calls update() once to sync state and check dirty flags
@@ -1131,7 +1136,7 @@ export class Terminal implements ITerminalCore {
         try {
           this.renderer!.render(
             this.wasmTerm!,
-            this.renderFailed,
+            this.renderFailed || this.redrawOnShow,
             this.viewportY,
             this,
             this.scrollbarOpacity
@@ -1145,6 +1150,7 @@ export class Terminal implements ITerminalCore {
             this.cursorMoveEmitter.fire();
           }
           this.renderFailed = false;
+          this.redrawOnShow = false;
         } catch (error) {
           if (!this.renderFailed) console.error('akitty-web: render failed, retrying next frame', error);
           this.renderFailed = true;
@@ -1155,9 +1161,29 @@ export class Terminal implements ITerminalCore {
         // if they need frame-by-frame updates.
 
         this.animationFrameId = requestAnimationFrame(loop);
+      } else if (!this.isDisposed && this.isOpen) {
+        // Off-screen: keep the callback alive but do no work. Output is still parsed by write().
+        this.animationFrameId = requestAnimationFrame(loop);
       }
     };
     loop();
+  }
+
+  /**
+   * Track whether the terminal is on screen. Rendering while hidden (display:none, a background tab or pane) costs
+   * CPU for pixels nobody sees, which adds up with many terminals. Without IntersectionObserver the terminal is
+   * treated as always visible.
+   */
+  private observeVisibility(parent: HTMLElement): void {
+    if (typeof IntersectionObserver === 'undefined') return;
+    this.visibilityObserver = new IntersectionObserver((entries) => {
+      const latest = entries[entries.length - 1];
+      if (!latest) return;
+      const visible = latest.isIntersecting;
+      if (visible && !this.onScreen) this.redrawOnShow = true;
+      this.onScreen = visible;
+    });
+    this.visibilityObserver.observe(parent);
   }
 
   /**
@@ -1237,6 +1263,9 @@ export class Terminal implements ITerminalCore {
       window.clearTimeout(this.scrollbarHideTimeout);
       this.scrollbarHideTimeout = undefined;
     }
+
+    this.visibilityObserver?.disconnect();
+    this.visibilityObserver = undefined;
 
     // Dispose link detector
     if (this.linkDetector) {

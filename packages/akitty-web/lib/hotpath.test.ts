@@ -299,3 +299,60 @@ describe('Terminal render loop', () => {
     container.remove();
   });
 });
+
+describe('Terminal visibility', () => {
+  test('does not render while off-screen and redraws fully when shown again', async () => {
+    let notify: (entries: { isIntersecting: boolean }[]) => void = () => {};
+    let disconnected = false;
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: typeof notify) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {
+          disconnected = true;
+        }
+      }
+    );
+
+    try {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 4 });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      term.open(container);
+
+      const renderer = term.renderer!;
+      const original = renderer.render.bind(renderer);
+      const forced: boolean[] = [];
+      renderer.render = ((...args: Parameters<typeof original>) => {
+        forced.push(args[1] === true);
+        return original(...args);
+      }) as typeof renderer.render;
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      await wait(80);
+      expect(forced.length).toBeGreaterThan(1);
+
+      notify([{ isIntersecting: false }]);
+      await wait(40); // let any frame already scheduled finish
+      const hiddenAt = forced.length;
+      term.write('output while hidden');
+      await wait(120);
+      expect(forced.length).toBe(hiddenAt);
+
+      notify([{ isIntersecting: true }]);
+      await wait(80);
+      expect(forced.length).toBeGreaterThan(hiddenAt);
+      expect(forced[hiddenAt]).toBe(true); // first frame back is a full redraw
+      expect(forced.slice(hiddenAt + 1).every((full) => !full)).toBe(true);
+
+      term.dispose();
+      expect(disconnected).toBe(true);
+      container.remove();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

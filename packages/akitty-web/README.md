@@ -42,6 +42,9 @@ Notable behavior:
 
 - `lineHeight` sets the row height as a multiple of the glyph height.
 - Empty, out-of-range and surrogate cell codepoints render as a space instead of throwing.
+- A terminal whose container is off-screen (hidden tab or pane, per `IntersectionObserver`) stops drawing but keeps
+  parsing output, then redraws fully when shown again. Without `IntersectionObserver` it always draws.
+- A frame that throws is logged once and the next frame is a full redraw; the render loop keeps running.
 
 ## Reading terminals from agents
 
