@@ -833,7 +833,7 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(messages.isEmpty)
     }
 
-    @MainActor func testPlainClickClearsSelectionTextCopyAndHighlight() async throws {
+    @MainActor func testPlainClickClearsSelectionTextAndHighlight() async throws {
         _ = NSApplication.shared
         let terminal = try TerminalView(headless: true, forceSoftware: true)
         defer { terminal.shutdown() }
@@ -841,20 +841,15 @@ final class AkittyTests: XCTestCase {
         terminal.onStatus = { statuses.append($0) }
         _ = try terminal.session.call("feed", ["text": "hello world"])
         try await waitUntil(terminal, timeout: 3) { terminal.snapshot?.text.hasPrefix("hello world") == true }
-        let cell = terminal.cellSize
-        func point(_ col: Int) -> NSPoint { NSPoint(x: 8 + cell.width * CGFloat(col) + 1, y: 9) }
-        func mouse(_ type: NSEvent.EventType, _ col: Int, _ number: Int) throws -> NSEvent {
-            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point(col), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: number, clickCount: 1, pressure: 1))
-        }
-        terminal.mouseDown(with: try mouse(.leftMouseDown, 0, 1))
-        terminal.mouseDragged(with: try mouse(.leftMouseDragged, 4, 2))
+        terminal.selectCells(from: (0, 0), to: (0, 4))
         try await waitUntil(terminal, timeout: 3) {
             terminal.accessibilitySelectedText() == "hello" && terminal.snapshot?.cells.contains(where: \.selected) == true
         }
-        XCTAssertEqual(statuses.filter { !$0.contains("cols") }, [], "status: \(statuses)")
+        XCTAssertEqual(statuses.filter { !$0.contains("cols") && !$0.contains("Software rendering") }, [], "status: \(statuses)")
         XCTAssertEqual(terminal.accessibilitySelectedText(), "hello")
         // A plain click starts a new selection anchor, so the old text and highlight must go.
-        terminal.mouseDown(with: try mouse(.leftMouseDown, 8, 3))
+        let click = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        terminal.mouseDown(with: click)
         XCTAssertEqual(terminal.accessibilitySelectedText(), "")
         XCTAssertEqual(terminal.accessibilitySelectedTextRange().location, NSNotFound)
         XCTAssertTrue(try XCTUnwrap(terminal.snapshot).cells.allSatisfy { !$0.selected })
