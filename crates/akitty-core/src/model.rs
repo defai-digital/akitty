@@ -51,7 +51,17 @@ impl EventListener for Events {
     }
 }
 
+/// What the client holds after the last snapshot sent: lets the next one carry only changed rows.
+struct SentRows {
+    revision: u64,
+    cols: usize,
+    hashes: Vec<u64>,
+}
+
 pub struct Model {
+    sent: Option<SentRows>,
+    /// OSC 8 targets; stable across partial snapshots so unchanged rows keep valid indices.
+    links: Vec<String>,
     pub graphics: Graphics,
     apc: ApcFilter,
     /// Pixel size of one cell as reported by the host; (0, 0) until known.
@@ -79,6 +89,8 @@ impl Model {
             ..Config::default()
         };
         Self {
+            sent: None,
+            links: Vec::new(),
             graphics: Graphics::default(),
             apc: ApcFilter::default(),
             cell_px: (0, 0),
@@ -216,14 +228,59 @@ impl Model {
         if since == Some(self.revision) && self.clipboard.is_empty() {
             return json!({"changed": false});
         }
+        let rows = self.size.rows;
+        // Pass 1 hashes every row without allocating, to learn which rows differ from the
+        // client's copy (the snapshot it was last sent, identified by `since`).
+        let mut hashes = vec![0xcbf2_9ce4_8422_2325_u64; rows];
+        {
+            let content = self.term.renderable_content();
+            for indexed in content.display_iter {
+                let row = indexed.point.line.0 + content.display_offset as i32;
+                if row < 0 || row as usize >= rows {
+                    continue;
+                }
+                let cell = indexed.cell;
+                let selected = content.selection.as_ref().is_some_and(|s| s.contains(indexed.point));
+                let mut hash = mix(hashes[row as usize], u64::from(cell.c) | u64::from(cell.flags.bits()) << 32);
+                hash = mix(hash, pack(resolve(cell.fg, content.colors)) << 32 | pack(resolve(cell.bg, content.colors)));
+                hash = mix(hash, u64::from(selected));
+                if let Some(extra) = cell.zerowidth() {
+                    for ch in extra {
+                        hash = mix(hash, u64::from(*ch));
+                    }
+                }
+                if let Some(link) = cell.hyperlink() {
+                    for byte in link.uri().bytes() {
+                        hash = mix(hash, u64::from(byte));
+                    }
+                }
+                if let Some(color) = cell.underline_color() {
+                    hash = mix(hash, pack(resolve(color, content.colors)) | 1 << 40);
+                }
+                hashes[row as usize] = hash;
+            }
+        }
+        let partial = self.sent.as_ref().is_some_and(|sent| {
+            Some(sent.revision) == since && sent.cols == self.size.cols && sent.hashes.len() == rows
+        });
+        let mut dirty: Vec<bool> = match (&self.sent, partial) {
+            (Some(sent), true) => (0..rows).map(|r| sent.hashes[r] != hashes[r]).collect(),
+            _ => vec![true; rows],
+        };
+        // When every row changed a partial buys nothing, and a full snapshot also rebuilds the link table.
+        let partial = partial && dirty.iter().any(|changed| !changed);
+        if !partial {
+            dirty.fill(true);
+        }
         let content = self.term.renderable_content();
-        let mut cells = Vec::with_capacity(self.size.rows * self.size.cols);
-        let mut text = vec![String::new(); self.size.rows];
+        let mut cells = Vec::new();
+        let mut text = vec![String::new(); rows];
         // OSC 8 targets are deduplicated into a bounded table; cells reference them by index.
-        let mut links: Vec<String> = Vec::new();
+        // A full snapshot rebuilds it; a partial one extends it so unchanged rows stay valid.
+        let mut links: Vec<String> = if partial { std::mem::take(&mut self.links) } else { Vec::new() };
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + content.display_offset as i32;
-            if row < 0 || row as usize >= self.size.rows {
+            if row < 0 || row as usize >= self.size.rows || !dirty[row as usize] {
                 continue;
             }
             let cell = indexed.cell;
@@ -313,8 +370,11 @@ impl Model {
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
         let links_empty = links.is_empty();
+        self.links = links.clone();
+        let dirty_rows: Vec<usize> = (0..rows).filter(|r| dirty[*r]).collect();
+        let lines: Vec<&String> = dirty_rows.iter().map(|r| &text[*r]).collect();
         let mut snapshot = json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
-            "title": self.title, "cells": cells, "lines": text, "links": links, "images": images,
+            "title": self.title, "cells": cells, "lines": lines, "links": links, "images": images,
             "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
             "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
             "app_cursor": content.mode.contains(TermMode::APP_CURSOR),
@@ -328,9 +388,22 @@ impl Model {
             "offset": content.display_offset, "history": self.term.grid().history_size(),
             "clipboard": std::mem::take(&mut self.clipboard), "error": self.error,
             "exited": self.exited, "exit_code": self.exit_code});
-        if links_empty && let Some(object) = snapshot.as_object_mut() {
-            object.remove("links");
+        if let Some(object) = snapshot.as_object_mut() {
+            if links_empty {
+                object.remove("links");
+            }
+            if partial {
+                object.insert("partial".into(), json!(true));
+                object.insert("dirty".into(), json!(dirty_rows));
+            }
         }
+        // A crowded link table is rebuilt by the next full snapshot instead of growing without bound.
+        let crowded = partial && self.links.len() > MAX_LINKS / 2;
+        self.sent = (!crowded).then_some(SentRows {
+            revision: self.revision,
+            cols: self.size.cols,
+            hashes,
+        });
         snapshot
     }
 }
@@ -371,6 +444,15 @@ pub fn palette(index: usize) -> Rgb {
         g: rgb[1],
         b: rgb[2],
     }
+}
+/// Cheap order-dependent 64-bit mixing for row signatures; a collision only delays one row's repaint.
+#[inline]
+fn mix(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(23)
+}
+#[inline]
+fn pack(rgb: [u8; 3]) -> u64 {
+    u64::from(rgb[0]) << 16 | u64::from(rgb[1]) << 8 | u64::from(rgb[2])
 }
 /// Resolved default background; the host clears to this colour, so matching cells need no entry.
 const DEFAULT_BACKGROUND: [u8; 3] = [18, 22, 29];
@@ -534,6 +616,103 @@ mod tests {
         model.term.selection = Some(selection);
         let selected = model.snapshot(None);
         assert!(selected["cells"].as_array().unwrap().iter().any(|c| c["row"] == 0 && c["col"] == 4 && c["selected"] == true));
+    }
+    /// What a client does with a snapshot: replace dirty rows of its copy, keep the rest.
+    fn apply(base: &mut (Vec<Value>, Vec<String>), snapshot: &Value) {
+        let incoming: Vec<Value> = snapshot["cells"].as_array().unwrap().clone();
+        if snapshot.get("partial") == Some(&json!(true)) {
+            let dirty: Vec<usize> = snapshot["dirty"].as_array().unwrap().iter().map(|r| r.as_u64().unwrap() as usize).collect();
+            base.0.retain(|c| !dirty.contains(&(c["row"].as_u64().unwrap() as usize)));
+            base.0.extend(incoming);
+            for (slot, line) in dirty.iter().zip(snapshot["lines"].as_array().unwrap()) {
+                base.1[*slot] = line.as_str().unwrap().to_string();
+            }
+        } else {
+            base.0 = incoming;
+            base.1 = snapshot["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
+        }
+        base.0.sort_by_key(|c| (c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap()));
+    }
+    #[test]
+    fn partial_snapshots_reconstruct_exactly_what_a_full_snapshot_holds() {
+        let steps: [&[u8]; 18] = [
+            b"hello world\r\nsecond line", b"\x1b[2;3Hxx", b"\x1b[31;44mcolor\x1b[0m", b"\x1b[4:3;58;2;1;2;3mcurly\x1b[0m",
+            b"\x1b]8;;https://a.test/\x07link\x1b]8;;\x07", b"\x1b]8;;https://b.test/\x07other\x1b]8;;\x07", b"\x1b[1;1H\x1b[2K",
+            b"\r\n\r\n\r\n\r\n\r\nscrolling now", "\x1b[2;1H中文e\u{301}".as_bytes(), b"\x1b[?1049h\x1b[Halt screen", b"\x1b[3;1H\x1b[7minverse\x1b[0m",
+            b"\x1b[?1049l", b"\x1b[2J\x1b[H", b"\x1b[9mstrike\x1b[0m", b"line\r\nline\r\nline\r\nline\r\nline\r\nline\r\n",
+            b"\x1b]8;;https://c.test/\x07linked\x1b]8;;\x07", b"\x1b[5;1Hbottom", b"tail",
+        ];
+        let mut model = Model::new(Size::validate(24, 5).unwrap(), 100);
+        let mut client: (Vec<Value>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut since = None;
+        let mut partials = 0;
+        for (index, step) in steps.iter().enumerate() {
+            model.feed(step);
+            // Every other step also changes the selection, which affects rows without new output.
+            if index % 4 == 1 {
+                let point = alacritty_terminal::index::Point::new(alacritty_terminal::index::Line(0), alacritty_terminal::index::Column(1));
+                let mut selection = alacritty_terminal::selection::Selection::new(
+                    alacritty_terminal::selection::SelectionType::Simple, point, alacritty_terminal::index::Side::Left);
+                selection.update(point, alacritty_terminal::index::Side::Right);
+                model.term.selection = Some(selection);
+                model.revision += 1;
+            }
+            let snapshot = model.snapshot(since);
+            partials += usize::from(snapshot.get("partial") == Some(&json!(true)));
+            apply(&mut client, &snapshot);
+            since = snapshot["revision"].as_u64();
+            let mut fresh = Model::new(Size::validate(24, 5).unwrap(), 100);
+            // A second model that saw the same history, asked for a full snapshot, is the reference.
+            for earlier in &steps[..=index] {
+                fresh.feed(earlier);
+                if index % 4 == 1 && std::ptr::eq(earlier, step) {
+                    fresh.term.selection = model.term.selection.clone();
+                }
+            }
+            fresh.term.selection = model.term.selection.clone();
+            let full = fresh.snapshot(None);
+            let mut expected: Vec<Value> = full["cells"].as_array().unwrap().clone();
+            expected.sort_by_key(|c| (c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap()));
+            // Link indices may differ (a partial keeps its table stable); the targets they name may not.
+            let resolve_links = |cells: &[Value], table: &Value| -> Vec<Value> {
+                cells.iter().map(|c| {
+                    let mut cell = c.clone();
+                    let target = c.get("link").and_then(|i| table.get(i.as_u64().unwrap() as usize)).cloned();
+                    let object = cell.as_object_mut().unwrap();
+                    object.remove("link");
+                    if let Some(target) = target {
+                        object.insert("target".into(), target);
+                    }
+                    cell
+                }).collect()
+            };
+            assert_eq!(resolve_links(&client.0, &snapshot["links"]), resolve_links(&expected, &full["links"]), "cells diverged after step {index}");
+            let expected_lines: Vec<String> = full["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
+            assert_eq!(client.1, expected_lines, "lines diverged after step {index}");
+        }
+        assert!(partials >= 8, "most steps should have been partial, got {partials}");
+    }
+    #[test]
+    fn a_stale_since_resize_or_missing_baseline_gets_a_full_snapshot() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        model.feed(b"abc");
+        let first = model.snapshot(None);
+        assert!(first.get("partial").is_none());
+        let revision = first["revision"].as_u64().unwrap();
+        model.feed(b"d");
+        // The client names a revision the server never sent: full.
+        assert!(model.snapshot(Some(revision - 1)).get("partial").is_none());
+        let second = model.snapshot(None);
+        model.feed(b"e");
+        let partial = model.snapshot(second["revision"].as_u64());
+        assert_eq!(partial["partial"], true);
+        assert_eq!(partial["dirty"], json!([0]));
+        // Resize changes the row count, so the next one is full again.
+        let sent = partial["revision"].as_u64();
+        model.term.resize(Size::validate(20, 6).unwrap());
+        model.size = Size::validate(20, 6).unwrap();
+        model.revision += 1;
+        assert!(model.snapshot(sent).get("partial").is_none());
     }
     #[test]
     fn plain_snapshots_omit_optional_fields() {

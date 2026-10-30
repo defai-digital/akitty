@@ -95,8 +95,12 @@ public struct Snapshot: Codable, Sendable {
     public let cols: Int
     public let rows: Int
     public let title: String
-    public let cells: [Cell]
-    public let lines: [String]
+    /// For a partial snapshot, only the cells of the `dirty` rows; `TerminalSession.snapshot` merges them.
+    public internal(set) var cells: [Cell]
+    /// For a partial snapshot, the text of the `dirty` rows in order.
+    public internal(set) var lines: [String]
+    public let partial: Bool?
+    public let dirty: [Int]?
     public let links: [String]?
     public let images: [ImagePlacement]?
     public let cursor: Cursor
@@ -117,6 +121,27 @@ public struct Snapshot: Codable, Sendable {
     public let exited: Bool
     public let exit_code: UInt32?
     public var text: String { lines.joined(separator: "\n") }
+    /// This snapshot with a partial one applied: dirty rows replaced, everything else kept.
+    func applying(_ partial: Snapshot) -> Snapshot? {
+        guard let dirty = partial.dirty, partial.cols == cols, partial.rows == rows, lines.count == rows,
+              partial.lines.count == dirty.count, dirty.allSatisfy({ (0..<rows).contains($0) }) else { return nil }
+        var result = partial
+        var newLines = lines
+        for (slot, row) in dirty.enumerated() { newLines[row] = partial.lines[slot] }
+        let changed = Set(dirty)
+        // Both sides are ordered by row, so merging keeps the order without a sort.
+        var merged: [Cell] = []
+        merged.reserveCapacity(cells.count + partial.cells.count)
+        var kept = cells.lazy.filter { !changed.contains($0.row) }.makeIterator(), incoming = partial.cells.makeIterator()
+        var nextKept = kept.next(), nextIncoming = incoming.next()
+        while nextKept != nil || nextIncoming != nil {
+            if let k = nextKept, nextIncoming == nil || k.row < nextIncoming!.row { merged.append(k); nextKept = kept.next() }
+            else if let i = nextIncoming { merged.append(i); nextIncoming = incoming.next() }
+        }
+        result.cells = merged
+        result.lines = newLines
+        return result
+    }
     /// The openable hyperlink under a cell, if any.
     public func hyperlink(row: Int, col: Int) -> URL? {
         guard let links else { return nil }
@@ -164,7 +189,9 @@ public final class TerminalSession: @unchecked Sendable {
         return try CoreBridge.call(request)
     }
     /// Snapshots are megabytes on a busy screen, so the envelope is decoded once, directly into `Snapshot`.
-    public func snapshot(since: UInt64? = nil) throws -> Snapshot? {
+    /// Pass the snapshot you hold as `base` (and its revision as `since`) to receive only the rows that changed;
+    /// the result is always a complete snapshot.
+    public func snapshot(since: UInt64? = nil, base: Snapshot? = nil) throws -> Snapshot? {
         let data: Data = try {
             lock.lock(); defer { lock.unlock() }
             guard !closed else { throw AkittyError.core("Session is closed") }
@@ -176,7 +203,11 @@ public final class TerminalSession: @unchecked Sendable {
         guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
         guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
         switch reply.data {
-        case .full(let snapshot): return snapshot
+        case .full(let snapshot):
+            guard snapshot.partial == true else { return snapshot }
+            // A partial snapshot only makes sense on top of the exact snapshot it was computed against.
+            guard let base, base.revision == since, let merged = base.applying(snapshot) else { return try self.snapshot() }
+            return merged
         case .unchanged: return nil
         case nil: throw AkittyError.core("Missing response data")
         }

@@ -317,6 +317,51 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(snapshot.textOffset(row: 1, col: 3), 11 + 2)
         XCTAssertEqual(snapshot.textOffset(row: 2, col: 4), 11 + 10 + 4, "row 1 is 中, c and 7 blanks: 9 units plus a newline")
     }
+    func testPartialSnapshotsMergeIntoTheSameStateAsAFullOne() throws {
+        let session = try TerminalSession(cols: 30, rows: 6, headless: true)
+        defer { try? session.close() }
+        func same(_ a: Snapshot, _ b: Snapshot, _ step: String) {
+            XCTAssertEqual(a.lines, b.lines, step)
+            XCTAssertEqual(a.cells.map { "\($0.row),\($0.col),\($0.text),\($0.fg),\($0.bg),\($0.bold),\($0.selected),\($0.strike ?? false)" },
+                           b.cells.map { "\($0.row),\($0.col),\($0.text),\($0.fg),\($0.bg),\($0.bold),\($0.selected),\($0.strike ?? false)" }, step)
+            for cell in a.cells where cell.link != nil {
+                XCTAssertEqual(a.hyperlink(row: cell.row, col: cell.col), b.hyperlink(row: cell.row, col: cell.col), step)
+            }
+            XCTAssertEqual(a.cursor.row, b.cursor.row, step); XCTAssertEqual(a.cursor.col, b.cursor.col, step)
+        }
+        var held = try XCTUnwrap(try session.snapshot())
+        var partials = 0
+        for (index, text) in ["hello\r\nworld", "\u{1b}[2;1H\u{1b}[31mred\u{1b}[0m", "\u{1b}]8;;https://p.test/\u{7}link\u{1b}]8;;\u{7}", "\r\n\r\n\r\n\r\n\r\nscroll", "\u{1b}[3;3H中e\u{301}", "x"].enumerated() {
+            _ = try session.call("feed", ["text": text])
+            let merged = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
+            partials += 1
+            // The reference asks for a full snapshot, which also resets the server's baseline.
+            let full = try XCTUnwrap(try session.snapshot())
+            same(merged, full, "step \(index)")
+            held = full
+        }
+        XCTAssertEqual(partials, 6)
+        // Typing one character changes exactly one row, so the wire snapshot is tiny.
+        _ = try session.call("feed", ["text": "\u{1b}[1;1Hz"])
+        let wire = try session.call("snapshot", ["since": held.revision])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+        XCTAssertEqual(object["partial"] as? Bool, true)
+        XCTAssertEqual(object["dirty"] as? [Int], [0])
+    }
+    func testWrongBaselineFallsBackToAFullSnapshot() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "abc"])
+        let first = try XCTUnwrap(try session.snapshot())
+        _ = try session.call("feed", ["text": "d"])
+        // Nothing was held on the Swift side, or the wrong revision was: still a correct, complete answer.
+        let noBase = try XCTUnwrap(try session.snapshot(since: first.revision, base: nil))
+        XCTAssertTrue(noBase.lines[0].hasPrefix("abcd"))
+        _ = try session.call("feed", ["text": "e"])
+        let wrong = try XCTUnwrap(try session.snapshot(since: first.revision, base: first))
+        XCTAssertTrue(wrong.lines[0].hasPrefix("abcde"))
+        XCTAssertNil(wrong.partial == true ? wrong : nil, "never hand a partial snapshot to callers")
+    }
     func testStalePathsResetOnlyThemselvesOnLoad() throws {
         let suite = "akitty-tests-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

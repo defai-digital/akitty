@@ -104,9 +104,9 @@ import os
     public func poll() {
         guard !stopped, !pollInFlight else { return }
         pollInFlight = true
-        let session = self.session, since = snapshot?.revision, store = imageStore
+        let session = self.session, base = snapshot, since = snapshot?.revision, store = imageStore
         snapshotQueue.async { [weak self] in
-            let result = Result { try session.snapshot(since: since) }
+            let result = Result { try session.snapshot(since: since, base: base) }
             // Pixels are fetched here, off the main thread, before the frame is drawn.
             if case let .success(.some(next)) = result { store.sync(next.images ?? [], session: session) }
             DispatchQueue.main.async {

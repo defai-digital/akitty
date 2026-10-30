@@ -29,6 +29,14 @@ final class HotpathProbe: XCTestCase {
         try time("GridRasterizer.make 200x50 @2x", 20) {
             _ = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
         }
+        // The typing case: one changed row on a full screen, held snapshot as the baseline.
+        var held = try XCTUnwrap(try session.snapshot())
+        var toggle = 0
+        try time("typing one character on a full screen: snapshot(since:base:)", 50) {
+            toggle += 1
+            _ = try session.call("feed", ["text": "\u{1b}[1;1H\(toggle % 2 == 0 ? "x" : "y")"])
+            held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
+        }
         // Mostly blank screen with a cursor line, the usual shell case.
         let quiet = try TerminalSession(cols: cols, rows: rows, headless: true)
         defer { try? quiet.close() }

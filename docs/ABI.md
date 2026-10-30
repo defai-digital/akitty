@@ -20,7 +20,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | version | none | Version/platform information |
 | create | cols, rows; optional shell, cwd, headless | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
-| snapshot | id; optional since | Current snapshot or changed=false |
+| snapshot | id; optional since | Current snapshot, changed=false, or a partial snapshot (below) |
 | input | id, text; optional paste | UTF-8 input with optional bracketed-paste protection |
 | input_bytes | id, bytes | Raw byte input for terminal protocols, bounded to 64 KiB + delimiters |
 | resize | id, cols, rows | Resize kernel PTY and terminal state in worker order |
@@ -60,6 +60,18 @@ sees scrolling as history growth), so with scrollback 0, a full scrollback buffe
 on the alternate screen an image stays on its viewport row when text scrolls past it.
 Programs that animate (such as AX Code) redraw in place and delete explicitly.
 Alternate-screen images are removed when that screen is left.
+
+**Delta snapshots.** Blank cells on the default background are not listed in `cells`;
+`lines` holds every column, and a missing cell is one space. When `since` equals the
+revision of the last snapshot the core sent for that session and the grid size is
+unchanged, the core may reply with `"partial": true` and `"dirty": [rows]`. Then
+`cells` holds only the dirty rows' cells and `lines` only their text, in `dirty`
+order; the client replaces those rows in the snapshot it holds and keeps the rest.
+Rows are compared by a 64-bit content hash (characters, colours, attributes,
+selection, links), so a hash collision at worst delays one row's repaint. Any other
+`since`, a resize, or a snapshot where every row changed gets a full snapshot, so a
+client that lost state can always recover by asking again without `since`. The `links`
+table is complete in every snapshot and keeps its indices across partial ones.
 
 Optional per-cell fields are omitted when unset: `ustyle` (1 single, 2 double,
 3 curly, 4 dotted, 5 dashed; `underline` stays true for any of them), `ucolor`
