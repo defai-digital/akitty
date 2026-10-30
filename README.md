@@ -191,6 +191,14 @@ acknowledge **Mitchell Hashimoto and the Ghostty contributors** for the original
 project, its native terminal design, and the source used as the starting reference.
 AkiTTY is an independent project, not an official Ghostty release.
 
+We also read **[iTerm2](https://github.com/gnachman/iterm2)** and
+**[Kitty](https://github.com/kovidgoyal/kitty)** to understand how those terminals
+are structured. Thank you to **George Nachman**, **Kovid Goyal**, and their
+contributors for the architectural ideas that informed AkiTTY's own design.
+Their source stays in their repositories under their own licenses (iTerm2 is
+GPL-2.0, Kitty is GPL-3.0). The Kitty graphics and keyboard protocols AkiTTY
+speaks follow Kovid Goyal's published specifications, in AkiTTY's own code.
+
 AkiTTY's own code is **MIT licensed**; see [LICENSE](LICENSE). Original notices are
 preserved for adapted code. Third-party dependencies retain their own licenses;
 MIT does not relicense them. The Rust terminal engine is
