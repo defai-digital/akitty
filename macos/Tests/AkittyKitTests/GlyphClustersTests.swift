@@ -14,6 +14,18 @@ final class GlyphClustersTests: XCTestCase {
 }
 
 extension GlyphClustersTests {
+    func testZwjSequenceStartingWithANarrowPieceStillGetsTwoColumns() throws {
+        // The pride flag's first piece is narrow (a flag with VS16) and its last, the rainbow, is wide.
+        let cells = try readCells("\u{1b}[1;1H🏳\u{FE0F}\u{200D}🌈x")
+        let items = visible(GlyphClusters.merge(cells))
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.first?.columns, 2, "the whole sequence is an emoji and needs a full-size box")
+        XCTAssertEqual(items.last?.text, "x")
+    }
+    func testZwjBetweenNarrowTextStaysOneColumn() throws {
+        let items = visible(GlyphClusters.merge(try readCells("\u{1b}[1;1Ha\u{200D}b")))
+        XCTAssertEqual(items.first?.columns, 1)
+    }
     func testFamilyEmojiIsOneItemAndTheNextCharacterKeepsItsColumn() throws {
         let cells = try readCells("\u{1b}[1;1H👨\u{200D}👩\u{200D}👧x")
         let drawn = GlyphClusters.merge(cells)

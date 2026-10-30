@@ -26,6 +26,9 @@ enum GlyphClusters {
             var next = index + 1
             if text.unicodeScalars.last == zwj {
                 while text.unicodeScalars.last == zwj, let joined = follower(cells, from: next, row: first.row, column: end) {
+                    // A joined piece that is wide makes the whole sequence an emoji, which needs two columns even when
+                    // its first piece (a flag or heart with VS16) is narrow.
+                    if joined.cell.wide { columns = 2 }
                     text += joined.cell.text
                     next = joined.index + 1
                     end = joined.cell.col + (joined.cell.wide ? 2 : 1)

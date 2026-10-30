@@ -194,4 +194,33 @@ final class BoxGlyphsTests: XCTestCase {
             }
         }
     }
+    /// Double tees and the cross: the wall on a side with an arm is cut at the crossing arm, the other wall runs through.
+    func testDoubleTeesAndCrossTurnTheirWallsInsteadOfClosingTheGap() {
+        let size = CGSize(width: 12, height: 24), scale = 2           // 24x48 px, light stroke 3, bands 3 + 3 + 3
+        let leftWall = 8, rightWall = 14, topWall = 20, bottomWall = 26, gapX = 11, gapY = 23, far = 21, farY = 44
+        func lit(_ bitmap: GlyphBitmap, _ x: Int, _ y: Int) -> Bool { bitmap.painted(row: 0, col: 0, x: x, y: y) }
+
+        let tee = GlyphBitmap(rows: ["╠"], cell: size, scale: scale)      // up, down, right
+        XCTAssertTrue(lit(tee, leftWall, gapY), "╠ left wall runs straight through")
+        XCTAssertFalse(lit(tee, rightWall, gapY), "╠ right wall is cut where the right arm leaves")
+        XCTAssertTrue(lit(tee, rightWall, 2) && lit(tee, rightWall, farY), "╠ right wall continues above and below")
+        XCTAssertTrue(lit(tee, far, topWall) && lit(tee, far, bottomWall), "╠ arm walls reach the right edge")
+        XCTAssertFalse(lit(tee, far, gapY), "╠ gap between the arm walls stays open")
+        XCTAssertFalse(lit(tee, gapX, gapY), "╠ centre gap stays open")
+
+        let down = GlyphBitmap(rows: ["╦"], cell: size, scale: scale)     // down, left, right
+        XCTAssertTrue(lit(down, 2, topWall) && lit(down, far, topWall), "╦ top wall runs across")
+        XCTAssertTrue(lit(down, 2, bottomWall) && lit(down, far, bottomWall), "╦ bottom wall turns down on each side")
+        XCTAssertFalse(lit(down, gapX, bottomWall), "╦ bottom wall is open where the down arm leaves")
+        XCTAssertTrue(lit(down, leftWall, farY) && lit(down, rightWall, farY), "╦ both walls continue down")
+        XCTAssertFalse(lit(down, gapX, gapY), "╦ centre gap stays open")
+
+        let cross = GlyphBitmap(rows: ["╬"], cell: size, scale: scale)
+        for (x, y) in [(leftWall, 2), (leftWall, farY), (rightWall, 2), (rightWall, farY), (2, topWall), (far, topWall), (2, bottomWall), (far, bottomWall)] {
+            XCTAssertTrue(lit(cross, x, y), "╬ wall at \(x),\(y)")
+        }
+        for (x, y) in [(leftWall, gapY), (rightWall, gapY), (gapX, topWall), (gapX, bottomWall), (gapX, gapY), (2, gapY), (far, gapY), (gapX, 2), (gapX, farY)] {
+            XCTAssertFalse(lit(cross, x, y), "╬ gap at \(x),\(y)")
+        }
+    }
 }

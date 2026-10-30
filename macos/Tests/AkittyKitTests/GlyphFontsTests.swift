@@ -25,6 +25,12 @@ final class GlyphFontsTests: XCTestCase {
         XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["zh-Hant-HK"]).first, "PingFang HK")
     }
 
+    func testAnExplicitScriptOutranksTheRegion() {
+        XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["zh-Hans-HK"]).first, "PingFang SC")
+        XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["zh-Hans-MO"]).first, "PingFang SC")
+        XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["zh-Hant-MO"]).first, "PingFang TC")
+    }
+
     func testSimplifiedChineseAndUnrelatedLanguagesDefaultToPingFangSCFirst() {
         XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["zh-Hans-CN"]).first, "PingFang SC")
         XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: ["en-US"]).first, "PingFang SC")
@@ -73,6 +79,15 @@ final class GlyphFontsTests: XCTestCase {
         XCTAssertEqual(scale, 1, accuracy: 1e-9)
         XCTAssertEqual(origin.x, box.minX, accuracy: 1e-9, "a glyph that fits keeps the font's own left bearing")
         XCTAssertEqual(origin.y, 204, accuracy: 1e-9)
+    }
+
+    func testNarrowGlyphThatFitsByWidthButSitsOffCentreIsSlidBackInside() {
+        let box = CGRect(x: 100, y: 200, width: 8, height: 20)
+        let right = GlyphFonts.placement(ink: CGRect(x: 2.8, y: 0, width: 7.4, height: 12), box: box, baseline: 204, centre: false)
+        XCTAssertEqual(right.scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(right.origin.x + 10.2, box.maxX, accuracy: 1e-9, "ink that ran past the right edge ends on it")
+        let left = GlyphFonts.placement(ink: CGRect(x: -1.4, y: 0, width: 6, height: 12), box: box, baseline: 204, centre: false)
+        XCTAssertEqual(left.origin.x - 1.4, box.minX, accuracy: 1e-9, "ink that started left of the cell starts on its edge")
     }
 
     func testInkWiderThanTheBoxIsScaledDownAndFits() {

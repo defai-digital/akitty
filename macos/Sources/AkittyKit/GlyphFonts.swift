@@ -20,6 +20,8 @@ enum GlyphFonts {
         if tag == "ja" || tag.hasPrefix("ja-") { return "Hiragino Sans" }
         if tag == "ko" || tag.hasPrefix("ko-") { return "Apple SD Gothic Neo" }
         guard tag == "zh" || tag.hasPrefix("zh-") else { return nil }
+        // An explicit script outranks the region: zh-Hans-HK is Simplified.
+        if tag.contains("-hans") { return "PingFang SC" }
         if tag.contains("-hk") { return "PingFang HK" }
         if tag.contains("-hant") || tag.contains("-tw") || tag.contains("-mo") { return "PingFang TC" }
         return "PingFang SC"
@@ -67,7 +69,10 @@ enum GlyphFonts {
         if ink.height > 0, box.height > 0 { scale = min(scale, box.height / ink.height) }
         guard scale.isFinite, scale > 0 else { return (CGPoint(x: box.minX, y: baseline), 1) }
         // A narrow glyph that fits keeps the font's own left bearing (origin on the cell edge); one that had to shrink is centred.
-        let x = centre || scale < 1 ? box.midX - scale * ink.midX : box.minX
+        var x = centre || scale < 1 ? box.midX - scale * ink.midX : box.minX
+        // A glyph that fits by width can still sit off-centre (Ⅲ, ℓ, Ί): slide it back inside rather than let the cell clip it.
+        if x + scale * ink.minX < box.minX { x = box.minX - scale * ink.minX }
+        else if x + scale * ink.maxX > box.maxX { x = box.maxX - scale * ink.maxX }
         // Shift to whichever edge the ink would cross; once it fits, the baseline is left alone.
         var y = baseline
         if y + scale * ink.minY < box.minY { y = box.minY - scale * ink.minY }

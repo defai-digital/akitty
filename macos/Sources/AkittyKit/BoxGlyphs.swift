@@ -45,8 +45,8 @@ enum BoxGlyphs {
     /// hole; both sides together span the cell.
     private static func strokes(_ arms: Arms, _ grid: GlyphGrid, _ context: CGContext) {
         context.setShouldAntialias(false)
-        if let corner = doubleCorner(arms, grid) {
-            for (x, y, width, height) in corner { fill(x, y, width, height, grid, context) }
+        if let walls = doubleCorner(arms, grid) ?? doubleJunction(arms, grid) {
+            for (x, y, width, height) in walls { fill(x, y, width, height, grid, context) }
             return
         }
         let w = grid.width, h = grid.height, l = grid.light
@@ -122,6 +122,40 @@ enum BoxGlyphs {
         let innerHStart = right ? x + 2 * l : 0, innerHEnd = right ? w : x + l
         return [(outerV, outerVStart, l, outerVEnd - outerVStart), (outerHStart, outerH, outerHEnd - outerHStart, l),
                 (innerV, innerVStart, l, innerVEnd - innerVStart), (innerHStart, innerH, innerHEnd - innerHStart, l)]
+    }
+
+    /// ╠ ╣ ╦ ╩ ╬: three or four double arms. Each of the four walls (left, right, top, bottom of the double band) runs
+    /// straight through the junction when no arm leaves on its side, and otherwise stops where the crossing arm's wall
+    /// begins, so the walls turn into four corner pieces instead of closing the gap into a grid.
+    private static func doubleJunction(_ arms: Arms, _ grid: GlyphGrid) -> [(Int, Int, Int, Int)]? {
+        let all = [arms.up, arms.down, arms.left, arms.right]
+        guard all.allSatisfy({ $0 == .none || $0 == .double }), all.filter({ $0 == .double }).count >= 3 else { return nil }
+        let up = arms.up == .double, down = arms.down == .double, left = arms.left == .double, right = arms.right == .double
+        let l = grid.light, w = grid.width, h = grid.height
+        let x = (w - 3 * l) / 2, y = (h - 3 * l) / 2
+        var boxes: [(Int, Int, Int, Int)] = []
+        // A vertical wall at `wallX`; `crossing` is whether an arm leaves through that side.
+        func vertical(_ wallX: Int, crossing: Bool) {
+            if crossing {
+                if up { boxes.append((wallX, 0, l, y + l)) }
+                if down { boxes.append((wallX, y + 2 * l, l, h - y - 2 * l)) }
+            } else {
+                let top = up ? 0 : y, bottom = down ? h : y + 3 * l
+                boxes.append((wallX, top, l, bottom - top))
+            }
+        }
+        func horizontal(_ wallY: Int, crossing: Bool) {
+            if crossing {
+                if left { boxes.append((0, wallY, x + l, l)) }
+                if right { boxes.append((x + 2 * l, wallY, w - x - 2 * l, l)) }
+            } else {
+                let start = left ? 0 : x, end = right ? w : x + 3 * l
+                boxes.append((start, wallY, end - start, l))
+            }
+        }
+        vertical(x, crossing: left); vertical(x + 2 * l, crossing: right)
+        horizontal(y, crossing: up); horizontal(y + 2 * l, crossing: down)
+        return boxes
     }
 
     /// Dashed lines: each period is a dash with half a gap at each end, so the gap between cells is as wide as the
