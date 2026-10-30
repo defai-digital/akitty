@@ -94,15 +94,37 @@ extension TerminalPreferences {
     }
 }
 
+struct PreferencesDraft {
+    private(set) var saved: TerminalPreferences
+    var draft: TerminalPreferences
+    private(set) var savedAutomaticChecks: Bool
+    var automaticChecks: Bool
+    init(preferences: TerminalPreferences, automaticChecks: Bool) {
+        saved = preferences; draft = preferences
+        savedAutomaticChecks = automaticChecks; self.automaticChecks = automaticChecks
+    }
+    var hasChanges: Bool { draft != saved || automaticChecks != savedAutomaticChecks }
+    mutating func markSaved() { saved = draft; savedAutomaticChecks = automaticChecks }
+}
+
 @MainActor private struct PreferencesView: View {
-    @State private var draft = TerminalPreferences.load()
-    @State private var automaticChecks: Bool
+    @State private var state: PreferencesDraft
     @State private var error = ""
     let updater: UpdateController
-    init(updater: UpdateController) {
-        self.updater = updater
-        _automaticChecks = State(initialValue: updater.automaticChecks)
+    let defaults: UserDefaults
+    init(updater: UpdateController, defaults: UserDefaults = .standard) {
+        self.updater = updater; self.defaults = defaults
+        _state = State(initialValue: PreferencesDraft(preferences: .load(from: defaults), automaticChecks: updater.automaticChecks))
     }
+    private var draft: TerminalPreferences {
+        get { state.draft }
+        nonmutating set { state.draft = newValue }
+    }
+    private var automaticChecks: Bool {
+        get { state.automaticChecks }
+        nonmutating set { state.automaticChecks = newValue }
+    }
+    private var hasChanges: Bool { state.hasChanges }
     /// Keep a saved face selectable even when it is not installed any more, so the picker round-trips it.
     private var fontChoices: [String] {
         let fonts = TerminalPreferences.availableFonts()
@@ -117,22 +139,22 @@ extension TerminalPreferences {
             TabView {
                 Form {
                     Section("Appearance") {
-                        Picker("Font", selection: $draft.fontName) { ForEach(fontChoices, id: \.self) { Text($0) } }
-                        Picker("CJK font", selection: $draft.cjkFont) {
+                        Picker("Font", selection: $state.draft.fontName) { ForEach(fontChoices, id: \.self) { Text($0) } }
+                        Picker("CJK font", selection: $state.draft.cjkFont) {
                             Text("Automatic").tag("")
                             ForEach(cjkChoices, id: \.self) { Text($0).tag($0) }
                         }
                         Text("Chinese, Japanese and Korean text. Automatic follows your system language.").font(.caption).foregroundStyle(.secondary)
-                        Stepper("Font size: \(Int(draft.fontSize)) pt", value: $draft.fontSize, in: 9...36)
+                        Stepper("Font size: \(Int(draft.fontSize)) pt", value: $state.draft.fontSize, in: 9...36)
                         Text("Applies to open terminals. ⌘+ and ⌘− adjust an individual pane.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
                     .tabItem { Text("Appearance") }
                 Form {
                     Section("New Terminals") {
-                        TextField("Shell", text: $draft.shell, prompt: Text("Default login shell"))
+                        TextField("Shell", text: $state.draft.shell, prompt: Text("Default login shell"))
                         HStack {
-                            TextField("Starting directory", text: $draft.directory, prompt: Text("Home directory"))
+                            TextField("Starting directory", text: $state.draft.directory, prompt: Text("Home directory"))
                                 .accessibilityIdentifier("starting-directory")
                             Button("Clear") { draft.directory = "" }
                                 .disabled(draft.directory.isEmpty)
@@ -143,23 +165,23 @@ extension TerminalPreferences {
                                 if panel.runModal() == .OK { draft.directory = panel.url?.path ?? "" }
                             }
                         }
-                        Stepper("Scrollback: \(draft.scrollback) lines", value: $draft.scrollback, in: 0...20000, step: 1000)
+                        Stepper("Scrollback: \(draft.scrollback) lines", value: $state.draft.scrollback, in: 0...20000, step: 1000)
                         Text("Shell, directory and scrollback changes apply to new tabs and splits.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
                     .tabItem { Text("Sessions") }
                 Form {
                     Section("Keyboard") {
-                        Toggle("Use Option as Alt", isOn: $draft.optionAsAlt)
+                        Toggle("Use Option as Alt", isOn: $state.draft.optionAsAlt)
                         Text("Sends Escape-prefixed keys to terminal apps. Leave off to type accented characters using Option.").font(.caption).foregroundStyle(.secondary)
-                        Toggle("Allow programs to set the status bar", isOn: $draft.programChrome)
+                        Toggle("Allow programs to set the status bar", isOn: $state.draft.programChrome)
                         Text("Programs can show a status line, progress, and a small mark on their tab while they work. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
                     .tabItem { Text("Keyboard") }
                 Form {
                     Section("Updates") {
-                        Toggle("Check for updates automatically", isOn: $automaticChecks)
+                        Toggle("Check for updates automatically", isOn: $state.automaticChecks)
                         Text("Available updates appear in the title bar. Downloads and restarts require your action.").font(.caption).foregroundStyle(.secondary)
                         Button("Check for Updates…") { updater.checkForUpdates(nil) }
                     }
@@ -170,19 +192,23 @@ extension TerminalPreferences {
                 Text(error).foregroundStyle(.red).font(.caption).accessibilityIdentifier("settings-error")
                 Spacer()
                 Button("Apply") {
-                    do { try draft.save(); updater.automaticChecks = automaticChecks; error = "" }
-                    catch { self.error = error.localizedDescription }
+                    do {
+                        try draft.save(to: defaults); updater.automaticChecks = automaticChecks
+                        state.markSaved(); error = ""
+                    } catch { self.error = error.localizedDescription }
                 }.keyboardShortcut(.defaultAction)
+                    .disabled(!hasChanges)
+                    .accessibilityIdentifier("apply-preferences")
             }.padding()
         }.frame(width: 560, height: 430)
     }
 }
 
 @MainActor final class PreferencesWindow: NSWindowController {
-    init(updater: UpdateController) {
+    init(updater: UpdateController, defaults: UserDefaults = .standard) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 430), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"; window.isReleasedWhenClosed = false
-        window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater))
+        window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater, defaults: defaults))
         window.center(); super.init(window: window)
     }
     required init?(coder: NSCoder) { nil }

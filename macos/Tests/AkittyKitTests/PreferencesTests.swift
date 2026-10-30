@@ -91,4 +91,27 @@ final class PreferencesTests: XCTestCase {
             XCTAssertNoThrow(try preferences.validated(), family)
         }
     }
+
+    func testApplyStateTracksEditsAndSuccessfulSaves() {
+        var state = PreferencesDraft(preferences: TerminalPreferences(), automaticChecks: false)
+        XCTAssertFalse(state.hasChanges, "Apply starts disabled when the draft matches saved settings")
+
+        state.draft.optionAsAlt = true
+        XCTAssertTrue(state.hasChanges, "Editing a preference enables Apply")
+        state.markSaved()
+        XCTAssertFalse(state.hasChanges, "A successful save disables Apply")
+
+        state.draft.optionAsAlt = false
+        XCTAssertTrue(state.hasChanges, "The saved baseline advances to the latest successful save")
+        state.markSaved()
+        state.automaticChecks = true
+        XCTAssertTrue(state.hasChanges, "Update preference changes are included in the dirty state")
+        state.markSaved()
+        XCTAssertFalse(state.hasChanges)
+
+        state.draft.fontSize += 1
+        XCTAssertTrue(state.hasChanges)
+        state.draft = TerminalPreferences()
+        XCTAssertFalse(state.hasChanges, "Reverting every edit disables Apply again")
+    }
 }
