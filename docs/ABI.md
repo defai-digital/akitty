@@ -182,7 +182,7 @@ Additive response fields must be tolerated; unknown operations must fail.
 Normal PTY termination reports the child exit code; the native UI closes successful
 sessions and leaves failures visible.
 
-## Shell observations and host command control (current source after 1.0.0)
+## Shell observations and host command control (added in 1.1.0)
 
 These are additive schema-1 operations; no C symbols or existing fields change.
 

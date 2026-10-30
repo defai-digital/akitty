@@ -127,11 +127,11 @@ import os
             timer?.invalidate(); timer = nil
             stopRefreshLink()
             pendingClipboard.removeAll()
-            let session = self.session, group = shutdownGroup
+            let cleanup = session.prepareClose(), group = shutdownGroup
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 defer { group.leave() }
-                do { try session.close() } catch { Logger(subsystem: "com.defai.akitty", category: "pty").error("PTY close failed: \(error.localizedDescription, privacy: .public)") }
+                do { try cleanup?() } catch { Logger(subsystem: "com.defai.akitty", category: "pty").error("PTY close failed: \(error.localizedDescription, privacy: .public)") }
             }
         }
         // A second caller (for example Quit during window close) waits for the same cleanup.

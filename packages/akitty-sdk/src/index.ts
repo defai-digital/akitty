@@ -1,4 +1,4 @@
-export const SDK_VERSION = "0.1.0";
+export const SDK_VERSION = "0.2.0";
 export const CHROME_CLEAR_SEQUENCE = '\x1b]771;{"clear":true}\x07';
 
 export type Status = Readonly<{

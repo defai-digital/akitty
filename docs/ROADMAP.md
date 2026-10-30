@@ -1,7 +1,6 @@
 # AkiTTY implementation roadmap
 
-This plan distinguishes current source implementation from remaining qualification.
-Source additions after 1.0.0 are not in the published archive until a new release.
+This plan distinguishes the implementation in version 1.1.0 from remaining qualification.
 The native Mac app uses locally maintained source derived from `alacritty_terminal` 0.26.0 with AkiTTY's own
 Rust/Swift integration and rendering. AkiTTY Web separately uses Ghostty's VT
 parser compiled to WebAssembly and Canvas rendering. Native performance must be
@@ -53,9 +52,9 @@ equivalence and protocol behavior, and pass `scripts/verify.sh` plus app smoke
 checks. Performance claims need measurements; stability claims need stress-test
 evidence. The local engine fork provides independent maintenance; integration improvements still require their own tests.
 
-## 2. Shell integration (implemented in current source; qualification continues)
+## 2. Shell integration (implemented in 1.1.0; qualification continues)
 
-Current source provides opt-in local bash/zsh hooks and bounded command history/output.
+Version 1.1.0 provides opt-in local bash/zsh hooks and bounded command history/output.
 See [host workflows](AGENT_WORKFLOWS.md) for startup, limits and trust boundaries.
 Continue qualifying native-app awareness of prompt and command boundaries, working-directory
 changes, and command completion/exit status through shell notifications. Define
@@ -75,9 +74,9 @@ Acceptance criteria:
   host must explicitly adopt any integration; native support does not add it to
   the separate web package automatically.
 
-## 3. Quick terminal (implemented in current source; qualification continues)
+## 3. Quick terminal (implemented in 1.1.0; qualification continues)
 
-Current source provides a persistent window and three selectable global shortcuts.
+Version 1.1.0 provides a persistent window and three selectable global shortcuts.
 Continue qualifying a configurable global shortcut that shows/hides a persistent native terminal.
 Hiding the terminal keeps the shell session alive. Closing it or quitting the app
 continues to follow live-process confirmation and bounded shutdown rules.

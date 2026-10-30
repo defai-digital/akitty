@@ -85,14 +85,14 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
    Full external esctest qualification and dedicated VoiceOver development/user
    testing are outside the current roadmap, not release gates.
 
-Current source adds opt-in bash/zsh shell observations, trusted host command control,
+Version 1.1.0 adds opt-in bash/zsh shell observations, trusted host command control,
 a persistent quick terminal, quoted file/text drops and a deep-dark default background.
-These additions follow the published 1.0.0 archive; see [host workflows](AGENT_WORKFLOWS.md).
+See [host workflows](AGENT_WORKFLOWS.md).
 Performance/stability and broader platform/workflow qualification remain in [the roadmap](ROADMAP.md).
 
 ## Compatibility scope
 
-Shell integration and quick terminal are opt-in native source features after 1.0.0;
+Shell integration and quick terminal are opt-in native features in 1.1.0;
 they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
 public extension ecosystem are outside the current roadmap. Sixel, image clipboard
 protocols, and custom shaders remain unsupported. Dedicated VoiceOver work and

@@ -44,8 +44,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v1.0.0 ZIP](https://download.automatosx.com/akitty/releases/download/v1.0.0/AkiTTY-1.0.0-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.0.0).
+You can also [download the v1.1.0 ZIP](https://download.automatosx.com/akitty/releases/download/v1.1.0/AkiTTY-1.1.0-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.1.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## What makes AkiTTY useful
@@ -77,7 +77,7 @@ and [Python automation](https://iterm2.com/python-api/). AkiTTY emphasizes the
 combination of program-selected tab identity, activity and completion, with direct
 AX ecosystem integration. See [product scope and host integration](docs/AGENT_WORKFLOWS.md).
 
-## Current source additions (not in the published 1.0.0 archive)
+## New in 1.1.0
 
 - Opt-in bash/zsh shell integration records command boundaries, timestamps,
   reported working directories and exit status, with bounded per-command output.
@@ -173,9 +173,8 @@ lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-**Status: 1.0.0.** This is not a drop-in Ghostty replacement.
-The published 1.0.0 archive does not include shell integration or quick terminal;
-current-source additions are described above.
+**Status: 1.1.0.** This is not a drop-in Ghostty replacement.
+Shell integration and quick terminal are opt-in features described above.
 Ghostty configuration compatibility and third-party plugins are outside the current
 roadmap. Sixel, image clipboard protocols, and custom shaders remain unsupported.
 The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
@@ -202,7 +201,7 @@ on every supported Mac version are not claimed.
 - **Shell integration qualification:** broaden startup-hook compatibility and remote/multiplexer coverage beyond the opt-in local bash/zsh implementation.
 - **Quick terminal qualification:** expand sleep/wake, Spaces and multi-display checks for the implemented persistent window and configurable global shortcut.
 
-These are remaining qualification goals; the source additions above are not yet in the published archive. See the
+These are remaining qualification goals for the implemented features. See the
 [implementation roadmap](docs/ROADMAP.md) for acceptance criteria and exclusions.
 
 ## Build and run

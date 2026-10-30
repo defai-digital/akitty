@@ -424,14 +424,21 @@ public final class TerminalSession: @unchecked Sendable {
     public func close() throws {
         try close { id in _ = try CoreBridge.call(["op": "close", "id": id]) }
     }
+    private func markClosed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        closed = true; return true
+    }
     func close(using request: (UInt64) throws -> Void) throws {
-        lock.lock()
-        if closed { lock.unlock(); return }
-        closed = true
-        lock.unlock()
-        // Closing may wait for a PTY child. Late AppKit events must see `closed`
-        // immediately, rather than block the main thread behind that wait.
+        guard markClosed() else { return }
         try request(id)
+    }
+    /// Revoke Swift access synchronously, then transfer the bounded core cleanup
+    /// to a worker. Removing a pane must not leave a usable session until that worker runs.
+    func prepareClose() -> (@Sendable () throws -> Void)? {
+        guard markClosed() else { return nil }
+        let handle = id
+        return { _ = try CoreBridge.call(["op": "close", "id": handle]) }
     }
     public func call(_ op: String, _ values: [String: Any] = [:]) throws -> Data {
         lock.lock()

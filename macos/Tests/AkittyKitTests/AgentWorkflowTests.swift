@@ -3,6 +3,17 @@ import AppKit
 @testable import AkittyKit
 
 final class AgentWorkflowTests: XCTestCase {
+    func testPreparingDeferredCloseRevokesAccessBeforeCleanupRuns() throws {
+        let session = try TerminalSession(headless:true)
+        let cleanup = try XCTUnwrap(session.prepareClose())
+        XCTAssertThrowsError(try session.snapshot())
+        XCTAssertNil(session.prepareClose())
+        // The worker has not run: prove cleanup ownership was transferred, not discarded.
+        XCTAssertNoThrow(try CoreBridge.call(["op":"snapshot", "id":session.id]))
+        try cleanup()
+        XCTAssertThrowsError(try CoreBridge.call(["op":"snapshot", "id":session.id]))
+    }
+
     @MainActor func testDeniedCommandWritesNothingAndReturnsHumanControl() async throws {
         let session = try TerminalSession(headless: true)
         defer { try? session.close() }

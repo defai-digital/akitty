@@ -1,7 +1,7 @@
 # Program identity, shell observations, and trusted host control
 
-This document describes current source additions after the published 1.0.0 release.
-A public archive is unchanged until a separately built, tested and published release.
+This document describes the native workflow and SDK host additions in AkiTTY 1.1.0.
+The separate Web terminal and its embedding host retain their own adoption and release process.
 
 ## Product strengths and scope
 

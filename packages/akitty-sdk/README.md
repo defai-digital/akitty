@@ -85,7 +85,7 @@ Tests include an isolated packed consumer with declaration checks. The repositor
 checks snapshots and cleanup, and verifies that OSC payloads never enter the grid.
 See [the protocol contract](../../docs/ABI.md).
 
-## Trusted host command management (current source after 1.0.0)
+## Trusted host command management (SDK 0.2.0 / native app 1.1.0)
 
 The main import remains a program-side presentation client. It lets each program
 show its own tab sprite/activity and background completion indicator, with text
