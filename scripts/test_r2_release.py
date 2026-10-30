@@ -71,19 +71,16 @@ def prepared(archive=b"signed archive"):
 
 
 class Store:
-    """In-memory stand-in for the conditional R2 object API."""
+    """In-memory stand-in for the R2 object API."""
 
-    def __init__(self, values=None, lose_race=False):
+    def __init__(self, values=None):
         self.values = dict(values or {})
-        self.lose_race = lose_race
         self.requests = []
 
-    def storage(self, key, data=None, create_only=False):
-        self.requests.append((key, data, create_only))
+    def storage(self, key, data=None):
+        self.requests.append((key, data))
         if data is None:
             return self.values.get(key)
-        if create_only and (self.lose_race or key in self.values):
-            return None
         self.values[key] = data
         return data
 
@@ -92,8 +89,8 @@ class CloudStub:
     def __init__(self, store):
         self.store = store
 
-    def storage(self, key, data=None, create_only=False):
-        return self.store.storage(key, data, create_only)
+    def storage(self, key, data=None):
+        return self.store.storage(key, data)
 
 
 class DistributionTests(unittest.TestCase):
@@ -134,37 +131,13 @@ class DistributionTests(unittest.TestCase):
                     CloudStub(store), "appcast.xml", b"feed", mutable=True
                 )
 
-    def test_new_immutable_objects_use_a_conditional_put(self):
-        cloud = object.__new__(release.Cloudflare)
-        cloud.token, cloud.account = "token", "account"
-        seen = {}
-
-        def fake_fetch(
-            url, *, method="GET", data=None, headers=None, missing=False, conflict=False
-        ):
-            seen.update(method=method, headers=headers, conflict=conflict, data=data)
-            return data
-
-        with patch.object(release, "fetch", side_effect=fake_fetch):
-            cloud.storage(
-                "releases/download/v0.12.0/app.zip", b"bytes", create_only=True
-            )
-        self.assertEqual(seen["method"], "PUT")
-        self.assertEqual(seen["headers"]["If-None-Match"], "*")
-        self.assertTrue(seen["conflict"])
-
-        with patch.object(release, "fetch", side_effect=fake_fetch):
-            cloud.storage("latest.json", b"{}")
-        self.assertNotIn("If-None-Match", seen["headers"])
-        self.assertFalse(seen["conflict"])
-
-    def test_lost_creation_race_is_idempotent_only_for_identical_bytes(self):
-        same = Store({ARCHIVE_KEY: b"bytes"}, lose_race=True)
+    def test_existing_immutable_objects_are_idempotent_only_for_identical_bytes(self):
+        same = Store({ARCHIVE_KEY: b"bytes"})
         with patch.object(release, "public", return_value=b"bytes"):
             release.put_verified(CloudStub(same), ARCHIVE_KEY, b"bytes")
         self.assertEqual(same.values[ARCHIVE_KEY], b"bytes")
 
-        other = Store({ARCHIVE_KEY: b"theirs"}, lose_race=True)
+        other = Store({ARCHIVE_KEY: b"theirs"})
         with self.assertRaises(RuntimeError):
             release.put_verified(CloudStub(other), ARCHIVE_KEY, b"bytes")
         self.assertEqual(other.values[ARCHIVE_KEY], b"theirs")

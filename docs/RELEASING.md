@@ -45,6 +45,9 @@ Credentials, receipts and private deployment notes never belong in Git.
    Gatekeeper, the app version, and the updater feed. Test both current-version
    checks and an older test copy upgrading to the release.
 
+Run one publisher at a time. The REST upload endpoint does not enforce conditional
+writes; existing-object checks and readback verification do not provide a distributed lock.
+
 Cloudflare authentication reads `CLOUDFLARE_API_TOKEN` or the single raw token in
 `~/.cf`; the file is not sourced as shell code, copied into the repository, or logged.
 The gateway is read-only and permits only public release keys. Versioned downloads

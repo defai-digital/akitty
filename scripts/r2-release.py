@@ -44,7 +44,7 @@ def credential():
     return token
 
 
-def fetch(url, *, method="GET", data=None, headers=None, missing=False, conflict=False):
+def fetch(url, *, method="GET", data=None, headers=None, missing=False):
     request = urllib.request.Request(
         url, method=method, data=data, headers=headers or {}
     )
@@ -52,10 +52,6 @@ def fetch(url, *, method="GET", data=None, headers=None, missing=False, conflict
         with urllib.request.urlopen(request, timeout=240) as response:
             return response.read()
     except urllib.error.HTTPError as error:
-        # A failed precondition means another writer won the creation race; the
-        # caller compares bytes instead of treating it as a hard failure.
-        if conflict and error.code in (409, 412):
-            return None
         if missing and error.code == 404:
             return None
         # Never print response bodies or authorization headers.
@@ -165,7 +161,7 @@ class Cloudflare:
         require(before["domain"] == after["domain"], "Shared download domain changed")
         print("Gateway verified:", WORKER, BUCKET, ROUTE)
 
-    def storage(self, key, data=None, create_only=False):
+    def storage(self, key, data=None):
         require(
             re.fullmatch(r"[A-Za-z0-9/_.-]+", key) and ".." not in key.split("/"),
             "Invalid object key",
@@ -179,19 +175,12 @@ class Cloudflare:
             if key.endswith(".zip")
             else "text/plain"
         )
-        headers = {"Authorization": "Bearer " + self.token, "Content-Type": kind}
-        conditional = create_only and data is not None
-        if conditional:
-            # `If-None-Match: *` creates only if the key is still absent, which
-            # closes the check-then-put race for immutable objects.
-            headers["If-None-Match"] = "*"
         return fetch(
             f"https://api.cloudflare.com/client/v4/accounts/{self.account}/r2/buckets/{BUCKET}/objects/{key}",
             method="GET" if data is None else "PUT",
             data=data,
             missing=data is None,
-            headers=headers,
-            conflict=conditional,
+            headers={"Authorization": "Bearer " + self.token, "Content-Type": kind},
         )
 
 
@@ -210,11 +199,7 @@ def put_verified(cloud, key, data, mutable=False):
         "Refusing to replace immutable object: " + key,
     )
     if previous != data:
-        stored = cloud.storage(key, data, create_only=previous is None)
-        if stored is None:
-            # Lost the creation race: acceptable only when the winner wrote the
-            # exact bytes we intended to publish.
-            require(cloud.storage(key) == data, "Concurrent write differs: " + key)
+        cloud.storage(key, data)
     require(cloud.storage(key) == data, "Stored bytes differ: " + key)
     require(public(key) == data, "Public bytes differ: " + key)
     print("Verified:", key, flush=True)
