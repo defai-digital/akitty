@@ -125,6 +125,10 @@ The snapshot includes `chrome` only while something is still current: `status` (
 
 `{ "op": "program_chrome", "id", "enabled" }` is the host switch, also exposed as the setting "Allow programs to set the status bar". It defaults to on. When it is off, `OSC 771` is still consumed but does not change the document, and `chrome` from `akitty_request_v1` still does.
 
+For programs running inside the terminal, the [TypeScript SDK](../packages/akitty-sdk/README.md)
+encodes OSC 771, merges field updates into full documents and manages sprite ticks.
+Native hosts keep using the C ABI; the SDK does not create or attach to sessions.
+
 **Delta snapshots.** Blank cells on the default background are not listed in `cells`;
 `lines` holds every column, and a missing cell is one space. When `since` equals the
 revision of the last snapshot the core sent for that session and the grid size is

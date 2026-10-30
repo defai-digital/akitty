@@ -118,6 +118,11 @@ browser suite. Details are in [the package README](packages/akitty-web/README.md
 **AkiTTY Web** (`packages/akitty-web`) is the Windows, Linux, and in-browser terminal
 described in [Windows and Linux](#windows-and-linux). It is a private source package.
 
+**Program integration:** [`@ax-code/akitty-sdk`](packages/akitty-sdk/README.md) is a
+lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
+and small title-bar sprites. It writes the existing terminal protocols through a
+host-supplied output queue; native embedding continues to use the C ABI.
+
 **Status: early 0.12.2 implementation.** This is not a drop-in Ghostty replacement.
 Shell integration and quick terminal are planned and are not implemented yet.
 Ghostty configuration compatibility and third-party plugins are outside the current

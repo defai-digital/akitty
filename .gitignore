@@ -3,6 +3,7 @@
 /macos/.build/
 /node_modules/
 /packages/*/node_modules/
+/packages/akitty-sdk/dist/
 .DS_Store
 .internal/
 .agents/
