@@ -76,6 +76,8 @@ pub struct Model {
     pub revision: u64,
     pub title: String,
     pub clipboard: Vec<String>,
+    /// BEL seen since the last snapshot; the client decides how to sound it.
+    pub bell: bool,
     pub error: Option<String>,
     pub exited: bool,
     pub exit_code: Option<u32>,
@@ -104,6 +106,7 @@ impl Model {
             revision: 1,
             title: "Akitty".into(),
             clipboard: Vec::new(),
+            bell: false,
             error: None,
             exited: false,
             exit_code: None,
@@ -216,6 +219,7 @@ impl Model {
                         .collect()
                 }
                 Event::ResetTitle => self.title = "Akitty".into(),
+                Event::Bell => self.bell = true,
                 Event::ClipboardStore(_, text) => {
                     if self.clipboard.len() < 4 && text.len() <= 65536 {
                         self.clipboard.push(text);
@@ -246,7 +250,7 @@ impl Model {
         false
     }
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
-        if since == Some(self.revision) && self.clipboard.is_empty() {
+        if since == Some(self.revision) && self.clipboard.is_empty() && !self.bell {
             return json!({"changed": false});
         }
         self.sync_graphics();
@@ -410,7 +414,7 @@ impl Model {
             "alternate": content.mode.contains(TermMode::ALT_SCREEN),
             "kitty_flags": kitty_flags(content.mode),
             "offset": content.display_offset, "history": self.term.grid().history_size(),
-            "clipboard": std::mem::take(&mut self.clipboard), "error": self.error,
+            "clipboard": std::mem::take(&mut self.clipboard), "bell": std::mem::take(&mut self.bell), "error": self.error,
             "exited": self.exited, "exit_code": self.exit_code});
         if let Some(object) = snapshot.as_object_mut() {
             if links_empty {

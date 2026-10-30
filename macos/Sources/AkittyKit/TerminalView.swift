@@ -32,6 +32,7 @@ import os
     private var selectedText = ""
     private var pendingClipboard: [String] = []
     private var clipboardPromptOpen = false
+    private var lastBell = Date.distantPast
     private var lastGrid: (Int, Int) = (0, 0)
     /// Key codes whose press went out as a Kitty escape, so only those get a release.
     private var kittyDown: [UInt16: KittyKeyInput] = [:]
@@ -140,6 +141,7 @@ import os
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
+                ringBell(next.bell == true)
                 if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
                 redraw()
                 NSAccessibility.post(element: self, notification: .valueChanged)
@@ -188,6 +190,11 @@ import os
             context.saveGState(); context.translateBy(x: 0, y: bounds.height); context.scaleBy(x: 1, y: -1)
             context.draw(image, in: bounds); context.restoreGState()
         }
+    }
+    /// One beep per second at most, so a program that rings in a loop cannot make noise continuously.
+    private func ringBell(_ rang: Bool) {
+        guard rang, Date().timeIntervalSince(lastBell) >= 1 else { return }
+        lastBell = Date(); NSSound.beep()
     }
     private func show(_ error: Error) { onStatus?(error.localizedDescription); NSSound.beep() }
     public func send(_ text: String, paste: Bool = false) {

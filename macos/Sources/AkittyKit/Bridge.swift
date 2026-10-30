@@ -133,6 +133,8 @@ public struct Snapshot: Codable, Sendable {
     public let offset: Int
     public let history: Int
     public let clipboard: [String]
+    /// A BEL arrived since the previous snapshot.
+    public let bell: Bool?
     public let error: String?
     public let exited: Bool
     public let exit_code: UInt32?

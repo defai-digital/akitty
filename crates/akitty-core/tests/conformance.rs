@@ -79,6 +79,15 @@ fn clipboard_is_bounded_text_event_not_host_write() {
     assert_eq!(t.snapshot()["clipboard"], json!([]));
 }
 #[test]
+fn bell_is_reported_once_and_osc_terminators_do_not_ring() {
+    let t = Terminal::new(20, 3);
+    t.feed("\x1b]0;title\x07\x1b]52;c;aGVsbG8=\x07");
+    assert_eq!(t.snapshot()["bell"], false, "BEL ending an OSC string is a terminator");
+    t.feed("\x07");
+    assert_eq!(t.snapshot()["bell"], true);
+    assert_eq!(t.snapshot()["bell"], false);
+}
+#[test]
 fn malformed_sequences_and_unknown_osc_recover() {
     let t = Terminal::new(20, 3);
     t.feed("\x1b]999;unsupported\x07\x1b[0mok");
