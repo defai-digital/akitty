@@ -5,7 +5,7 @@
  *
  * Usage:
  * ```typescript
- * import { init, Terminal } from 'ghostty-web';
+ * import { init, Terminal } from '@ax-code/akitty-web';
  *
  * await init();
  * const term = new Terminal();
@@ -126,6 +126,7 @@ export class Terminal implements ITerminalCore {
   private scrollbarDragStartViewportY: number = 0;
 
   // Scrollbar visibility/auto-hide state
+  private renderFailed: boolean = false;
   private scrollbarVisible: boolean = false;
   private scrollbarOpacity: number = 0;
   private scrollbarHideTimeout?: number;
@@ -202,7 +203,7 @@ export class Terminal implements ITerminalCore {
 
       case 'theme':
         if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
+          console.warn('akitty-web: theme changes after open() are not yet fully supported');
         }
         break;
 
@@ -1108,14 +1109,28 @@ export class Terminal implements ITerminalCore {
         // 1. Calls update() once to sync state and check dirty flags
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always calls clearDirty() at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
+        // A throwing frame must not end the loop, or the terminal would freeze for good: log it once per failure
+        // streak, force a full redraw on the next frame and keep scheduling.
+        try {
+          this.renderer!.render(
+            this.wasmTerm!,
+            this.renderFailed,
+            this.viewportY,
+            this,
+            this.scrollbarOpacity
+          );
 
-        // Check for cursor movement (Phase 2: onCursorMove event)
-        // Note: getCursor() reads from already-updated render state (from render() above)
-        const cursor = this.wasmTerm!.getCursor();
-        if (cursor.y !== this.lastCursorY) {
-          this.lastCursorY = cursor.y;
-          this.cursorMoveEmitter.fire();
+          // Check for cursor movement (Phase 2: onCursorMove event)
+          // Note: getCursor() reads from already-updated render state (from render() above)
+          const cursor = this.wasmTerm!.getCursor();
+          if (cursor.y !== this.lastCursorY) {
+            this.lastCursorY = cursor.y;
+            this.cursorMoveEmitter.fire();
+          }
+          this.renderFailed = false;
+        } catch (error) {
+          if (!this.renderFailed) console.error('akitty-web: render failed, retrying next frame', error);
+          this.renderFailed = true;
         }
 
         // Note: onRender event is intentionally not fired in the render loop
