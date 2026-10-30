@@ -648,6 +648,37 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(URL(fileURLWithPath: reported).resolvingSymlinksInPath(), directory.resolvingSymlinksInPath())
     }
 
+    /// Text output and typing, not only graphics, switch to display-rate polling, so an echo or a scrolling
+    /// screen is shown on the next frame instead of waiting up to 33 ms for the idle timer.
+    @MainActor func testOutputAndTypingPollAtDisplayRate() async throws {
+        _ = NSApplication.shared
+        func hosted(_ view: TerminalView) -> NSWindow {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
+            window.isReleasedWhenClosed = false
+            window.contentView = view
+            return window
+        }
+        let output = try TerminalView(headless: true, forceSoftware: true)
+        defer { output.shutdown() }
+        let outputWindow = hosted(output)
+        defer { outputWindow.close() }
+        for _ in 0..<100 where output.snapshot == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        _ = try output.session.call("feed", ["text": "streaming output"])
+        output.poll()
+        for _ in 0..<100 where output.snapshot?.text.contains("streaming output") != true { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(output.pollsAtDisplayRate, "a changed snapshot keeps polling at display rate")
+
+        let shell = try TerminalView(headless: false, forceSoftware: true)
+        defer { shell.shutdown() }
+        let shellWindow = hosted(shell)
+        defer { shellWindow.close() }
+        // Wait until the shell has settled, so only the keystroke can restart fast polling.
+        for _ in 0..<300 where shell.pollsAtDisplayRate || shell.snapshot == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        try XCTSkipIf(shell.pollsAtDisplayRate, "shell kept printing; cannot isolate the keystroke")
+        shell.send("x")
+        XCTAssertTrue(shell.pollsAtDisplayRate, "accepted input polls at display rate at once")
+    }
+
     @MainActor func testFailedShellStartupThrowsWithoutUninitializedNSViewCrash() async {
         var preferences = TerminalPreferences(); preferences.shell = "/does-not-exist/akitty-test-shell"
         XCTAssertThrowsError(try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences))

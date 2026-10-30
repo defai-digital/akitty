@@ -29,11 +29,11 @@ import os
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
     private var timer: Timer?
-    /// Polls at the display rate while graphics move; paused, not invalidated, while the view is idle.
+    /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
-    /// Uptime seconds of the last image generation change; a fresh frame keeps the fast poll going briefly.
-    private var lastImageChange: Double = 0
-    private var imageGenerations: [UInt32: UInt64] = [:]
+    /// Uptime seconds of the last changed snapshot or local input. Output, typing and graphics alike keep the
+    /// display-rate poll going for a second, so an echoed keystroke or a scrolling screen never waits for the 30 Hz tick.
+    private var lastChange: Double = 0
     private var composition = Composition()
     private var tracking: NSTrackingArea?
     private var selectionStart: (Int, Int)?
@@ -140,7 +140,7 @@ import os
         return now - changedAt < 1
     }
     private func updatePolling() {
-        setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastImageChange, now: ProcessInfo.processInfo.systemUptime))
+        setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastChange, now: ProcessInfo.processInfo.systemUptime))
     }
     /// The link is only created inside a window; without one the idle timer keeps polling.
     private func setFastPolling(_ fast: Bool) {
@@ -152,6 +152,8 @@ import os
         }
         refreshLink?.isPaused = false
     }
+    /// Whether the display link is polling now, rather than only the 30 Hz idle timer.
+    var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
     @objc private func displayTick(_ link: CADisplayLink) {
         guard !stopped, window != nil else { link.isPaused = true; return }
@@ -188,10 +190,8 @@ import os
             if let next = try result.get() {
                 let previous = snapshot
                 snapshot = next
-                // A generation change means this frame may already be superseded by the next animation frame.
-                var generations: [UInt32: UInt64] = [:]
-                for image in next.images ?? [] { generations[image.id] = image.gen }
-                if generations != imageGenerations { imageGenerations = generations; lastImageChange = ProcessInfo.processInfo.systemUptime }
+                // More frames usually follow a changed one: output keeps streaming, an animation advances.
+                lastChange = ProcessInfo.processInfo.systemUptime
                 if next.exited, next.error == nil, next.exit_code == 0, !exitHandled {
                     exitHandled = true
                     DispatchQueue.main.async { [weak self] in self?.onExit?() }
@@ -306,7 +306,12 @@ import os
     private func show(_ error: Error) { onStatus?(error.localizedDescription); NSSound.beep() }
     public func send(_ text: String, paste: Bool = false) {
         guard !stopped else { return }
-        do { try session.input(text, paste: paste) } catch { show(error) }
+        do {
+            try session.input(text, paste: paste)
+            // The echo arrives within milliseconds; poll at the display rate to show it on the next frame.
+            lastChange = ProcessInfo.processInfo.systemUptime
+            updatePolling()
+        } catch { show(error) }
     }
     /// Kitty keyboard protocol: bytes for this event when the running program asked for them.
     private func kittyKey(_ event: NSEvent, type: KittyEventType) -> KittyKeyResult {
