@@ -297,6 +297,11 @@ fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     let response: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(response["ok"], true, "{}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]));
     assert!(bytes.len() < 8 * 1024 * 1024);
+    // The ABI splices pre-serialized snapshot JSON into the envelope; it must match the value path exactly.
+    assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0})));
+    let cell = &response["data"]["cells"][0];
+    assert_eq!((cell["ustyle"].clone(), cell["ucolor"].clone(), cell["strike"].clone(), cell["link"].clone()),
+        (json!(3), json!([1, 2, 3]), json!(true), json!(0)));
     eprintln!("worst-case snapshot: {} bytes", bytes.len());
 }
 #[test]

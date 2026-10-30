@@ -6,6 +6,7 @@ use crate::placeholder;
 use crate::tracker::{Tracker, Tracking};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::Flags};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -52,6 +53,76 @@ impl EventListener for Events {
             events.push_back(event);
         }
     }
+}
+
+/// One cell of a snapshot. Serialized directly, never through a `Value`: a busy screen has
+/// thousands of these, and a map per cell cost most of the snapshot time.
+#[derive(Serialize)]
+struct CellOut {
+    row: i32,
+    col: usize,
+    text: String,
+    fg: [u8; 3],
+    bg: [u8; 3],
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    selected: bool,
+    wide: bool,
+    // Optional fields are omitted when unset to keep snapshots compact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ustyle: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ucolor: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strike: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct CursorOut {
+    row: i32,
+    col: usize,
+    visible: bool,
+}
+
+#[derive(Serialize)]
+struct SnapshotOut<'a> {
+    changed: bool,
+    revision: u64,
+    cols: usize,
+    rows: usize,
+    title: &'a str,
+    cells: Vec<CellOut>,
+    lines: Vec<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    links: &'a [String],
+    images: Vec<Value>,
+    animating: bool,
+    cursor: CursorOut,
+    bracketed_paste: bool,
+    app_cursor: bool,
+    mouse_mode: bool,
+    mouse_sgr: bool,
+    mouse_drag: bool,
+    mouse_motion: bool,
+    focus_reporting: bool,
+    alternate: bool,
+    kitty_flags: u8,
+    offset: usize,
+    history: usize,
+    clipboard: Vec<String>,
+    bell: bool,
+    error: &'a Option<String>,
+    exited: bool,
+    exit_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chrome: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty: Option<Vec<usize>>,
 }
 
 /// What the client holds after the last snapshot sent: lets the next one carry only changed rows.
@@ -289,7 +360,13 @@ impl Model {
         }
         false
     }
+    /// The snapshot as a parsed value; the wire path uses [`Self::snapshot_json`].
+    #[cfg(test)]
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
+        serde_json::from_str(&self.snapshot_json(since)).expect("snapshot is valid JSON")
+    }
+    /// The snapshot JSON, serialized once from typed rows.
+    pub fn snapshot_json(&mut self, since: Option<u64>) -> String {
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
             self.revision = self.revision.saturating_add(1);
@@ -297,7 +374,7 @@ impl Model {
         let now = chrome::now_ms();
         let transient = self.chrome.transient_visible(now);
         if since == Some(self.revision) && self.clipboard.is_empty() && !self.bell && transient == self.reported_transient {
-            return json!({"changed": false});
+            return r#"{"changed":false}"#.into();
         }
         self.reported_transient = transient;
         self.sync_graphics();
@@ -418,28 +495,23 @@ impl Model {
             {
                 continue;
             }
-            let mut entry = json!({"row": row, "col": indexed.point.column.0, "text": value,
-                "fg": fg, "bg": bg, "bold": cell.flags.contains(Flags::BOLD),
-                "italic": cell.flags.contains(Flags::ITALIC), "underline": cell.flags.intersects(Flags::ALL_UNDERLINES),
-                "selected": selected, "wide": cell.flags.contains(Flags::WIDE_CHAR)});
-            // Optional fields are omitted when unset to keep snapshots compact.
-            if let Some(fields) = entry.as_object_mut() {
-                if let Some(style) = underline_style(cell.flags) {
-                    fields.insert("ustyle".into(), json!(style));
-                    if let Some(color) = cell.underline_color() {
-                        fields.insert("ucolor".into(), json!(resolve(color, content.colors)));
-                    }
-                }
-                if cell.flags.contains(Flags::STRIKEOUT) {
-                    fields.insert("strike".into(), json!(true));
-                }
-                if let Some(link) = cell.hyperlink()
-                    && let Some(index) = link_index(&mut links, link.uri())
-                {
-                    fields.insert("link".into(), json!(index));
-                }
-            }
-            cells.push(entry);
+            let ustyle = underline_style(cell.flags);
+            cells.push(CellOut {
+                row,
+                col: indexed.point.column.0,
+                text: value,
+                fg,
+                bg,
+                bold: cell.flags.contains(Flags::BOLD),
+                italic: cell.flags.contains(Flags::ITALIC),
+                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                selected,
+                wide: cell.flags.contains(Flags::WIDE_CHAR),
+                ustyle,
+                ucolor: ustyle.and(cell.underline_color()).map(|color| resolve(color, content.colors)),
+                strike: cell.flags.contains(Flags::STRIKEOUT).then_some(true),
+                link: cell.hyperlink().and_then(|link| link_index(&mut links, link.uri())),
+            });
         }
         let alternate = content.mode.contains(TermMode::ALT_SCREEN);
         // Drawn placements are bounded by the graphics limits, not cut here.
@@ -491,38 +563,42 @@ impl Model {
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
-        let links_empty = links.is_empty();
-        self.links = links.clone();
+        self.links = links;
         let dirty_rows: Vec<usize> = (0..rows).filter(|r| dirty[*r]).collect();
-        let lines: Vec<&String> = dirty_rows.iter().map(|r| &text[*r]).collect();
-        let mut snapshot = json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
-            "title": self.title, "cells": cells, "lines": lines, "links": links, "images": images,
-            "animating": self.graphics.animating(),
-            "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
-            "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
-            "app_cursor": content.mode.contains(TermMode::APP_CURSOR),
-            "mouse_mode": content.mode.intersects(TermMode::MOUSE_MODE),
-            "mouse_sgr": content.mode.contains(TermMode::SGR_MOUSE),
-            "mouse_drag": content.mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
-            "mouse_motion": content.mode.contains(TermMode::MOUSE_MOTION),
-            "focus_reporting": content.mode.contains(TermMode::FOCUS_IN_OUT),
-            "alternate": content.mode.contains(TermMode::ALT_SCREEN),
-            "kitty_flags": kitty_flags(content.mode),
-            "offset": content.display_offset, "history": self.term.grid().history_size(),
-            "clipboard": std::mem::take(&mut self.clipboard), "bell": std::mem::take(&mut self.bell), "error": self.error,
-            "exited": self.exited, "exit_code": self.exit_code});
-        if let Some(object) = snapshot.as_object_mut() {
-            if links_empty {
-                object.remove("links");
-            }
-            if let Some(chrome) = self.chrome.to_json(now) {
-                object.insert("chrome".into(), chrome);
-            }
-            if partial {
-                object.insert("partial".into(), json!(true));
-                object.insert("dirty".into(), json!(dirty_rows));
-            }
-        }
+        let lines: Vec<&str> = dirty_rows.iter().map(|r| text[*r].as_str()).collect();
+        let snapshot = SnapshotOut {
+            changed: true,
+            revision: self.revision,
+            cols: self.size.cols,
+            rows: self.size.rows,
+            title: &self.title,
+            cells,
+            lines,
+            links: &self.links,
+            images,
+            animating: self.graphics.animating(),
+            cursor: CursorOut { row: cursor_row, col: content.cursor.point.column.0, visible: cursor_visible },
+            bracketed_paste: content.mode.contains(TermMode::BRACKETED_PASTE),
+            app_cursor: content.mode.contains(TermMode::APP_CURSOR),
+            mouse_mode: content.mode.intersects(TermMode::MOUSE_MODE),
+            mouse_sgr: content.mode.contains(TermMode::SGR_MOUSE),
+            mouse_drag: content.mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
+            mouse_motion: content.mode.contains(TermMode::MOUSE_MOTION),
+            focus_reporting: content.mode.contains(TermMode::FOCUS_IN_OUT),
+            alternate: content.mode.contains(TermMode::ALT_SCREEN),
+            kitty_flags: kitty_flags(content.mode),
+            offset: content.display_offset,
+            history: self.term.grid().history_size(),
+            clipboard: std::mem::take(&mut self.clipboard),
+            bell: std::mem::take(&mut self.bell),
+            error: &self.error,
+            exited: self.exited,
+            exit_code: self.exit_code,
+            chrome: self.chrome.to_json(now),
+            partial: partial.then_some(true),
+            dirty: partial.then_some(dirty_rows),
+        };
+        let json = serde_json::to_string(&snapshot).expect("snapshot fields serialize");
         // A crowded link table is rebuilt by the next full snapshot instead of growing without bound.
         let crowded = partial && self.links.len() > MAX_LINKS / 2;
         self.sent = (!crowded).then_some(SentRows {
@@ -530,7 +606,7 @@ impl Model {
             cols: self.size.cols,
             hashes,
         });
-        snapshot
+        json
     }
 }
 

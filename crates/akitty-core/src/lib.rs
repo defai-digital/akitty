@@ -101,17 +101,45 @@ struct Registry {
 }
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 
-pub fn request(bytes: &[u8]) -> Value {
-    match catch_unwind(AssertUnwindSafe(|| dispatch(bytes))) {
-        Ok(Ok(data)) => json!({"version": ABI_VERSION, "ok": true, "data": data}),
-        Ok(Err(error)) => json!({"version": ABI_VERSION, "ok": false, "error": error}),
-        Err(_) => {
-            json!({"version": ABI_VERSION, "ok": false, "error": "internal panic; recreate affected session"})
-        }
+/// Response data: a value, or JSON a hot path (snapshots) already serialized.
+enum Reply {
+    Value(Value),
+    Json(String),
+}
+
+/// Runs one request, turning a panic into an error response.
+fn guarded(bytes: &[u8]) -> Result<Reply, String> {
+    catch_unwind(AssertUnwindSafe(|| dispatch(bytes)))
+        .unwrap_or_else(|_| Err("internal panic; recreate affected session".into()))
+}
+
+fn envelope(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(data) => json!({"version": ABI_VERSION, "ok": true, "data": data}),
+        Err(error) => json!({"version": ABI_VERSION, "ok": false, "error": error}),
     }
 }
 
-fn dispatch(bytes: &[u8]) -> Result<Value, String> {
+/// The response envelope as a value. The C ABI uses [`respond`], which splices
+/// pre-serialized data instead of parsing it back.
+pub fn request(bytes: &[u8]) -> Value {
+    envelope(guarded(bytes).and_then(|reply| match reply {
+        Reply::Value(value) => Ok(value),
+        Reply::Json(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+    }))
+}
+
+/// The serialized response envelope for one request.
+fn respond(bytes: &[u8]) -> Vec<u8> {
+    let result = match guarded(bytes) {
+        Ok(Reply::Json(json)) => return format!(r#"{{"version":{ABI_VERSION},"ok":true,"data":{json}}}"#).into_bytes(),
+        Ok(Reply::Value(value)) => Ok(value),
+        Err(error) => Err(error),
+    };
+    serde_json::to_vec(&envelope(result)).unwrap_or_default()
+}
+
+fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
     if bytes.len() > MAX_REQUEST {
         return Err("request exceeds 1 MiB".into());
     }
@@ -120,7 +148,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match request {
+    let value = match request {
         Request::Version {} => Ok(
             json!({"abi": ABI_VERSION, "schema": 1, "platform": "macos", "engine": "alacritty_terminal 0.26.0"}),
         ),
@@ -191,7 +219,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             match request {
-                Request::Snapshot { since, .. } => session.snapshot(since),
+                Request::Snapshot { since, .. } => return session.snapshot(since).map(Reply::Json),
                 Request::Input { text, paste, .. } => {
                     session.input(text, paste.unwrap_or(false))?;
                     Ok(json!({}))
@@ -232,7 +260,8 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 _ => unreachable!(),
             }
         }
-    }
+    };
+    value.map(Reply::Value)
 }
 
 #[repr(C)]
@@ -251,13 +280,12 @@ pub extern "C" fn akitty_abi_version() -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn akitty_request_v1(data: *const u8, len: usize) -> AkittyBuffer {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let response = if len > MAX_REQUEST || data.is_null() {
-            json!({"version": 1, "ok": false, "error": "invalid request buffer"})
+        let mut bytes = if len > MAX_REQUEST || data.is_null() {
+            br#"{"version":1,"ok":false,"error":"invalid request buffer"}"#.to_vec()
         } else {
             // SAFETY: caller supplies a live byte slice; the bound is checked above.
-            request(unsafe { std::slice::from_raw_parts(data, len) })
+            respond(unsafe { std::slice::from_raw_parts(data, len) })
         };
-        let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
         if bytes.len() > MAX_RESPONSE {
             bytes = br#"{"version":1,"ok":false,"error":"snapshot exceeds 8 MiB"}"#.to_vec();
         }
