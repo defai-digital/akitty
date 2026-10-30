@@ -40,6 +40,23 @@ public struct Cell: Codable, Sendable {
     public let underline: Bool
     public let selected: Bool
     public let wide: Bool
+    /// 1 single, 2 double, 3 curly, 4 dotted, 5 dashed; absent when the cell is not underlined.
+    public let ustyle: UInt8?
+    public let ucolor: [UInt8]?
+    public let strike: Bool?
+    /// Index into `Snapshot.links` for OSC 8 hyperlinks.
+    public let link: Int?
+}
+
+/// OSC 8 targets come from untrusted terminal output; only inert schemes may be opened.
+public enum LinkPolicy {
+    public static let allowedSchemes: Set<String> = ["http", "https", "mailto"]
+    public static func url(for target: String) -> URL? {
+        guard target.utf8.count <= 2048, !target.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              let url = URL(string: target), let scheme = url.scheme?.lowercased(), allowedSchemes.contains(scheme) else { return nil }
+        if scheme != "mailto", url.host?.isEmpty != false { return nil }
+        return url
+    }
 }
 public struct Cursor: Codable, Sendable { public let row: Int; public let col: Int; public let visible: Bool }
 public struct Snapshot: Codable, Sendable {
@@ -50,6 +67,7 @@ public struct Snapshot: Codable, Sendable {
     public let title: String
     public let cells: [Cell]
     public let lines: [String]
+    public let links: [String]?
     public let cursor: Cursor
     public let bracketed_paste: Bool
     public let app_cursor: Bool
@@ -66,6 +84,12 @@ public struct Snapshot: Codable, Sendable {
     public let exited: Bool
     public let exit_code: UInt32?
     public var text: String { lines.joined(separator: "\n") }
+    /// The openable hyperlink under a cell, if any.
+    public func hyperlink(row: Int, col: Int) -> URL? {
+        guard let links, let cell = cells.first(where: { $0.row == row && $0.col == col }),
+              let index = cell.link, links.indices.contains(index) else { return nil }
+        return LinkPolicy.url(for: links[index])
+    }
     public func textOffset(row: Int, col: Int) -> Int {
         let row = min(max(0, row), max(0, rows - 1))
         let before = lines.prefix(row).reduce(0) { $0 + $1.utf16.count + 1 }

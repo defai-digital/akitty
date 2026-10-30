@@ -155,6 +155,8 @@ impl Model {
         let content = self.term.renderable_content();
         let mut cells = Vec::with_capacity(self.size.rows * self.size.cols);
         let mut text = vec![String::new(); self.size.rows];
+        // OSC 8 targets are deduplicated into a bounded table; cells reference them by index.
+        let mut links: Vec<String> = Vec::new();
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + content.display_offset as i32;
             if row < 0 || row as usize >= self.size.rows {
@@ -191,16 +193,34 @@ impl Model {
                 .as_ref()
                 .is_some_and(|s| s.contains(indexed.point));
             text[row as usize].push_str(&value);
-            cells.push(json!({"row": row, "col": indexed.point.column.0, "text": value,
+            let mut entry = json!({"row": row, "col": indexed.point.column.0, "text": value,
                 "fg": fg, "bg": bg, "bold": cell.flags.contains(Flags::BOLD),
                 "italic": cell.flags.contains(Flags::ITALIC), "underline": cell.flags.intersects(Flags::ALL_UNDERLINES),
-                "selected": selected, "wide": cell.flags.contains(Flags::WIDE_CHAR)}));
+                "selected": selected, "wide": cell.flags.contains(Flags::WIDE_CHAR)});
+            // Optional fields are omitted when unset to keep snapshots compact.
+            if let Some(fields) = entry.as_object_mut() {
+                if let Some(style) = underline_style(cell.flags) {
+                    fields.insert("ustyle".into(), json!(style));
+                    if let Some(color) = cell.underline_color() {
+                        fields.insert("ucolor".into(), json!(resolve(color, content.colors)));
+                    }
+                }
+                if cell.flags.contains(Flags::STRIKEOUT) {
+                    fields.insert("strike".into(), json!(true));
+                }
+                if let Some(link) = cell.hyperlink()
+                    && let Some(index) = link_index(&mut links, link.uri())
+                {
+                    fields.insert("link".into(), json!(index));
+                }
+            }
+            cells.push(entry);
         }
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
         json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
-            "title": self.title, "cells": cells, "lines": text,
+            "title": self.title, "cells": cells, "lines": text, "links": links,
             "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
             "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
             "app_cursor": content.mode.contains(TermMode::APP_CURSOR),
@@ -253,6 +273,38 @@ pub fn palette(index: usize) -> Rgb {
         b: rgb[2],
     }
 }
+/// Underline kind for a cell: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
+fn underline_style(flags: Flags) -> Option<u8> {
+    if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        Some(2)
+    } else if flags.contains(Flags::UNDERCURL) {
+        Some(3)
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        Some(4)
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        Some(5)
+    } else if flags.contains(Flags::UNDERLINE) {
+        Some(1)
+    } else {
+        None
+    }
+}
+const MAX_LINKS: usize = 256;
+const MAX_LINK_BYTES: usize = 2048;
+/// Interns a hyperlink target; oversized, control-bearing or excess targets are dropped.
+fn link_index(links: &mut Vec<String>, uri: &str) -> Option<usize> {
+    if uri.is_empty() || uri.len() > MAX_LINK_BYTES || uri.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(index) = links.iter().position(|known| known == uri) {
+        return Some(index);
+    }
+    if links.len() >= MAX_LINKS {
+        return None;
+    }
+    links.push(uri.to_owned());
+    Some(links.len() - 1)
+}
 fn resolve(color: Color, colors: &alacritty_terminal::term::color::Colors) -> [u8; 3] {
     let rgb = match color {
         Color::Spec(rgb) => rgb,
@@ -279,6 +331,31 @@ mod tests {
             assert_eq!(got["cells"], expected["cells"], "split={split}");
             assert_eq!(got["cursor"], expected["cursor"]);
         }
+    }
+    #[test]
+    fn styled_underlines_strikethrough_and_hyperlinks_are_reported() {
+        let mut model = Model::new(Size::validate(40, 3).unwrap(), 100);
+        model.feed(b"\x1b[4:3;58;2;1;2;3mC\x1b[0m\x1b[9mS\x1b[0m\x1b]8;;https://a.test/x\x07L\x1b]8;;\x07N");
+        let snapshot = model.snapshot(None);
+        let cells = &snapshot["cells"];
+        assert_eq!(cells[0]["ustyle"], 3);
+        assert_eq!(cells[0]["ucolor"], json!([1, 2, 3]));
+        assert_eq!(cells[1]["strike"], true);
+        assert_eq!(cells[2]["link"], 0);
+        assert_eq!(snapshot["links"], json!(["https://a.test/x"]));
+        assert!(cells[3].get("link").is_none() && cells[3].get("strike").is_none());
+    }
+    #[test]
+    fn hyperlink_table_is_bounded_and_rejects_control_bytes() {
+        let mut links = Vec::new();
+        assert_eq!(link_index(&mut links, "https://a"), Some(0));
+        assert_eq!(link_index(&mut links, "https://a"), Some(0));
+        assert_eq!(link_index(&mut links, "https://a\u{1b}b"), None);
+        assert_eq!(link_index(&mut links, &"x".repeat(MAX_LINK_BYTES + 1)), None);
+        for i in 1..MAX_LINKS {
+            assert_eq!(link_index(&mut links, &format!("https://h/{i}")), Some(i));
+        }
+        assert_eq!(link_index(&mut links, "https://overflow"), None);
     }
     #[test]
     fn cursor_report_and_device_status_reply() {

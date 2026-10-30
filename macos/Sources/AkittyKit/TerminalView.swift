@@ -241,6 +241,10 @@ import os
     }
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        if event.modifierFlags.contains(.command), let snapshot {
+            let cell = position(convert(event.locationInWindow, from: nil))
+            if let url = snapshot.hyperlink(row: cell.0, col: cell.1) { NSWorkspace.shared.open(url); return }
+        }
         if reportMouse(event, button: 0) { return }
         selectionStart = position(convert(event.locationInWindow, from: nil)); selectionEnd = nil
     }

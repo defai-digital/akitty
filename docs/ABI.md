@@ -35,6 +35,13 @@ Snapshots include authoritative Rust cell coordinates, colors, flags, cursor,
 mode state, visible text, title, clipboard requests and lifecycle/error status.
 Swift converts cells to UTF-16 offsets only for macOS text/accessibility APIs.
 
+Optional per-cell fields are omitted when unset: `ustyle` (1 single, 2 double,
+3 curly, 4 dotted, 5 dashed; `underline` stays true for any of them), `ucolor`
+(RGB underline colour), `strike`, and `link`, an index into the snapshot `links`
+array of OSC 8 targets. `links` holds at most 256 unique targets of at most 2,048
+bytes with no control characters; others are dropped. The core does not judge
+schemes: Swift opens only http, https and mailto targets, and only on Command-click.
+
 Calls may move between threads. The registry lock only looks up/creates/removes
 handles; session state is separately protected. Closing removes future lookup
 access while existing calls retain ownership until completion. Panics do not

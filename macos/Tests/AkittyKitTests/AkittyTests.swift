@@ -146,6 +146,24 @@ final class AkittyTests: XCTestCase {
         defaults.set(Data("bad".utf8), forKey: "terminalPreferences")
         XCTAssertEqual(TerminalPreferences.load(from: defaults), TerminalPreferences())
     }
+    func testHyperlinkPolicyAllowsOnlyInertSchemes() {
+        XCTAssertNotNil(LinkPolicy.url(for: "https://example.com/a?b=1"))
+        XCTAssertNotNil(LinkPolicy.url(for: "mailto:a@example.com"))
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "ssh://host", "x-apple.systempreferences:", "https://", "https://a\u{1b}b", "not a url", String(repeating: "a", count: 3000)] {
+            XCTAssertNil(LinkPolicy.url(for: bad), bad)
+        }
+    }
+    func testCoreReportsStyledCellsAndHyperlinksToSwift() throws {
+        let session = try TerminalSession(cols: 20, rows: 3, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}[4:3mC\u{1b}[0m\u{1b}[9mS\u{1b}[0m\u{1b}]8;;https://a.test/\u{7}L\u{1b}]8;;\u{7}N"])
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        XCTAssertEqual(snapshot.cells[0].ustyle, 3)
+        XCTAssertEqual(snapshot.cells[1].strike, true)
+        XCTAssertEqual(snapshot.hyperlink(row: 0, col: 2)?.absoluteString, "https://a.test/")
+        XCTAssertNil(snapshot.hyperlink(row: 0, col: 3))
+        _ = try GridRasterizer.make(snapshot: snapshot, size: CGSize(width: 200, height: 80), scale: 1, fontName: "Menlo", fontSize: 13, cellSize: CGSize(width: 8, height: 16), composition: "")
+    }
     func testStalePathsResetOnlyThemselvesOnLoad() throws {
         let suite = "akitty-tests-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

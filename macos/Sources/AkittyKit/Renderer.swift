@@ -105,18 +105,30 @@ enum GridRasterizer {
                               width: cellSize.width*(cell.wide ? 2 : 1), height: cellSize.height)
             if cell.text.isEmpty || cell.text == " " { continue }
             let style = (cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)
-            let key = "\(style):\(cell.underline):\(cell.fg):\(cell.text)"
+            let key = "\(style):\(cell.fg):\(cell.text)"
             let line: CTLine
             if let cached = glyphs[key] { line = cached }
             else {
                 var attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
-                if cell.underline { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
                 line = CTLineCreateWithAttributedString(NSAttributedString(string: cell.text, attributes: attrs))
                 glyphs[key] = line
             }
             context.saveGState(); context.clip(to: rect)
             context.textPosition = CGPoint(x: rect.minX, y: rect.minY + CTFontGetDescent(base) + 2)
             CTLineDraw(line, context); context.restoreGState()
+        }
+        // Decorations are drawn per cell so blank cells can still carry underlines and strikethrough.
+        let baseline = CTFontGetDescent(base) + 2
+        for cell in snapshot.cells where cell.underline || cell.strike == true {
+            let rect = CGRect(x: 8 + CGFloat(cell.col)*cellSize.width, y: size.height - 8 - CGFloat(cell.row+1)*cellSize.height,
+                              width: cellSize.width*(cell.wide ? 2 : 1), height: cellSize.height)
+            let lineColor = color(cell.ucolor ?? cell.fg)
+            if cell.underline { underline(context, style: cell.ustyle ?? 1, rect: rect, baseline: rect.minY + baseline, color: lineColor) }
+            if cell.strike == true {
+                context.setStrokeColor(color(cell.fg)); context.setLineWidth(1); context.setLineDash(phase: 0, lengths: [])
+                let y = rect.minY + baseline + CTFontGetXHeight(base) / 2
+                context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y)); context.strokePath()
+            }
         }
         if snapshot.cursor.visible {
             let rect = CGRect(x: 8 + CGFloat(snapshot.cursor.col)*cellSize.width, y: size.height - 8 - CGFloat(snapshot.cursor.row+1)*cellSize.height, width: cellSize.width, height: cellSize.height)
@@ -127,6 +139,29 @@ enum GridRasterizer {
             }
         }
         return context
+    }
+    static func underline(_ context: CGContext, style: UInt8, rect: CGRect, baseline: CGFloat, color: CGColor) {
+        context.saveGState(); defer { context.restoreGState() }
+        context.setStrokeColor(color); context.setLineWidth(1); context.setLineDash(phase: 0, lengths: [])
+        let y = baseline - 1.5
+        switch style {
+        case 2:
+            for offset in [CGFloat(0), -2] { context.move(to: CGPoint(x: rect.minX, y: y + offset)); context.addLine(to: CGPoint(x: rect.maxX, y: y + offset)) }
+        case 3:
+            let steps = max(4, Int(rect.width))
+            for step in 0...steps {
+                let x = rect.minX + rect.width * CGFloat(step) / CGFloat(steps)
+                let point = CGPoint(x: x, y: y - 1 + sin(CGFloat(step) / CGFloat(steps) * 2 * .pi) )
+                if step == 0 { context.move(to: point) } else { context.addLine(to: point) }
+            }
+        case 4:
+            context.setLineDash(phase: 0, lengths: [1, 2]); context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y))
+        case 5:
+            context.setLineDash(phase: 0, lengths: [3, 2]); context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y))
+        default:
+            context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y))
+        }
+        context.strokePath()
     }
     private static func color(_ bytes: [UInt8]) -> CGColor {
         guard bytes.count == 3 else { return CGColor(gray: 1, alpha: 1) }
