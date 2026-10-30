@@ -85,15 +85,30 @@ impl Model {
         }
     }
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.parser.advance(&mut self.term, bytes);
-        self.revision = self.revision.saturating_add(1);
-        let events: Vec<_> = self
-            .events
-            .0
-            .lock()
-            .map(|mut q| q.drain(..).collect())
-            .unwrap_or_default();
         let mut replies = Vec::new();
+        let mut overflowed = false;
+        // The event queue holds 128 entries and every event needs at least one input byte,
+        // so draining after each 64-byte slice guarantees none are dropped mid-chunk.
+        for slice in bytes.chunks(64) {
+            self.parser.advance(&mut self.term, slice);
+            let events: Vec<_> = self
+                .events
+                .0
+                .lock()
+                .map(|mut q| q.drain(..).collect())
+                .unwrap_or_default();
+            if !overflowed {
+                overflowed = self.handle_events(events, &mut replies);
+            }
+        }
+        self.revision = self.revision.saturating_add(1);
+        if overflowed {
+            replies.clear();
+        }
+        replies
+    }
+    /// Applies parsed terminal events; returns true when the reply limit was exceeded.
+    fn handle_events(&mut self, events: Vec<Event>, replies: &mut Vec<u8>) -> bool {
         for event in events {
             match event {
                 Event::Title(title) => {
@@ -128,10 +143,10 @@ impl Model {
             if replies.len() > 65536 {
                 replies.clear();
                 self.error = Some("terminal reply limit exceeded".into());
-                break;
+                return true;
             }
         }
-        replies
+        false
     }
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
         if since == Some(self.revision) && self.clipboard.is_empty() {

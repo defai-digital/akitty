@@ -70,6 +70,8 @@ enum Request {
 #[derive(Default)]
 struct Registry {
     next_id: u64,
+    /// Sessions being spawned outside the lock; they count against the cap.
+    creating: usize,
     sessions: HashMap<u64, Arc<session::Session>>,
 }
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -106,7 +108,7 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
             scrollback,
         } => {
             model::Size::validate(cols, rows)?;
-            if registry.sessions.len() >= 64 {
+            if registry.sessions.len() + registry.creating >= 64 {
                 return Err("session limit reached".into());
             }
             registry.next_id = registry
@@ -114,25 +116,23 @@ fn dispatch(bytes: &[u8]) -> Result<Value, String> {
                 .checked_add(1)
                 .ok_or("session ID exhausted")?;
             let id = registry.next_id;
+            registry.creating += 1;
             drop(registry);
-            let session = Arc::new(session::Session::new(
+            let created = session::Session::new(
                 cols,
                 rows,
                 shell,
                 cwd,
                 headless.unwrap_or(false),
                 scrollback.unwrap_or(5000),
-            )?);
+            );
             let mut registry = REGISTRY
                 .get()
                 .unwrap()
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            if registry.sessions.len() >= 64 {
-                drop(registry);
-                session.close()?;
-                return Err("session limit reached".into());
-            }
+            registry.creating -= 1;
+            let session = Arc::new(created?);
             registry.sessions.insert(id, session);
             Ok(json!({"id": id}))
         }

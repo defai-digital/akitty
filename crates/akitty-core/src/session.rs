@@ -138,10 +138,8 @@ impl Session {
     }
     pub fn input_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > 65548 { return Err("input exceeds 64 KiB plus paste delimiters".into()); }
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
-        model.term.scroll_display(Scroll::Bottom);
-        model.revision += 1;
         drop(model);
         let sender = self
             .commands
@@ -159,6 +157,11 @@ impl Session {
         if let Err(error) = sender.try_send(Command::Input(bytes)) {
             self.pending.fetch_sub(len, Ordering::SeqCst);
             return Err(format!("PTY command rejected: {error}"));
+        }
+        // Typing jumps back to the live screen, but only once the input was accepted.
+        if let Ok(mut model) = self.model.lock() {
+            model.term.scroll_display(Scroll::Bottom);
+            model.revision += 1;
         }
         Ok(())
     }

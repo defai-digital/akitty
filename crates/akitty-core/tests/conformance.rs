@@ -208,3 +208,22 @@ fn normal_shell_exit_preserves_success_status_for_native_pane_cleanup() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+#[test]
+fn events_are_not_dropped_within_one_large_chunk() {
+    let t = Terminal::new(20, 4);
+    let titles: String = (0..200).map(|i| format!("\x1b]0;t{i:03}\x07")).collect();
+    t.feed(&titles);
+    assert_eq!(t.snapshot()["title"], "t199");
+}
+#[test]
+fn rejected_input_does_not_move_the_viewport() {
+    let t = Terminal::new(10, 3);
+    t.feed(&"line\r\n".repeat(20));
+    call(json!({"op":"scroll","id":t.0,"lines":5}));
+    let before = t.snapshot();
+    let response = request(&serde_json::to_vec(&json!({"op":"input","id":t.0,"text":"x"})).unwrap());
+    assert_eq!(response["ok"], false);
+    let after = t.snapshot();
+    assert_eq!(before["offset"], after["offset"]);
+    assert!(after["offset"].as_u64().unwrap() > 0);
+}
