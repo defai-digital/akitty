@@ -60,7 +60,7 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
 
 ## Compatibility scope
 
-Unsupported initially: sixel, PNG/file/shared-memory Kitty graphics, image
+Unsupported initially: sixel, file/shared-memory/Unicode-placeholder Kitty graphics and Kitty animation frames, image
 clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
 public extension ecosystem. The Kitty keyboard protocol is advertised because
 `KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
@@ -68,14 +68,20 @@ is a modifier or composes text, and input-method text still composes. CoreText r
 performance or shaping parity. Full esctest results are not inferred from the
 curated conformance suite.
 
-Kitty graphics is a deliberately small subset. The core strips APC strings from the
+Kitty graphics is a small but practical subset. The core strips APC strings from the
 byte stream before the VT parser, keeps decoded RGBA images under hard limits
 (8 Mi pixels per image, 128 MiB and 256 placements per session) and reports visible
-placements in the snapshot. Pixels cross the boundary through
-`akitty_image_read_v1`, not JSON, so 1080p animation frames stay clear of the 8 MiB
-response cap. Only direct transmission is accepted: a program can never make Akitty
-read a file or shared-memory segment. Swift fetches pixels off the main thread and
-draws them in the grid rasterizer by z-index.
+placements in the snapshot, including source rectangles and pixel offsets. Pixels
+cross the boundary through `akitty_image_read_v1`, not JSON, so 1080p animation
+frames stay clear of the 8 MiB response cap. Direct raw RGB/RGBA transmission and
+in-band PNG (`f=100`, normalized to RGBA8) are accepted; files and shared memory are
+refused, so terminal output can never make Akitty read the filesystem. Placements
+stay attached to their text: a `tracker` handler sits between the parser and the
+terminal, forwards every callback unchanged and mirrors scroll regions, linefeeds,
+autowrap, reverse index, insert/delete lines, erase display, resets and resizes into
+the placement list, so images keep moving with the content even once scrollback is
+full. Swift fetches pixels off the main thread and draws them in the grid
+rasterizer by z-index.
 
 ## macOS 0.6 release additions
 

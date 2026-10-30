@@ -81,10 +81,11 @@ from ghostty-web, is now maintained independently, and runs Ghostty's VT parser 
 package. See [its README](packages/akitty-web/README.md).
 
 **Status: early 0.9.0 implementation.** This is not a drop-in Ghostty replacement.
-Sixel, PNG and file-based Kitty graphics, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick
-terminal and third-party plugins are not implemented. A bounded Kitty graphics subset
-(direct raw RGB/RGBA with zlib and chunking, placement, z-index, delete) is supported
-so pixel animations such as AX Code's opening and ending scenes can run; OSC 8
+Sixel, file/shared-memory and Unicode-placeholder Kitty graphics, Kitty animation frames, image clipboard protocols, custom shaders,
+Ghostty configuration compatibility, shell integration, quick terminal and third-party plugins are not implemented. A bounded Kitty
+graphics subset (direct raw RGB/RGBA and in-band PNG with zlib and chunking, image numbers, source rectangles and cell offsets,
+z-index layers and every delete mode) is supported, placements follow scrolling, scroll regions and resizes, and programs see the
+window's pixel size (TIOCGWINSZ, CSI 14 t and CSI 16 t), so PNG-based image tools and AX Code's opening and ending scenes can run; OSC 8
 hyperlinks open with Command-click, and underline styles and strikethrough render.
 The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
 modifier-only keys); base-layout alternate keys are reported only for US-position keys. Search currently finds the

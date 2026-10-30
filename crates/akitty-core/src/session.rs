@@ -59,7 +59,7 @@ impl Session {
             return Err("working directory does not exist".into());
         }
         let pty = portable_pty::native_pty_system()
-            .openpty(pty_size(size))
+            .openpty(pty_size(size, (0, 0)))
             .map_err(|e| e.to_string())?;
         let fd = pty.master.as_raw_fd().ok_or("PTY has no file descriptor")?;
         // SAFETY: fd is owned by pty.master, which outlives the worker.
@@ -183,7 +183,18 @@ impl Session {
         if !(1..=256).contains(&width) || !(1..=512).contains(&height) {
             return Err("cell size must be 1..256 by 1..512 pixels".into());
         }
-        self.model.lock().map_err(|_| "terminal unavailable")?.cell_px = (width, height);
+        let size = {
+            let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+            model.cell_px = (width, height);
+            model.size
+        };
+        // Push a PTY resize so TIOCGWINSZ reports the new pixel size even
+        // though the grid itself did not change. Headless sessions just store it.
+        if let Some(sender) = &self.commands {
+            sender
+                .try_send(Command::Resize(size))
+                .map_err(|e| format!("resize rejected: {e}"))?;
+        }
         Ok(())
     }
     pub fn read_image(&self, image: u32, out: &mut [u8]) -> usize {
@@ -264,12 +275,13 @@ impl Drop for Session {
         let _ = self.shutdown();
     }
 }
-fn pty_size(s: Size) -> PtySize {
+fn pty_size(s: Size, cell: (u32, u32)) -> PtySize {
     PtySize {
         cols: s.cols as u16,
         rows: s.rows as u16,
-        pixel_width: 0,
-        pixel_height: 0,
+        // Device pixels of the window: cells times cell size, clamped to u16.
+        pixel_width: (s.cols * cell.0 as usize).min(u16::MAX as usize) as u16,
+        pixel_height: (s.rows * cell.1 as usize).min(u16::MAX as usize) as u16,
     }
 }
 
@@ -291,7 +303,9 @@ fn run(
             match command {
                 Command::Input(bytes) => output.push_back((bytes, 0, true)),
                 Command::Resize(size) => {
-                    if let Err(error) = master.resize(pty_size(size)) {
+                    // The cell size is read before the ioctl so TIOCGWINSZ sees it.
+                    let cell = model.lock().map(|state| state.cell_px).unwrap_or((0, 0));
+                    if let Err(error) = master.resize(pty_size(size, cell)) {
                         io_error = Some(error.to_string());
                         break;
                     }
@@ -519,5 +533,28 @@ mod tests {
         assert!(session.input_bytes(vec![1; 65549]).is_err());
         session.close().unwrap();
         assert!(session.input_bytes(vec![1]).is_err());
+    }
+
+    #[test]
+    fn pty_pixel_size_is_cells_times_cell_pixels_and_clamps() {
+        let size = Size::validate(80, 24).unwrap();
+        let unknown = pty_size(size, (0, 0));
+        assert_eq!((unknown.pixel_width, unknown.pixel_height), (0, 0));
+        let pty = pty_size(size, (10, 20));
+        assert_eq!((pty.cols, pty.rows, pty.pixel_width, pty.pixel_height), (80, 24, 800, 480));
+        let huge = pty_size(Size::validate(256, 128).unwrap(), (256, 512));
+        assert_eq!((huge.pixel_width, huge.pixel_height), (u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn set_cell_size_pushes_a_pty_resize_without_a_grid_change() {
+        let mut session = Session::new(20, 3, None, None, true, 5000).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        session.commands = Some(tx);
+        session.set_cell_size(10, 20).unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::Resize(size)) if (size.cols, size.rows) == (20, 3))
+        );
+        assert_eq!(session.model.lock().unwrap().cell_px, (10, 20));
     }
 }

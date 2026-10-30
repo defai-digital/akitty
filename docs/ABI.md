@@ -45,21 +45,42 @@ legacy encoding is unchanged byte for byte. The flags are as fresh as the last
 snapshot, so a key typed within one poll interval of a flag change may use the old mode.
 
 **Kitty graphics.** The core answers a subset of the Kitty graphics protocol sent
-as APC strings: queries (`a=q`), direct (`t=d`) raw RGB/RGBA (`f=24|32`)
-transmission with optional zlib (`o=z`) and `m=` chunking, placement (`a=T|p`)
-and deletion (`a=d`: all, by image id, by z-index; capitals also free image data).
-Files, shared memory and PNG are refused with `ENOTSUP`, so terminal output can
-never make the core read a local file. Images are at most 8 Mi pixels, one session
-holds at most 128 MiB of pixels and 256 placements, and zlib output is capped at the
-declared size. The snapshot lists visible placements in `images` (`id`, `gen`
-generation, pixel `w`/`h`, viewport `row`/`col`, `cols`/`rows` in cells, `z`; at most
-64). Pixels do not travel in JSON: `akitty_image_read_v1(session, image, out,
-capacity)` copies `w*h*4` RGBA bytes and returns the count, or 0 on any error.
-Main-screen placements follow scrolling only while scrollback is growing (the core
-sees scrolling as history growth), so with scrollback 0, a full scrollback buffer, or
-on the alternate screen an image stays on its viewport row when text scrolls past it.
-Programs that animate (such as AX Code) redraw in place and delete explicitly.
-Alternate-screen images are removed when that screen is left.
+as APC strings: queries (`a=q`), direct (`t=d`) raw RGB/RGBA (`f=24|32`) and PNG
+(`f=100`) transmission with optional zlib (`o=z`) and `m=` chunking, image numbers
+(`I=`; `i=` and `I=` are mutually exclusive, replies echo `i=...,I=...`), placement
+(`a=T|p`) with source rectangles (`x`,`y`,`w`,`h` in image pixels, offsets `X`,`Y`
+inside the first cell, spans derived from the source aspect ratio unless both `c`
+and `r` are given) and deletion (`a=d`). PNG is checked against the pixel limit
+from its header before any frame is allocated, normalized to RGBA8 from every
+colour type and bit depth, and APNG yields only the default image; `o=z` PNG
+inflates with the `S=` limit when given (else 32 MiB) and queries decode the
+header only. Files and shared memory are refused with `ENOTSUP`, so terminal
+output can never make the core read a local file. Retransmitting an existing id
+first deletes all of its placements; images sent with neither `i=` nor `I=` are
+freed as soon as their last placement goes away. When a new image would exceed
+the limits the core first evicts images without placements (oldest first), then
+those whose placements are all in scrollback, before failing with `ENOSPC`;
+placement overflow evicts scrollback placements first. Images are at most 8 Mi
+pixels, one session holds at most 128 MiB of pixels and 256 placements, and zlib
+output is capped at the declared size. Deletes implement every `d=` mode
+(a/A visible-only, i/I and n/N by id or number with optional `p=`, c/C at the
+cursor, p/P and q/Q at 1-based x=,y= coordinates (q adds z=), x/X by column,
+y/Y by row, z/Z by z-index, r/R by id range, f/F as a no-op), affect only the
+current screen, cancel a pending chunked upload, and free unreferenced image
+data when uppercase (lowercase still frees idless images); unknown modes reply
+EINVAL. The snapshot lists visible placements in `images` (`id`, `gen`
+generation, pixel `w`/`h`, viewport `row`/`col`, `cols`/`rows` in cells, `z`,
+and the additive schema-1 fields `sx`,`sy`,`sw`,`sh` for the source rectangle in
+image pixels and `ox`,`oy` for the device-pixel offset inside the first cell);
+unknown keys are ignored. Pixels do not travel in JSON: `akitty_image_read_v1(session,
+image, out, capacity)` copies `w*h*4` RGBA bytes and returns the count, or 0 on
+any error. Placements follow the text: scrolling (including scroll regions, RI,
+IL/DL and a full scrollback buffer), ED, and reset move or delete them with the
+content on the current screen. Alternate-screen images are removed when that
+screen is left. `CSI 16 t` (cell size in pixels) is answered from the cell size
+the host reports via `cell_size`, and the kernel window size reports pixel
+dimensions derived from it; `cell_size` also pushes a PTY resize so the ioctl
+updates without a grid change.
 
 **Delta snapshots.** Blank cells on the default background are not listed in `cells`;
 `lines` holds every column, and a missing cell is one space. When `since` equals the

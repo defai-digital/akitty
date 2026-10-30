@@ -14,9 +14,11 @@ portable-pty = "=0.9.0"
 libc = "=0.2.177"
 base64 = "=0.22.1"
 miniz_oxide = "=0.8.9"
+png = { version = "=0.18.1", default-features = false }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 
 [dev-dependencies]
 base64 = "=0.22.1"
 miniz_oxide = "=0.8.9"
+png = { version = "=0.18.1", default-features = false }

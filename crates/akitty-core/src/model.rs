@@ -1,6 +1,7 @@
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use crate::graphics::{self, ApcFilter, Graphics, Segment};
+use crate::tracker::{Tracker, Tracking};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::Flags};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
 use serde_json::{Value, json};
@@ -67,7 +68,7 @@ pub struct Model {
     /// Pixel size of one cell as reported by the host; (0, 0) until known.
     pub cell_px: (u32, u32),
     in_alt: bool,
-    last_history: usize,
+    tracking: Tracking,
     pub term: Term<Events>,
     pub parser: Processor,
     pub events: Events,
@@ -95,7 +96,7 @@ impl Model {
             apc: ApcFilter::default(),
             cell_px: (0, 0),
             in_alt: false,
-            last_history: 0,
+            tracking: Tracking::new(size.cols, size.rows),
             term: Term::new(config, &size, events.clone()),
             parser: Processor::new(),
             events,
@@ -115,6 +116,15 @@ impl Model {
             match segment {
                 Segment::Pass(data) => self.advance(&data, &mut replies, &mut overflowed),
                 Segment::Apc(payload) => self.graphics_command(&payload, &mut replies, &mut overflowed),
+                // CSI 16 t: cell size in pixels, height first, like kitty's reply.
+                Segment::CellSizeQuery => {
+                    if !overflowed {
+                        let (width, height) = self.cell_px;
+                        let (width, height) =
+                            (if width > 0 { width } else { 8 }, if height > 0 { height } else { 16 });
+                        replies.extend_from_slice(format!("\x1b[6;{height};{width}t").as_bytes());
+                    }
+                }
             }
         }
         self.revision = self.revision.saturating_add(1);
@@ -127,7 +137,7 @@ impl Model {
         // The event queue holds 128 entries and every event needs at least one input byte,
         // so draining after each 64-byte slice guarantees none are dropped mid-chunk.
         for slice in data.chunks(64) {
-            self.parser.advance(&mut self.term, slice);
+            self.parse(slice);
             let events: Vec<_> = self
                 .events
                 .0
@@ -140,20 +150,30 @@ impl Model {
             self.track_screen();
         }
     }
-    /// Keeps image placements attached to their content as the screen scrolls or swaps.
+    /// Parses one chunk through the tracker, which forwards every callback to
+    /// the terminal and mirrors grid changes into the graphics placements.
+    fn parse(&mut self, slice: &[u8]) {
+        let Model { term, graphics, tracking, parser, .. } = self;
+        let mut handler = Tracker::new(term, graphics, tracking);
+        handler.sync();
+        parser.advance(&mut handler, slice);
+    }
+    /// Applies pending resize-driven placement shifts; a snapshot read after
+    /// a resize without new output still reports correct placement rows.
+    fn sync_graphics(&mut self) {
+        let Model { term, graphics, tracking, .. } = self;
+        Tracker::new(term, graphics, tracking).sync();
+    }
+    /// Drops alternate-screen images when that screen is left.
     fn track_screen(&mut self) {
         let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
-        let history = self.term.grid().history_size();
         if alt != self.in_alt {
             self.graphics.cancel_pending();
             if self.in_alt {
                 self.graphics.leave_alternate_screen();
             }
             self.in_alt = alt;
-        } else if !alt && history > self.last_history {
-            self.graphics.scrolled((history - self.last_history) as i32, history);
         }
-        self.last_history = history;
     }
     fn graphics_command(&mut self, payload: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
         let point = self.term.grid().cursor.point;
@@ -162,6 +182,7 @@ impl Model {
             line: point.line.0,
             col: point.column.0,
             alt: self.in_alt,
+            rows: self.size.rows,
             cell_width: if width > 0 { width } else { 8 },
             cell_height: if height > 0 { height } else { 16 },
         };
@@ -228,6 +249,7 @@ impl Model {
         if since == Some(self.revision) && self.clipboard.is_empty() {
             return json!({"changed": false});
         }
+        self.sync_graphics();
         let rows = self.size.rows;
         // Pass 1 hashes every row without allocating, to learn which rows differ from the
         // client's copy (the snapshot it was last sent, identified by `since`).
@@ -350,6 +372,7 @@ impl Model {
             cells.push(entry);
         }
         let alternate = content.mode.contains(TermMode::ALT_SCREEN);
+        // Visible placements are bounded by the graphics limits, not cut here.
         let images: Vec<Value> = self
             .graphics
             .placements
@@ -362,9 +385,10 @@ impl Model {
                     return None;
                 }
                 Some(json!({"id": p.image, "gen": image.generation, "w": image.width, "h": image.height,
-                    "row": row, "col": p.col, "cols": p.cols, "rows": p.rows, "z": p.z}))
+                    "row": row, "col": p.col, "cols": p.cols, "rows": p.rows, "z": p.z,
+                    "sx": p.src_x, "sy": p.src_y, "sw": p.src_w, "sh": p.src_h,
+                    "ox": p.off_x, "oy": p.off_y}))
             })
-            .take(64)
             .collect();
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
@@ -730,5 +754,172 @@ mod tests {
         let mut model = Model::new(Size::validate(30, 5).unwrap(), 5000);
         assert_eq!(model.feed(b"\x1b[2;4H\x1b[6n"), b"\x1b[2;4R");
         assert_eq!(model.feed(b"\x1b[5n"), b"\x1b[0n");
+    }
+
+    /// A 2x2 RGB frame, base64 of 12 zero bytes; small enough to inline.
+    const PIXEL: &str = "AAAAAAAAAAAAAAAA";
+    fn place(id: u32) -> String {
+        format!("\x1b_Ga=T,f=24,s=2,v=2,i={id},q=2,C=1;{PIXEL}\x1b\\")
+    }
+
+    #[test]
+    fn size_reports_answer_window_pixels_cells_and_cell_pixels() {
+        let mut model = Model::new(Size::validate(40, 10).unwrap(), 100);
+        model.cell_px = (8, 16);
+        assert_eq!(model.feed(b"\x1b[14t"), b"\x1b[4;160;320t");
+        assert_eq!(model.feed(b"\x1b[18t"), b"\x1b[8;10;40t");
+        assert_eq!(model.feed(b"\x1b[16t"), b"\x1b[6;16;8t");
+        // Without a reported cell size the documented 8x16 fallback answers.
+        let mut fresh = Model::new(Size::validate(40, 10).unwrap(), 100);
+        assert_eq!(fresh.feed(b"\x1b[16t"), b"\x1b[6;16;8t");
+    }
+
+    #[test]
+    fn placements_keep_following_scrolls_after_scrollback_is_full() {
+        let mut model = Model::new(Size::validate(20, 5).unwrap(), 100);
+        model.cell_px = (8, 16);
+        model.feed(place(1).as_bytes());
+        assert_eq!(model.graphics.placements.len(), 1);
+        // The cursor needs four linefeeds to reach the bottom of five rows,
+        // after which every linefeed scrolls the image one line further up.
+        model.feed("\r\n".repeat(50).as_bytes());
+        assert_eq!(model.graphics.placements[0].line, -46);
+        model.feed("\r\n".repeat(20000).as_bytes());
+        assert!(model.graphics.placements.is_empty(), "placement must leave with the text");
+        assert_eq!(model.term.grid().history_size(), 100);
+        assert!(model.graphics.images.contains_key(&1), "named image data survives");
+        assert!(
+            model.snapshot(None)["lines"][4].as_str().unwrap().trim().is_empty(),
+            "text kept scrolling after scrollback was full"
+        );
+    }
+
+    #[test]
+    fn wrapping_text_scrolls_the_screen_and_moves_placements() {
+        let mut model = Model::new(Size::validate(10, 3).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(b"\r\n\r\n");
+        model.feed(place(1).as_bytes());
+        model.feed(b"0123456789");
+        assert_eq!(model.graphics.placements[0].line, 2);
+        // The eleventh character wraps at the bottom of the screen, which
+        // scrolls the region up instead of moving the cursor further down.
+        model.feed(b"x");
+        assert_eq!(model.graphics.placements[0].line, 1);
+    }
+
+    #[test]
+    fn decstbm_scrolls_move_only_placements_inside_the_region() {
+        let mut model = Model::new(Size::validate(20, 10).unwrap(), 50);
+        model.cell_px = (8, 16);
+        let line = |model: &Model, id: u32| {
+            model
+                .graphics
+                .placements
+                .iter()
+                .find(|p| p.image == id)
+                .unwrap()
+                .line
+        };
+        // Region 0-based lines [1, 5); an image inside it (not on the border,
+        // since content scrolled out of the region is discarded) and one outside.
+        model.feed(b"\x1b[2;5r\x1b[3;1H");
+        model.feed(place(1).as_bytes());
+        model.feed(b"\x1b[9;1H");
+        model.feed(place(2).as_bytes());
+        assert_eq!((line(&model, 1), line(&model, 2)), (2, 8));
+        // A linefeed on the region's bottom line scrolls only the region.
+        model.feed(b"\x1b[5;1H\n");
+        assert_eq!((line(&model, 1), line(&model, 2)), (1, 8), "outside the region nothing moves");
+        // Reverse index on the region's top line scrolls the region back down.
+        model.feed(b"\x1b[2;1H\x1bM");
+        assert_eq!((line(&model, 1), line(&model, 2)), (2, 8));
+        // A linefeed outside the region, even at the screen bottom, scrolls nothing.
+        model.feed(b"\x1b[10;1H\n");
+        assert_eq!((line(&model, 1), line(&model, 2)), (2, 8));
+    }
+
+    #[test]
+    fn insert_and_delete_lines_shift_the_placements_below_the_cursor() {
+        let mut model = Model::new(Size::validate(20, 10).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(b"\x1b[3;1H");
+        model.feed(place(1).as_bytes());
+        assert_eq!(model.graphics.placements[0].line, 2);
+        model.feed(b"\x1b[3;1H\x1b[1L");
+        assert_eq!(model.graphics.placements[0].line, 3, "IL pushes content down");
+        // DL above the placement pulls it back up; DL on its own line would
+        // delete it, because that line's content is removed.
+        model.feed(b"\x1b[3;1H\x1b[1M");
+        assert_eq!(model.graphics.placements[0].line, 2, "DL pulls it back up");
+        // IL with the cursor outside the scroll region is ignored entirely.
+        model.feed(b"\x1b[2;5r\x1b[9;1H\x1b[1L");
+        assert_eq!(model.graphics.placements[0].line, 2);
+    }
+
+    #[test]
+    fn erase_display_deletes_visible_or_scrollback_placements() {
+        let mut model = Model::new(Size::validate(20, 5).unwrap(), 50);
+        model.cell_px = (8, 16);
+        let line = |model: &Model, id: u32| {
+            model
+                .graphics
+                .placements
+                .iter()
+                .find(|p| p.image == id)
+                .unwrap()
+                .line
+        };
+        model.feed(b"\x1b[1;1H");
+        model.feed(place(1).as_bytes());
+        model.feed("\r\n".repeat(8).as_bytes());
+        model.feed(b"\x1b[1;1Hx");
+        model.feed(place(2).as_bytes());
+        assert_eq!((line(&model, 1), line(&model, 2)), (-4, 0));
+        // ED 2 keeps scrollback images but moves them up by the viewport
+        // rows alacritty scrolls into history: one occupied row here.
+        model.feed(b"\x1b[2J");
+        assert_eq!(line(&model, 1), -5, "scrollback placement follows the cleared text");
+        assert!(!model.graphics.placements.iter().any(|p| p.image == 2));
+        // ED 3 removes the placements that live in scrollback.
+        model.feed(b"\x1b[3J");
+        assert!(model.graphics.placements.is_empty());
+        assert!(
+            model.graphics.images.contains_key(&1) && model.graphics.images.contains_key(&2),
+            "named image data is not freed by ED"
+        );
+        // ED 2 on the alternate screen deletes its visible placements.
+        model.feed(b"\x1b[?1049h\x1b[1;1H");
+        model.feed(place(3).as_bytes());
+        model.feed(b"\x1b[2J");
+        assert!(model.graphics.placements.is_empty());
+    }
+
+    #[test]
+    fn resize_reflow_shifts_main_placements_by_the_history_delta() {
+        let mut model = Model::new(Size::validate(20, 5).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(b"\x1b[1;1H");
+        model.feed(place(1).as_bytes());
+        model.feed(b"\x1b[5;1H");
+        model.feed(place(2).as_bytes());
+        assert_eq!((model.graphics.placements[0].line, model.graphics.placements[1].line), (0, 4));
+        // Shrinking by two rows reflows those lines into history: every
+        // placement moves up by two; the top one lands in scrollback.
+        let size = Size::validate(20, 3).unwrap();
+        model.term.resize(size);
+        model.size = size;
+        model.revision += 1;
+        let snapshot = model.snapshot(None);
+        assert_eq!(model.graphics.placements[0].line, -2);
+        assert_eq!(model.graphics.placements[1].line, 2);
+        assert_eq!(snapshot["images"].as_array().unwrap().len(), 1, "only the viewport image shows");
+        // Growing back restores the scrollback placement to the viewport.
+        let size = Size::validate(20, 5).unwrap();
+        model.term.resize(size);
+        model.size = size;
+        model.revision += 1;
+        model.snapshot(None);
+        assert_eq!(model.graphics.placements[0].line, 0);
     }
 }

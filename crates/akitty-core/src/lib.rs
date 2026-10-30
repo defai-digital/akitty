@@ -6,6 +6,7 @@ compile_error!("Akitty supports macOS only");
 mod graphics;
 mod model;
 mod session;
+mod tracker;
 
 use serde::Deserialize;
 use serde_json::{Value, json};

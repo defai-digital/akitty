@@ -297,3 +297,109 @@ fn graphics_without_c1_moves_cursor_below_the_image() {
     assert_eq!((s["cursor"]["row"].as_i64(), s["cursor"]["col"].as_i64()), (Some(1), Some(5)));
     assert_eq!(s["images"][0]["col"], 2);
 }
+
+/// A 2x2 RGB frame (base64 of 12 zero bytes) placed without moving the cursor.
+const PIXEL: &str = "AAAAAAAAAAAAAAAA";
+fn frame(id: u32) -> String {
+    format!("\x1b_Ga=T,f=24,s=2,v=2,i={id},q=2,C=1;{PIXEL}\x1b\\")
+}
+
+#[test]
+fn images_follow_scrolls_and_leave_with_a_tiny_scrollback() {
+    let id = call(json!({"op":"create","cols":12,"rows":3,"headless":true,"scrollback":2}))["id"]
+        .as_u64()
+        .unwrap();
+    let t = Terminal(id);
+    call(json!({"op":"cell_size","id":id,"width":8,"height":16}));
+    t.feed("line\r\n");
+    t.feed(&frame(1));
+    t.feed("more\r\n");
+    // The cursor is on the bottom row now; one more linefeed scrolls both
+    // the text and the placement up into the two-line scrollback.
+    t.feed("\r\n");
+    call(json!({"op":"scroll","id":id,"lines":1}));
+    let s = t.snapshot();
+    let images = s["images"].as_array().unwrap();
+    assert_eq!(
+        images.len(),
+        1,
+        "the placement follows its text into scrollback"
+    );
+    assert_eq!(
+        images[0]["row"], 1,
+        "the image sits on the line it was printed on"
+    );
+    assert!(s["lines"][1].as_str().unwrap().starts_with("more"));
+    // Once the text has left the scrollback the placement is gone for good.
+    t.feed(&"tail\r\n".repeat(10));
+    call(json!({"op":"scroll","id":id,"lines":5}));
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
+    assert_eq!(t.snapshot()["history"], 2);
+}
+
+#[test]
+fn region_scrolls_move_only_the_placements_inside_the_region() {
+    let t = Terminal::new(20, 10);
+    call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
+    // Region lines [1, 5); the first image sits inside it (not on the border,
+    // because content scrolled out of the region is discarded), the second outside.
+    t.feed("\x1b[2;5r\x1b[3;1H");
+    t.feed(&frame(1));
+    t.feed("\x1b[9;1H");
+    t.feed(&frame(2));
+    t.feed("\x1b[5;1H\n");
+    let s = t.snapshot();
+    let row = |id: u64| {
+        s["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap()["row"]
+            .as_i64()
+            .unwrap()
+    };
+    assert_eq!((row(1), row(2)), (1, 8), "only the region placement moves");
+    // Erasing the visible screen drops both; the text is gone with them.
+    t.feed("\x1b[2J");
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn snapshot_reports_placement_rectangle_and_pixel_offsets() {
+    use base64::Engine;
+    let t = Terminal::new(40, 10);
+    call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
+    let raw: Vec<u8> = (0..16 * 16 * 3).map(|i| (i % 251) as u8).collect();
+    let packed = base64::engine::general_purpose::STANDARD.encode(raw);
+    t.feed(&format!(
+        "ab\x1b_Ga=T,f=24,s=16,v=16,i=9,x=4,y=6,w=8,h=4,X=3,Y=5,c=4,r=2,q=2,C=1;{packed}\x1b\\"
+    ));
+    let image = &t.snapshot()["images"][0];
+    assert_eq!(image["sx"], 4);
+    assert_eq!(image["sy"], 6);
+    assert_eq!(image["sw"], 8);
+    assert_eq!(image["sh"], 4);
+    assert_eq!(image["ox"], 3);
+    assert_eq!(image["oy"], 5);
+    assert_eq!(image["cols"], 4);
+    assert_eq!(image["rows"], 2);
+    assert_eq!(image["row"], 0);
+    assert_eq!(image["col"], 2);
+}
+
+#[test]
+fn snapshots_report_every_visible_placement_without_the_old_64_cap() {
+    let id = call(json!({"op":"create","cols":30,"rows":100,"headless":true}))["id"]
+        .as_u64()
+        .unwrap();
+    let t = Terminal(id);
+    call(json!({"op":"cell_size","id":id,"width":8,"height":16}));
+    for row in 1..=80u32 {
+        t.feed(&format!("\x1b[{row};1H"));
+        t.feed(&frame(row));
+    }
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 80);
+    t.feed("\x1b[2J");
+    assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
+}
