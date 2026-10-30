@@ -1,0 +1,4 @@
+module AkittyCore {
+  header "akitty.h"
+  export *
+}

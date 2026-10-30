@@ -1,0 +1,25 @@
+name: Verify macOS
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  required:
+    name: Required macOS verification
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+      - name: Verify Rust, TypeScript, Swift, C ABI and public files
+        run: scripts/verify.sh
+      - name: Build app bundle
+        run: scripts/build-app.sh release
+      - name: Check generated TypeScript bundle is current
+        run: git diff --exit-code -- macos/Sources/AkittyKit/Resources/features.js

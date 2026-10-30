@@ -1,0 +1,64 @@
+# Akitty architecture and implementation plan
+
+Akitty is an independent, macOS-only Rust/Swift revamp of Ghostty, with a small
+TypeScript feature layer. Its own source is MIT licensed. It is not a mechanical
+port and does not promise Ghostty protocol or configuration parity.
+
+## Decisions
+
+- Pin alacritty_terminal 0.26.0 for VT state and parsing; keep its types private.
+  Directly translating Ghostty's Zig core would recreate a substantial correctness
+  burden. Dependencies keep their own licenses (the engine is Apache-2.0).
+- Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
+  One nonblocking worker owns each PTY. Session state is mutex protected; logical
+  serialization does not assume DispatchQueue calls stay on one OS thread.
+- ABI v1 uses bounded UTF-8 JSON, integer session handles, explicit buffer freeing,
+  version checks, errors and panic containment. Both sides validate dimensions.
+- Swift owns AppKit windows/tabs/splits, IME, text accessibility, pasteboard policy,
+  CoreText rasterization and Metal presentation. A renderer failure switches to a
+  visible software fallback. No GTK/OpenGL code is carried over.
+- Clipboard reads from terminal applications are denied. OSC 52 text writes need
+  user approval; images are unsupported, so confirmation never decodes images.
+- TypeScript ranks native commands through bundled JavaScriptCore code. Swift is
+  the command authority. No Node runtime, shell bridge, dynamic plugin loading,
+  AX TUI native renderer, or arbitrary user JavaScript is included.
+- Adapt only AX TUI's fuzzy ranking algorithm, with pinned provenance and license.
+  The original registry imports Node and renderer classes and is not copied whole.
+
+## Independent advice
+
+Muse CLI recommended a mature Rust engine, narrow versioned ABI, bounded process
+shutdown, permission-first clipboard behavior, native IME/accessibility and
+blocking regressions. Grok CLI and Muse CLI independently recommended declarative
+TypeScript palette results validated and dispatched by Swift. Grok's first architecture call timed out; a shorter retry completed and agreed on
+engine reuse, while highlighting render data cost, character-width authority and
+PTY cleanup. Raw discussions are private and excluded from publication.
+
+Advice is not test evidence. In particular, a serial queue is not a fixed OS
+thread, and a JavaScriptCore time-limit API must not be assumed public/available.
+Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
+
+## Implementation order and acceptance
+
+1. Rust engine, ABI, PTY lifecycle: terminal escape behavior, split UTF-8/escape
+   input, alternate screen, resize, output replies, stale handles, bounds, process
+   cleanup and backpressure regressions must pass.
+2. Swift app: interactive shell, tabs/splits, scrollback, copy/paste/find, IME and
+   accessible text. Test native policy and Unicode selection behavior.
+3. Metal presentation: check each creation/encoding/completion stage; exercise
+   fallback by injected device/pipeline failure and verify the app still draws.
+4. TS palette: deterministic ranking, bounded inputs, schema/ID validation,
+   exception fallback and native execution. Typecheck and run JSCore integration.
+5. macOS CI runs the complete local verification command with no ignored test
+   failures. Public files are checked for secrets, machine paths and agent files.
+6. Build and smoke-test the app before committing/pushing. Signing/notarization,
+   release publication and full external esctest qualification are separate gates.
+
+## Compatibility scope
+
+Unsupported initially: Kitty graphics, sixel, image clipboard protocols, custom
+shaders, Ghostty config compatibility, shell integration, quick terminal and a
+public extension ecosystem. Kitty keyboard extensions are not advertised until
+native encoding is implemented. CoreText rendering is not a claim of Ghostty's
+performance or shaping parity. Full esctest results are not inferred from the
+curated conformance suite.
