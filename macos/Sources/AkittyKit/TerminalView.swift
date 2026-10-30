@@ -29,6 +29,10 @@ import os
     private var pendingClipboard: [String] = []
     private var clipboardPromptOpen = false
     private var lastGrid: (Int, Int) = (0, 0)
+    /// Key codes whose press went out as a Kitty escape, so only those get a release.
+    private var kittyDown: Set<UInt16> = []
+    /// Physical modifier keys currently down; a flags change alone cannot say which one moved.
+    private var heldModifierKeys: Set<UInt16> = []
     private var stopped = false
     private var fontSize: CGFloat = 14
     private var preferences = TerminalPreferences.load()
@@ -181,7 +185,7 @@ import os
     /// Kitty keyboard protocol: bytes for this event when the running program asked for them.
     private func kittyKey(_ event: NSEvent, type: KittyEventType) -> KittyKeyResult {
         let flags = Int(snapshot?.kitty_flags ?? 0)
-        guard flags != 0, !hasMarkedText(), !event.modifierFlags.contains(.command),
+        guard flags != 0, !hasMarkedText(),
               let input = KittyKeyInput(event: event, optionAsAlt: preferences.optionAsAlt, type: type) else { return .legacy }
         // With "all keys as escape codes", plain text from an input method (Japanese, Chinese…) still has to compose.
         let plain = input.modifiers.subtracting([.shift, .capsLock, .numLock]).isEmpty
@@ -190,24 +194,28 @@ import os
         return KittyKeyEncoder.encode(input, flags: flags)
     }
     public override func keyUp(with event: NSEvent) {
-        if case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
+        if kittyDown.remove(event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
         else { super.keyUp(with: event) }
     }
     public override func flagsChanged(with event: NSEvent) {
         let flags = Int(snapshot?.kitty_flags ?? 0)
-        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText(), let modifier = KittyKeyEncoder.modifier(forKeyCode: event.keyCode) else { super.flagsChanged(with: event); return }
+        guard KittyKeyEncoder.modifier(forKeyCode: event.keyCode) != nil else { super.flagsChanged(with: event); return }
+        // Toggle per physical key: with both Shifts down, releasing one leaves the aggregate flag set.
+        let pressed = heldModifierKeys.insert(event.keyCode).inserted
+        if !pressed { heldModifierKeys.remove(event.keyCode) }
+        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText() else { super.flagsChanged(with: event); return }
         let mods = KittyKeyInput.modifiers(of: event.modifierFlags, optionAsAlt: preferences.optionAsAlt)
-        if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: mods.contains(modifier), flags: flags) {
+        if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: pressed, flags: flags) {
             send(String(decoding: bytes, as: UTF8.self))
         }
     }
     public override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
         switch kittyKey(event, type: event.isARepeat ? .repeat : .press) {
-        case let .bytes(bytes): send(String(decoding: bytes, as: UTF8.self)); return
+        case let .bytes(bytes): kittyDown.insert(event.keyCode); send(String(decoding: bytes, as: UTF8.self)); return
         case .none: return
         case .legacy: break
         }
+        if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
         if event.modifierFlags.contains(.control), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
             if value >= 64 && value <= 127 { send(String(UnicodeScalar(value & 0x1f)!)); return }
@@ -220,8 +228,11 @@ import os
             let mask = (modifiers.contains(.shift) ? 1 : 0) + (modifiers.contains(.option) ? 2 : 0) + (modifiers.contains(.control) ? 4 : 0)
             send(mask > 0 ? "\u{1b}[1;\(mask + 1)\(code)" : "\u{1b}\(app ? "O" : "[")\(code)"); return
         }
-        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
-        if !hasMarkedText(), let text = special[event.keyCode] { send(event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text); return }
+        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 114: "\u{1b}[2~", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
+        if !hasMarkedText(), let text = special[event.keyCode] {
+            let sequence = event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text
+            send(preferences.optionAsAlt && event.modifierFlags.contains(.option) ? "\u{1b}" + sequence : sequence); return
+        }
         if preferences.optionAsAlt, event.modifierFlags.contains(.option), !hasMarkedText(), let text = event.charactersIgnoringModifiers, !text.isEmpty {
             send("\u{1b}" + text); return
         }
@@ -318,6 +329,7 @@ import os
         return true
     }
     public override func resignFirstResponder() -> Bool {
+        heldModifierKeys.removeAll(); kittyDown.removeAll()
         if snapshot?.focus_reporting == true { send("\u{1b}[O") }
         return true
     }

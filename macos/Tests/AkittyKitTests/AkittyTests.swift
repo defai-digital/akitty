@@ -255,6 +255,23 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 59, modifiers: [], pressed: false, flags: 10), esc("57442;1:3u"))
         XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 56, modifiers: [.shift], pressed: true, flags: 1), .none)
     }
+    func testKittyKeyboardReviewRegressions() throws {
+        XCTAssertEqual(kitty(99, [.ctrl], flags: 1), esc("13;5~"), "F3 uses the tilde form; CSI R is a cursor report")
+        XCTAssertEqual(kitty(8, "c", [.ctrl, .capsLock], flags: 1), esc("99;5u"), "lock state is reported only with all-keys")
+        XCTAssertEqual(kitty(8, "c", [.ctrl, .capsLock], flags: 8), esc("99;69u"))
+        XCTAssertEqual(kitty(36, [.shift], .release, flags: 3), .none)
+        XCTAssertEqual(kitty(36, [.shift], .repeat, flags: 3), esc("13;2u"))
+        XCTAssertEqual(kitty(36, [.shift], .release, flags: 11), esc("13;2:3u"))
+        XCTAssertEqual(kitty(53, [], .release, flags: 3), esc("27;1:3u"), "Escape releases are reported")
+        XCTAssertEqual(kitty(105, flags: 1), esc("57376u"), "F13")
+        XCTAssertEqual(kitty(114, flags: 1), .legacy)
+        XCTAssertEqual(KittyKeyInput.modifiers(of: .option, optionAsAlt: false), [])
+        XCTAssertEqual(KittyKeyInput.modifiers(of: [.option, .command], optionAsAlt: true), [.alt, .super])
+        let command = try XCTUnwrap(KittyKeyInput(event: XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: 0, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)), optionAsAlt: false, type: .press))
+        XCTAssertEqual(KittyKeyEncoder.encode(command, flags: 1), esc("97;9u"))
+        XCTAssertTrue(command.text.isEmpty)
+    }
     func testKittyKeyInputFromRealKeyEvents() throws {
         func event(_ chars: String, _ ignoring: String, _ flags: NSEvent.ModifierFlags, _ code: UInt16) throws -> NSEvent {
             try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,

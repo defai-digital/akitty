@@ -52,10 +52,12 @@ public enum KittyKeyEncoder {
     /// Keys encoded as `CSI 1;mods X` (letter) or `CSI n;mods ~`.
     private static let functional: [UInt16: (number: Int, final: Character)] = [
         126: (1, "A"), 125: (1, "B"), 124: (1, "C"), 123: (1, "D"), 115: (1, "H"), 119: (1, "F"),
-        122: (1, "P"), 120: (1, "Q"), 99: (1, "R"), 118: (1, "S"),
+        122: (1, "P"), 120: (1, "Q"), 99: (13, "~"), 118: (1, "S"),
         114: (2, "~"), 117: (3, "~"), 116: (5, "~"), 121: (6, "~"),
         96: (15, "~"), 97: (17, "~"), 98: (18, "~"), 100: (19, "~"), 101: (20, "~"), 109: (21, "~"), 103: (23, "~"), 111: (24, "~"),
     ]
+    /// F13-F20 are always `CSI code u` (their letter and tilde forms are taken).
+    private static let extraFunction: [UInt16: UInt32] = [105: 57376, 107: 57377, 113: 57378, 106: 57379, 64: 57380, 79: 57381, 80: 57382, 90: 57383]
     /// Escape, Enter, keypad Enter, Tab, Backspace.
     private static let editing: [UInt16: UInt32] = [53: 27, 36: 13, 76: 13, 48: 9, 51: 127]
     private static let keypad: [UInt16: UInt32] = [
@@ -76,7 +78,8 @@ public enum KittyKeyEncoder {
         // Repeats look like presses unless the app asked for event types; releases need that flag.
         if input.event == .release, !events { return .none }
         let significant = input.modifiers.subtracting(.locks)
-        let modifierValue = 1 + (input.modifiers.rawValue & 0xff)
+        // Lock state is only worth reporting when the app asked for every key.
+        let modifierValue = 1 + ((allKeys ? input.modifiers : significant).rawValue & 0xff)
         let unclaimed: KittyKeyResult = input.event == .release ? .none : .legacy
 
         if let function = functional[input.keyCode] {
@@ -86,14 +89,23 @@ public enum KittyKeyEncoder {
             let number = function.final == "~" ? "\(function.number)" : "1"
             return .bytes(Array("\u{1b}[\(number);\(mods)\(suffix)\(function.final)".utf8))
         }
+        if let code = extraFunction[input.keyCode] {
+            guard claimsKeys else { return unclaimed }
+            return .bytes(csiU(code: code, shifted: nil, base: nil, input: input, mods: modifierValue, flags: flags, text: []))
+        }
         if let base = editing[input.keyCode] {
             let code = allKeys && input.keyCode == 76 ? 57414 : base
             let claimed = (allKeys || (claimsKeys && (base == 27 || !significant.isEmpty)))
             guard claimed else { return unclaimed }
-            return .bytes(csiU(code: code, shifted: nil, base: nil, input: input, flags: flags, text: []))
+            // Enter, Tab and Backspace report repeats and releases only with "all keys".
+            if base != 27, !allKeys, input.event != .press {
+                return input.event == .release ? .none : .bytes(csiU(code: code, shifted: nil, base: nil,
+                    input: KittyKeyInput(keyCode: input.keyCode, modifiers: input.modifiers), mods: modifierValue, flags: flags, text: []))
+            }
+            return .bytes(csiU(code: code, shifted: nil, base: nil, input: input, mods: modifierValue, flags: flags, text: []))
         }
         if allKeys, let code = keypad[input.keyCode] {
-            return .bytes(csiU(code: code, shifted: nil, base: nil, input: input, flags: flags, text: input.text))
+            return .bytes(csiU(code: code, shifted: nil, base: nil, input: input, mods: modifierValue, flags: flags, text: input.text))
         }
         guard let key = input.key else { return unclaimed }
         // Shift alone produces ordinary text; any other modifier needs the unambiguous form.
@@ -101,7 +113,7 @@ public enum KittyKeyEncoder {
         guard claimed else { return unclaimed }
         let shifted = input.modifiers.contains(.shift) ? input.shiftedKey.flatMap { $0 == key ? nil : $0 } : nil
         let base = input.baseLayoutKey.flatMap { $0 == key ? nil : $0 }
-        return .bytes(csiU(code: key, shifted: shifted, base: base, input: input, flags: flags, text: input.text))
+        return .bytes(csiU(code: key, shifted: shifted, base: base, input: input, mods: modifierValue, flags: flags, text: input.text))
     }
 
     /// Press or release of a modifier key on its own; only reported with "all keys as escape codes".
@@ -113,14 +125,13 @@ public enum KittyKeyEncoder {
         return .bytes(Array("\u{1b}[\(key.code);\(1 + (modifiers.rawValue & 0xff))\(suffix)u".utf8))
     }
 
-    private static func csiU(code: UInt32, shifted: UInt32?, base: UInt32?, input: KittyKeyInput, flags: Int, text: [UInt32]) -> [UInt8] {
+    private static func csiU(code: UInt32, shifted: UInt32?, base: UInt32?, input: KittyKeyInput, mods: Int, flags: Int, text: [UInt32]) -> [UInt8] {
         var out = "\u{1b}[\(code)"
         if flags & reportAlternates != 0, shifted != nil || base != nil {
             out += ":" + (shifted.map(String.init) ?? "")
             if let base { out += ":\(base)" }
         }
         let suffix = flags & reportEvents != 0 && input.event != .press ? ":\(input.event.rawValue)" : ""
-        let mods = 1 + (input.modifiers.rawValue & 0xff)
         let carried = flags & reportText != 0 && flags & reportAllKeys != 0 && input.event != .release ? text : []
         if !carried.isEmpty {
             out += ";" + (mods == 1 && suffix.isEmpty ? "" : "\(mods)\(suffix)") + ";" + carried.map(String.init).joined(separator: ":")
@@ -150,6 +161,7 @@ extension KittyKeyInput {
         if flags.contains(.shift) { mods.insert(.shift) }
         if flags.contains(.control) { mods.insert(.ctrl) }
         if flags.contains(.capsLock) { mods.insert(.capsLock) }
+        if flags.contains(.command) { mods.insert(.super) }
         if flags.contains(.option) {
             if optionAsAlt { mods.insert(.alt) }
             else if Self.ansi[event.keyCode] != nil { return nil }
@@ -168,7 +180,7 @@ extension KittyKeyInput {
             key = us.0.unicodeScalars.first?.value
         }
         let typed = (event.characters ?? "").unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f && !(0xF700...0xF8FF).contains($0.value) }
-        let produced = type == .release || flags.contains(.control) ? [] : typed.map(\.value)
+        let produced = type == .release || flags.contains(.control) || flags.contains(.command) ? [] : typed.map(\.value)
         self.init(keyCode: event.keyCode, key: key,
                   shiftedKey: shift ? (typed.first?.value ?? us?.1.unicodeScalars.first?.value) : nil,
                   baseLayoutKey: us?.0.unicodeScalars.first?.value, text: produced, modifiers: mods, event: type)
@@ -179,7 +191,7 @@ extension KittyKeyInput {
         var mods: KittyModifiers = []
         if flags.contains(.shift) { mods.insert(.shift) }
         if flags.contains(.control) { mods.insert(.ctrl) }
-        if flags.contains(.option) { mods.insert(.alt) }
+        if flags.contains(.option), optionAsAlt { mods.insert(.alt) }
         if flags.contains(.command) { mods.insert(.super) }
         if flags.contains(.capsLock) { mods.insert(.capsLock) }
         return mods
