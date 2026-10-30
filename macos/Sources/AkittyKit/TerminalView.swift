@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import MetalKit
 import QuartzCore
 import os
@@ -51,13 +52,29 @@ import os
     private let shutdownGroup = DispatchGroup()
     private var fontSize: CGFloat = 14
     private var preferences = TerminalPreferences.load()
-    private var font: NSFont {
-        if preferences.fontName != "System Monospaced", let selected = NSFont(name: preferences.fontName, size: fontSize) { return selected }
-        return .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
+    private var fontLayout: (name: String, size: CGFloat, font: NSFont, cell: CGSize) {
+        if let cachedFont, cachedFont.name == preferences.fontName, cachedFont.size == fontSize { return cachedFont }
+        let size = fontSize.isFinite ? min(36, max(9, fontSize)) : 14
+        let font = (preferences.fontName == "System Monospaced" ? nil : NSFont(name: preferences.fontName, size: size))
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        // NSString.size(withAttributes:) raised an uncaught CoreText dictionary exception during
+        // redraw on macOS 27. A fixed grid needs a glyph advance, not attributed-string layout.
+        let face = font as CTFont
+        var character: UniChar = 0x4d, glyph: CGGlyph = 0
+        let found = CTFontGetGlyphsForCharacters(face, &character, &glyph, 1)
+        var advance = CGSize.zero
+        if found { CTFontGetAdvancesForGlyphs(face, .horizontal, &glyph, &advance, 1) }
+        let width = advance.width.isFinite && advance.width > 0 ? advance.width : size * 0.6
+        let height = CTFontGetAscent(face) + CTFontGetDescent(face) + CTFontGetLeading(face) + 4
+        let cell = CGSize(width: ceil(min(256, max(1, width))),
+                          height: ceil(min(512, max(1, height.isFinite && height > 0 ? height : size + 4))))
+        let result = (name: preferences.fontName, size: fontSize, font: font, cell: cell)
+        cachedFont = result
+        return result
     }
-    public var cellSize: CGSize {
-        CGSize(width: ceil(("M" as NSString).size(withAttributes: [.font: font]).width), height: ceil(font.ascender - font.descender + font.leading + 4))
-    }
+    private var font: NSFont { fontLayout.font }
+    public var cellSize: CGSize { fontLayout.cell }
     public override var acceptsFirstResponder: Bool { true }
     public override var isFlipped: Bool { true }
     /// `directory` overrides the Settings starting directory for this terminal only (a folder opened from Finder, Dock or `open -a`).
@@ -249,7 +266,7 @@ import os
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
-        let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
+        let fontName = font.fontName, fontSize = font.pointSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
         // With Metal, frames that show images split the text into two layers and let the GPU composite each image from
         // its own texture, so an animation frame re-uploads one texture instead of repainting the window. Frames without
         // images (and the software fallback) keep the single bitmap.
