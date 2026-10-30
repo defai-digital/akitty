@@ -133,6 +133,7 @@ impl Model {
         let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
         let history = self.term.grid().history_size();
         if alt != self.in_alt {
+            self.graphics.cancel_pending();
             if self.in_alt {
                 self.graphics.leave_alternate_screen();
             }

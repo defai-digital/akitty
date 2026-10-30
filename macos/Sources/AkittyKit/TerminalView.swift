@@ -30,7 +30,7 @@ import os
     private var clipboardPromptOpen = false
     private var lastGrid: (Int, Int) = (0, 0)
     /// Key codes whose press went out as a Kitty escape, so only those get a release.
-    private var kittyDown: Set<UInt16> = []
+    private var kittyDown: [UInt16: KittyKeyInput] = [:]
     /// Physical modifier keys currently down; a flags change alone cannot say which one moved.
     private var heldModifierKeys: Set<UInt16> = []
     private var stopped = false
@@ -194,24 +194,50 @@ import os
         return KittyKeyEncoder.encode(input, flags: flags)
     }
     public override func keyUp(with event: NSEvent) {
-        if kittyDown.remove(event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
+        if kittyDown.removeValue(forKey: event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
         else { super.keyUp(with: event) }
     }
     public override func flagsChanged(with event: NSEvent) {
         let flags = Int(snapshot?.kitty_flags ?? 0)
-        guard KittyKeyEncoder.modifier(forKeyCode: event.keyCode) != nil else { super.flagsChanged(with: event); return }
-        // Toggle per physical key: with both Shifts down, releasing one leaves the aggregate flag set.
-        let pressed = heldModifierKeys.insert(event.keyCode).inserted
-        if !pressed { heldModifierKeys.remove(event.keyCode) }
-        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText() else { super.flagsChanged(with: event); return }
+        guard let modifier = KittyKeyEncoder.modifier(forKeyCode: event.keyCode) else { super.flagsChanged(with: event); return }
+        // Per physical key: with both Shifts down, releasing one leaves the aggregate flag set. A key we
+        // never saw go down (pressed before the view had focus) falls back to the aggregate state.
         let mods = KittyKeyInput.modifiers(of: event.modifierFlags, optionAsAlt: preferences.optionAsAlt)
+        let pressed: Bool
+        if heldModifierKeys.remove(event.keyCode) != nil { pressed = false }
+        else { pressed = event.modifierFlags.contains(Self.nativeFlag(for: modifier)); if pressed { heldModifierKeys.insert(event.keyCode) } }
+        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText() else { super.flagsChanged(with: event); return }
         if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: pressed, flags: flags) {
             send(String(decoding: bytes, as: UTF8.self))
         }
     }
+    private static func nativeFlag(for modifier: KittyModifiers) -> NSEvent.ModifierFlags {
+        if modifier == .shift { return .shift }
+        if modifier == .ctrl { return .control }
+        if modifier == .alt { return .option }
+        return .command
+    }
+    /// Keys still held when focus leaves would never see their key-up here, so release them now.
+    private func releaseHeldKittyKeys() {
+        let flags = Int(snapshot?.kitty_flags ?? 0)
+        if flags & KittyKeyEncoder.reportEvents != 0 {
+            for var input in kittyDown.values {
+                input.event = .release
+                if case let .bytes(bytes) = KittyKeyEncoder.encode(input, flags: flags) { send(String(decoding: bytes, as: UTF8.self)) }
+            }
+            if flags & KittyKeyEncoder.reportAllKeys != 0 {
+                for code in heldModifierKeys {
+                    if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: code, modifiers: [], pressed: false, flags: flags) { send(String(decoding: bytes, as: UTF8.self)) }
+                }
+            }
+        }
+        kittyDown.removeAll(); heldModifierKeys.removeAll()
+    }
     public override func keyDown(with event: NSEvent) {
         switch kittyKey(event, type: event.isARepeat ? .repeat : .press) {
-        case let .bytes(bytes): kittyDown.insert(event.keyCode); send(String(decoding: bytes, as: UTF8.self)); return
+        case let .bytes(bytes):
+            if let input = KittyKeyInput(event: event, optionAsAlt: preferences.optionAsAlt, type: .press) { kittyDown[event.keyCode] = input }
+            send(String(decoding: bytes, as: UTF8.self)); return
         case .none: return
         case .legacy: break
         }
@@ -228,7 +254,7 @@ import os
             let mask = (modifiers.contains(.shift) ? 1 : 0) + (modifiers.contains(.option) ? 2 : 0) + (modifiers.contains(.control) ? 4 : 0)
             send(mask > 0 ? "\u{1b}[1;\(mask + 1)\(code)" : "\u{1b}\(app ? "O" : "[")\(code)"); return
         }
-        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 114: "\u{1b}[2~", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
+        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 114: "\u{1b}[2~", 105: "\u{1b}[25~", 107: "\u{1b}[26~", 113: "\u{1b}[28~", 106: "\u{1b}[29~", 64: "\u{1b}[31~", 79: "\u{1b}[32~", 80: "\u{1b}[33~", 90: "\u{1b}[34~", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
         if !hasMarkedText(), let text = special[event.keyCode] {
             let sequence = event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text
             send(preferences.optionAsAlt && event.modifierFlags.contains(.option) ? "\u{1b}" + sequence : sequence); return
@@ -329,7 +355,7 @@ import os
         return true
     }
     public override func resignFirstResponder() -> Bool {
-        heldModifierKeys.removeAll(); kittyDown.removeAll()
+        releaseHeldKittyKeys()
         if snapshot?.focus_reporting == true { send("\u{1b}[O") }
         return true
     }

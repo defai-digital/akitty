@@ -346,9 +346,14 @@ impl Graphics {
         let id = if command.id != 0 {
             command.id
         } else {
-            // Unnamed images get internal ids from a range clients rarely use.
-            self.next_auto_id = self.next_auto_id.wrapping_add(1);
-            0x8000_0000 | (self.next_auto_id & 0x7fff_ffff)
+            // Unnamed images get internal ids from a range clients rarely use, skipping taken ones.
+            loop {
+                self.next_auto_id = self.next_auto_id.wrapping_add(1);
+                let candidate = 0x8000_0000 | (self.next_auto_id & 0x7fff_ffff);
+                if !self.images.contains_key(&candidate) {
+                    break candidate;
+                }
+            }
         };
         if !self.images.contains_key(&id) && self.images.len() >= MAX_IMAGES {
             return self.fail(&command, "ENOSPC", "too many images");
@@ -454,14 +459,22 @@ impl Graphics {
     /// Called when the alternate screen is left: its images and placements go with it.
     pub fn leave_alternate_screen(&mut self) {
         self.placements.retain(|p| !p.alt);
+        let placements = &self.placements;
         let mut freed = 0;
-        self.images.retain(|_, image| {
-            if image.alt {
+        // An image the main screen still shows survives even if it was retransmitted on the alternate screen.
+        self.images.retain(|id, image| {
+            let keep = !image.alt || placements.iter().any(|p| p.image == *id);
+            if !keep {
                 freed += image.rgba.len();
             }
-            !image.alt
+            keep
         });
         self.bytes -= freed;
+        self.cancel_pending();
+    }
+
+    /// An unfinished chunked upload does not survive a screen switch.
+    pub fn cancel_pending(&mut self) {
         self.pending = None;
     }
 
@@ -563,6 +576,20 @@ mod tests {
         assert!(graphics.images.contains_key(&2));
         assert!(graphics.handle(b"m=0;", &context()).reply.is_empty());
         assert!(!graphics.images.contains_key(&3));
+    }
+
+    #[test]
+    fn auto_ids_never_replace_client_images_and_main_images_survive_alt_retransmit() {
+        let mut graphics = Graphics::default();
+        let pixel = encode(&[1, 2, 3]);
+        graphics.handle(format!("a=t,f=24,s=1,v=1,i=2147483649,q=2;{pixel}").as_bytes(), &context());
+        graphics.handle(format!("a=t,f=24,s=1,v=1,q=2;{pixel}").as_bytes(), &context());
+        assert_eq!(graphics.images.len(), 2, "unnamed image must not overwrite 0x80000001");
+        let main = Context { alt: false, ..context() };
+        graphics.handle(format!("a=T,f=24,s=1,v=1,i=1,q=2;{pixel}").as_bytes(), &main);
+        graphics.handle(format!("a=t,f=24,s=1,v=1,i=1,q=2;{pixel}").as_bytes(), &context());
+        graphics.leave_alternate_screen();
+        assert!(graphics.images.contains_key(&1) && graphics.placements.iter().any(|p| p.image == 1));
     }
 
     #[test]

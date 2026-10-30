@@ -55,8 +55,11 @@ declared size. The snapshot lists visible placements in `images` (`id`, `gen`
 generation, pixel `w`/`h`, viewport `row`/`col`, `cols`/`rows` in cells, `z`; at most
 64). Pixels do not travel in JSON: `akitty_image_read_v1(session, image, out,
 capacity)` copies `w*h*4` RGBA bytes and returns the count, or 0 on any error.
-Placements on the main screen follow scrolling while scrollback grows; alternate
-screen images are removed when that screen is left.
+Main-screen placements follow scrolling only while scrollback is growing (the core
+sees scrolling as history growth), so with scrollback 0, a full scrollback buffer, or
+on the alternate screen an image stays on its viewport row when text scrolls past it.
+Programs that animate (such as AX Code) redraw in place and delete explicitly.
+Alternate-screen images are removed when that screen is left.
 
 Optional per-cell fields are omitted when unset: `ustyle` (1 single, 2 double,
 3 curly, 4 dotted, 5 dashed; `underline` stays true for any of them), `ucolor`
