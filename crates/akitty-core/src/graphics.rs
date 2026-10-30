@@ -455,25 +455,20 @@ impl Graphics {
                 // A query never stores anything; it only reports whether the data would load.
                 // Real probes are a pixel or two, so large ones cannot be used to burn CPU.
                 // PNG queries read only the header; their size comes from the file.
-                let result = match command.medium {
-                    b'd' => {
-                        if command.format == 100 {
-                            BASE64
-                                .decode(&data)
-                                .map_err(|_| "EINVAL:invalid base64".to_string())
-                                .and_then(|raw| png_bytes(&command, &raw))
-                                .and_then(|bytes| png_decode(&bytes, true))
-                                .and_then(|head| query_pixel_rule(head.width, head.height))
-                        } else {
-                            query_pixel_rule(command.width, command.height)
-                                .and_then(|_| self.decode(&command, &data).map(|_| ()))
-                        }
-                    }
-                    // Probes through a file, temp file or shared memory carry real (tiny) data, which is read and,
-                    // for temp files and shared memory, consumed: kitten icat picks its transfer mode this way.
-                    b'f' | b't' | b's' => query_pixel_rule(command.width, command.height)
-                        .and_then(|_| self.decode(&command, &data).map(|_| ())),
-                    _ => Err("ENOTSUP:unknown transmission medium".to_string()),
+                let result = if command.format == 100 {
+                    let payload = match command.medium {
+                        b'd' => BASE64.decode(&data).map_err(|_| "EINVAL:invalid base64".to_string()),
+                        b'f' | b't' | b's' => self.read_medium(&command, &data),
+                        _ => Err("ENOTSUP:unknown transmission medium".to_string()),
+                    };
+                    payload.and_then(|raw| png_bytes(&command, &raw))
+                        .and_then(|bytes| png_decode(&bytes, true))
+                        .and_then(|head| query_pixel_rule(head.width, head.height))
+                } else {
+                    // Raw probes carry tiny real data. Temp-file and shared-memory probes consume
+                    // their media just like a transmission, so clients can choose a working transport.
+                    query_pixel_rule(command.width, command.height)
+                        .and_then(|_| self.decode(&command, &data).map(|_| ()))
                 };
                 Outcome { reply: reply(&command, result.err().as_deref(), 0), advance: None }
             }
@@ -641,7 +636,7 @@ impl Graphics {
         // anchor of its own; the chain may neither loop nor exceed MAX_CHAIN.
         let parent = (command.parent_image != 0).then_some((command.parent_image, command.parent_placement));
         if let Some((parent_image, parent_placement)) = parent {
-            let Some(found) = self.find_parent(parent_image, parent_placement) else {
+            let Some(found) = self.find_parent(parent_image, parent_placement, context.alt) else {
                 return self.fail(&command, "ENOPARENT", "no such parent placement");
             };
             if let Err(code) = self.check_chain(id, command.placement, found) {
@@ -972,9 +967,9 @@ impl Graphics {
     }
 
     /// The placement a relative placement names: image `image` and placement id `placement` (0 matches the
-    /// image's first placement).
-    fn find_parent(&self, image: u32, placement: u32) -> Option<usize> {
-        self.placements.iter().position(|p| p.image == image && (placement == 0 || p.id == placement))
+    /// image's first placement on the same screen).
+    fn find_parent(&self, image: u32, placement: u32, alt: bool) -> Option<usize> {
+        self.placements.iter().position(|p| p.alt == alt && p.image == image && (placement == 0 || p.id == placement))
     }
 
     /// Refuses a relative placement whose parent chain, starting at index `parent`, loops back to the placement
@@ -985,7 +980,7 @@ impl Graphics {
             let Some(index) = at else { return Ok(()) };
             let p = &self.placements[index];
             if p.image == image && (id == 0 || p.id == id) { return Err("ECYCLE"); }
-            at = p.parent.and_then(|(image, placement)| self.find_parent(image, placement));
+            at = p.parent.and_then(|(image, placement)| self.find_parent(image, placement, p.alt));
         }
         if at.is_some() { Err("ETOODEEP") } else { Ok(()) }
     }
@@ -994,7 +989,7 @@ impl Graphics {
     fn cascade(&mut self) {
         loop {
             let orphan = self.placements.iter().position(|p| {
-                p.parent.is_some_and(|(image, placement)| self.find_parent(image, placement).is_none())
+                p.parent.is_some_and(|(image, placement)| self.find_parent(image, placement, p.alt).is_none())
             });
             let Some(index) = orphan else { break };
             self.placements.remove(index);
@@ -1014,7 +1009,7 @@ impl Graphics {
             };
             line += i64::from(p.rel.1);
             col += i64::from(p.rel.0);
-            p = &self.placements[self.find_parent(image, placement)?];
+            p = &self.placements[self.find_parent(image, placement, p.alt)?];
         }
         None
     }
@@ -1035,8 +1030,8 @@ impl Graphics {
     }
 
     /// The virtual placement Unicode placeholders of `image` refer to: id `placement`, or the image's first one for 0.
-    pub fn virtual_placement(&self, image: u32, placement: u32) -> Option<&Placement> {
-        let mut virtuals = self.placements.iter().filter(|p| p.virt && p.image == image);
+    pub fn virtual_placement(&self, image: u32, placement: u32, alt: bool) -> Option<&Placement> {
+        let mut virtuals = self.placements.iter().filter(|p| p.virt && p.image == image && p.alt == alt);
         if placement == 0 { virtuals.next() } else { virtuals.find(|p| p.id == placement) }
     }
 
@@ -1818,6 +1813,33 @@ mod tests {
     }
 
     #[test]
+    fn png_queries_through_files_use_header_dimensions_and_preserve_consumption_rules() {
+        for medium in ['f', 't'] {
+            for size in [3, 100] {
+                for compressed in [false, true] {
+                    let png = png_file(png::ColorType::Rgba, png::BitDepth::Eight, size, size, &vec![0; (size * size * 4) as usize]);
+                    let payload = if compressed { miniz_oxide::deflate::compress_to_vec_zlib(&png, 1) } else { png };
+                    let path = std::env::temp_dir().join(format!("tty-graphics-protocol-query-{}-{medium}-{size}-{compressed}.png", std::process::id()));
+                    std::fs::write(&path, &payload).unwrap();
+                    let name = encode(path.as_os_str().as_encoded_bytes());
+                    // PNG dimensions come from its header, never the declared s/v fields.
+                    let declared = if size == 3 { 100 } else { 1 };
+                    let compression = if compressed { ",o=z" } else { "" };
+                    let mut graphics = Graphics::default();
+                    let outcome = graphics.handle(format!("i=9,a=q,t={medium},f=100,s={declared},v={declared}{compression};{name}").as_bytes(), &context());
+                    let preserved = path.exists();
+                    if preserved { std::fs::remove_file(&path).unwrap(); }
+                    assert_eq!(preserved, medium == 'f', "only temp-file queries consume the file");
+                    let reply = String::from_utf8(outcome.reply).unwrap();
+                    if size == 3 { assert!(reply.contains(";OK"), "{medium} {compressed}: {reply}"); }
+                    else { assert!(reply.contains("limited"), "{medium} {compressed}: {reply}"); }
+                    assert!(graphics.images.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn image_numbers_are_assigned_resolved_and_pruned() {
         let mut graphics = Graphics::default();
         let pixel = encode(&[1, 2, 3]);
@@ -2269,6 +2291,29 @@ mod tests {
     }
 
     #[test]
+    fn relative_parents_are_resolved_only_on_the_childs_screen() {
+        for alt in [false, true] {
+            let mut graphics = Graphics::default();
+            let pixel = encode(&[1, 2, 3]);
+            let source = Context { alt: !alt, line: 2, col: 3, ..context() };
+            let target = Context { alt, line: 8, col: 9, ..context() };
+            for id in [1, 2] { graphics.handle(format!("a=t,f=24,s=1,v=1,i={id},q=2;{pixel}").as_bytes(), &source); }
+            graphics.handle(b"a=p,i=1,p=1,q=2", &source);
+            let rejected = graphics.handle(b"a=p,i=2,p=2,P=1,Q=1", &target);
+            assert!(String::from_utf8(rejected.reply).unwrap().contains("ENOPARENT"));
+            // Identical placement ids on different screens are separate anchors.
+            graphics.handle(b"a=p,i=1,p=1,q=2", &target);
+            graphics.handle(b"a=p,i=2,p=2,P=1,Q=1,H=1,V=1,q=2", &target);
+            let child = graphics.drawn(alt).into_iter().find(|p| p.image == 2).unwrap();
+            assert_eq!((child.line, child.col), (9, 10));
+            graphics.handle(b"a=d,d=i,i=1", &source);
+            assert!(graphics.drawn(alt).iter().any(|p| p.image == 2), "deleting the other screen's parent must preserve this child");
+            graphics.handle(b"a=d,d=i,i=1", &target);
+            assert!(graphics.drawn(alt).is_empty());
+        }
+    }
+
+    #[test]
     fn relative_placements_follow_their_parent_and_go_with_it() {
         let mut graphics = Graphics::default();
         let pixel = encode(&[1, 2, 3]);
@@ -2306,16 +2351,16 @@ mod tests {
         let outcome = graphics.handle(b"a=p,U=1,i=4,p=7,c=4,r=2,q=2", &Context { line: 2, ..context() });
         assert!(outcome.advance.is_none());
         assert!(graphics.drawn(true).is_empty());
-        assert_eq!(graphics.virtual_placement(4, 7).map(|p| (p.cols, p.rows)), Some((4, 2)));
-        assert_eq!(graphics.virtual_placement(4, 0).map(|p| p.id), Some(7));
-        assert!(graphics.virtual_placement(4, 8).is_none());
+        assert_eq!(graphics.virtual_placement(4, 7, context().alt).map(|p| (p.cols, p.rows)), Some((4, 2)));
+        assert_eq!(graphics.virtual_placement(4, 0, context().alt).map(|p| p.id), Some(7));
+        assert!(graphics.virtual_placement(4, 8, context().alt).is_none());
         graphics.scroll(true, 0, 24, 5, false, 0);
         graphics.delete_visible(true, 24);
         graphics.handle(b"a=d,d=a", &context());
         graphics.handle(b"a=d,d=y,y=3", &context());
-        assert_eq!(graphics.virtual_placement(4, 7).map(|p| p.line), Some(2), "untouched by scrolls and clears");
+        assert_eq!(graphics.virtual_placement(4, 7, context().alt).map(|p| p.line), Some(2), "untouched by scrolls and clears");
         graphics.handle(b"a=d,d=i,i=4", &context());
-        assert!(graphics.virtual_placement(4, 7).is_none());
+        assert!(graphics.virtual_placement(4, 7, context().alt).is_none());
     }
 
     #[test]

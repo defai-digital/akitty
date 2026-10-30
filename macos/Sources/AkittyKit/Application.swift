@@ -412,23 +412,31 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     var findQuery: String { get { findBar.query } set { findBar.field.stringValue = newValue } }
     var findStatus: String { findBar.status.stringValue }
     var findBarVisible: Bool { !findBar.isHidden }
+    /// The field owns focus while editing; otherwise the focused pane wins. A retained
+    /// search owner is valid only in the selected tab, including after its old pane exits.
+    private var searchOwner: TerminalView? {
+        let visible = (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal } ?? []
+        if let focused = window?.firstResponder as? TerminalView, visible.contains(where: { $0 === focused }) { return focused }
+        if let findTarget, visible.contains(where: { $0 === findTarget }) { return findTarget }
+        return visible.first
+    }
+    private func setFindTarget(_ target: TerminalView?) {
+        if findTarget !== target { clearFindHighlights(); findBar.status.stringValue = "" }
+        findTarget = target
+    }
     func showFind(_ target: TerminalView? = nil) {
         let wasHidden = findBar.isHidden
-        let previous = findTarget
-        // Capture before the field takes focus; a visible bar keeps the pane it already owns.
-        if let target { findTarget = target }
-        else if wasHidden { findTarget = active }
-        else if let current = findTarget, !panes.contains(where: { $0.terminal === current }) { findTarget = active }
-        if previous !== findTarget { clearFindHighlights(); findBar.status.stringValue = "" }
+        let explicit = target.flatMap { candidate in panes.contains(where: { $0.terminal === candidate }) ? candidate : nil }
+        setFindTarget(explicit ?? searchOwner)
         findBar.isHidden = false; findBarHeight.constant = 28; findBarGap.constant = 4
         window?.layoutIfNeeded()
         window?.makeFirstResponder(findBar.field)
         if wasHidden { findBar.field.currentEditor()?.selectAll(nil) }
     }
     func closeFind() {
+        let owner = searchOwner
         findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0
         clearFindHighlights()
-        let owner = findTarget.flatMap { candidate in panes.contains(where: { $0.terminal === candidate }) ? candidate : nil } ?? active
         findTarget = nil
         if let owner { window?.makeFirstResponder(owner) }
     }
@@ -442,7 +450,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     }
     /// `direction` is `latest`, `next`, or `previous`. An empty field clears the highlight.
     func runSearch(_ direction: String) {
-        guard let terminal = findTarget ?? active else { return }
+        guard let terminal = searchOwner else { return }
+        setFindTarget(terminal)
         let text = findBar.query
         if text.isEmpty {
             clearFindHighlights(); findBar.status.stringValue = ""; return

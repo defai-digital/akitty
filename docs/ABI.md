@@ -69,7 +69,7 @@ U+10EEEE with the image id in the foreground colour (24-bit or 256-colour), the
 placement id in the underline colour and row/column/high-id diacritics show the
 matching slice of the image, fitted into the placement's `c`x`r` cells; missing
 diacritics continue the left neighbour's run. `P=`,`Q=` with `H=`,`V=` place an
-image relative to another placement (`ENOPARENT`, `ECYCLE`, `ETOODEEP` beyond 8
+image relative to another placement on the same screen (`ENOPARENT`, `ECYCLE`, `ETOODEEP` beyond 8
 links); children move with their parent and are deleted with it. Animation
 follows Kitty: `a=f` composes a frame (base frame `c=`, edit frame `r=`, offset
 `x=`,`y=`, background `Y=`, `X=1` overwrite, gap `z=`, 40 ms default, negative
@@ -108,7 +108,10 @@ with ANSI colour), which clients such as `kitten icat` use to end their graphics
 probe. `CSI 16 t` (cell size in pixels) is answered from the cell size
 the host reports via `cell_size`, and the kernel window size reports pixel
 dimensions derived from it; `cell_size` also pushes a PTY resize so the ioctl
-updates without a grid change.
+updates without a grid change. Before a host reports cell metrics, `CSI 14 t`
+(window pixels) and `CSI 16 t` use 8×16 pixels per cell. `CSI 14 t` reports the
+full dimensions even when they exceed 16-bit values; the kernel ioctl remains
+clamped to its 16-bit fields.
 
 **Program chrome.** A session holds one chrome document: a one-line status, a mark, a progress value, and an optional sprite. Two entries share one validator. A program sends `OSC 771` as `ESC ] 771 ; <json> BEL` or `ESC ] 771 ; <json> ST` (`ESC \`). The JSON is the document itself (no `op` or `id`). A host sends the same fields to `akitty_request_v1` as `{ "op": "chrome", "id", ... }`. `OSC 771` is removed from the byte stream before the terminal parser, including when it is rejected or its body exceeds 64 KiB, so it never appears as grid text. That cap applies only to `OSC 771`. Every other OSC sequence, including title `OSC 0` and `OSC 2` and a clipboard `OSC 52` whose base64 is larger than 64 KiB, passes through unchanged. The shell title stays the window title and the tab label; chrome text does not replace it. There is no video decoder and no plugin or script runtime.
 

@@ -649,6 +649,44 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
     }
 
+    @MainActor func testVisibleFindRetargetsWhenAnotherPaneReceivesFocus() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let first = try XCTUnwrap(controller.active)
+        _ = try first.session.call("feed", ["text": "match first"])
+        controller.perform(.find); controller.findQuery = "match"; controller.runSearch("latest")
+        controller.perform(.split)
+        let second = controller.panes[1].terminal
+        window.makeFirstResponder(second)
+        controller.perform(.find)
+        _ = try second.session.call("feed", ["text": "match second"])
+        controller.runSearch("latest")
+        XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.search })
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
+        controller.closeFind()
+        XCTAssertTrue(window.firstResponder === second)
+    }
+
+    @MainActor func testFindNavigationAfterTabSwitchUsesTheSelectedTab() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let first = try XCTUnwrap(controller.active)
+        _ = try first.session.call("feed", ["text": "match first"])
+        controller.perform(.find); controller.findQuery = "match"; controller.runSearch("latest")
+        try controller.newTab()
+        let second = try XCTUnwrap(controller.active)
+        _ = try second.session.call("feed", ["text": "match second"])
+        controller.runSearch("next")
+        XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.search })
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
+        controller.closeFind()
+        XCTAssertTrue(window.firstResponder === second)
+    }
+
     @MainActor func testEveryTabHasACloseButtonThatClosesOnlyThatTab() async throws {
         _ = NSApplication.shared
         let app = AkittyApplication()

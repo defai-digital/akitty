@@ -466,15 +466,15 @@ impl Model {
                 Event::ColorRequest(index, format) => {
                     replies.extend_from_slice(format(palette(index)).as_bytes())
                 }
-                Event::TextAreaSizeRequest(format) => replies.extend_from_slice(
-                    format(alacritty_terminal::event::WindowSize {
-                        num_lines: self.size.rows as u16,
-                        num_cols: self.size.cols as u16,
-                        cell_width: self.cell_px.0 as u16,
-                        cell_height: self.cell_px.1 as u16,
-                    })
-                    .as_bytes(),
-                ),
+                Event::TextAreaSizeRequest(_) => {
+                    let width = if self.cell_px.0 > 0 { self.cell_px.0 } else { 8 };
+                    let height = if self.cell_px.1 > 0 { self.cell_px.1 } else { 16 };
+                    // The pinned upstream formatter multiplies u16 fields, which can overflow
+                    // at valid grid/cell limits. CSI 14 t can represent the full pixel dimensions.
+                    let width = self.size.cols as u64 * u64::from(width);
+                    let height = self.size.rows as u64 * u64::from(height);
+                    replies.extend_from_slice(format!("\x1b[4;{height};{width}t").as_bytes());
+                }
                 _ => {}
             }
             if replies.len() > 65536 {
@@ -681,8 +681,7 @@ impl Model {
         for (row, cells) in placeholders.iter().enumerate() {
             if cells.is_empty() || fragments >= MAX_FRAGMENTS { continue; }
             let mut resolve = |image: u32, placement: u32| -> Option<placeholder::Grid> {
-                let placed = self.graphics.virtual_placement(image, placement)?;
-                if placed.alt != alternate { return None; }
+                let placed = self.graphics.virtual_placement(image, placement, alternate)?;
                 let data = self.graphics.images.get(&image)?;
                 Some(placeholder::Grid {
                     cols: placed.cols,
@@ -694,7 +693,7 @@ impl Model {
             for (fragment, placement) in placeholder::decode_row(row, cells, cell_px, &mut resolve) {
                 if fragments >= MAX_FRAGMENTS { break; }
                 let (Some(placed), Some(data)) =
-                    (self.graphics.virtual_placement(fragment.image, placement), self.graphics.images.get(&fragment.image))
+                    (self.graphics.virtual_placement(fragment.image, placement, alternate), self.graphics.images.get(&fragment.image))
                 else { break; };
                 images.push(json!({"id": fragment.image, "gen": data.generation, "w": data.width, "h": data.height,
                     "row": fragment.row, "col": fragment.col, "cols": fragment.cols, "rows": 1, "z": placed.z,
@@ -1217,6 +1216,23 @@ mod tests {
         assert!(model.snapshot(None)["images"].as_array().unwrap().is_empty());
     }
 
+    #[test]
+    fn unicode_placeholders_resolve_duplicate_ids_on_the_current_screen() {
+        for explicit in [false, true] {
+            let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+            model.feed(format!("\x1b_Ga=t,f=24,s=2,v=2,i=5,q=2;{PIXEL}\x1b\\\x1b_Ga=p,U=1,i=5,p=7,c=2,r=1,z=3,q=2\x1b\\").as_bytes());
+            let color = if explicit { "\x1b[58;2;0;0;7m" } else { "" };
+            let placeholder = format!("\x1b[38;2;0;0;5m{color}\u{10EEEE}\u{305}\u{305}\x1b[0m");
+            model.feed(placeholder.as_bytes());
+            assert_eq!(model.snapshot(None)["images"][0]["z"], 3);
+            model.feed(b"\x1b[?1049h\x1b_Ga=p,U=1,i=5,p=7,c=1,r=1,z=9,q=2\x1b\\");
+            model.feed(placeholder.as_bytes());
+            assert_eq!(model.snapshot(None)["images"][0]["z"], 9);
+            model.feed(b"\x1b[?1049l");
+            assert_eq!(model.snapshot(None)["images"][0]["z"], 3);
+        }
+    }
+
     /// A 2x2 RGB frame, base64 of 12 zero bytes; small enough to inline.
     const PIXEL: &str = "AAAAAAAAAAAAAAAA";
     fn place(id: u32) -> String {
@@ -1232,7 +1248,18 @@ mod tests {
         assert_eq!(model.feed(b"\x1b[16t"), b"\x1b[6;16;8t");
         // Without a reported cell size the documented 8x16 fallback answers.
         let mut fresh = Model::new(Size::validate(40, 10).unwrap(), 100);
+        assert_eq!(fresh.feed(b"\x1b[14t"), b"\x1b[4;160;320t");
         assert_eq!(fresh.feed(b"\x1b[16t"), b"\x1b[6;16;8t");
+    }
+
+    #[test]
+    fn window_pixel_reports_do_not_overflow_at_valid_grid_and_cell_limits() {
+        for (cols, rows, expected) in [(512, 64, b"\x1b[4;32768;131072t".as_slice()), (128, 256, b"\x1b[4;131072;32768t".as_slice())] {
+            let mut model = Model::new(Size::validate(cols, rows).unwrap(), 0);
+            model.cell_px = (256, 512);
+            assert_eq!(model.feed(b"\x1b[14t"), expected);
+            model.feed(b"still responsive");
+        }
     }
 
     #[test]
