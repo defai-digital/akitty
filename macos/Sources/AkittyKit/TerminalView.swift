@@ -15,6 +15,10 @@ import os
     private var bitmap: CGContext?
     private let snapshotQueue = DispatchQueue(label: "com.defai.akitty.snapshot", qos: .userInteractive)
     private let rasterQueue = DispatchQueue(label: "com.defai.akitty.raster", qos: .userInteractive)
+    /// Keeps the bitmap between frames; only touched on `rasterQueue`.
+    private let rasterizer = GridRasterizer()
+    /// Grid rows changed since the last raster started; nil means unknown (repaint everything).
+    private var pendingDamage: Set<Int>? = nil
     private var pollInFlight = false
     private var rasterInFlight = false
     private var rasterPending = false
@@ -133,6 +137,7 @@ import os
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
+                if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
                 redraw()
                 NSAccessibility.post(element: self, notification: .valueChanged)
             }
@@ -152,20 +157,23 @@ import os
         rasterInFlight = true; rasterPending = false
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
         let fontName = font.fontName, fontSize = self.fontSize, cells = cellSize, marked = composition.text, images = imageStore.images
+        // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
+        let damage = pendingDamage, rasterizer = self.rasterizer, reuse = presenter != nil
+        pendingDamage = []
         rasterQueue.async { [weak self] in
-            let result = Result { try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, images: images) }
+            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, images: images, reuse: reuse) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false
                 guard !self.stopped else { return }
                 do {
-                    let bitmap = try result.get()
+                    let frame = try result.get()
                     if size == self.bounds.size {
-                        self.bitmap = bitmap
-                        if let presenter = self.presenter { do { try presenter.update(bitmap: bitmap) } catch { self.renderFailed(error.localizedDescription) } }
+                        self.bitmap = frame.context
+                        if let presenter = self.presenter { do { try presenter.update(bitmap: frame.context, damage: frame.damage) } catch { self.renderFailed(error.localizedDescription) } }
                         self.needsDisplay = true
-                    }
-                } catch { self.renderFailed(error.localizedDescription) }
+                    } else { self.pendingDamage = nil }
+                } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
                 if self.rasterPending { self.redraw() }
             }
         }

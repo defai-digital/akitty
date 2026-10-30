@@ -37,6 +37,28 @@ final class HotpathProbe: XCTestCase {
             _ = try session.call("feed", ["text": "\u{1b}[1;1H\(toggle % 2 == 0 ? "x" : "y")"])
             held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
         }
+        // Persistent rasterizer: a full frame, then a typing frame that repaints one row.
+        let stateful = GridRasterizer()
+        var typed = try XCTUnwrap(try session.snapshot())
+        _ = try stateful.render(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        try time("GridRasterizer.render full (warm glyph cache)", 20) {
+            _ = try stateful.render(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        }
+        var frame = try stateful.render(snapshot: typed, damage: [], size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        var flip = 0
+        try time("GridRasterizer.render typing frame (1 row)", 50) {
+            flip += 1
+            _ = try session.call("feed", ["text": "\u{1b}[1;1H\(flip % 2 == 0 ? "x" : "y")"])
+            typed = try XCTUnwrap(try session.snapshot(since: typed.revision, base: typed))
+            frame = try stateful.render(snapshot: typed, damage: Set(typed.dirty ?? []), size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        }
+        try MainActor.assumeIsolated {
+            guard let presenter = try? MetalPresenter() else { return }
+            try presenter.update(bitmap: frame.context, damage: nil)
+            try time("MetalPresenter.update full upload", 30) { try presenter.update(bitmap: frame.context, damage: nil) }
+            let rows = 0..<Int(18 * 2 + 16)
+            try time("MetalPresenter.update one-row damage", 30) { try presenter.update(bitmap: frame.context, damage: rows) }
+        }
         // Mostly blank screen with a cursor line, the usual shell case.
         let quiet = try TerminalSession(cols: cols, rows: rows, headless: true)
         defer { try? quiet.close() }

@@ -17,6 +17,10 @@ port and does not promise Ghostty protocol or configuration parity.
 - Swift owns AppKit windows/tabs/splits, IME, text accessibility, pasteboard policy,
   CoreText rasterization and Metal presentation. A renderer failure switches to a
   visible software fallback. No GTK/OpenGL code is carried over.
+  The rasterizer keeps its bitmap and glyph cache between frames and repaints only the rows the core marked dirty
+  (plus the old and new cursor rows); a new size, font or scale, any image, or an unknown change repaints everything.
+  The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
+  frames are always full.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval; images are unsupported, so confirmation never decodes images.
 - TypeScript ranks native commands through bundled JavaScriptCore code. Swift is
