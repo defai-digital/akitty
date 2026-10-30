@@ -402,11 +402,14 @@ public final class TerminalSession: @unchecked Sendable {
             if let since { request["since"] = since }
             return try CoreBridge.raw(request)
         }()
-        let reply = try JSONDecoder().decode(SnapshotReply.self, from: data)
+        // The cells are most of a busy snapshot; they are read by hand and the rest by JSONDecoder.
+        let scanned = CellScanner.split(data)
+        let reply = try JSONDecoder().decode(SnapshotReply.self, from: scanned?.rest ?? data)
         guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
         guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
         switch reply.data {
-        case .full(let snapshot):
+        case .full(var snapshot):
+            if let scanned { snapshot.cells = scanned.cells }
             guard snapshot.partial == true else { return snapshot }
             // A partial snapshot only makes sense on top of the exact snapshot it was computed against.
             guard let base, base.revision == since, let merged = base.applying(snapshot) else { return try self.snapshot() }
