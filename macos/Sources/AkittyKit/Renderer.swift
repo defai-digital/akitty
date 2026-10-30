@@ -152,7 +152,7 @@ enum GridRasterizer {
             let line: CTLine
             if let cached = glyphs[key] { line = cached }
             else {
-                var attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
+                let attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
                 line = CTLineCreateWithAttributedString(NSAttributedString(string: cell.text, attributes: attrs))
                 glyphs[key] = line
             }

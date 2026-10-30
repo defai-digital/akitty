@@ -36,6 +36,14 @@ Snapshots include authoritative Rust cell coordinates, colors, flags, cursor,
 mode state, visible text, title, clipboard requests and lifecycle/error status.
 Swift converts cells to UTF-16 offsets only for macOS text/accessibility APIs.
 
+**Kitty keyboard protocol.** The core answers the protocol's flag stack (`CSI > u`
+push, `CSI < u` pop, `CSI = u` set, `CSI ? u` query), separately for the main and
+alternate screens, and reports the active flags as the snapshot integer `kitty_flags`
+(1 disambiguate, 2 event types, 4 alternate keys, 8 all keys as escape codes,
+16 associated text). The Swift app encodes keys from those flags; with 0 the
+legacy encoding is unchanged byte for byte. The flags are as fresh as the last
+snapshot, so a key typed within one poll interval of a flag change may use the old mode.
+
 **Kitty graphics.** The core answers a subset of the Kitty graphics protocol sent
 as APC strings: queries (`a=q`), direct (`t=d`) raw RGB/RGBA (`f=24|32`)
 transmission with optional zlib (`o=z`) and `m=` chunking, placement (`a=T|p`)

@@ -58,8 +58,9 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
 
 Unsupported initially: sixel, PNG/file/shared-memory Kitty graphics, image
 clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
-public extension ecosystem. Kitty keyboard extensions are not advertised until
-native encoding is implemented. CoreText rendering is not a claim of Ghostty's
+public extension ecosystem. The Kitty keyboard protocol is advertised because
+`KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
+is a modifier or composes text, and input-method text still composes. CoreText rendering is not a claim of Ghostty's
 performance or shaping parity. Full esctest results are not inferred from the
 curated conformance suite.
 

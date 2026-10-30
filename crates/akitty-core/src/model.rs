@@ -75,7 +75,7 @@ impl Model {
         let config = Config {
             scrolling_history: scrollback,
             osc52: Osc52::CopyPaste,
-            kitty_keyboard: false,
+            kitty_keyboard: true,
             ..Config::default()
         };
         Self {
@@ -299,7 +299,8 @@ impl Model {
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
-        json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
+        let links_empty = links.is_empty();
+        let mut snapshot = json!({"changed": true, "revision": self.revision, "cols": self.size.cols, "rows": self.size.rows,
             "title": self.title, "cells": cells, "lines": text, "links": links, "images": images,
             "cursor": {"row": cursor_row, "col": content.cursor.point.column.0, "visible": cursor_visible},
             "bracketed_paste": content.mode.contains(TermMode::BRACKETED_PASTE),
@@ -310,9 +311,14 @@ impl Model {
             "mouse_motion": content.mode.contains(TermMode::MOUSE_MOTION),
             "focus_reporting": content.mode.contains(TermMode::FOCUS_IN_OUT),
             "alternate": content.mode.contains(TermMode::ALT_SCREEN),
+            "kitty_flags": kitty_flags(content.mode),
             "offset": content.display_offset, "history": self.term.grid().history_size(),
             "clipboard": std::mem::take(&mut self.clipboard), "error": self.error,
-            "exited": self.exited, "exit_code": self.exit_code})
+            "exited": self.exited, "exit_code": self.exit_code});
+        if links_empty && let Some(object) = snapshot.as_object_mut() {
+            object.remove("links");
+        }
+        snapshot
     }
 }
 
@@ -352,6 +358,20 @@ pub fn palette(index: usize) -> Rgb {
         g: rgb[1],
         b: rgb[2],
     }
+}
+/// Active Kitty keyboard flags: 1 disambiguate, 2 event types, 4 alternate keys,
+/// 8 all keys as escape codes, 16 associated text.
+fn kitty_flags(mode: TermMode) -> u8 {
+    [
+        (TermMode::DISAMBIGUATE_ESC_CODES, 1),
+        (TermMode::REPORT_EVENT_TYPES, 2),
+        (TermMode::REPORT_ALTERNATE_KEYS, 4),
+        (TermMode::REPORT_ALL_KEYS_AS_ESC, 8),
+        (TermMode::REPORT_ASSOCIATED_TEXT, 16),
+    ]
+    .iter()
+    .filter(|(flag, _)| mode.contains(*flag))
+    .fold(0, |bits, (_, bit)| bits | bit)
 }
 /// Underline kind for a cell: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
 fn underline_style(flags: Flags) -> Option<u8> {
@@ -457,6 +477,37 @@ mod tests {
         model.feed(b"\x1b[?1049l");
         assert_eq!(model.snapshot(None)["images"].as_array().unwrap().len(), 0);
         assert!(model.graphics.images.is_empty());
+    }
+    #[test]
+    fn kitty_keyboard_flags_follow_the_protocol_stack_per_screen() {
+        let mut model = Model::new(Size::validate(30, 5).unwrap(), 100);
+        assert_eq!(model.snapshot(None)["kitty_flags"], 0);
+        assert_eq!(model.feed(b"\x1b[?u"), b"\x1b[?0u");
+        model.feed(b"\x1b[>5u");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 5);
+        assert_eq!(model.feed(b"\x1b[?u"), b"\x1b[?5u");
+        model.feed(b"\x1b[>8u");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 8);
+        model.feed(b"\x1b[<u");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 5);
+        // The alternate screen has its own stack, so a full-screen app cannot leak flags to the shell.
+        model.feed(b"\x1b[?1049h");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 0);
+        model.feed(b"\x1b[=31;1u");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 31);
+        model.feed(b"\x1b[?1049l");
+        assert_eq!(model.snapshot(None)["kitty_flags"], 5);
+    }
+    #[test]
+    fn plain_snapshots_omit_optional_fields() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed(b"hi");
+        let snapshot = model.snapshot(None);
+        assert!(snapshot.get("links").is_none());
+        let cell = snapshot["cells"][0].as_object().unwrap();
+        for key in ["ustyle", "ucolor", "strike", "link"] {
+            assert!(!cell.contains_key(key), "{key}");
+        }
     }
     #[test]
     fn cursor_report_and_device_status_reply() {

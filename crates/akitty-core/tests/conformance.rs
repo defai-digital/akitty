@@ -272,6 +272,21 @@ fn ax_code_style_kitty_graphics_frames_are_placed_and_readable() {
     assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
 }
 #[test]
+fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
+    let t = Terminal::new(512, 64);
+    let uri = "https://example.com/a/fairly/long/path/to/make/the/link/table/entry/realistic?query=1";
+    t.feed(&format!("\x1b[4:3;58;2;1;2;3;9;1;3m\x1b]8;;{uri}\x07{}", "x".repeat(512 * 64)));
+    let request = serde_json::to_vec(&json!({"op":"snapshot","id":t.0})).unwrap();
+    let buffer = unsafe { akitty_core::akitty_request_v1(request.as_ptr(), request.len()) };
+    assert!(!buffer.data.is_null());
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) }.to_vec();
+    unsafe { akitty_core::akitty_buffer_free_v1(buffer) };
+    let response: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(response["ok"], true, "{}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]));
+    assert!(bytes.len() < 8 * 1024 * 1024);
+    eprintln!("worst-case snapshot: {} bytes", bytes.len());
+}
+#[test]
 fn graphics_without_c1_moves_cursor_below_the_image() {
     use base64::Engine;
     let t = Terminal::new(40, 10);

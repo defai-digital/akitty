@@ -17,6 +17,22 @@ Updates appear as a quiet, versioned titlebar reminder. **AkiTTY → Check for
 Updates…** checks manually. Sparkle verifies signed feeds and update archives;
 you choose when to install and restart. Automatic checks can be changed in Settings.
 
+## Install from the terminal
+
+Download the installer first and run it — no download is piped into a shell:
+
+```
+curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
+bash install.sh            # into ~/Applications
+bash install.sh --system   # into /Applications (must be writable)
+```
+
+The installer reads `latest.json` for the version, takes the archive digest from the
+immutable `releases/download/vX.Y.Z/release.json`, verifies the size and SHA-256,
+checks the code signature and notarization, then replaces an existing copy atomically.
+It prints the installed path on stdout; diagnostics go to stderr. Manual install:
+download the ZIP above and verify it with `shasum -a 256` against the same `release.json`.
+
 ## What is implemented
 
 - Native windows, tabs and split panes with interactive login shells; a visible
@@ -45,12 +61,13 @@ from ghostty-web and runs Ghostty's VT parser as WebAssembly. It is not part of 
 package. See [its README](packages/akitty-web/README.md).
 
 **Status: early 0.7.0 implementation.** This is not a drop-in Ghostty replacement.
-Sixel, PNG and file-based Kitty graphics, image clipboard protocols, Kitty keyboard
-extensions, custom shaders, Ghostty configuration compatibility, shell integration, quick
+Sixel, PNG and file-based Kitty graphics, image clipboard protocols, custom shaders, Ghostty configuration compatibility, shell integration, quick
 terminal and third-party plugins are not implemented. A bounded Kitty graphics subset
 (direct raw RGB/RGBA with zlib and chunking, placement, z-index, delete) is supported
 so pixel animations such as AX Code's opening and ending scenes can run; OSC 8
-hyperlinks open with Command-click, and underline styles and strikethrough render. Search currently finds the
+hyperlinks open with Command-click, and underline styles and strikethrough render.
+The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
+modifier-only keys); base-layout alternate keys are reported only for US-position keys. Search currently finds the
 latest literal match. Full external esctest qualification, VoiceOver user testing,
 performance parity and testing on every supported Mac version remain separate work.
 

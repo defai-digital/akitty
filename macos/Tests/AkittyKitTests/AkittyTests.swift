@@ -190,6 +190,104 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(store.images.isEmpty)
         XCTAssertNil(session.imagePixels(9, width: 4, height: 4))
     }
+    // MARK: Kitty keyboard protocol
+    private func kitty(_ keyCode: UInt16, _ mods: KittyModifiers = [], _ event: KittyEventType = .press, flags: Int) -> KittyKeyResult {
+        KittyKeyEncoder.encode(KittyKeyInput(keyCode: keyCode, modifiers: mods, event: event), flags: flags)
+    }
+    private func kitty(_ keyCode: UInt16, _ key: Character, shifted: Character? = nil, text: String = "", _ mods: KittyModifiers = [],
+                       _ event: KittyEventType = .press, flags: Int) -> KittyKeyResult {
+        KittyKeyEncoder.encode(KittyKeyInput(keyCode: keyCode, key: key.unicodeScalars.first?.value, shiftedKey: shifted?.unicodeScalars.first?.value,
+                                             text: text.unicodeScalars.map(\.value), modifiers: mods, event: event), flags: flags)
+    }
+    private func esc(_ body: String) -> KittyKeyResult { .bytes(Array(("\u{1b}[" + body).utf8)) }
+    func testKittyKeyboardLegacyUntilDisambiguated() {
+        XCTAssertEqual(kitty(8, "c", [.ctrl], flags: 0), .legacy)
+        XCTAssertEqual(kitty(0, "a", flags: 1), .legacy)
+        XCTAssertEqual(kitty(0, "a", shifted: "A", [.shift], flags: 1), .legacy)
+        // Releases and Enter/Tab/Backspace stay legacy until the app asks for more.
+        XCTAssertEqual(kitty(0, "a", [], .release, flags: 1), .none)
+        XCTAssertEqual(kitty(36, flags: 1), .legacy); XCTAssertEqual(kitty(48, flags: 1), .legacy); XCTAssertEqual(kitty(51, flags: 1), .legacy)
+        XCTAssertEqual(kitty(123, flags: 1), .legacy)
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), .legacy)
+    }
+    func testKittyKeyboardDisambiguatesModifiedAndEscapeKeys() {
+        XCTAssertEqual(kitty(8, "c", [.ctrl], flags: 1), esc("99;5u"))
+        XCTAssertEqual(kitty(8, "c", shifted: "C", [.ctrl, .shift], flags: 1), esc("99;6u"))
+        XCTAssertEqual(kitty(0, "a", [.alt], flags: 1), esc("97;3u"))
+        XCTAssertEqual(kitty(53, flags: 1), esc("27u"))
+        XCTAssertEqual(kitty(48, [.shift], flags: 1), esc("9;2u"))
+        XCTAssertEqual(kitty(36, [.shift], flags: 1), esc("13;2u"))
+        XCTAssertEqual(kitty(51, [.ctrl], flags: 1), esc("127;5u"))
+        XCTAssertEqual(kitty(0, "a", shifted: "A", [.ctrl, .shift], flags: 5), esc("97:65;6u"))
+    }
+    func testKittyKeyboardFunctionalKeys() {
+        XCTAssertEqual(kitty(123, [.ctrl], flags: 1), esc("1;5D"))
+        XCTAssertEqual(kitty(117, [.alt], flags: 1), esc("3;3~"))
+        XCTAssertEqual(kitty(96, [.ctrl], flags: 1), esc("15;5~"))
+        XCTAssertEqual(kitty(122, [.ctrl], flags: 1), esc("1;5P"))
+        XCTAssertEqual(kitty(123, [], .release, flags: 3), esc("1;1:3D"))
+        XCTAssertEqual(kitty(123, [], .repeat, flags: 3), esc("1;1:2D"))
+        XCTAssertEqual(kitty(123, flags: 3), .legacy)
+        XCTAssertEqual(kitty(123, [], .release, flags: 2), esc("1;1:3D"))
+    }
+    func testKittyKeyboardEventTypesAndAlternates() {
+        XCTAssertEqual(kitty(8, "c", [.ctrl], .release, flags: 3), esc("99;5:3u"))
+        XCTAssertEqual(kitty(8, "c", [.ctrl], .repeat, flags: 3), esc("99;5:2u"))
+        XCTAssertEqual(kitty(0, "a", [], .release, flags: 2), .none, "text keys are not escaped by event types alone")
+        XCTAssertEqual(kitty(8, "c", [.ctrl], flags: 2), .legacy)
+        XCTAssertEqual(KittyKeyEncoder.encode(KittyKeyInput(keyCode: 12, key: 0x61, shiftedKey: 0x41, baseLayoutKey: 0x71, modifiers: [.ctrl, .shift]), flags: 5),
+                       esc("97:65:113;6u"))
+    }
+    func testKittyKeyboardReportAllKeysAndText() {
+        XCTAssertEqual(kitty(0, "a", text: "a", flags: 8), esc("97u"))
+        XCTAssertEqual(kitty(0, "a", shifted: "A", text: "A", [.shift], flags: 8), esc("97;2u"))
+        XCTAssertEqual(kitty(0, "a", text: "a", flags: 24), esc("97;;97u"))
+        XCTAssertEqual(kitty(0, "a", shifted: "A", text: "A", [.shift], flags: 24), esc("97;2;65u"))
+        XCTAssertEqual(kitty(0, "a", shifted: "A", text: "A", [.shift], .release, flags: 31), esc("97:65;2:3u"))
+        XCTAssertEqual(kitty(36, flags: 8), esc("13u")); XCTAssertEqual(kitty(48, flags: 8), esc("9u")); XCTAssertEqual(kitty(51, flags: 8), esc("127u"))
+        XCTAssertEqual(kitty(87, "5", text: "5", flags: 8), esc("57404u"))
+        XCTAssertEqual(kitty(76, flags: 8), esc("57414u"))
+        XCTAssertEqual(kitty(76, flags: 1), .legacy)
+    }
+    func testKittyKeyboardModifierKeysNeedAllKeys() {
+        XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 56, modifiers: [.shift], pressed: true, flags: 8), esc("57441;2u"))
+        XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 56, modifiers: [], pressed: false, flags: 8), .none)
+        XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 59, modifiers: [], pressed: false, flags: 10), esc("57442;1:3u"))
+        XCTAssertEqual(KittyKeyEncoder.encodeModifier(keyCode: 56, modifiers: [.shift], pressed: true, flags: 1), .none)
+    }
+    func testKittyKeyInputFromRealKeyEvents() throws {
+        func event(_ chars: String, _ ignoring: String, _ flags: NSEvent.ModifierFlags, _ code: UInt16) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                                           characters: chars, charactersIgnoringModifiers: ignoring, isARepeat: false, keyCode: code))
+        }
+        let ctrlC = try XCTUnwrap(KittyKeyInput(event: event("\u{3}", "c", .control, 8), optionAsAlt: false, type: .press))
+        XCTAssertEqual(ctrlC.key, 99); XCTAssertEqual(ctrlC.modifiers, [.ctrl]); XCTAssertTrue(ctrlC.text.isEmpty)
+        // Shift+1 reports the unshifted key even though the OS hands back "!".
+        let bang = try XCTUnwrap(KittyKeyInput(event: event("!", "!", .shift, 18), optionAsAlt: false, type: .press))
+        XCTAssertEqual([bang.key, bang.shiftedKey, bang.text.first], [49, 33, 33])
+        // Option composes text unless Option-as-Alt is on.
+        XCTAssertNil(KittyKeyInput(event: try event("å", "a", .option, 0), optionAsAlt: false, type: .press))
+        let alt = try XCTUnwrap(KittyKeyInput(event: event("å", "a", .option, 0), optionAsAlt: true, type: .press))
+        XCTAssertEqual(alt.modifiers, [.alt]); XCTAssertEqual(alt.key, 97)
+        let arrow = try XCTUnwrap(KittyKeyInput(event: event("\u{F702}", "\u{F702}", [.control], 123), optionAsAlt: false, type: .press))
+        XCTAssertNil(arrow.key); XCTAssertEqual(KittyKeyEncoder.encode(arrow, flags: 1), esc("1;5D"))
+    }
+    func testCoreAdvertisesAndTracksKittyKeyboardFlags() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        XCTAssertEqual(try XCTUnwrap(try session.snapshot()).kitty_flags, 0)
+        _ = try session.call("feed", ["text": "\u{1b}[>5u"])
+        XCTAssertEqual(try XCTUnwrap(try session.snapshot()).kitty_flags, 5)
+    }
+    func testWideLinkedCellSpacerResolvesToTheLink() throws {
+        let session = try TerminalSession(cols: 20, rows: 3, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}]8;;https://wide.test/\u{7}中\u{1b}]8;;\u{7}x"])
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        XCTAssertEqual(snapshot.hyperlink(row: 0, col: 0)?.absoluteString, "https://wide.test/")
+        XCTAssertEqual(snapshot.hyperlink(row: 0, col: 1)?.absoluteString, "https://wide.test/")
+        XCTAssertNil(snapshot.hyperlink(row: 0, col: 2))
+    }
     func testStalePathsResetOnlyThemselvesOnLoad() throws {
         let suite = "akitty-tests-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

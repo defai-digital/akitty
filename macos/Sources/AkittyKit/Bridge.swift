@@ -90,6 +90,8 @@ public struct Snapshot: Codable, Sendable {
     public let mouse_motion: Bool
     public let focus_reporting: Bool
     public let alternate: Bool
+    /// Active Kitty keyboard flags (1 disambiguate, 2 events, 4 alternates, 8 all keys, 16 text).
+    public let kitty_flags: UInt8?
     public let offset: Int
     public let history: Int
     public let clipboard: [String]
@@ -99,7 +101,10 @@ public struct Snapshot: Codable, Sendable {
     public var text: String { lines.joined(separator: "\n") }
     /// The openable hyperlink under a cell, if any.
     public func hyperlink(row: Int, col: Int) -> URL? {
-        guard let links, let cell = cells.first(where: { $0.row == row && $0.col == col }),
+        guard let links else { return nil }
+        func linked(_ column: Int) -> Cell? { cells.first { $0.row == row && $0.col == column && $0.link != nil } }
+        // The spacer half of a wide character belongs to the link of the leading half.
+        guard let cell = linked(col) ?? (col > 0 ? linked(col - 1).flatMap { $0.wide ? $0 : nil } : nil),
               let index = cell.link, links.indices.contains(index) else { return nil }
         return LinkPolicy.url(for: links[index])
     }

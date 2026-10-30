@@ -178,8 +178,36 @@ import os
     public func send(_ text: String, paste: Bool = false) {
         do { try session.input(text, paste: paste) } catch { show(error) }
     }
+    /// Kitty keyboard protocol: bytes for this event when the running program asked for them.
+    private func kittyKey(_ event: NSEvent, type: KittyEventType) -> KittyKeyResult {
+        let flags = Int(snapshot?.kitty_flags ?? 0)
+        guard flags != 0, !hasMarkedText(), !event.modifierFlags.contains(.command),
+              let input = KittyKeyInput(event: event, optionAsAlt: preferences.optionAsAlt, type: type) else { return .legacy }
+        // With "all keys as escape codes", plain text from an input method (Japanese, Chinese…) still has to compose.
+        let plain = input.modifiers.subtracting([.shift, .capsLock, .numLock]).isEmpty
+        if flags & KittyKeyEncoder.reportAllKeys != 0, plain, input.key != nil,
+           inputContext?.selectedKeyboardInputSource?.hasPrefix("com.apple.keylayout.") == false { return .legacy }
+        return KittyKeyEncoder.encode(input, flags: flags)
+    }
+    public override func keyUp(with event: NSEvent) {
+        if case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
+        else { super.keyUp(with: event) }
+    }
+    public override func flagsChanged(with event: NSEvent) {
+        let flags = Int(snapshot?.kitty_flags ?? 0)
+        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText(), let modifier = KittyKeyEncoder.modifier(forKeyCode: event.keyCode) else { super.flagsChanged(with: event); return }
+        let mods = KittyKeyInput.modifiers(of: event.modifierFlags, optionAsAlt: preferences.optionAsAlt)
+        if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: mods.contains(modifier), flags: flags) {
+            send(String(decoding: bytes, as: UTF8.self))
+        }
+    }
     public override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
+        switch kittyKey(event, type: event.isARepeat ? .repeat : .press) {
+        case let .bytes(bytes): send(String(decoding: bytes, as: UTF8.self)); return
+        case .none: return
+        case .legacy: break
+        }
         if event.modifierFlags.contains(.control), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
             if value >= 64 && value <= 127 { send(String(UnicodeScalar(value & 0x1f)!)); return }
