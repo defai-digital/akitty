@@ -282,7 +282,16 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func command(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String, let command = NativeCommand(rawValue: id) else { return }
         if command == .newWindow { newWindow(nil); return }
-        (NSApp.keyWindow?.windowController as? TerminalWindow)?.perform(command)
+        guard let window = NSApp.keyWindow?.windowController as? TerminalWindow else {
+            // Settings and palette text fields: keep normal editing for the shared Edit menu.
+            switch command {
+            case .copy: NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
+            case .paste: NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
+            default: break
+            }
+            return
+        }
+        window.perform(command)
     }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
     @objc private func settings(_ sender: Any?) {

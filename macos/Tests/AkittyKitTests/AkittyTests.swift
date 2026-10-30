@@ -146,6 +146,17 @@ final class AkittyTests: XCTestCase {
         defaults.set(Data("bad".utf8), forKey: "terminalPreferences")
         XCTAssertEqual(TerminalPreferences.load(from: defaults), TerminalPreferences())
     }
+    func testStalePathsResetOnlyThemselvesOnLoad() throws {
+        let suite = "akitty-tests-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var value = TerminalPreferences(); value.fontSize = 20; value.scrollback = 2000; value.optionAsAlt = true
+        value.directory = "/does-not-exist/akitty-test-dir"; value.shell = "/does-not-exist/akitty-test-shell"
+        defaults.set(try JSONEncoder().encode(value), forKey: "terminalPreferences")
+        let loaded = TerminalPreferences.load(from: defaults)
+        XCTAssertEqual(loaded.fontSize, 20); XCTAssertEqual(loaded.scrollback, 2000); XCTAssertTrue(loaded.optionAsAlt)
+        XCTAssertEqual(loaded.directory, ""); XCTAssertEqual(loaded.shell, "")
+    }
     @MainActor func testVisiblePlusButtonCreatesTabAndReminderHasVersion() async throws {
         _ = NSApplication.shared
         let app = AkittyApplication()

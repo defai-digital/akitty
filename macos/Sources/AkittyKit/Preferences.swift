@@ -19,8 +19,14 @@ struct TerminalPreferences: Codable, Equatable {
         return self
     }
     static func load(from defaults: UserDefaults = .standard) -> Self {
-        guard let data = defaults.data(forKey: "terminalPreferences"), let value = try? JSONDecoder().decode(Self.self, from: data), let valid = try? value.validated() else { return Self() }
-        return valid
+        guard let data = defaults.data(forKey: "terminalPreferences"), var value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+        if let valid = try? value.validated() { return valid }
+        // A deleted shell or directory should reset only itself, not every saved setting.
+        let fallback = Self()
+        var isDirectory: ObjCBool = false
+        if !value.shell.isEmpty, !(value.shell.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: value.shell)) { value.shell = fallback.shell }
+        if !value.directory.isEmpty, !(value.directory.hasPrefix("/") && FileManager.default.fileExists(atPath: value.directory, isDirectory: &isDirectory) && isDirectory.boolValue) { value.directory = fallback.directory }
+        return (try? value.validated()) ?? fallback
     }
     func save(to defaults: UserDefaults = .standard) throws {
         defaults.set(try JSONEncoder().encode(validated()), forKey: "terminalPreferences")

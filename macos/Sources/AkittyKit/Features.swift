@@ -61,7 +61,8 @@ private struct CommandEnvelope: Codable { let version: Int; let commands: [Comma
         return envelope.commands
     }
     public func search(_ query: String) -> [CommandDescriptor] {
-        let query = String(query.prefix(128))
+        var query = String(query.prefix(128))
+        while query.utf16.count > 512 { query.removeLast() }
         if let context {
             context.exception = nil
             let value = context.objectForKeyedSubscript("AkittyFeatures")?.objectForKeyedSubscript("listCommands")?.call(withArguments: [query])

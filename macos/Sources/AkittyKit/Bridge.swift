@@ -67,7 +67,7 @@ public struct Snapshot: Codable, Sendable {
     public let exit_code: UInt32?
     public var text: String { lines.joined(separator: "\n") }
     public func textOffset(row: Int, col: Int) -> Int {
-        let row = min(max(0, row), rows - 1)
+        let row = min(max(0, row), max(0, rows - 1))
         let before = lines.prefix(row).reduce(0) { $0 + $1.utf16.count + 1 }
         return before + cells.lazy.filter { $0.row == row && $0.col < col }.reduce(0) { $0 + $1.text.utf16.count }
     }

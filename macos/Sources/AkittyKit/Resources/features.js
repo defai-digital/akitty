@@ -57,6 +57,7 @@ var AkittyFeatures = (() => {
         score += found - cursor;
         cursor = found + 1;
       }
+      if (matches && needle.length > 0 && haystack.join("").includes(needle.join(""))) score -= 1e3;
       if (matches) ranked.push({ command, score, index });
     }
     ranked.sort((a, b) => a.score - b.score || a.index - b.index);

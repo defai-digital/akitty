@@ -18,6 +18,9 @@ test('Unicode normalization and subsequence search', () => {
   assert.equal(list('nwtab').commands[0].id, 'new-tab');
   assert.deepEqual(list('🚀unknown').commands, []);
 });
+test('contiguous keyword matches outrank scattered subsequences', () => {
+  assert.equal(list('side').commands[0].id, 'split');
+});
 test('reject invalid and excessive input', () => {
   assert.throws(() => list('x'.repeat(513)));
   assert.throws(() => list(null));

@@ -37,6 +37,8 @@ export function listCommands(query: string): string {
       score += found - cursor
       cursor = found + 1
     }
+    // A contiguous match (e.g. the keyword "side by side") outranks any scattered subsequence match.
+    if (matches && needle.length > 0 && haystack.join("").includes(needle.join(""))) score -= 1000
     if (matches) ranked.push({ command, score, index })
   }
   ranked.sort((a, b) => a.score - b.score || a.index - b.index)

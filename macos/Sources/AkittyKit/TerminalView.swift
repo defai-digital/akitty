@@ -184,7 +184,7 @@ import os
             let mask = (modifiers.contains(.shift) ? 1 : 0) + (modifiers.contains(.option) ? 2 : 0) + (modifiers.contains(.control) ? 4 : 0)
             send(mask > 0 ? "\u{1b}[1;\(mask + 1)\(code)" : "\u{1b}\(app ? "O" : "[")\(code)"); return
         }
-        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS"]
+        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
         if !hasMarkedText(), let text = special[event.keyCode] { send(event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text); return }
         if preferences.optionAsAlt, event.modifierFlags.contains(.option), !hasMarkedText(), let text = event.charactersIgnoringModifiers, !text.isEmpty {
             send("\u{1b}" + text); return
@@ -242,13 +242,13 @@ import os
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         if reportMouse(event, button: 0) { return }
-        selectionStart = position(convert(event.locationInWindow, from: nil)); selectionEnd = selectionStart
-        updateSelection()
+        selectionStart = position(convert(event.locationInWindow, from: nil)); selectionEnd = nil
     }
     public override func mouseDragged(with event: NSEvent) {
         if snapshot?.mouse_mode == true && !event.modifierFlags.contains(.option) {
             if snapshot?.mouse_drag == true { _ = reportMouse(event, button: 32) }; return
         }
+        if selectionStart == nil { selectionStart = position(convert(event.locationInWindow, from: nil)) }
         selectionEnd = position(convert(event.locationInWindow, from: nil)); updateSelection() }
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
