@@ -47,6 +47,16 @@ final class AkittyTests: XCTestCase {
         try session.close(); try session.close()
         XCTAssertThrowsError(try session.snapshot())
     }
+    func testClosingThroughCallReturnsTheReplyAndMarksTheSessionClosed() throws {
+        let session = try TerminalSession(headless: true)
+        let data = try session.call("close")
+        XCTAssertNotNil(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertThrowsError(try session.call("snapshot")) { error in
+            XCTAssertEqual(error.localizedDescription, "Session is closed")
+        }
+        XCTAssertThrowsError(try session.snapshot())
+        XCTAssertNoThrow(try session.close())
+    }
     func testClosingSessionRejectsCallsWithoutWaitingForChildReaping() throws {
         let session = try TerminalSession(headless: true)
         let closing = expectation(description: "child cleanup started")
@@ -594,6 +604,39 @@ final class AkittyTests: XCTestCase {
             XCTAssertTrue(cells.allSatisfy { !$0.search && !$0.activeSearch })
         }
     }
+    @MainActor func testFindSearchesTheFocusedOrPalettePaneAndRestoresItsFocus() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let first = try XCTUnwrap(controller.active)
+        _ = try first.session.call("feed", ["text": "one first"])
+        controller.perform(.split)
+        XCTAssertEqual(controller.panes.count, 2)
+        let second = controller.panes[1].terminal
+        window.makeFirstResponder(second)
+        XCTAssertTrue(controller.active === second)
+        _ = try second.session.call("feed", ["text": "one two one"])
+        // The find field takes focus; the search must still run in the pane that had it.
+        controller.perform(.find)
+        XCTAssertFalse(window.firstResponder === second)
+        controller.findQuery = "one"
+        controller.runSearch("latest")
+        XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.search && !$0.activeSearch })
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
+        controller.perform(.findNext)
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.activeSearch).isEmpty)
+        XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.activeSearch })
+        controller.closeFind()
+        XCTAssertTrue(window.firstResponder === second)
+        // A palette command names its pane even while another pane holds focus.
+        window.makeFirstResponder(first)
+        controller.perform(.find, target: second)
+        controller.findQuery = "one"
+        controller.runSearch("latest")
+        XCTAssertTrue(try XCTUnwrap(first.session.snapshot()).cells.allSatisfy { !$0.search && !$0.activeSearch })
+        XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
+    }
 
     @MainActor func testEveryTabHasACloseButtonThatClosesOnlyThatTab() async throws {
         _ = NSApplication.shared
@@ -787,6 +830,59 @@ final class AkittyTests: XCTestCase {
         terminal.onStatus = { messages.append($0) }
         terminal.send("late text")
         terminal.mouseMoved(with: try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)))
+        XCTAssertTrue(messages.isEmpty)
+    }
+
+    @MainActor func testPlainClickClearsSelectionTextCopyAndHighlight() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        defer { terminal.shutdown() }
+        var statuses: [String] = []
+        terminal.onStatus = { statuses.append($0) }
+        _ = try terminal.session.call("feed", ["text": "hello world"])
+        try await waitUntil(terminal, timeout: 3) { terminal.snapshot?.text.hasPrefix("hello world") == true }
+        let cell = terminal.cellSize
+        func point(_ col: Int) -> NSPoint { NSPoint(x: 8 + cell.width * CGFloat(col) + 1, y: 9) }
+        func mouse(_ type: NSEvent.EventType, _ col: Int, _ number: Int) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point(col), modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: number, clickCount: 1, pressure: 1))
+        }
+        terminal.mouseDown(with: try mouse(.leftMouseDown, 0, 1))
+        terminal.mouseDragged(with: try mouse(.leftMouseDragged, 4, 2))
+        try await waitUntil(terminal, timeout: 3) {
+            terminal.accessibilitySelectedText() == "hello" && terminal.snapshot?.cells.contains(where: \.selected) == true
+        }
+        XCTAssertEqual(statuses.filter { !$0.contains("cols") }, [], "status: \(statuses)")
+        XCTAssertEqual(terminal.accessibilitySelectedText(), "hello")
+        // A plain click starts a new selection anchor, so the old text and highlight must go.
+        terminal.mouseDown(with: try mouse(.leftMouseDown, 8, 3))
+        XCTAssertEqual(terminal.accessibilitySelectedText(), "")
+        XCTAssertEqual(terminal.accessibilitySelectedTextRange().location, NSNotFound)
+        XCTAssertTrue(try XCTUnwrap(terminal.snapshot).cells.allSatisfy { !$0.selected })
+        // Later polls keep the core's old mark from coming back.
+        try await waitUntil(terminal, timeout: 1) { false }
+        XCTAssertTrue(try XCTUnwrap(terminal.snapshot).cells.allSatisfy { !$0.selected })
+    }
+
+    @MainActor func testPasteOfControlTextWithoutAWindowFailsClosed() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        defer { terminal.shutdown() }
+        var messages: [String] = []
+        terminal.onStatus = { messages.append($0) }
+        terminal.paste("safe\nrm -rf /")
+        XCTAssertNil(terminal.window)
+        XCTAssertEqual(messages, ["Paste requires confirmation, but the terminal is not in a window"])
+    }
+
+    @MainActor func testPreferencesChangeAfterShutdownIsIgnored() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let done = expectation(description: "terminal cleanup")
+        terminal.shutdown { done.fulfill() }
+        await fulfillment(of: [done], timeout: 2)
+        var messages: [String] = []
+        terminal.onStatus = { messages.append($0) }
+        NotificationCenter.default.post(name: .terminalPreferencesChanged, object: nil)
         XCTAssertTrue(messages.isEmpty)
     }
 
@@ -996,6 +1092,30 @@ final class AkittyTests: XCTestCase {
         controller.refreshUpdateReminder(nil)
         XCTAssertEqual(controller.window?.titlebarAccessoryViewControllers.map { $0.view.accessibilityIdentifier() }, ["chrome-sprite"])
         XCTAssertEqual(chromeMark(controller)?.chromePixels, frame0)
+    }
+
+    func testChromeSpriteDecodingEnforcesABIBoundsWithoutTrapping() throws {
+        func decode(_ object: [String: Any]) -> ChromeSprite? {
+            try? JSONDecoder().decode(ChromeSprite.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        func frame(_ w: Int, _ h: Int) -> String { Data(count: w * h * 4).base64EncodedString() }
+        XCTAssertEqual(decode(["w": 1, "h": 1, "frames": [frame(1, 1)]])?.frames.count, 1)
+        XCTAssertEqual(decode(["w": 32, "h": 32, "frames": Array(repeating: frame(32, 32), count: 4)])?.w, 32)
+        let invalid: [[String: Any]] = [
+            ["w": -1, "h": 1, "frames": [frame(1, 1)]],
+            ["w": 0, "h": 1, "frames": [frame(1, 1)]],
+            ["w": 33, "h": 1, "frames": [frame(33, 1)]],
+            ["w": 1, "h": 33, "frames": [frame(1, 33)]],
+            ["w": 1, "h": 1, "frames": [String]()],
+            ["w": 1, "h": 1, "frames": Array(repeating: frame(1, 1), count: 5)],
+            ["w": 1, "h": 1, "frames": [Data(count: 3).base64EncodedString()]],
+            ["w": Int.max, "h": Int.max, "frames": [frame(1, 1)]]
+        ]
+        for object in invalid {
+            XCTAssertThrowsError(try JSONDecoder().decode(ChromeSprite.self, from: JSONSerialization.data(withJSONObject: object))) { error in
+                XCTAssertTrue(error is DecodingError, "\(object) threw \(error)")
+            }
+        }
     }
 
     @MainActor func testProgramChromeOffIgnoresTerminalSequenceButNotAbi() async throws {

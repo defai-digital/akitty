@@ -192,6 +192,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private var findBarGap: NSLayoutConstraint!
     /// The query last sent to the core. Return advances when the field still holds it.
     private var searchedQuery: String?
+    /// The pane the find bar searches. The bar takes first responder, so `active` cannot
+    /// answer once it is shown; remember the focused or palette-targeted pane instead.
+    private weak var findTarget: TerminalView?
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
     init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
@@ -342,9 +345,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             case .closePane: if let terminal { close(terminal) }
             case .copy: if self.editingFind { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) } else { terminal?.copy(nil) }
             case .paste: if self.editingFind { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) } else { terminal?.paste(nil) }
-            case .find: showFind()
-            case .findNext: showFind(); runSearch(findBar.query == searchedQuery ? "next" : "latest")
-            case .findPrevious: showFind(); runSearch("previous")
+            case .find: showFind(target)
+            case .findNext: showFind(target); runSearch(findBar.query == searchedQuery ? "next" : "latest")
+            case .findPrevious: showFind(target); runSearch("previous")
             case .fontIncrease: terminal?.changeFont(1)
             case .fontDecrease: terminal?.changeFont(-1)
             case .fontReset: terminal?.changeFont(nil)
@@ -409,8 +412,12 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     var findQuery: String { get { findBar.query } set { findBar.field.stringValue = newValue } }
     var findStatus: String { findBar.status.stringValue }
     var findBarVisible: Bool { !findBar.isHidden }
-    func showFind() {
+    func showFind(_ target: TerminalView? = nil) {
         let wasHidden = findBar.isHidden
+        // Capture before the field takes focus; a visible bar keeps the pane it already owns.
+        if let target { findTarget = target }
+        else if wasHidden { findTarget = active }
+        else if let current = findTarget, !panes.contains(where: { $0.terminal === current }) { findTarget = active }
         findBar.isHidden = false; findBarHeight.constant = 28; findBarGap.constant = 4
         window?.layoutIfNeeded()
         window?.makeFirstResponder(findBar.field)
@@ -419,7 +426,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     func closeFind() {
         findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0
         clearFindHighlights()
-        if let terminal = active { window?.makeFirstResponder(terminal) }
+        let owner = findTarget.flatMap { candidate in panes.contains(where: { $0.terminal === candidate }) ? candidate : nil } ?? active
+        findTarget = nil
+        if let owner { window?.makeFirstResponder(owner) }
     }
     /// The bar is one per window, and a search can have highlighted any pane, so clear them all.
     private func clearFindHighlights() {
@@ -431,7 +440,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     }
     /// `direction` is `latest`, `next`, or `previous`. An empty field clears the highlight.
     func runSearch(_ direction: String) {
-        guard let terminal = active else { return }
+        guard let terminal = findTarget ?? active else { return }
         let text = findBar.query
         if text.isEmpty {
             clearFindHighlights(); findBar.status.stringValue = ""; return

@@ -90,6 +90,8 @@ import os
     required init?(coder: NSCoder) { nil }
     deinit { timer?.invalidate(); refreshLink?.invalidate(); NotificationCenter.default.removeObserver(self) }
     @objc private func preferencesChanged() {
+        // A stopped terminal has no session behind it; a late notification must not surface an error.
+        guard !stopped else { return }
         preferences = TerminalPreferences.load(); fontSize = preferences.fontSize
         do { try syncProgramChrome() } catch { show(error) }
         // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row.
@@ -191,6 +193,9 @@ import os
             if let next = try result.get() {
                 let previous = snapshot
                 snapshot = next
+                // The host owns the visible selection; without a drag selection, drop core marks
+                // left over from a cleared selection (schema 1 has no deselect request).
+                if selectionEnd == nil { snapshot?.clearSelectionMarks() }
                 // More frames usually follow a changed one: output keeps streaming, an animation advances.
                 lastChange = ProcessInfo.processInfo.systemUptime
                 if next.exited, next.error == nil, next.exit_code == 0, !exitHandled {
@@ -451,6 +456,7 @@ import os
             if let url = snapshot.hyperlink(row: cell.0, col: cell.1) { NSWorkspace.shared.open(url); return }
         }
         if reportMouse(event, button: 0) { return }
+        clearSelection()
         selectionStart = position(convert(event.locationInWindow, from: nil)); selectionEnd = nil
     }
     public override func mouseDragged(with event: NSEvent) {
@@ -492,9 +498,28 @@ import os
         if snapshot?.focus_reporting == true { send("\u{1b}[O") }
         return true
     }
+    /// Drops the host selection, its copy/accessibility text, and the cached highlight.
+    /// Schema 1 has no deselect request, so the cached snapshot's marks are cleared too;
+    /// otherwise a plain click would leave the previous highlight and Cmd-C its text.
+    private func clearSelection() {
+        let hadMarks = snapshot?.cells.contains(where: \.selected) == true
+        let hadSelection = hadMarks || !selectedText.isEmpty || selectionStart != nil || selectionEnd != nil
+        selectionStart = nil; selectionEnd = nil; selectedText = ""
+        if hadMarks {
+            snapshot?.clearSelectionMarks()
+            pendingDamage = nil
+            redraw()
+        }
+        if hadSelection { NSAccessibility.post(element: self, notification: .selectedTextChanged) }
+    }
     private func updateSelection() {
-        guard !stopped else { return }
         guard let start = selectionStart, let end = selectionEnd else { return }
+        selectCells(from: start, to: end)
+    }
+    /// Applies a visible-cell selection and publishes its text. Internal so tests can
+    /// exercise selection without synthesising drag events.
+    func selectCells(from start: (Int, Int), to end: (Int, Int)) {
+        guard !stopped else { return }
         do {
             let data = try session.call("select", ["start_row": start.0, "start_col": start.1, "end_row": end.0, "end_col": end.1])
             selectedText = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["text"] as? String ?? ""
@@ -519,7 +544,14 @@ import os
     @objc public func paste(_ sender: Any?) {
         guard !stopped else { return }
         guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { onStatus?("Paste requires plain text up to 64 KiB"); return }
-        if ClipboardPolicy.needsPasteConfirmation(text), let window {
+        paste(text)
+    }
+    /// Sends already-validated clipboard text. Control or multiline text must not reach
+    /// the PTY without confirmation; without a window there is nowhere to ask, so fail closed.
+    func paste(_ text: String) {
+        guard !stopped else { return }
+        if ClipboardPolicy.needsPasteConfirmation(text) {
+            guard let window else { onStatus?("Paste requires confirmation, but the terminal is not in a window"); return }
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"
             alert.informativeText = "This text may execute commands in the terminal."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Paste")

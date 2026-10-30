@@ -54,6 +54,14 @@ public struct Cell: Codable, Sendable {
     public let strike: Bool?
     /// Index into `Snapshot.links` for OSC 8 hyperlinks.
     public let link: Int?
+    /// A copy without the selection attribute. The core ABI has no deselect operation, so the
+    /// host, which is the only caller of `select`, clears the cached mark when it drops a selection.
+    func clearingSelection() -> Cell {
+        guard selected else { return self }
+        let attrs: UInt16 = (bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0) | (wide ? 16 : 0)
+            | (strike == true ? 32 : 0) | (search ? 64 : 0) | (activeSearch ? 128 : 0) | UInt16(ustyle ?? 0) << 8
+        return Cell(row: row, col: col, text: text, fg: fg, bg: bg, attrs: attrs, ucolor: ucolor, link: link)
+    }
     /// The core sends a cell as `[row, col, text, fg, bg, attrs]`, then `ucolor` (or null) and `link` when set.
     /// Colours are packed 0xRRGGBB; `attrs` bits are 1 bold, 2 italic, 4 underline, 8 selected, 16 wide,
     /// 32 strike, 64 search, 128 active search, with the underline style in bits 8-10.
@@ -251,10 +259,15 @@ extension ChromeSprite: Codable {
         let w = try container.decode(Int.self, forKey: .w)
         let h = try container.decode(Int.self, forKey: .h)
         let encoded = try container.decode([String].self, forKey: .frames)
-        let expected = w * h * 4
-        guard w > 0, h > 0, expected / 4 == w * h else {
-            throw DecodingError.dataCorruptedError(forKey: .frames, in: container, debugDescription: "chrome sprite size is invalid")
+        // ABI schema 1: 1 through 32 pixels on each edge and 1 through 4 frames.
+        // Validate before multiplying so a hostile size cannot overflow Int and trap.
+        guard (1...32).contains(w), (1...32).contains(h) else {
+            throw DecodingError.dataCorruptedError(forKey: .w, in: container, debugDescription: "chrome sprite size must be 1..32 by 1..32")
         }
+        guard (1...4).contains(encoded.count) else {
+            throw DecodingError.dataCorruptedError(forKey: .frames, in: container, debugDescription: "chrome sprite must have 1..4 frames")
+        }
+        let expected = w * h * 4
         self.w = w
         self.h = h
         frames = try encoded.map { text in
@@ -332,6 +345,12 @@ public struct Snapshot: Codable, Sendable {
     /// Present when a mark, sprite, status, or progress is still current. Omitted by the core otherwise.
     public let chrome: ChromeDocument?
     public var text: String { lines.joined(separator: "\n") }
+    /// Drops `selected` marks from this cached snapshot. Used when the host has no selection but
+    /// the core still holds one, because schema 1 has no deselect request.
+    mutating func clearSelectionMarks() {
+        guard cells.contains(where: \.selected) else { return }
+        cells = cells.map { $0.clearingSelection() }
+    }
     /// This snapshot with a partial one applied: dirty rows replaced, everything else kept.
     func applying(_ partial: Snapshot) -> Snapshot? {
         guard let dirty = partial.dirty, partial.cols == cols, partial.rows == rows, lines.count == rows,
@@ -402,8 +421,17 @@ public final class TerminalSession: @unchecked Sendable {
         try request(id)
     }
     public func call(_ op: String, _ values: [String: Any] = [:]) throws -> Data {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { throw AkittyError.core("Session is closed") }
+        lock.lock()
+        guard !closed else { lock.unlock(); throw AkittyError.core("Session is closed") }
+        if op == "close" {
+            // Mark closed before the call reaches Rust, like `close()`, so late app events
+            // see the state immediately. Do not route through `close()`: NSLock is not
+            // recursive and it would deadlock. The reply still follows the call contract.
+            closed = true
+            lock.unlock()
+            return try CoreBridge.call(["op": "close", "id": id])
+        }
+        defer { lock.unlock() }
         var request = values; request["op"] = op; request["id"] = id
         return try CoreBridge.call(request)
     }
