@@ -56,12 +56,21 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
 
 ## Compatibility scope
 
-Unsupported initially: Kitty graphics, sixel, image clipboard protocols, custom
-shaders, Ghostty config compatibility, shell integration, quick terminal and a
+Unsupported initially: sixel, PNG/file/shared-memory Kitty graphics, image
+clipboard protocols, custom shaders, Ghostty config compatibility, shell integration, quick terminal and a
 public extension ecosystem. Kitty keyboard extensions are not advertised until
 native encoding is implemented. CoreText rendering is not a claim of Ghostty's
 performance or shaping parity. Full esctest results are not inferred from the
 curated conformance suite.
+
+Kitty graphics is a deliberately small subset. The core strips APC strings from the
+byte stream before the VT parser, keeps decoded RGBA images under hard limits
+(8 Mi pixels per image, 128 MiB and 256 placements per session) and reports visible
+placements in the snapshot. Pixels cross the boundary through
+`akitty_image_read_v1`, not JSON, so 1080p animation frames stay clear of the 8 MiB
+response cap. Only direct transmission is accepted: a program can never make Akitty
+read a file or shared-memory segment. Swift fetches pixels off the main thread and
+draws them in the grid rasterizer by z-index.
 
 ## macOS 0.6 release additions
 

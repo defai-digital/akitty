@@ -45,9 +45,12 @@ from ghostty-web and runs Ghostty's VT parser as WebAssembly. It is not part of 
 package. See [its README](packages/akitty-web/README.md).
 
 **Status: early 0.7.0 implementation.** This is not a drop-in Ghostty replacement.
-Kitty graphics, sixel, image clipboard protocols, Kitty keyboard extensions,
-custom shaders, Ghostty configuration compatibility, shell integration, quick
-terminal and third-party plugins are not implemented. Search currently finds the
+Sixel, PNG and file-based Kitty graphics, image clipboard protocols, Kitty keyboard
+extensions, custom shaders, Ghostty configuration compatibility, shell integration, quick
+terminal and third-party plugins are not implemented. A bounded Kitty graphics subset
+(direct raw RGB/RGBA with zlib and chunking, placement, z-index, delete) is supported
+so pixel animations such as AX Code's opening and ending scenes can run; OSC 8
+hyperlinks open with Command-click, and underline styles and strikethrough render. Search currently finds the
 latest literal match. Full external esctest qualification, VoiceOver user testing,
 performance parity and testing on every supported Mac version remain separate work.
 
