@@ -7,6 +7,35 @@ with a Rust terminal core, native Swift/AppKit interface, and a small TypeScript
 feature layer. No Zig compiler or runtime is required. Windows and Linux are not
 application targets.
 
+## Quick start
+
+Requires an **Apple Silicon Mac running macOS 14 or later**.
+
+```sh
+curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
+bash install.sh
+open "$HOME/Applications/Akitty.app"
+```
+
+The installer downloads the latest release, verifies its checksum, code signature
+and notarization, then installs it into `~/Applications`.
+
+Click **+** or press **⌘T** for a new terminal tab. Open **Settings… (⌘,)** to
+choose your font, shell and starting directory.
+
+Updates appear as a quiet reminder in the title bar. Use **AkiTTY → Check for
+Updates…** to check manually; you choose when to install and restart. Automatic
+checks can be changed in Settings.
+
+For a shared installation in `/Applications`, run the downloaded installer with
+`bash install.sh --system` instead; that directory must be writable.
+
+## Manual download
+
+You can also [download the v0.9.0 ZIP](https://download.automatosx.com/akitty/releases/download/v0.9.0/AkiTTY-0.9.0-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.9.0).
+Unzip it, move **Akitty.app** into **Applications**, and open it.
+
 ## Why AkiTTY exists
 
 AkiTTY began with [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop),
@@ -23,35 +52,6 @@ Our focus is our **macOS client** and its integration with AX Code. For other
 platforms, we recommend trying **[Ghostty](https://github.com/ghostty-org/ghostty)**
 where it is available. It is an excellent project, and we are grateful to its
 contributors for the work that helped make AkiTTY possible.
-
-## Download
-
-[Download AkiTTY 0.9.0 for Apple Silicon](https://download.automatosx.com/akitty/releases/download/v0.9.0/AkiTTY-0.9.0-macOS-arm64.zip)
-(macOS 14+) or use the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v0.9.0).
-Unzip and move **Akitty.app** to **Applications** before opening it.
-
-Updates appear as a quiet, versioned titlebar reminder. **AkiTTY → Check for
-Updates…** checks manually. Sparkle verifies signed feeds and update archives;
-you choose when to install and restart. Automatic checks can be changed in Settings.
-
-## Install from the terminal
-
-Download the installer first and run it — no download is piped into a shell:
-
-```
-curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
-bash install.sh
-```
-
-The commands install into `~/Applications`. To install into `/Applications`
-instead, run `bash install.sh --system`; that location must be writable
-(admin-owned on most Macs, locked down on managed ones).
-
-The installer reads `latest.json` for the version, takes the archive digest from the
-immutable `releases/download/vX.Y.Z/release.json`, verifies the size and SHA-256,
-checks the code signature and notarization, then replaces an existing copy atomically.
-It prints the installed path on stdout; diagnostics go to stderr. Manual install:
-download the ZIP above and verify it with `shasum -a 256` against the same `release.json`.
 
 ## What is implemented
 
