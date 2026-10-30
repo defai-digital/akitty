@@ -23,11 +23,12 @@ Download the installer first and run it — no download is piped into a shell:
 
 ```
 curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
-bash install.sh            # into ~/Applications
+bash install.sh
 ```
 
-To install into `/Applications` instead, run `bash install.sh --system`; that
-location must be writable (admin-owned on most Macs, locked down on managed ones).
+The commands install into `~/Applications`. To install into `/Applications`
+instead, run `bash install.sh --system`; that location must be writable
+(admin-owned on most Macs, locked down on managed ones).
 
 The installer reads `latest.json` for the version, takes the archive digest from the
 immutable `releases/download/vX.Y.Z/release.json`, verifies the size and SHA-256,
