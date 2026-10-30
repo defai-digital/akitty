@@ -1,2 +1,6 @@
 # Preserve the exact upstream patch bytes, including patch context whitespace.
 packages/akitty-web/patches/ghostty-wasm-api.patch whitespace=-blank-at-eol
+
+# Recorded terminal byte streams must retain CR/control bytes and trailing spaces.
+third_party/alacritty_terminal/tests/ref/**/alacritty.recording -text -diff
+third_party/vte/tests/demo.vte -text -diff

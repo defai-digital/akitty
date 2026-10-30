@@ -646,3 +646,34 @@ fn long_osc_52_sets_the_clipboard() {
     assert!(snap["lines"][0].as_str().unwrap().starts_with("OK"), "{}", snap["lines"][0]);
     assert!(!snap["lines"][0].as_str().unwrap().contains('A'));
 }
+
+#[test]
+fn synchronized_output_expires_without_an_end_sequence_and_invalidates_cached_snapshot() {
+    let t = Terminal::new(20, 4);
+    t.feed("before\r\n\x1b[?2026hafter\x1b]2;recovered\x07");
+    let first = t.snapshot();
+    assert!(!first["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().contains("after")));
+    std::thread::sleep(Duration::from_millis(200));
+    let next = call(json!({"op":"snapshot","id":t.0,"since":first["revision"],"compact":true}));
+    assert_eq!(next["changed"], true);
+    assert!(next["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().contains("after")));
+    assert_eq!(next["title"], "recovered");
+    t.feed(" continues");
+    assert!(t.snapshot()["lines"][1].as_str().unwrap().starts_with("after continues"));
+}
+
+#[test]
+fn synchronized_expiry_preserves_clipboard_bell_and_screen_transition() {
+    let t = Terminal::new(20, 4);
+    t.feed("main\x1b[?2026h\x1b[?1049halt\x07\x1b]52;c;aGVsbG8=\x07");
+    assert_eq!(t.snapshot()["alternate"], false);
+    std::thread::sleep(Duration::from_millis(200));
+    let next = t.snapshot();
+    assert_eq!(next["alternate"], true);
+    assert!(next["lines"][0].as_str().unwrap().trim_start().starts_with("alt"));
+    assert_eq!(next["bell"], true);
+    assert_eq!(next["clipboard"], json!(["hello"]));
+    assert_eq!(t.snapshot()["clipboard"], json!([]));
+    t.feed("\x1b[?1049l");
+    assert!(t.snapshot()["lines"][0].as_str().unwrap().starts_with("main"));
+}

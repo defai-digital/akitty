@@ -105,11 +105,10 @@ impl Session {
     }
     /// Snapshot JSON, already serialized; see [`Model::snapshot_json`].
     pub fn snapshot(&self, since: Option<u64>, compact: bool) -> Result<String, String> {
-        Ok(self
-            .model
-            .lock()
-            .map_err(|_| "terminal unavailable")?
-            .snapshot_json(since, compact))
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        // Real PTY sessions expire in the worker, which owns delivery of replies.
+        if self.commands.is_none() { model.expire_sync(); }
+        Ok(model.snapshot_json(since, compact))
     }
     pub fn feed(&self, bytes: &[u8]) -> Result<(), String> {
         if self.commands.is_some() {
@@ -292,6 +291,20 @@ fn pty_size(s: Size, cell: (u32, u32)) -> PtySize {
     }
 }
 
+/// Retry interruptions/readiness races; preserve unexpected failures for session status.
+fn read_pty(fd: i32, buffer: &mut [u8], hung_up: bool) -> Result<Option<usize>, String> {
+    // SAFETY: buffer is writable for its length; read reports invalid descriptors as EBADF.
+    let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+    if count >= 0 { return Ok(Some(count as usize)); }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) {
+        return Ok(None);
+    }
+    // Some PTYs report EIO on hangup; only an observed hangup authorizes normal EOF.
+    if hung_up && error.raw_os_error() == Some(libc::EIO) { return Ok(Some(0)); }
+    Err(format!("PTY read failed: {error}"))
+}
+
 fn run(
     master: Box<dyn portable_pty::MasterPty + Send>,
     mut child: ChildGuard,
@@ -306,6 +319,15 @@ fn run(
     let mut buffer = [0u8; 8192];
     let mut io_error = None;
     while !stop.load(Ordering::SeqCst) {
+        let replies = model.lock().map_err(|_| "terminal state poisoned")?.expire_sync();
+        if !replies.is_empty() {
+            response_pending += replies.len();
+            if response_pending > 65536 {
+                io_error = Some("terminal response backpressure limit".into());
+                break;
+            }
+            output.push_back((replies, 0, false));
+        }
         for command in rx.try_iter().take(16) {
             match command {
                 Command::Input(bytes) => output.push_back((bytes, 0, true)),
@@ -366,29 +388,22 @@ fn run(
             }
         }
         if poll.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-            // SAFETY: buffer is writable and the owned descriptor is live.
-            let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-            if count > 0 {
-                let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
-                let replies = state.feed(&buffer[..count as usize]);
-                if !replies.is_empty() {
-                    response_pending += replies.len();
-                    if response_pending > 65536 {
-                        io_error = Some("terminal response backpressure limit".into());
-                        break;
+            match read_pty(fd, &mut buffer, poll.revents & libc::POLLHUP != 0) {
+                Ok(Some(0)) => break,
+                Ok(Some(count)) => {
+                    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+                    let replies = state.feed(&buffer[..count]);
+                    if !replies.is_empty() {
+                        response_pending += replies.len();
+                        if response_pending > 65536 {
+                            io_error = Some("terminal response backpressure limit".into());
+                            break;
+                        }
+                        output.push_back((replies, 0, false));
                     }
-                    output.push_back((replies, 0, false));
                 }
-            } else if count == 0 {
-                break;
-            } else {
-                let error = std::io::Error::last_os_error();
-                if !matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) {
-                    break;
-                }
+                Ok(None) => {},
+                Err(error) => { io_error = Some(error); break; },
             }
         }
         match child.try_wait() {
@@ -405,12 +420,12 @@ fn run(
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-                    if count <= 0 {
-                        break;
-                    }
-                    if let Ok(mut state) = model.lock() {
-                        state.feed(&buffer[..count as usize]);
+                    match read_pty(fd, &mut buffer, true) {
+                        Ok(Some(0)) | Ok(None) => break,
+                        Ok(Some(count)) => {
+                            if let Ok(mut state) = model.lock() { state.feed(&buffer[..count]); }
+                        }
+                        Err(error) => { io_error = Some(error); break; },
                     }
                 }
                 break;
@@ -444,6 +459,15 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_pty_read_failure_is_preserved_even_with_hangup() {
+        for hung_up in [false, true] {
+            let error = read_pty(-1, &mut [0; 8], hung_up).unwrap_err();
+            assert!(error.starts_with("PTY read failed:"), "{error}");
+            assert!(error.contains(&std::io::Error::from_raw_os_error(libc::EBADF).to_string()));
+        }
+    }
 
     #[test]
     fn input_backpressure_bounds_bytes_and_rolls_back_rejected_messages() {

@@ -6,7 +6,7 @@ import subprocess
 metadata=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--filter-platform','aarch64-apple-darwin']))
 parts=['Third-party Rust dependency licenses\nGenerated from Cargo.lock.\n']
 for package in sorted(metadata['packages'],key=lambda p:(p['name'],p['version'])):
-    if package['source'] is None: continue
+    if package['source'] is None and package['name'] not in {'alacritty_terminal', 'vte'}: continue
     root=pathlib.Path(package['manifest_path']).parent
     parts.append(f"\n{'='*72}\n{package['name']} {package['version']}\nLicense: {package.get('license','unspecified')}\nSource: {package.get('repository') or package['source']}\n")
     candidates=sorted(p for p in root.rglob('*') if p.is_file() and p.name.lower().startswith(('license','licence','copying','notice')) and p.stat().st_size<100000)

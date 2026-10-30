@@ -35,3 +35,6 @@ __pycache__/
 
 .cf
 *.sparkle-private-key
+
+/packages/akitty-web/test-results/
+/packages/akitty-web/playwright-report/

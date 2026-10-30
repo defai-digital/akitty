@@ -5,9 +5,10 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
 export MACOSX_DEPLOYMENT_TARGET=14.0
-cargo build --locked
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo build --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+python3 scripts/check-engine-source.py
 npm ci --ignore-scripts
 npm run build
 npm test
@@ -16,6 +17,8 @@ npm --prefix packages/akitty-sdk test
 npm ci --ignore-scripts --prefix packages/akitty-web
 npm --prefix packages/akitty-web run type-check
 npm --prefix packages/akitty-web test
+npm --prefix packages/akitty-web exec -- playwright install chromium firefox webkit
+npm --prefix packages/akitty-web run test:browser
 cmp include/akitty.h macos/Bridge/akitty.h
 mkdir -p build
 clang -Wall -Wextra -Werror -mmacosx-version-min=14.0 -I include scripts/abi-smoke.c -L target/debug -lakitty_core -framework Security -framework Foundation -o build/abi-smoke

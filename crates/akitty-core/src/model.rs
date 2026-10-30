@@ -343,6 +343,23 @@ impl Model {
         }
         replies
     }
+    /// The parser records a deadline; the host must expire it even when output stops.
+    /// Return replies to the PTY owner rather than discarding buffered queries.
+    pub fn expire_sync(&mut self) -> Vec<u8> {
+        if !self.parser.sync_timeout().sync_timeout().is_some_and(|deadline| deadline <= std::time::Instant::now()) {
+            return Vec::new();
+        }
+        let Model { term, graphics, tracking, parser, .. } = self;
+        let mut handler = Tracker::new(term, graphics, tracking);
+        handler.sync();
+        parser.stop_sync(&mut handler);
+        let events = self.events.0.lock().map(|mut queue| queue.drain(..).collect()).unwrap_or_default();
+        let mut replies = Vec::new();
+        self.handle_events(events, &mut replies);
+        self.track_screen();
+        self.revision = self.revision.saturating_add(1);
+        replies
+    }
     pub fn set_chrome(&mut self, input: chrome::ChromeInput) -> Result<(), String> {
         self.chrome.apply(input)?;
         self.revision = self.revision.saturating_add(1);
@@ -961,6 +978,15 @@ fn resolve(color: Color, colors: &alacritty_terminal::term::color::Colors) -> [u
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn synchronized_expiry_returns_buffered_query_replies_once() {
+        let mut model = super::Model::new(super::Size::validate(20, 4).unwrap(), 100);
+        assert!(model.feed(b"\x1b[?2026h\x1b[6n").is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(model.expire_sync(), b"\x1b[1;1R");
+        assert!(model.expire_sync().is_empty());
+    }
     use super::*;
     #[test]
     fn split_every_byte_boundary_matches_whole_stream() {

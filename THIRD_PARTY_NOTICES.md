@@ -9,7 +9,7 @@ Akitty's own code is MIT licensed. Dependencies are not relicensed by Akitty.
   to WebAssembly. The original MIT notice is preserved in LICENSE.
 - **Alacritty terminal engine 0.26.0** — https://github.com/alacritty/alacritty —
   Apache-2.0. Thank you to the Alacritty contributors for the terminal engine.
-  See third_party/alacritty/LICENSE-APACHE. The macOS app links `alacritty_terminal`
+  See third_party/alacritty/LICENSE-APACHE and third_party/alacritty_terminal/LICENSE-APACHE. The local maintained source and provenance are documented in third_party/TERMINAL_ENGINE.md. The macOS app links `alacritty_terminal`
   into its Rust library for escape-sequence parsing, the cell grid, and terminal
   state; Akitty supplies its own Swift/AppKit interface and rendering. No engine
   ABI is exposed by Akitty.
@@ -28,3 +28,5 @@ esbuild are build tools, not runtime components of the Mac app.
   includes its prebuilt `ghostty-vt.wasm`, built from Ghostty (MIT). Licenses are in `packages/akitty-web/LICENSE` and
   `LICENSE-GHOSTTY`; provenance and artifact hashes are in `packages/akitty-web/PROVENANCE.md`. Rebuilding the wasm needs
   Zig 0.15.2, which is not required to build or run Akitty itself.
+
+- **VTE 0.15.0 derived parser** — maintained locally in `third_party/vte`; original Apache-2.0 OR MIT licensing and authorship retained in its license files.

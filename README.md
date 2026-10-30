@@ -229,7 +229,7 @@ official Ghostty release or a port of Ghostty's native terminal core.
 The macOS app's terminal engine is **[Alacritty](https://github.com/alacritty/alacritty)**.
 We thank **the Alacritty contributors** for `alacritty_terminal`, which provides
 terminal escape-sequence parsing, the cell grid, and terminal state. AkiTTY uses
-version 0.26.0 under Apache-2.0, with its own Swift/AppKit interface and rendering.
+version 0.26.0 under Apache-2.0, maintained locally together with VTE, with its own Swift/AppKit interface and rendering. See [engine ownership](third_party/TERMINAL_ENGINE.md).
 Alacritty is also credited in the app's **About Akitty** panel and the bundled
 [third-party notices](THIRD_PARTY_NOTICES.md).
 

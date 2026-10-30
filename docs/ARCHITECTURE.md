@@ -1,6 +1,6 @@
 # Akitty architecture and implementation plan
 
-Akitty's native macOS app uses the unmodified `alacritty_terminal` 0.26.0 engine
+Akitty's native macOS app uses an AkiTTY-maintained engine derived from `alacritty_terminal` 0.26.0
 with Akitty's own Rust integration, Swift/AppKit interface, CoreText/Metal
 rendering, and a small TypeScript feature layer. Its own source is MIT licensed.
 Windows and Linux are reached through the separate AkiTTY Web browser terminal.
@@ -18,7 +18,7 @@ performance or feature parity. See [the roadmap](ROADMAP.md) for planned work.
 
 ## Decisions
 
-- Pin alacritty_terminal 0.26.0 for VT state and parsing; keep its types private.
+- Maintain local alacritty_terminal and VTE source for VT state and parsing; keep their types private. See [engine ownership](../third_party/TERMINAL_ENGINE.md).
   Directly translating Ghostty's Zig core would recreate a substantial correctness
   burden. Dependencies keep their own licenses (the engine is Apache-2.0).
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
@@ -162,8 +162,7 @@ normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There
 this repository. People on those systems use the host that embeds AkiTTY Web.
 
 - **Platforms:** Windows and Linux support is this browser terminal, including on macOS inside AX Code Desktop. The
-  native app has no Windows or Linux build. CI type-checks the package and runs Vitest on macOS. There is no Windows
-  or Linux browser run in this repo.
+  native app has no Windows or Linux build. CI type-checks the package and runs Vitest on macOS. Playwright exercises Chromium, Firefox and WebKit on macOS, with Windows/Linux browser jobs also configured.
 - **Scope:** it was migrated from `ax-code-desktop`, which keeps its own copy for now. Neither side syncs automatically.
 - **Distribution:** private source package, never published. Consumers compile its TypeScript.
 - **Zig:** only rebuilding the wasm needs Zig 0.15.2. The macOS app, the Rust core and the normal build do not.
@@ -174,7 +173,7 @@ this repository. People on those systems use the host that embeds AkiTTY Web.
   tool definitions and an optional WebMCP adapter. Input and command execution are intentionally not offered: they need
   a host PTY service, authorization and an input-control rule that the browser package cannot enforce. Terminal text
   is untrusted and tool results say so.
-- **Verification:** type-check and Vitest run in `scripts/verify.sh`; there is no browser or end-to-end test in this repo.
+- **Verification:** type-check and Vitest run in `scripts/verify.sh`; real-browser canvas pixel, keyboard, resize and disposal tests also run there. These do not qualify physical IME input or every font/platform combination.
 
 ## macOS folder opening
 

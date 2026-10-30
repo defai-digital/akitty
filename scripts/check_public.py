@@ -24,6 +24,13 @@ PATTERNS = [
 # Only the exact notice bytes are exempt from the personal-email heuristic.
 PUBLIC_NOTICE_HASHES = {"third_party/sparkle/LICENSE": "816be66341dd11b22806862dffd8392b240babaced1cdf24da2ff413ef00c3fd"}
 
+# Exact published upstream recordings contain historical developer paths. Only
+# the path heuristic is exempt; credentials remain prohibited, even in fixtures.
+PUBLIC_RECORDING_HASHES = {
+    "third_party/alacritty_terminal/tests/ref/vim_24bitcolors_bce/alacritty.recording": "1bea3eb169cb672625a627aed12f6ce58db1d4a35aa2e7fd2bf706218d6b607a",
+    "third_party/alacritty_terminal/tests/ref/alt_reset/alacritty.recording": "ebd6cce7283817296986298b5ded99d0543db21ced0d2675c3feaf2c8f475090",
+}
+
 def violations(name, data):
     path = pathlib.PurePosixPath(name)
     parts = [p.lower() for p in path.parts]
@@ -33,7 +40,9 @@ def violations(name, data):
     if path.suffix in {'.zig', '.zon'}:
         errors.append('Zig source is prohibited')
     public_notice = PUBLIC_NOTICE_HASHES.get(name) == hashlib.sha256(data).hexdigest()
-    if any(pattern.search(data) for pattern in (PATTERNS[:-1] if public_notice else PATTERNS)):
+    patterns = PATTERNS[:-1] if public_notice else PATTERNS
+    if PUBLIC_RECORDING_HASHES.get(name) == hashlib.sha256(data).hexdigest(): patterns = patterns[1:]
+    if any(pattern.search(data) for pattern in patterns):
         errors.append('possible credential or private machine/account data')
     return errors
 

@@ -15,12 +15,16 @@
   "scripts": {
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "build:wasm": "bash scripts/build-wasm.sh"
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "browser:serve": "vite --host 127.0.0.1 --port 4179 --strictPort",
+    "test:browser": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@types/node": "26.6.5",
     "happy-dom": "21.0.4",
     "typescript": "5.9.3",
+    "vite": "8.3.5",
     "vitest": "4.1.12"
   }
 }
