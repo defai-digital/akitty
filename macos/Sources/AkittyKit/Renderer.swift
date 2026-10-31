@@ -601,7 +601,10 @@ final class GridRasterizer: @unchecked Sendable {
         if let rows, let first = rows.min(), let last = rows.max() {
             let top = Int(floor((Self.margin + CGFloat(first) * cellSize.height) * scale))
             let bottom = Int(ceil((Self.margin + CGFloat(last + 1) * cellSize.height) * scale))
-            pixels = max(0, top)..<min(height, max(top, bottom))
+            // A snapshot can still carry more rows than a just-shrunk view holds, so damaged rows may lie wholly below
+            // the bitmap; clamp both bounds so the range stays valid (and empty there) instead of trapping.
+            let lower = min(height, max(0, top))
+            pixels = lower..<min(height, max(lower, bottom))
         } else if rows != nil { pixels = 0..<0 }
         return Frame(context: context, damage: pixels)
     }

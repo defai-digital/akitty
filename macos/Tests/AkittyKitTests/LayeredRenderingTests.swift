@@ -61,6 +61,27 @@ final class LayeredRenderingTests: XCTestCase {
         XCTAssertFalse(rasterizer.hasLayerPasses, "once the last image goes, the layer bitmaps go with it")
     }
 
+    func testDamageBelowAShrunkViewStaysInsideTheBitmap() throws {
+        // A view that just shrank can still receive a snapshot with the old row count; damage on a row wholly below
+        // the bitmap used to build a reversed pixel range and trap (crash on the raster queue).
+        let short = CGSize(width: size.width, height: 2 * cell.height + 16)
+        for layered in [false, true] {
+            let rasterizer = GridRasterizer()
+            let full = try snapshot(cells: [cell(5, 0, text: "x")])
+            let frames: [Range<Int>?] = try [nil, [5], [1, 5]].map { damage in
+                layered
+                    ? try rasterizer.renderLayers(snapshot: full, damage: damage, size: short, scale: 2, fontName: "Menlo",
+                                                  fontSize: 13, cellSize: cell, composition: "").damage
+                    : try rasterizer.render(snapshot: full, damage: damage, size: short, scale: 2, fontName: "Menlo",
+                                            fontSize: 13, cellSize: cell, composition: "").damage
+            }
+            let height = Int(short.height * 2)
+            XCTAssertEqual(frames[1], height..<height, "a row below the bitmap damages nothing")
+            XCTAssertEqual(frames[2]?.lowerBound, Int((GridRasterizer.margin + cell.height) * 2))
+            XCTAssertEqual(frames[2]?.upperBound, height, "damage reaching past the bitmap is clipped to it")
+        }
+    }
+
     func testTheColourCacheStaysBoundedUnderTruecolorOutput() throws {
         let rasterizer = GridRasterizer()
         // 100 frames of 72 distinct foreground and background colours name 14,400 colours, over three times the cap.
