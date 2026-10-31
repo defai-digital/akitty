@@ -82,6 +82,41 @@ final class LayeredRenderingTests: XCTestCase {
         }
     }
 
+    func testRandomResizesNeverProduceDamageOutsideTheBitmap() throws {
+        // Window resizes and display changes let the snapshot's grid and the view's size drift apart in either
+        // direction. Drive one retained rasterizer through random sizes, scales, grids and damage, as the raster
+        // queue would, and check every frame's damage is a valid range inside its bitmap.
+        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        for layered in [false, true] {
+            let rasterizer = GridRasterizer()
+            for _ in 0..<200 {
+                let gridRows = 1 + next(40), gridCols = 2 + next(30), scale = CGFloat(1 + next(3))
+                let size = CGSize(width: CGFloat(20 + next(400)), height: CGFloat(20 + next(800)))
+                let cells = (0..<min(gridRows, 6)).map { _ in self.cell(next(gridRows), next(gridCols), text: "x") }.sorted { ($0[0] as! Int, $0[1] as! Int) < ($1[0] as! Int, $1[1] as! Int) }
+                let snap = try snapshot(cells: cells, cursor: ["row": next(gridRows + 3), "col": next(gridCols), "visible": next(2) == 0],
+                                        grid: (gridCols, gridRows))
+                let damage: Set<Int>? = next(4) == 0 ? nil : Set((0..<next(5)).map { _ in next(gridRows + 10) - 5 })
+                // Repeating a size keeps the retained bitmap, so damage is honoured rather than reset to a full repaint.
+                let height = Int(ceil(size.height * scale))
+                for _ in 0..<2 {
+                    let frame: Range<Int>? = layered
+                        ? try rasterizer.renderLayers(snapshot: snap, damage: damage, size: size, scale: scale, fontName: "Menlo",
+                                                      fontSize: 13, cellSize: cell, composition: "").damage
+                        : try rasterizer.render(snapshot: snap, damage: damage, size: size, scale: scale, fontName: "Menlo",
+                                                fontSize: 13, cellSize: cell, composition: "").damage
+                    if let frame {
+                        XCTAssertGreaterThanOrEqual(frame.lowerBound, 0)
+                        XCTAssertLessThanOrEqual(frame.upperBound, height, "damage stays inside the \(height)-pixel bitmap")
+                    }
+                }
+            }
+        }
+    }
+
     func testTheColourCacheStaysBoundedUnderTruecolorOutput() throws {
         let rasterizer = GridRasterizer()
         // 100 frames of 72 distinct foreground and background colours name 14,400 colours, over three times the cap.
@@ -154,7 +189,8 @@ final class LayeredRenderingTests: XCTestCase {
     }
 
     private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], partial: [Int]? = nil,
-                          cursor: [String: Any] = ["row": 4, "col": 2, "visible": false]) throws -> Snapshot {
+                          cursor: [String: Any] = ["row": 4, "col": 2, "visible": false], grid: (cols: Int, rows: Int)? = nil) throws -> Snapshot {
+        let (cols, rows) = grid ?? (self.cols, self.rows)
         var object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
             "lines": Array(repeating: String(repeating: " ", count: cols), count: rows), "images": images.map { placement in
                 var value: [String: Any] = ["id": placement.id, "gen": placement.gen, "w": placement.w, "h": placement.h,
