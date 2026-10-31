@@ -3,5 +3,6 @@
 for __akitty_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
     if [[ -r $__akitty_profile ]]; then source "$__akitty_profile"; break; fi
 done
+__akitty_quiet=1
 source "$AKITTY_INTEGRATION_DIR/akitty.bash"
-unset AKITTY_INTEGRATION_DIR __akitty_profile
+unset AKITTY_INTEGRATION_DIR __akitty_profile __akitty_quiet
