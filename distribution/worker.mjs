@@ -13,7 +13,17 @@ export function rangeFor(header, size) {
   // therefore means "serve the whole representation"; `null` means the header
   // named bytes but its range set was malformed or unsatisfiable (416).
   if (separator < 0 || value.slice(0, separator).trim().toLowerCase() !== "bytes") return undefined
-  const values = /^(\d*)-(\d*)$/.exec(value.slice(separator + 1).trim())
+  const rangeSpec = /^(\d*)-(\d*)$/
+  const specs = value.slice(separator + 1).split(",").map(part => part.trim())
+  // RFC 9110 §14.1.1 allows a comma-separated range set. This gateway does not
+  // implement multipart/byteranges, so a syntactically valid multi-range is
+  // ignored (`undefined` -> full 200) instead of answered 416. A malformed set
+  // (e.g. an empty or non-numeric member) still fails closed.
+  if (specs.length > 1) return specs.every(part => {
+    const match = rangeSpec.exec(part)
+    return match && (match[1] || match[2]) && (!match[1] || !match[2] || BigInt(match[1]) <= BigInt(match[2]))
+  }) ? undefined : null
+  const values = rangeSpec.exec(specs[0])
   if (!values || (!values[1] && !values[2])) return null
   const start = values[1] ? Number(values[1]) : Math.max(0, size - Number(values[2]))
   const end = values[1] && values[2] ? Math.min(size - 1, Number(values[2])) : size - 1
@@ -42,7 +52,7 @@ function entityTags(header) {
   return { wildcard: false, tags }
 }
 export function ifMatch(header, httpEtag) {
-  if (!header) return true // no precondition
+  if (header == null) return true // absent precondition
   const parsed = entityTags(header)
   if (!parsed) return false
   if (parsed.wildcard) return true
@@ -83,7 +93,7 @@ export default {
     if (request.method === "GET" && request.headers.has("Range") && (!request.headers.has("If-Range") || request.headers.get("If-Range") === metadata.httpEtag)) {
       range = rangeFor(request.headers.get("Range"), metadata.size)
       if (range === null) return failure(416, "Invalid range", { "Content-Range": `bytes */${metadata.size}` })
-      // `undefined` means an unsupported range unit: ignore it and serve 200.
+      // Ignore unsupported units and valid multi-ranges; serve the full 200.
       if (range) headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${metadata.size}`)
     }
     headers.set("Content-Length", String(range?.length ?? metadata.size))

@@ -13,14 +13,21 @@ test("ranges reject malformed and unsatisfiable input", () => {
   assert.deepEqual(rangeFor("bytes=1-3", 10), { offset: 1, length: 3 })
   assert.deepEqual(rangeFor("bytes=-3", 10), { offset: 7, length: 3 })
   assert.deepEqual(rangeFor("bytes=8-", 10), { offset: 8, length: 2 })
-  for (const range of ["bytes=-0", "bytes=10-", "bytes=4-2", "bytes=-", "bytes=0-1,3-4", "bytes=999999999999999999999-"]) assert.equal(rangeFor(range, 10), null)
+  for (const range of ["bytes=-0", "bytes=10-", "bytes=4-2", "bytes=-", "bytes=999999999999999999999-"]) assert.equal(rangeFor(range, 10), null)
+})
+test("valid multi-range headers are ignored so the full representation is served", () => {
+  // This gateway omits multipart/byteranges, so a well-formed range set with more
+  // than one range is ignored (`undefined`) rather than answered 416.
+  for (const range of ["bytes=0-1,4-5", "bytes=0-1,3-4", "BYTES=0-1,3-4", "bytes=0-1, 4-5", "bytes=-3,8-", "bytes=0-1,999-"]) assert.equal(rangeFor(range, 10), undefined)
+  // A malformed member still fails the whole range set closed.
+  for (const range of ["bytes=0-1,4-2", "bytes=0-1,", "bytes=0-1,-", "bytes=0-1,abc", "bytes=0-1,,4-5", "bytes=,0-1"]) assert.equal(rangeFor(range, 10), null)
 })
 test("range units are case-insensitive and unsupported units are ignored", () => {
   for (const unit of ["Bytes", "BYTES", "bYtEs"]) assert.deepEqual(rangeFor(`${unit}=1-3`, 10), { offset: 1, length: 3 })
   for (const range of ["items=0-1", "ITEMS=0-1", "frames=0-1", "nonsense", ""]) assert.equal(rangeFor(range, 10), undefined)
   // A bytes unit with a bad range set is still an error, not an ignored unit.
   assert.equal(rangeFor("Bytes=4-2", 10), null)
-  assert.equal(rangeFor("BYTES=0-1,3-4", 10), null)
+  assert.equal(rangeFor("BYTES=0-1,3-4", 10), undefined) // valid multi-range, ignored
 })
 test("body reads are bound to metadata; mutable feeds never cache", async () => {
   const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/xml") }
@@ -53,7 +60,7 @@ test("If-None-Match uses the RFC weak comparison function", () => {
 })
 test("If-Match uses the RFC strong comparison function", () => {
   assert.equal(ifMatch(undefined, '"id"'), true) // absent precondition
-  assert.equal(ifMatch("", '"id"'), true) // empty field is no precondition
+  assert.equal(ifMatch("", '"id"'), false) // present but empty never matches
   assert.equal(ifMatch("*", '"id"'), true) // wildcard matches any current representation
   assert.equal(ifMatch("  *  ", '"id"'), true)
   assert.equal(ifMatch('"id"', '"id"'), true)
@@ -102,7 +109,7 @@ test("If-Match answers 412 before If-None-Match and Range without fetching the b
   const url = "https://download.automatosx.com/akitty/appcast.xml"
   // If-None-Match and Range are sent too: a failed If-Match must win over both.
   for (const method of ["GET", "HEAD"]) {
-    for (const value of ['"other"', 'W/"identity"', 'W/"other", W/"identity"', '"other", "third"', "garbage"]) {
+    for (const value of ["", '"other"', 'W/"identity"', 'W/"other", W/"identity"', '"other", "third"', "garbage"]) {
       fetches = 0
       const response = await worker.fetch(new Request(url, { method, headers: { "If-Match": value, "If-None-Match": "*", Range: "bytes=9-" } }), env)
       assert.equal(response.status, 412, `${method} If-Match: ${value}`)
@@ -165,12 +172,32 @@ test("unsupported Range units are ignored and serve the full representation", as
   assert.equal(head.headers.get("Content-Range"), null)
   assert.equal(seen, null)
 })
+test("valid multi-range requests are ignored and serve the full representation", async () => {
+  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
+  const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
+  let seen = null
+  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
+  for (const value of ["bytes=0-1,4-5", "BYTES=0-1,3-4", "bytes=0-1, 4-5", "bytes=-2,1-"]) {
+    seen = null
+    const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
+    assert.equal(response.status, 200, `Range: ${value}`)
+    assert.equal(response.headers.get("Content-Range"), null, `Range: ${value}`)
+    assert.equal(response.headers.get("Content-Length"), "3", `Range: ${value}`)
+    assert.equal(seen.range, undefined, `range not forwarded for ${value}`)
+    assert.equal(await response.text(), "abc", `Range: ${value}`)
+  }
+  seen = null
+  const head = await worker.fetch(new Request(url, { method: "HEAD", headers: { Range: "bytes=0-1,4-5" } }), env)
+  assert.equal(head.status, 200)
+  assert.equal(head.headers.get("Content-Range"), null)
+  assert.equal(seen, null)
+})
 test("malformed and unsatisfiable byte ranges stay 416 at the endpoint", async () => {
   const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
   let seen = null
   const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
-  for (const value of ["bytes=3-", "bytes=4-2", "bytes=-", "bytes=0-1,3-4", "bytes=-0", "bytes=abc-def", "Bytes=9-"]) {
+  for (const value of ["bytes=3-", "bytes=4-2", "bytes=-", "bytes=0-1,", "bytes=0-1,abc", "bytes=-0", "bytes=abc-def", "Bytes=9-"]) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
     assert.equal(response.status, 416, `Range: ${value}`)
