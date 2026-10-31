@@ -36,12 +36,20 @@ fi
 __akitty_previous_prompts=("${PROMPT_COMMAND[@]}")
 __akitty_previous_history=
 __akitty_ready=
+# Parse history without =~: it overwrites the user's BASH_REMATCH, which bash 3.2 also makes read-only.
+__akitty_history_entry() {
+    local line number
+    line=$(HISTTIMEFORMAT= builtin history 1)
+    line=${line#"${line%%[![:space:]]*}"}
+    number=${line%%[[:space:]]*}
+    [[ -n $number && $number != *[!0-9]* && $line != "$number" ]] || return 1
+    line=${line#"$number"}
+    __akitty_history_id=$number
+    __akitty_entry=${line#"${line%%[![:space:]]*}"}
+}
 # Sets __akitty_entry to the newest history line when it was entered since the last prompt; fails otherwise.
 __akitty_new_entry() {
-    local line
-    line=$(HISTTIMEFORMAT= builtin history 1)
-    [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ && ${BASH_REMATCH[1]} != "$__akitty_previous_history" ]] || return 1
-    __akitty_entry=${BASH_REMATCH[2]}
+    __akitty_history_entry && [[ $__akitty_history_id != "$__akitty_previous_history" ]]
 }
 __akitty_preexec() {
     [[ -n $__akitty_ready ]] || return 0
@@ -91,7 +99,7 @@ __akitty_adopt_prompts() {
     PROMPT_COMMAND=(__akitty_precmd)
 }
 __akitty_precmd() {
-    local code=$? line ready=1
+    local code=$? ready=1
     # PS0 started a line that ran no DEBUG trap here (it was only a subshell); end it as well.
     if [[ -n $__akitty_running ]] || { [[ -n $__akitty_ps0 && -n $__akitty_ready ]] && __akitty_new_entry; }; then
         printf '\e]133;D;%d\a' "$code"
@@ -101,9 +109,8 @@ __akitty_precmd() {
     __akitty_run_previous_prompts "$code"
     if [[ ${#PROMPT_COMMAND[@]} != 1 || $PROMPT_COMMAND != __akitty_precmd ]]; then __akitty_adopt_prompts; ready=entered; fi
     __akitty_report_prompt "$code"
-    line=$(HISTTIMEFORMAT= builtin history 1)
     __akitty_previous_history=
-    if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]] ]]; then __akitty_previous_history=${BASH_REMATCH[1]}; fi
+    if __akitty_history_entry; then __akitty_previous_history=$__akitty_history_id; fi
     __akitty_ready=$ready
 }
 # Bash hides an existing DEBUG trap from sourced files and functions and restores it when they return, so ownership

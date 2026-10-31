@@ -65,6 +65,12 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn('HOOK_STATUS=7', out.split('\x1b]133;D;7\x07')[1], 'a later hook sees the command status')
         self.assertNotIn('HOOK_STATUS=3', out, 'a hook never sees the status left by the hook before it')
 
+    def test_hooks_preserve_user_regex_captures_between_commands(self):
+        out = self.bash("source {source}\n[[ alphabeta =~ (alpha)(beta) ]]\nprintf 'MATCH=[%s|%s|%s]\\n' \"${{BASH_REMATCH[0]}}\" \"${{BASH_REMATCH[1]}}\" \"${{BASH_REMATCH[2]}}\"\nexit\n")
+        self.assertIn('MATCH=[alphabeta|alpha|beta]', out)
+        out = self.bash("source {source}\n[[ alphabeta =~ (missing) ]]\nprintf 'CAPTURES=%s\\n' \"${{#BASH_REMATCH[@]}}\"\nexit\n")
+        self.assertIn('CAPTURES=0', out)
+
     def test_history_ignored_command_never_reports_previous_command(self):
         out = self.bash('source {source}\necho PREVIOUS_COMMAND\n echo FRESH_IGNORED\nexit\n')
         commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
