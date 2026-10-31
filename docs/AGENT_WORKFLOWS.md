@@ -28,9 +28,10 @@ authorization and lifecycle integration separately.
 
 ## Local shell integration
 
-Enable **Settings → Sessions → Shell integration** for new terminals. Only bash
-and zsh are supported; another selected shell produces a visible startup error
-rather than silently pretending to integrate. The app loads bundled resources;
+**Settings → Sessions → Shell integration** is on by default for new terminals and
+can be turned off there (preferences saved before 1.1.3 held the old off default and
+move to on once). Only bash and zsh are integrated; the app starts any other
+shell as an ordinary login shell and does not pretend it is integrated. The app loads bundled resources;
 no user startup file is edited. Hosts using the ABI supply an absolute
 `shell_integration_dir` pointing at these trusted resources, or omit it to disable.
 The resources can also be explicitly sourced in an existing interactive shell:

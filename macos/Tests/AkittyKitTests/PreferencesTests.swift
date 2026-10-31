@@ -50,6 +50,43 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(decoded.programChrome)
     }
 
+    func testShellIntegrationIsOnByDefaultAndKeepsASavedChoice() throws {
+        XCTAssertTrue(TerminalPreferences().shellIntegration)
+        let older = #"{"fontName":"Menlo","fontSize":14,"shell":"","directory":"","scrollback":5000,"optionAsAlt":false}"#
+        XCTAssertTrue(try JSONDecoder().decode(TerminalPreferences.self, from: Data(older.utf8)).shellIntegration, "a missing key takes the default")
+        let savedOff = #"{"fontName":"Menlo","fontSize":14,"shell":"","directory":"","scrollback":5000,"optionAsAlt":false,"shellIntegration":false}"#
+        XCTAssertTrue(try JSONDecoder().decode(TerminalPreferences.self, from: Data(savedOff.utf8)).shellIntegration,
+                      "saves from before the default changed held the old default, so they move to on once")
+        var off = TerminalPreferences(); off.shellIntegration = false
+        XCTAssertFalse(try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(off)).shellIntegration,
+                       "turning it off after the change is kept")
+        let suite = "akitty-tests-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try off.save(to: defaults)
+        XCTAssertFalse(TerminalPreferences.load(from: defaults).shellIntegration)
+    }
+
+    func testIntegrationDirectoryOnlyForBundledBashAndZsh() throws {
+        let resources = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-integration-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: resources) }
+        let directory = resources.appendingPathComponent("shell-integration")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        func resolve(_ shell: String, _ environment: [String: String] = [:]) -> String? {
+            TerminalView.integrationDirectory(shell: shell, resources: resources, environment: environment)
+        }
+        XCTAssertNil(resolve("/bin/zsh"), "missing wrappers start an ordinary shell")
+        try Data().write(to: directory.appendingPathComponent(".zshrc"))
+        try Data().write(to: directory.appendingPathComponent("bashrc"))
+        XCTAssertEqual(resolve("/bin/zsh"), directory.path)
+        XCTAssertEqual(resolve("/opt/homebrew/bin/bash"), directory.path)
+        XCTAssertNil(resolve("/opt/homebrew/bin/fish"), "other shells are not integrated")
+        XCTAssertEqual(resolve("", ["SHELL": "/bin/bash"]), directory.path, "an empty shell follows $SHELL like the core")
+        XCTAssertNil(resolve("", ["SHELL": "/usr/local/bin/nu"]))
+        XCTAssertEqual(resolve(""), directory.path, "without $SHELL the core launches /bin/zsh")
+        XCTAssertNil(TerminalView.integrationDirectory(shell: "/bin/zsh", resources: nil))
+    }
+
     @MainActor func testAvailableFontsStartsWithSystemMonospacedAndListsMenloOnce() {
         let fonts = TerminalPreferences.availableFonts()
         XCTAssertEqual(fonts.first, "System Monospaced")

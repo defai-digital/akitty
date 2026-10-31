@@ -12,7 +12,8 @@ struct TerminalPreferences: Codable, Equatable {
     var optionAsAlt = false
     /// Programs may update chrome only when this preference is enabled.
     var programChrome = true
-    var shellIntegration = false
+    /// On by default; terminals whose shell is not bash or zsh start as ordinary login shells.
+    var shellIntegration = true
     var quickTerminal = false
     var quickShortcut = 0
     /// The system monospace face, then every installed fixed-pitch family, so CJK-optimised monospace fonts are selectable.
@@ -72,6 +73,8 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
         case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome, shellIntegration, quickTerminal, quickShortcut
+        /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
+        case shellIntegrationDefaultOn
     }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -86,7 +89,9 @@ extension TerminalPreferences {
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
         quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
         quickShortcut = try container.decodeIfPresent(Int.self, forKey: .quickShortcut) ?? 0
-        shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? false
+        if try container.decodeIfPresent(Bool.self, forKey: .shellIntegrationDefaultOn) == true {
+            shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? shellIntegration
+        }
         programChrome = try container.decodeIfPresent(Bool.self, forKey: .programChrome) ?? true
     }
     func encode(to encoder: Encoder) throws {
@@ -100,6 +105,7 @@ extension TerminalPreferences {
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
         try container.encode(programChrome, forKey: .programChrome)
         try container.encode(shellIntegration, forKey: .shellIntegration)
+        try container.encode(true, forKey: .shellIntegrationDefaultOn)
         try container.encode(quickTerminal, forKey: .quickTerminal)
         try container.encode(quickShortcut, forKey: .quickShortcut)
     }
@@ -164,7 +170,7 @@ struct PreferencesDraft {
                 Form {
                     Section("New Terminals") {
                         Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
-                        Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files.").font(.caption).foregroundStyle(.secondary)
+                        Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files. Other shells start normally.").font(.caption).foregroundStyle(.secondary)
                         TextField("Shell", text: $state.draft.shell, prompt: Text("Default login shell"))
                         HStack {
                             TextField("Starting directory", text: $state.draft.directory, prompt: Text("Home directory"))

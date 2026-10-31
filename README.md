@@ -177,7 +177,8 @@ and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
 **Status: 1.1.2.** This is not a drop-in Ghostty replacement.
-Shell integration and quick terminal are opt-in features described above.
+Bash/zsh shell integration is on by default (other shells start normally; turn it off
+in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current
 roadmap. Sixel, image clipboard protocols, and custom shaders remain unsupported.
 The Kitty graphics protocol is supported with bounded limits: raw RGB/RGBA and PNG with zlib
@@ -201,7 +202,7 @@ on every supported Mac version are not claimed.
 - **Performance and stability:** measure parser/snapshot/rendering costs, reduce
   unnecessary idle and hidden-pane work, and expand malformed-input and PTY
   lifecycle stress coverage.
-- **Shell integration qualification:** broaden startup-hook compatibility and remote/multiplexer coverage beyond the opt-in local bash/zsh implementation.
+- **Shell integration qualification:** broaden startup-hook compatibility and remote/multiplexer coverage beyond the default-on local bash/zsh implementation.
 - **Quick terminal qualification:** expand sleep/wake, Spaces and multi-display checks for the implemented persistent window and configurable global shortcut.
 
 These are remaining qualification goals for the implemented features. See the

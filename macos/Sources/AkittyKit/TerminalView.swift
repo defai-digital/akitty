@@ -83,14 +83,22 @@ import os
         if let directory { initial.directory = directory }
         try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial)
     }
+    /// The bundled integration directory when the shell the core will launch is bash or zsh and its wrapper is bundled.
+    /// Integration is on by default, so any other shell (or a build without the resources) starts as an ordinary login
+    /// shell instead of failing; the core resolves an empty shell the same way, from $SHELL then /bin/zsh.
+    nonisolated static func integrationDirectory(shell: String, resources: URL?, environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        let path = shell.isEmpty ? environment["SHELL"] ?? "/bin/zsh" : shell
+        let wrapper: String
+        switch (path as NSString).lastPathComponent { case "bash": wrapper = "bashrc"; case "zsh": wrapper = ".zshrc"; default: return nil }
+        guard let directory = resources?.appendingPathComponent("shell-integration"),
+              FileManager.default.fileExists(atPath: directory.appendingPathComponent(wrapper).path) else { return nil }
+        return directory.path
+    }
     init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences) throws {
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
-        let integrationDirectory: String?
-        if initial.shellIntegration && !headless {
-            guard let resources = Bundle.main.resourceURL else { throw AkittyError.core("Shell integration resources missing") }
-            integrationDirectory = resources.appendingPathComponent("shell-integration").path
-        } else { integrationDirectory = nil }
+        let integrationDirectory = initial.shellIntegration && !headless
+            ? Self.integrationDirectory(shell: initial.shell, resources: Bundle.main.resourceURL) : nil
         sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory)
         preferences = initial; fontSize = initial.fontSize
         try syncProgramChrome()

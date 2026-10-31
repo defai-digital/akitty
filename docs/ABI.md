@@ -201,6 +201,7 @@ These are additive schema-1 operations; no C symbols or existing fields change.
 `create.shell_integration_dir` opts into the bundled local bash/zsh integration.
 It is a trusted absolute resource directory of at most 4096 bytes; other shells
 or missing resources fail visibly. Omitting it preserves ordinary login startup.
+The macOS app passes it by default only when the launched shell is bash or zsh.
 See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinction.
 
 Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
