@@ -92,7 +92,7 @@ Performance/stability and broader platform/workflow qualification remain in [the
 
 ## Compatibility scope
 
-Shell integration (on by default for bash/zsh since 1.1.3) and the opt-in quick terminal are native features;
+Shell integration (on by default for bash/zsh since 1.2.0) and the opt-in quick terminal are native features;
 they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
 public extension ecosystem are outside the current roadmap. Sixel, image clipboard
 protocols, and custom shaders remain unsupported. Dedicated VoiceOver work and

@@ -64,6 +64,20 @@ final class AgentOverviewTests: XCTestCase {
         XCTAssertEqual(item?.keyEquivalentModifierMask, [.command, .option])
     }
 
+    @MainActor func testCommandWClosesOverviewWithoutClosingTerminal() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let terminal = try TerminalWindow(app: app, headless: true)
+        defer { terminal.panes.forEach { $0.terminal.shutdown() }; app.agentOverview?.close() }
+        app.showAgentOverview(nil)
+        let window = try XCTUnwrap(app.agentOverview?.window)
+        XCTAssertTrue(window.isVisible)
+        app.perform(.closePane, in: window, sender: NSMenuItem())
+        XCTAssertFalse(window.isVisible, "Command-W closes the focused utility window")
+        XCTAssertEqual(terminal.panes.count, 1)
+        XCTAssertNotNil(try terminal.panes[0].terminal.session.snapshot())
+    }
+
     @MainActor func testOverviewListsEveryPaneShowsAndReclaims() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)

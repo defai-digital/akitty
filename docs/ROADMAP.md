@@ -55,7 +55,7 @@ evidence. The local engine fork provides independent maintenance; integration im
 ## 2. Shell integration (implemented in 1.1.0; qualification continues)
 
 Version 1.1.0 provides local bash/zsh hooks and bounded command history/output; the app enables
-them by default for bash and zsh from 1.1.3.
+them by default for bash and zsh from 1.2.0.
 See [host workflows](AGENT_WORKFLOWS.md) for startup, limits and trust boundaries.
 Continue qualifying native-app awareness of prompt and command boundaries, working-directory
 changes, and command completion/exit status through shell notifications. Define

@@ -773,12 +773,16 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow(nil) }; return true }
     @objc private func command(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String, let command = NativeCommand(rawValue: id) else { return }
+        perform(command, in: NSApp.keyWindow, sender: sender)
+    }
+    func perform(_ command: NativeCommand, in keyWindow: NSWindow?, sender: NSMenuItem) {
         if command == .newWindow { newWindow(nil); return }
         // The overview is app-wide and opens from any key window, including itself.
         if command == .agentOverview { showAgentOverview(nil); return }
-        guard let window = NSApp.keyWindow?.windowController as? TerminalWindow else {
-            // Settings and palette text fields: keep normal editing for the shared Edit menu.
+        guard let window = keyWindow?.windowController as? TerminalWindow else {
+            // Utility windows keep native close and editing behavior; terminal panes retain their confirmation path.
             switch command {
+            case .closePane: keyWindow?.performClose(sender)
             case .copy: NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
             case .paste: NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
             default: break
