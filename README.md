@@ -44,8 +44,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v1.1.1 ZIP](https://download.automatosx.com/akitty/releases/download/v1.1.1/AkiTTY-1.1.1-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.1.1).
+You can also [download the v1.1.2 ZIP](https://download.automatosx.com/akitty/releases/download/v1.1.2/AkiTTY-1.1.2-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.1.2).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## What makes AkiTTY useful
@@ -175,7 +175,7 @@ lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-**Status: 1.1.1.** This is not a drop-in Ghostty replacement.
+**Status: 1.1.2.** This is not a drop-in Ghostty replacement.
 Shell integration and quick terminal are opt-in features described above.
 Ghostty configuration compatibility and third-party plugins are outside the current
 roadmap. Sixel, image clipboard protocols, and custom shaders remain unsupported.

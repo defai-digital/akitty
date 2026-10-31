@@ -83,9 +83,9 @@ public enum KittyKeyEncoder {
         let unclaimed: KittyKeyResult = input.event == .release ? .none : .legacy
 
         if let function = functional[input.keyCode] {
-            if significant.isEmpty, input.event == .press || !events { return .legacy }
+            if !allKeys, significant.isEmpty, input.event == .press || !events { return .legacy }
             let suffix = events && input.event != .press ? ":\(input.event.rawValue)" : ""
-            let mods = significant.isEmpty ? 1 : modifierValue
+            let mods = modifierValue
             let number = function.final == "~" ? "\(function.number)" : "1"
             return .bytes(Array("\u{1b}[\(number);\(mods)\(suffix)\(function.final)".utf8))
         }

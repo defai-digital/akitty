@@ -399,6 +399,15 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(kitty(123, flags: 3), .legacy)
         XCTAssertEqual(kitty(123, [], .release, flags: 2), esc("1;1:3D"))
     }
+    func testKittyKeyboardAllKeysPreservesFunctionalLockModifiers() {
+        for (key, sequence) in [(UInt16(123), "1;65D"), (UInt16(122), "1;65P"), (UInt16(117), "3;65~")] {
+            XCTAssertEqual(kitty(key, [.capsLock], flags: 8), esc(sequence))
+        }
+        XCTAssertEqual(kitty(123, flags: 8), esc("1;1D"))
+        XCTAssertEqual(kitty(123, [.numLock], .repeat, flags: 10), esc("1;129:2D"))
+        XCTAssertEqual(kitty(123, [.capsLock], .release, flags: 10), esc("1;65:3D"))
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), .legacy)
+    }
     func testKittyKeyboardEventTypesAndAlternates() {
         XCTAssertEqual(kitty(8, "c", [.ctrl], .release, flags: 3), esc("99;5:3u"))
         XCTAssertEqual(kitty(8, "c", [.ctrl], .repeat, flags: 3), esc("99;5:2u"))
