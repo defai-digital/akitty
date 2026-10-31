@@ -195,6 +195,10 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertEqual(titles[0], os.getcwd(), 'the first prompt names the starting directory in full')
         self.assertEqual(titles[1:3], ['cd "$HOME"', '~'])
         self.assertEqual(titles[4:], ['~/ab/c', 'echo TITLED', '~/ab/c', 'exit'])
+        # Only the home directory and what lies inside it are shortened, not a sibling that shares its prefix.
+        out = self.bash('source {source}\nmkdir -p "$HOME/h" "$HOME/hh" && cd "$HOME/hh" && HOME=$HOME/h\nexit\n')
+        self.assertTrue(re.findall(r'\x1b\]2;([^\x07]*)\x07', out)[2].endswith('/hh'), out)
+        self.assertNotIn('\x1b]2;~h', out, 'a sibling of $HOME keeps its full path')
         self.assertNotIn('\x1b]2;', self.bash('AKITTY_SHELL_TITLE=0\nsource {source}\necho QUIET\nexit\n'), 'the opt-out emits no title')
 
     def test_zsh_titles_keep_the_last_three_directories(self):
