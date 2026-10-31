@@ -83,6 +83,7 @@ AX ecosystem integration. See [product scope and host integration](docs/AGENT_WO
   reported working directories and exit status, with bounded per-command output.
 - Trusted native and JavaScript embedding hosts can use exclusive agent control,
   exact-command one-shot approvals, human reclaim and a bounded audit history.
+  **Window → Agent Overview** lists every pane's controller and program reports.
   A native sheet asks for approval. The separate SDK `/host` entry accepts a host
   policy callback; an ax-trust deployment must supply its own authenticated adapter.
   There is no built-in ax-trust service connection.

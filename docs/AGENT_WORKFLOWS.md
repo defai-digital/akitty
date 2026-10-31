@@ -104,6 +104,14 @@ or organization-wide auditing requires a host sink; it is not established by thi
 in-memory ring. Read/export pages before eviction and close. A transport failure
 following dispatch is an uncertain outcome: never blindly retry the command.
 
+**Window → Agent Overview** lists every pane in every window, including the quick
+terminal. For each it shows the controller from the core's control lease (host state),
+the program chrome mark, status and progress (reported by programs, unverified), the
+shell-reported directory (untrusted) and whether the shell exited. It reads only these
+snapshot fields, never terminal text, so it does not infer agent status from output.
+**Show Terminal** focuses the pane; **Reclaim Control** is the same human action as
+the Edit menu item. The overview cannot approve, execute or send input.
+
 ## Quick terminal and input
 
 **Shell → Toggle Quick Terminal** shows or hides a persistent terminal window.

@@ -412,6 +412,13 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         refreshTabs()
     }
     /// ⌘1 to ⌘8 select that tab and ⌘9 the last one; an index past the last tab does nothing.
+    /// Selects the tab holding `terminal`, brings this window forward and focuses that pane.
+    func focus(_ terminal: TerminalView) {
+        guard let item = tabs.tabViewItems.first(where: { (($0.view as? NSSplitView)?.arrangedSubviews ?? []).contains { ($0 as? TerminalPane)?.terminal === terminal } }) else { return }
+        tabs.selectTabViewItem(item)
+        showWindow(nil); window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(terminal)
+    }
     func selectTab(at index: Int) {
         let target = index == 8 ? tabs.numberOfTabViewItems - 1 : index
         if tabs.tabViewItems.indices.contains(target) { tabs.selectTabViewItem(at: target) }
@@ -691,6 +698,19 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     public func applicationWillTerminate(_ notification: Notification) { quickTerminal.stop() }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
+    private(set) var agentOverview: AgentOverviewController?
+    @objc func showAgentOverview(_ sender: Any?) {
+        if agentOverview == nil {
+            agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }) { [weak self] window, terminal in
+                // A hidden quick terminal is shown through its controller so its hide and focus restore keep working.
+                if window === self?.quickTerminal.terminalWindow, window.window?.isVisible != true {
+                    do { try self?.quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
+                }
+                window.focus(terminal)
+            }
+        }
+        agentOverview?.showWindow(nil); agentOverview?.window?.makeKeyAndOrderFront(nil)
+    }
     private var launched = false
     private var openedFolderAtLaunch = false
     private enum TerminationState { case idle, confirming, closing }
@@ -797,6 +817,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let window = menu("Window"); NSApp.windowsMenu = window
         window.addItem(withTitle: "Minimize",action: #selector(NSWindow.performMiniaturize(_:)),keyEquivalent: "m")
         window.addItem(withTitle: "Enter Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "")
+        let overview = window.addItem(withTitle: "Agent Overview", action: #selector(showAgentOverview(_:)), keyEquivalent: ""); overview.target = self
         window.addItem(.separator())
         for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
     }
