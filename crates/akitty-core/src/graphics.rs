@@ -1405,6 +1405,9 @@ fn png_decode(bytes: &[u8], header_only: bool) -> Result<Decoded, String> {
         }
         _ => return Err(bad_png()),
     };
+    // Frame composition slices this as exactly width x height RGBA8 on the PTY worker, so never trust the decoder's
+    // buffer size for that: a short buffer would panic the worker instead of failing the command.
+    if rgba.len() as u64 != u64::from(output.width) * u64::from(output.height) * 4 { return Err(bad_png()); }
     Ok(Decoded { width: output.width, height: output.height, rgba })
 }
 
