@@ -48,7 +48,13 @@ taking the DEBUG trap. Any other pre-existing DEBUG trap is preserved and integr
 is declined at the first prompt: quietly in app sessions, with a warning when the
 hooks are sourced by hand. Prompt frameworks,
 custom traps, nested shells and nonstandard startup policies need separate checks.
-Existing bash prompt arrays are preserved. When history omits a command, bash
+Existing bash prompt hooks, including bash 5.1+ `PROMPT_COMMAND` arrays, run once
+per prompt before the prompt is marked ready, and each sees the command's exit status
+as bash gives it. Hooks added to `PROMPT_COMMAND` later (a re-sourced rc file, a
+lazily loaded tool) are adopted at the next prompt; until then only a command that
+reaches history is recorded, so a hook is never reported as a command. A line that
+is only a subshell, such as `(cd dir && make)`, runs no DEBUG trap and is not
+recorded. The hooks are tested with bash 3.2 and 5.1–5.3. When history omits a command, bash
 falls back to the first simple command text; a compound line may therefore have
 partial descriptive text. Host approval/audit still binds the full exact requested
 command independently of this untrusted shell description.

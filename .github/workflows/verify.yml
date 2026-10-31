@@ -19,10 +19,28 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
       - name: Verify Rust, TypeScript, Swift, C ABI and public files
         run: scripts/verify.sh
+      - name: Shell hooks with current bash (macOS ships 3.2)
+        run: |
+          brew install bash
+          AKITTY_TEST_BASH="$(brew --prefix)/bin/bash" python3 scripts/test_shell_integration.py
       - name: Build app bundle
         run: scripts/build-app.sh release
       - name: Check generated TypeScript bundle is current
         run: git diff --exit-code -- macos/Sources/AkittyKit/Resources/features.js
+
+  shell-hooks:
+    # macOS /bin/bash is 3.2, which runs only the first PROMPT_COMMAND element; array hooks need bash 5.1 or later.
+    name: Shell hooks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04] # bash 5.1, 5.2
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q zsh
+      - run: bash --version | head -1 && AKITTY_TEST_ZSH=/usr/bin/zsh python3 scripts/test_shell_integration.py
 
   browser-platforms:
     name: Browser terminal (${{ matrix.os }})

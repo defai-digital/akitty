@@ -39,33 +39,55 @@ __akitty_ready=
 __akitty_preexec() {
     [[ -n $__akitty_ready ]] || return 0
     case "$BASH_COMMAND" in __akitty_*) return 0 ;; esac
-    __akitty_ready=
-    local command=$BASH_COMMAND line
+    local command=$BASH_COMMAND line entered=
     line=$(HISTTIMEFORMAT= builtin history 1)
     if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ && ${BASH_REMATCH[1]} != "$__akitty_previous_history" ]]; then
-        command=${BASH_REMATCH[2]}
+        command=${BASH_REMATCH[2]}; entered=1
     fi
+    # On a prompt where PROMPT_COMMAND changed, hooks added after ours may still run: only a new history entry counts.
+    [[ $__akitty_ready == 1 || -n $entered ]] || return 0
+    __akitty_ready=
     __akitty_report_command "$command"
 }
 __akitty_restore_status() { return "$1"; }
 __akitty_run_previous_prompts() {
-    local hook hook_status=$1
+    local hook
     for hook in "${__akitty_previous_prompts[@]}"; do
-        # Each user hook sees the previous hook's status, just as in Bash's prompt array.
-        [[ -z $hook ]] || { __akitty_restore_status "$hook_status"; eval "$hook"; hook_status=$?; }
+        # Each hook sees the user's command status, as each element of Bash's prompt array does.
+        [[ -z $hook ]] || { __akitty_restore_status "$1"; eval "$hook"; }
     done
 }
+# Moves hooks added to PROMPT_COMMAND since the last prompt (array elements, or text joined to ours with `;` or a
+# newline) into the list this hook runs, keeping their order around ours, and restores PROMPT_COMMAND to our hook.
+# Bash already runs them on this prompt, so they are adopted for the next one.
+__akitty_adopt_prompts() {
+    local hook before=() after=() found= head tail
+    for hook in "${PROMPT_COMMAND[@]}"; do
+        if [[ -z $found && $hook == *__akitty_precmd* ]]; then
+            found=1; head=${hook%%__akitty_precmd*}; tail=${hook#*__akitty_precmd}
+            while [[ $head == *[[:space:]\;] ]]; do head=${head%?}; done
+            while [[ $tail == [[:space:]\;]* ]]; do tail=${tail#?}; done
+            [[ -z $head ]] || before+=("$head")
+            [[ -z $tail ]] || after+=("$tail")
+        elif [[ -z $found ]]; then before+=("$hook")
+        elif [[ -n $hook ]]; then after+=("$hook")
+        fi
+    done
+    __akitty_previous_prompts=("${before[@]}" "${__akitty_previous_prompts[@]}" "${after[@]}")
+    PROMPT_COMMAND=(__akitty_precmd)
+}
 __akitty_precmd() {
-    local code=$? line
+    local code=$? line ready=1
     __akitty_ready=
     [[ -z $__akitty_running ]] || printf '\e]133;D;%d\a' "$code"
     __akitty_running=
     __akitty_run_previous_prompts "$code"
+    if [[ ${#PROMPT_COMMAND[@]} != 1 || $PROMPT_COMMAND != __akitty_precmd ]]; then __akitty_adopt_prompts; ready=entered; fi
     __akitty_report_prompt "$code"
     line=$(HISTTIMEFORMAT= builtin history 1)
     __akitty_previous_history=
     if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]] ]]; then __akitty_previous_history=${BASH_REMATCH[1]}; fi
-    __akitty_ready=1
+    __akitty_ready=$ready
 }
 # Bash hides an existing DEBUG trap from sourced files and functions and restores it when they return, so ownership
 # is decided by top-level PROMPT_COMMAND code at the first prompt, where `trap -p` sees what is really installed.
@@ -74,7 +96,7 @@ __akitty_first_prompt() {
     unset __akitty_status
     if [[ $__akitty_owner == "trap -- '__akitty_preexec' DEBUG" ]]; then
         unset __akitty_owner
-        PROMPT_COMMAND=__akitty_precmd
+        PROMPT_COMMAND=(__akitty_precmd)
         __akitty_restore_status "$code"; __akitty_precmd
         return
     fi
@@ -85,4 +107,6 @@ __akitty_first_prompt() {
     __akitty_run_previous_prompts "$code"
     return "$code"
 }
-PROMPT_COMMAND=$'__akitty_status=$?\n__akitty_owner=$(trap -p DEBUG)\n[[ -n $__akitty_owner ]] || { trap \'__akitty_preexec\' DEBUG; __akitty_owner=$(trap -p DEBUG); }\n__akitty_first_prompt'
+# Assign whole arrays: a plain assignment replaces only element 0, and bash 5.1+ would still run the user's later
+# elements after our hook marked the prompt ready, recording them as commands and running them twice.
+PROMPT_COMMAND=($'__akitty_status=$?\n__akitty_owner=$(trap -p DEBUG)\n[[ -n $__akitty_owner ]] || { trap \'__akitty_preexec\' DEBUG; __akitty_owner=$(trap -p DEBUG); }\n__akitty_first_prompt')
