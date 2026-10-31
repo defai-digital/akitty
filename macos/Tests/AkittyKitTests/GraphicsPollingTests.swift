@@ -58,6 +58,24 @@ final class GraphicsPollingTests: XCTestCase {
         XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 0, now: 10), "nothing ever changed")
     }
 
+    // MARK: Point to cell
+
+    func testCellAtPointClampsBeforeConvertingToAnInteger() {
+        let size = CGSize(width: 10, height: 20)
+        func cell(_ x: CGFloat, _ y: CGFloat) -> [Int] {
+            let (row, col) = TerminalView.cell(at: NSPoint(x: x, y: y), cellSize: size, rows: 24, cols: 80)
+            return [row, col]
+        }
+        XCTAssertEqual(cell(8, 8), [0, 0])
+        XCTAssertEqual(cell(8 + 35, 8 + 45), [2, 3])
+        XCTAssertEqual(cell(-500, -500), [0, 0], "points above or left of the grid clamp to its origin")
+        XCTAssertEqual(cell(1e6, 1e6), [23, 79], "points past the grid clamp to its last cell")
+        // Input methods may pass arbitrary screen points; none of these may trap in the Int conversion.
+        XCTAssertEqual(cell(.greatestFiniteMagnitude, -.greatestFiniteMagnitude), [0, 79])
+        XCTAssertEqual(cell(.infinity, .nan), [0, 0])
+        XCTAssertEqual(TerminalView.cell(at: .zero, cellSize: size, rows: 0, cols: 0).0, 0, "an empty grid still yields cell 0")
+    }
+
     // MARK: Helpers
 
     private func snapshot(_ extra: [String: Any] = [:]) throws -> Snapshot {

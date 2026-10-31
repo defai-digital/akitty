@@ -479,8 +479,16 @@ import os
         return snapshot?.textOffset(row: cell.0, col: cell.1) ?? 0
     }
     private func position(_ point: NSPoint) -> (Int, Int) {
-        (min(max(0, Int((point.y-8)/cellSize.height)), max(0,(snapshot?.rows ?? 1)-1)),
-         min(max(0, Int((point.x-8)/cellSize.width)), max(0,(snapshot?.cols ?? 1)-1)))
+        Self.cell(at: point, cellSize: cellSize, rows: snapshot?.rows ?? 1, cols: snapshot?.cols ?? 1)
+    }
+    /// The grid cell under a view point, clamped to the grid. Input methods hand `characterIndex(for:)` arbitrary
+    /// screen points, so the clamp happens before the integer conversion, which would trap on a huge or non-finite value.
+    nonisolated static func cell(at point: NSPoint, cellSize: CGSize, rows: Int, cols: Int) -> (Int, Int) {
+        func index(_ offset: CGFloat, _ extent: CGFloat, _ count: Int) -> Int {
+            let last = max(0, count - 1), value = offset / extent
+            return value.isFinite ? Int(min(max(0, value), CGFloat(last))) : 0
+        }
+        return (index(point.y - 8, cellSize.height, rows), index(point.x - 8, cellSize.width, cols))
     }
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
