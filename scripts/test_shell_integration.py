@@ -6,17 +6,22 @@ import pathlib
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'macos/Sources/AkittyKit/Resources/shell-integration/akitty.bash'
+# The system shells by default. Point these at other builds to qualify newer versions: macOS ships bash 3.2, which
+# runs only the first PROMPT_COMMAND element, so array hooks are only exercised by bash 5.1 or later.
+BASH = os.environ.get('AKITTY_TEST_BASH', '/bin/bash')
+ZSH = os.environ.get('AKITTY_TEST_ZSH', '/bin/zsh')
 
 class ShellIntegrationTests(unittest.TestCase):
     def bash(self, commands):
         with tempfile.TemporaryDirectory(prefix='akitty-shell-hooks-') as directory:
             env = dict(os.environ, HOME=directory, HISTFILE=os.path.join(directory, 'history'), HISTCONTROL='ignorespace')
             script = commands.format(source=shlex.quote(str(SCRIPT)))
-            result = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-i'], input=script,
+            result = subprocess.run([BASH, '--noprofile', '--norc', '-i'], input=script,
                                     text=True, capture_output=True, env=env, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout
@@ -24,14 +29,29 @@ class ShellIntegrationTests(unittest.TestCase):
     def test_prompt_array_hooks_run_without_becoming_commands(self):
         out = self.bash('PROMPT_COMMAND=("printf HOOK_A" "printf HOOK_B")\nsource {source}\necho REAL_COMMAND\nexit\n')
         self.assertIn('HOOK_AHOOK_B', out)
+        self.assertEqual(out.count('HOOK_B'), out.count('HOOK_AHOOK_B'), 'each hook runs once per prompt, in order')
         commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
         self.assertIn('echo REAL_COMMAND', commands)
         self.assertFalse(any('HOOK_' in command for command in commands), commands)
 
-    def test_prompt_array_preserves_status_between_user_hooks(self):
-        out = self.bash("""PROMPT_COMMAND=("false" 'printf "HOOK_STATUS=%s\\n" "$?"')\nsource {source}\necho READY\nexit\n""")
-        self.assertIn('HOOK_STATUS=1', out)
-        self.assertNotIn('HOOK_STATUS=0', out, 'later prompt hooks must see the previous hook status')
+    def test_prompt_hooks_added_after_startup_never_become_commands(self):
+        # Re-sourced rc files and lazily loaded tools append to PROMPT_COMMAND after the hooks are installed.
+        cases = {'array': 'PROMPT_COMMAND+=("printf LATE")', 'string': 'PROMPT_COMMAND+="; printf LATE"',
+                 'prepended': 'PROMPT_COMMAND="printf LATE;$PROMPT_COMMAND"'}
+        for name, append in cases.items():
+            with self.subTest(name):
+                out = self.bash('source {source}\n' + append + '\necho AFTER\necho AGAIN\nexit\n')
+                commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
+                self.assertEqual(commands, [append, 'echo AFTER', 'echo AGAIN', 'exit'])
+                # Bash runs (or, before 5.1, ignores) a new array element itself on the prompt that adds it.
+                after = out.split('\x1b]772;' + base64.b64encode(b'echo AFTER').decode())[1]
+                self.assertEqual(after.count('LATE'), 2, 'the added hook runs once on each later prompt')
+
+    def test_prompt_array_hooks_each_see_the_command_status(self):
+        # Bash 5.1+ gives every PROMPT_COMMAND element the last command's status, not the previous element's.
+        out = self.bash("""PROMPT_COMMAND=("(exit 3)" 'printf "HOOK_STATUS=%s\\n" "$?"')\nsource {source}\nsh -c 'exit 7'\nexit 0\n""")
+        self.assertIn('HOOK_STATUS=7', out.split('\x1b]133;D;7\x07')[1], 'a later hook sees the command status')
+        self.assertNotIn('HOOK_STATUS=3', out, 'a hook never sees the status left by the hook before it')
 
     def test_history_ignored_command_never_reports_previous_command(self):
         out = self.bash('source {source}\necho PREVIOUS_COMMAND\n echo FRESH_IGNORED\nexit\n')
@@ -54,9 +74,9 @@ class ShellIntegrationTests(unittest.TestCase):
                            AKITTY_INTEGRATION_DIR=str(resources), AKITTY_USER_ZDOTDIR=directory)
                 if shell == 'zsh':
                     env['ZDOTDIR'] = str(resources)
-                    argv = ['/bin/zsh', '-l', '-i']
+                    argv = [ZSH, '-l', '-i']
                 else:
-                    argv = ['/bin/bash', '--rcfile', str(resources / 'bashrc'), '-i']
+                    argv = [BASH, '--rcfile', str(resources / 'bashrc'), '-i']
                 result = subprocess.run(argv, input="printf 'HISTORY=%s\\n' \"$HISTFILE\"\nfalse\nexit 0\n", text=True,
                                         capture_output=True, env=env, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -65,7 +85,9 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertIn('\x1b]133;D;1\x07', result.stdout)
                 if shell == 'zsh':
                     self.assertIn('LOGIN', result.stdout)
-                    self.assertIn('HISTORY=' + str(home / '.zsh_history'), result.stdout)
+                    if sys.platform == 'darwin':
+                        # macOS /etc/zshrc chooses $ZDOTDIR/.zsh_history; other systems leave HISTFILE to the user.
+                        self.assertIn('HISTORY=' + str(home / '.zsh_history'), result.stdout)
                     self.assertEqual({p.name for p in resources.iterdir()}, resource_names)
                 for name, value in files.items():
                     self.assertEqual((home / name).read_text(), value)
@@ -76,7 +98,7 @@ class ShellIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='akitty-app-bash-') as directory:
             (pathlib.Path(directory) / '.bash_profile').write_text(profile)
             env = dict(os.environ, HOME=directory, HISTFILE=os.path.join(directory, 'history'), AKITTY_INTEGRATION_DIR=str(resources))
-            result = subprocess.run(['/bin/bash', '--rcfile', str(resources / 'bashrc'), '-i'], input=commands + 'exit 0\n',
+            result = subprocess.run([BASH, '--rcfile', str(resources / 'bashrc'), '-i'], input=commands + 'exit 0\n',
                                     text=True, capture_output=True, env=env, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             return result
@@ -90,7 +112,7 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(result.stdout.count('USER_PROMPT'), 3, 'the user prompt command still runs every prompt')
         self.assertNotIn('integration unavailable', result.stderr)
         self.assertIn('\n0\n', result.stdout, 'the wrapper does not leak its quiet flag')
-        out = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-i'], input=f"trap 'true' DEBUG\nsource {shlex.quote(str(SCRIPT))}\nexit 0\n",
+        out = subprocess.run([BASH, '--noprofile', '--norc', '-i'], input=f"trap 'true' DEBUG\nsource {shlex.quote(str(SCRIPT))}\nexit 0\n",
                              text=True, capture_output=True, timeout=10)
         self.assertIn('integration unavailable', out.stderr, 'sourcing the hooks by hand still explains why they are off')
 
