@@ -41,8 +41,12 @@ Zsh runs as an interactive login shell. A bundled ZDOTDIR wrapper loads the user
 `.zshenv`, `.zprofile` and `.zshrc`, restores their ZDOTDIR, then lets ordinary login
 startup continue. Bash uses an interactive `--rcfile` wrapper and explicitly sources
 `/etc/profile` and the first user login profile; its `login_shell` flag is not set.
-A bashrc sourced by that profile still runs normally. A pre-existing DEBUG trap
-is preserved and integration is declined with a visible warning. Prompt frameworks,
+A bashrc sourced by that profile still runs normally. When bash-preexec (used by
+tools such as Atuin) is loaded before the hooks, as it is from any startup file in an
+app session, the hooks join its `preexec_functions`/`precmd_functions` instead of
+taking the DEBUG trap. Any other pre-existing DEBUG trap is preserved and integration
+is declined at the first prompt: quietly in app sessions, with a warning when the
+hooks are sourced by hand. Prompt frameworks,
 custom traps, nested shells and nonstandard startup policies need separate checks.
 Existing bash prompt arrays are preserved. When history omits a command, bash
 falls back to the first simple command text; a compound line may therefore have
