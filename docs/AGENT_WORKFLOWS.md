@@ -40,7 +40,9 @@ The resources can also be explicitly sourced in an existing interactive shell:
 Zsh runs as an interactive login shell. A bundled ZDOTDIR `.zshenv` restores the
 user's ZDOTDIR and sources their `.zshenv`, so the system and user `.zprofile`,
 `.zshrc` and `.zlogin` run as usual (a system `compinit` or `HISTFILE` default never
-writes into the app bundle); the hooks load at the first prompt, after those files. Bash uses an interactive `--rcfile` wrapper and explicitly sources
+writes into the app bundle); the hooks load at the first prompt, after those files, from
+`precmd_functions`. A `.zshrc` that assigns that array instead of appending to it drops
+the loader and should source `akitty.zsh` itself. Bash uses an interactive `--rcfile` wrapper and explicitly sources
 `/etc/profile` and the first user login profile; its `login_shell` flag is not set.
 A bashrc sourced by that profile still runs normally. When bash-preexec (used by
 tools such as Atuin) is loaded before the hooks, as it is from any startup file in an
@@ -60,10 +62,12 @@ Bash 3.2–4.3 has no `PS0`, so the hooks turn on functrace (`set -T`) when they
 DEBUG trap: the subshell inherits the trap and reports the line before its first
 command, and the shell ends it at the next prompt. Functrace also makes functions
 inherit DEBUG and RETURN traps; the hooks ignore commands run inside functions. A
-line such as `(a) | b` can then be started by the subshell and again by the shell;
-the core keeps one record when the same command starts again before a prompt. On
-these versions a line that runs no command (a function definition, a comment) is not
-recorded. bash-preexec does not record subshell-only lines when the hooks join it. The hooks are tested with bash 3.2, 4.3, 4.4 and 5.1–5.3. When history omits a command, bash
+line such as `(a) | b` can then be started by the subshell and again by the shell.
+At the next prompt the shell restates a line that reached history but ran no DEBUG
+trap in the shell itself, and the core keeps one record when the same command starts
+again before a prompt; a line that runs no command (a comment, a function definition)
+is therefore recorded as well, with no output and a duration of the prompt turnaround.
+bash-preexec does not record subshell-only lines when the hooks join it. The hooks are tested with bash 3.2, 4.3, 4.4 and 5.1–5.3. When history omits a command, bash
 falls back to the first simple command text; a compound line may therefore have
 partial descriptive text. Host approval/audit still binds the full exact requested
 command independently of this untrusted shell description.
