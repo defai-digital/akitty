@@ -86,8 +86,8 @@ against bash built from GPG-verified GNU sources (`AKITTY_TEST_BASH=/path/to/bas
 
 | Bash | Before the fixes | After | Subshell-only lines |
 | --- | --- | --- | --- |
-| 3.2.57 (macOS) | pass | pass | not recorded (no `PS0`) |
-| 4.3.30 | not run | pass | not recorded (no `PS0`) |
+| 3.2.57 (macOS) | pass | pass | recorded (functrace) |
+| 4.3.30 | not run | pass | recorded (functrace; checked on 4.3.0) |
 | 4.4.18 | not run | pass | recorded |
 | 5.1.16 | 2 failures | pass | recorded |
 | 5.2.37 | 2 failures (the reported defect) | pass | recorded |
@@ -100,8 +100,15 @@ checked through a real PTY on bash 5.2: command, start, its output, then exit st
 CI now runs the tests with bash 5.1 and 5.2 (Ubuntu 22.04/24.04) and Homebrew bash 5.3
 on macOS, in addition to the system bash 3.2.
 
-Remaining: bash 3.2–4.3 does not record subshell-only lines (a record made after the
-fact would have no output or duration); the bash-preexec path keeps its own limits;
+Bash 3.2–4.3 later gained subshell-only lines through functrace (`set -T`): the subshell
+inherits the DEBUG trap and reports the line before its first command, so the record
+keeps its output and duration (a record made after the fact would have neither), and
+the core collapses a repeated start of the same command before a prompt. Qualified with
+macOS bash 3.2.57 and unpatched GNU 4.3.0 and 5.2.0 builds, plus a real PTY through the
+core on bash 3.2 (`actual_shells_record_subshell_only_lines_once_with_output_and_status`).
+
+Remaining: on bash 3.2–4.3 a line that runs no command is not recorded, and
+functrace makes functions inherit RETURN traps; the bash-preexec path keeps its own limits;
 bash 4.3/4.4 are qualified locally, not in CI; zsh was not re-qualified on Linux.
 
 ## 3. Quick terminal (implemented in 1.1.0; qualification continues)

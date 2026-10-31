@@ -56,8 +56,14 @@ lazily loaded tool) are adopted at the next prompt; until then only a command th
 reaches history is recorded, so a hook is never reported as a command. A line that
 is only a subshell, such as `(cd dir && make)`, runs no DEBUG trap in the shell; bash
 4.4+ records it through `PS0` (appended to any existing `PS0`) when it reaches history.
-Bash 3.2–4.3 has no `PS0` and does not record such a line, nor does bash-preexec when
-the hooks join it. The hooks are tested with bash 3.2, 4.3, 4.4 and 5.1–5.3. When history omits a command, bash
+Bash 3.2–4.3 has no `PS0`, so the hooks turn on functrace (`set -T`) when they own the
+DEBUG trap: the subshell inherits the trap and reports the line before its first
+command, and the shell ends it at the next prompt. Functrace also makes functions
+inherit DEBUG and RETURN traps; the hooks ignore commands run inside functions. A
+line such as `(a) | b` can then be started by the subshell and again by the shell;
+the core keeps one record when the same command starts again before a prompt. On
+these versions a line that runs no command (a function definition, a comment) is not
+recorded. bash-preexec does not record subshell-only lines when the hooks join it. The hooks are tested with bash 3.2, 4.3, 4.4 and 5.1–5.3. When history omits a command, bash
 falls back to the first simple command text; a compound line may therefore have
 partial descriptive text. Host approval/audit still binds the full exact requested
 command independently of this untrusted shell description.

@@ -59,10 +59,15 @@ __akitty_new_entry() {
 __akitty_preexec() {
     [[ -n $__akitty_ready ]] || return 0
     case "$BASH_COMMAND" in __akitty_*) return 0 ;; esac
+    # Under functrace the trap also runs inside functions, completion functions included; only a line's own commands count.
+    (( ${#FUNCNAME[@]} <= 1 )) || return 0
     local command=$BASH_COMMAND entered=
     if __akitty_new_entry; then command=$__akitty_entry; entered=1; fi
     # On a prompt where PROMPT_COMMAND changed, hooks added after ours may still run: only a new history entry counts.
     [[ $__akitty_ready == 1 || -n $entered ]] || return 0
+    # The prompt learns of a subshell's report only from history, so a subshell reports only a new entry. This also
+    # skips command substitutions in PS1, which run while the prompt is ready.
+    (( BASH_SUBSHELL == 0 )) || [[ -n $entered ]] || return 0
     __akitty_ready=
     __akitty_running=1
     # PS0 has already reported a line that reached history.
@@ -72,6 +77,9 @@ __akitty_preexec() {
 # and never for prompt hooks, so this also reports a line that is only a subshell, which runs no DEBUG trap here.
 __akitty_ps0_report() { [[ -n $__akitty_ready ]] && __akitty_new_entry && __akitty_report_command "$__akitty_entry"; }
 __akitty_ps0=
+# Without PS0 (bash before 4.4), the first prompt turns on functrace instead: a subshell inherits the DEBUG trap and
+# reports the line before its first command. Functions then inherit DEBUG and RETURN traps too.
+__akitty_functrace=
 if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) && shopt -q promptvars; then
     __akitty_ps0=1
     PS0="${PS0-}"'$(__akitty_ps0_report)'
@@ -105,8 +113,8 @@ __akitty_adopt_prompts() {
 }
 __akitty_precmd() {
     local code=$? ready=1
-    # PS0 started a line that ran no DEBUG trap here (it was only a subshell); end it as well.
-    if [[ -n $__akitty_running ]] || { [[ -n $__akitty_ps0 && -n $__akitty_ready ]] && __akitty_new_entry; }; then
+    # PS0 or the subshell started a line that ran no DEBUG trap here (it was only a subshell); end it as well.
+    if [[ -n $__akitty_running ]] || { [[ -n $__akitty_ps0$__akitty_functrace && -n $__akitty_ready ]] && __akitty_new_entry; }; then
         printf '\e]133;D;%d\a' "$code"
     fi
     __akitty_ready=
@@ -126,6 +134,7 @@ __akitty_first_prompt() {
     if [[ $__akitty_owner == "trap -- '__akitty_preexec' DEBUG" ]]; then
         unset __akitty_owner
         PROMPT_COMMAND=(__akitty_precmd)
+        [[ -n $__akitty_ps0 ]] || { set -T; __akitty_functrace=1; }
         __akitty_restore_status "$code"; __akitty_precmd
         return
     fi

@@ -69,6 +69,9 @@ impl Shell {
                 "133;B" => {},
                 "133;C" => {
                     let command = std::mem::take(&mut self.pending);
+                    // Bash before 4.4 can start a line from a subshell and again from the shell; with no prompt between,
+                    // the same command text restates the running record rather than starting another.
+                    if !command.is_empty() && self.active().is_some_and(|record| record.command == command) { return Ok(()); }
                     self.finish();
                     self.next = self.next.checked_add(1).ok_or(())?;
                     if self.records.len() == RECORDS { self.records.pop_front(); }
@@ -141,5 +144,19 @@ mod tests {
         assert_eq!(records["commands"][0]["truncated"],true);
         shell.observe(b"7;file:///tmp/%00bad"); assert_eq!(shell.cwd.as_deref(),Some("/tmp/a b"));
         assert_eq!(shell.rejected,1);
+    }
+    #[test]
+    fn repeated_start_without_prompt_restates_the_running_command() {
+        let mut shell = Shell::default();
+        let start = |shell: &mut Shell, command: &[u8]| { shell.observe(&[b"772;", command].concat()); shell.observe(b"133;C"); };
+        shell.observe(b"133;A"); start(&mut shell, b"KCBlY2hvIEEgKSB8IGNhdA=="); shell.output(b"A");
+        start(&mut shell, b"KCBlY2hvIEEgKSB8IGNhdA=="); shell.output(b"B"); shell.observe(b"133;D;0");
+        let records = shell.history(0);
+        assert_eq!(records["commands"].as_array().unwrap().len(), 1);
+        assert_eq!(records["commands"][0]["interrupted"], false);
+        assert_eq!(shell.command_output(1).unwrap()["output_base64"], "QUI=");
+        // A different command, or one after a prompt, is a new record.
+        shell.observe(b"133;A"); start(&mut shell, b"KCBlY2hvIEEgKSB8IGNhdA=="); start(&mut shell, b"ZWNobyBoaQ==");
+        assert_eq!(shell.history(1)["commands"].as_array().unwrap().len(), 2);
     }
 }

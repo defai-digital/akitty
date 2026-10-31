@@ -25,6 +25,21 @@ def events(out):
         found.append(base64.b64decode(match[1]).decode() if match[1] is not None else match[2])
     return found
 
+def as_core_records(found):
+    """Drops a start that repeats the running command before a prompt, as the core does."""
+    kept, pending, active = [], None, None
+    for event in found:
+        if event == 'C':
+            if pending is None or pending != active:
+                kept += [pending, 'C'] if pending is not None else ['C']
+                active = pending
+            pending = None
+        elif event.startswith('D;'):
+            kept.append(event); active = None
+        else:
+            pending = event
+    return kept
+
 class ShellIntegrationTests(unittest.TestCase):
     def bash(self, commands):
         with tempfile.TemporaryDirectory(prefix='akitty-shell-hooks-') as directory:
@@ -77,16 +92,24 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn('echo FRESH_IGNORED', commands)
         self.assertEqual(commands.count('echo PREVIOUS_COMMAND'), 1, commands)
 
-    def test_subshell_only_lines_are_recorded_from_bash_4_4(self):
-        # A line that is only a subshell runs no DEBUG trap in the interactive shell; bash 4.4+ PS0 still sees it.
-        out = self.bash("source {source}\n(exit 7)\n( cd / && echo SUB )\n echo IGNORED\nexit 0\n")
+    def test_subshell_only_lines_are_recorded(self):
+        # A line that is only a subshell runs no DEBUG trap in the interactive shell. Bash 4.4+ reports it from PS0;
+        # older bash turns on functrace so the subshell reports it, and a line can then be started twice.
+        out = self.bash("source {source}\n(exit 7)\n( cd / && echo SUB )\n( echo A ) | cat\n (echo IGNORED_SUB)\n"
+                        " echo IGNORED\nexit 0\n")
+        found = events(out)
         if BASH_VERSION < (4, 4):
-            self.assertEqual(events(out), [' echo IGNORED'.strip(), 'C', 'D;0', 'exit 0', 'C'], 'documented limitation')
-            return
-        self.assertEqual(events(out), ['(exit 7)', 'C', 'D;7', '( cd / && echo SUB )', 'C', 'D;0',
-                                       'echo IGNORED', 'C', 'D;0', 'exit 0', 'C'])
+            found = as_core_records(found)
+        self.assertEqual(found, ['(exit 7)', 'C', 'D;7', '( cd / && echo SUB )', 'C', 'D;0', '( echo A ) | cat', 'C', 'D;0',
+                                 'echo IGNORED', 'C', 'D;0', 'exit 0', 'C'])
         started = out.index(base64.b64encode(b'( cd / && echo SUB )').decode())
         self.assertIn('SUB', out[started:out.index('\x1b]133;D;0\x07', started)], 'output falls inside the record')
+
+    def test_functrace_reports_only_lines_not_function_or_prompt_commands(self):
+        out = self.bash("source {source}\nf() {{ echo F; (echo FS); }}\nf\nPS1='$(echo P)> '\necho $( (echo X) )\n"
+                        "exit 0\n")
+        commands = [e for e in events(out) if e not in ('C',) and not e.startswith('D')]
+        self.assertEqual(commands[-4:], ["f", "PS1='$(echo P)> '", 'echo $( (echo X) )', 'exit 0'])
 
     def test_wrappers_preserve_user_startup_files_and_completion_status(self):
         resources = SCRIPT.parent

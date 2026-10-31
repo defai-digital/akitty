@@ -756,6 +756,35 @@ fn actual_bash_and_zsh_integration_tracks_cwd_exit_and_output() {
 }
 
 #[test]
+fn actual_shells_record_subshell_only_lines_once_with_output_and_status() {
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+        let deadline = Instant::now()+Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline,"initial prompt missing in {shell}: {}",t.snapshot()); std::thread::sleep(Duration::from_millis(10)); }
+        // macOS bash 3.2 has no PS0: the subshell itself reports the line, and the pipeline's shell restates it.
+        call(json!({"op":"input","id":t.0,"text":"( printf 'PIPE-OUT\\n' ) | cat\r(cd / && printf 'SUB-OUT\\n'; exit 4)\r"}));
+        loop {
+            let h = call(json!({"op":"command_history","id":t.0}));
+            let commands = h["commands"].as_array().unwrap();
+            if let Some(sub) = commands.iter().find(|c| c["exit_code"] == 4) {
+                assert_eq!(sub["command"], "(cd / && printf 'SUB-OUT\\n'; exit 4)", "{shell}: {h}");
+                let out = call(json!({"op":"command_output","id":t.0,"command_id":sub["id"]}));
+                let bytes = base64::engine::general_purpose::STANDARD.decode(out["output_base64"].as_str().unwrap()).unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains("SUB-OUT"),"{shell}: {out}");
+                let pipes: Vec<_> = commands.iter().filter(|c| c["command"] == "( printf 'PIPE-OUT\\n' ) | cat").collect();
+                assert_eq!(pipes.len(), 1, "{shell}: {h}");
+                assert_eq!(pipes[0]["exit_code"], 0, "{shell}: {h}");
+                assert_eq!(pipes[0]["interrupted"], false, "{shell}: {h}");
+                break;
+            }
+            assert!(Instant::now()<deadline,"missing subshell record in {shell}: {h}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
 fn agent_control_requires_exact_host_approval_and_human_can_reclaim() {
     let t = Terminal::new(30,4);
     t.feed("\x1b]7;file:///tmp\x07\x1b]133;A\x07");
