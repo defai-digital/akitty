@@ -75,6 +75,35 @@ Acceptance criteria:
   host must explicitly adopt any integration; native support does not add it to
   the separate web package automatically.
 
+### Bash version qualification (2026-10-31)
+
+macOS ships bash 3.2, which runs only the first `PROMPT_COMMAND` element, so macOS CI
+alone could not catch prompt-array defects. A report from Linux bash 5.2 showed a
+second `PROMPT_COMMAND` array hook recorded as the user's command (`printf HOOK_B`
+instead of `echo REAL_COMMAND`). `scripts/test_shell_integration.py` was then run
+against bash built from GPG-verified GNU sources (`AKITTY_TEST_BASH=/path/to/bash`;
+`AKITTY_TEST_ZSH` selects zsh):
+
+| Bash | Before the fixes | After | Subshell-only lines |
+| --- | --- | --- | --- |
+| 3.2.57 (macOS) | pass | pass | not recorded (no `PS0`) |
+| 4.3.30 | not run | pass | not recorded (no `PS0`) |
+| 4.4.18 | not run | pass | recorded |
+| 5.1.16 | 2 failures | pass | recorded |
+| 5.2.37 | 2 failures (the reported defect) | pass | recorded |
+| 5.3 | 2 failures | pass | recorded |
+
+Fixed: whole-array `PROMPT_COMMAND` assignment; hooks added after startup are adopted
+instead of recorded; each hook sees the command's exit status as bash 5.1+ gives it;
+subshell-only lines are recorded through `PS0` on bash 4.4+. A subshell line was also
+checked through a real PTY on bash 5.2: command, start, its output, then exit status 3.
+CI now runs the tests with bash 5.1 and 5.2 (Ubuntu 22.04/24.04) and Homebrew bash 5.3
+on macOS, in addition to the system bash 3.2.
+
+Remaining: bash 3.2–4.3 does not record subshell-only lines (a record made after the
+fact would have no output or duration); the bash-preexec path keeps its own limits;
+bash 4.3/4.4 are qualified locally, not in CI; zsh was not re-qualified on Linux.
+
 ## 3. Quick terminal (implemented in 1.1.0; qualification continues)
 
 Version 1.1.0 provides a persistent window and three selectable global shortcuts.
