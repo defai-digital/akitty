@@ -582,12 +582,17 @@ describe('Terminal visibility', () => {
 
       await wait(80);
       expect(frames.mock.calls.length).toBeGreaterThan(1);
+      // Scroll up with history present so hidden output takes the auto-scroll and scrollbar-fade paths.
+      term.write('\r\n'.repeat(12));
+      await wait(40);
+      term.scrollLines(-2);
+      await wait(40);
 
       notify([{ isIntersecting: false }]);
       await wait(40); // the frame already scheduled observes onScreen=false and parks
       const parkedAt = frames.mock.calls.length;
       const renderedAt = forced.length;
-      term.write('output while hidden');
+      term.write('output while hidden\r\n');
       await wait(120);
       expect(frames.mock.calls.length).toBe(parkedAt);
       expect(forced.length).toBe(renderedAt);
@@ -595,10 +600,20 @@ describe('Terminal visibility', () => {
       notify([{ isIntersecting: true }]);
       expect(forced.length).toBe(renderedAt + 1); // restarted synchronously on the visible edge
       expect(forced[renderedAt]).toBe(true);
+      notify([{ isIntersecting: true }]); // a duplicate visible notification must not start a second loop
+      expect(forced.length).toBe(renderedAt + 1);
       await wait(80);
       expect(frames.mock.calls.length).toBeGreaterThan(parkedAt + 1);
 
+      // A second cycle parks again, and disposing while parked schedules nothing further.
+      notify([{ isIntersecting: false }]);
+      await wait(40);
+      const parkedAgainAt = frames.mock.calls.length;
+      await wait(60);
+      expect(frames.mock.calls.length).toBe(parkedAgainAt);
       term.dispose();
+      await wait(40);
+      expect(frames.mock.calls.length).toBe(parkedAgainAt);
       container.remove();
     } finally {
       frames.mockRestore();

@@ -1242,7 +1242,7 @@ export class Terminal implements ITerminalCore {
     // If animation is already running, don't restart it
     // Just let it continue toward the updated target
     // This prevents choppy restarts during continuous scrolling
-    if (this.scrollAnimationFrame) {
+    if (this.scrollAnimationFrame !== undefined) {
       return;
     }
 
@@ -1258,6 +1258,15 @@ export class Terminal implements ITerminalCore {
    */
   private animateScroll = (): void => {
     if (!this.wasmTerm || this.scrollAnimationStartTime === undefined) {
+      return;
+    }
+    if (!this.onScreen) {
+      // Hidden: jump to the target instead of animating; the forced redraw on show paints the final position.
+      this.viewportY = this.targetViewportY;
+      this.scrollEmitter.fire(Math.floor(this.viewportY));
+      this.scrollAnimationFrame = undefined;
+      this.scrollAnimationStartTime = undefined;
+      this.scrollAnimationStartY = undefined;
       return;
     }
 
@@ -1322,13 +1331,13 @@ export class Terminal implements ITerminalCore {
     this.isOpen = false;
 
     // Stop render loop
-    if (this.animationFrameId) {
+    if (this.animationFrameId !== undefined) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = undefined;
     }
 
     // Stop smooth scroll animation
-    if (this.scrollAnimationFrame) {
+    if (this.scrollAnimationFrame !== undefined) {
       cancelAnimationFrame(this.scrollAnimationFrame);
       this.scrollAnimationFrame = undefined;
     }
@@ -2050,6 +2059,11 @@ export class Terminal implements ITerminalCore {
   private fadeInScrollbar(): void {
     const startTime = Date.now();
     const animate = () => {
+      if (!this.onScreen) {
+        // Hidden: snap to the final opacity; the forced redraw on show paints it.
+        this.scrollbarOpacity = 1;
+        return;
+      }
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = progress;
@@ -2073,6 +2087,11 @@ export class Terminal implements ITerminalCore {
     const startTime = Date.now();
     const startOpacity = this.scrollbarOpacity;
     const animate = () => {
+      if (!this.onScreen) {
+        this.scrollbarVisible = false;
+        this.scrollbarOpacity = 0;
+        return;
+      }
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = startOpacity * (1 - progress);
