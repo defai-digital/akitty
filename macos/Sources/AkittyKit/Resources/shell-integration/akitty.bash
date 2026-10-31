@@ -36,19 +36,33 @@ fi
 __akitty_previous_prompts=("${PROMPT_COMMAND[@]}")
 __akitty_previous_history=
 __akitty_ready=
+# Sets __akitty_entry to the newest history line when it was entered since the last prompt; fails otherwise.
+__akitty_new_entry() {
+    local line
+    line=$(HISTTIMEFORMAT= builtin history 1)
+    [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ && ${BASH_REMATCH[1]} != "$__akitty_previous_history" ]] || return 1
+    __akitty_entry=${BASH_REMATCH[2]}
+}
 __akitty_preexec() {
     [[ -n $__akitty_ready ]] || return 0
     case "$BASH_COMMAND" in __akitty_*) return 0 ;; esac
-    local command=$BASH_COMMAND line entered=
-    line=$(HISTTIMEFORMAT= builtin history 1)
-    if [[ $line =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ && ${BASH_REMATCH[1]} != "$__akitty_previous_history" ]]; then
-        command=${BASH_REMATCH[2]}; entered=1
-    fi
+    local command=$BASH_COMMAND entered=
+    if __akitty_new_entry; then command=$__akitty_entry; entered=1; fi
     # On a prompt where PROMPT_COMMAND changed, hooks added after ours may still run: only a new history entry counts.
     [[ $__akitty_ready == 1 || -n $entered ]] || return 0
     __akitty_ready=
-    __akitty_report_command "$command"
+    __akitty_running=1
+    # PS0 has already reported a line that reached history.
+    [[ -n $__akitty_ps0 && -n $entered ]] || __akitty_report_command "$command"
 }
+# Runs in PS0's command substitution, after a line is read and before it runs. Bash 4.4+ expands PS0 once per line
+# and never for prompt hooks, so this also reports a line that is only a subshell, which runs no DEBUG trap here.
+__akitty_ps0_report() { [[ -n $__akitty_ready ]] && __akitty_new_entry && __akitty_report_command "$__akitty_entry"; }
+__akitty_ps0=
+if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) && shopt -q promptvars; then
+    __akitty_ps0=1
+    PS0="${PS0-}"'$(__akitty_ps0_report)'
+fi
 __akitty_restore_status() { return "$1"; }
 __akitty_run_previous_prompts() {
     local hook
@@ -78,8 +92,11 @@ __akitty_adopt_prompts() {
 }
 __akitty_precmd() {
     local code=$? line ready=1
+    # PS0 started a line that ran no DEBUG trap here (it was only a subshell); end it as well.
+    if [[ -n $__akitty_running ]] || { [[ -n $__akitty_ps0 && -n $__akitty_ready ]] && __akitty_new_entry; }; then
+        printf '\e]133;D;%d\a' "$code"
+    fi
     __akitty_ready=
-    [[ -z $__akitty_running ]] || printf '\e]133;D;%d\a' "$code"
     __akitty_running=
     __akitty_run_previous_prompts "$code"
     if [[ ${#PROMPT_COMMAND[@]} != 1 || $PROMPT_COMMAND != __akitty_precmd ]]; then __akitty_adopt_prompts; ready=entered; fi
@@ -103,6 +120,7 @@ __akitty_first_prompt() {
     unset __akitty_owner
     PROMPT_COMMAND=("${__akitty_previous_prompts[@]}")
     [[ $PS1 != *"$__akitty_mark" ]] || PS1=${PS1%"$__akitty_mark"}
+    [[ -z $__akitty_ps0 ]] || { PS0=${PS0%'$(__akitty_ps0_report)'}; [[ -n $PS0 ]] || unset PS0; __akitty_ps0=; }
     [[ -n $__akitty_quiet_decline ]] || printf '%s\n' 'AkiTTY shell integration unavailable: an existing DEBUG trap owns command hooks.' >&2
     __akitty_run_previous_prompts "$code"
     return "$code"

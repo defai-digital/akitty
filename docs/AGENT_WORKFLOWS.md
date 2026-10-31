@@ -53,8 +53,10 @@ per prompt before the prompt is marked ready, and each sees the command's exit s
 as bash gives it. Hooks added to `PROMPT_COMMAND` later (a re-sourced rc file, a
 lazily loaded tool) are adopted at the next prompt; until then only a command that
 reaches history is recorded, so a hook is never reported as a command. A line that
-is only a subshell, such as `(cd dir && make)`, runs no DEBUG trap and is not
-recorded. The hooks are tested with bash 3.2 and 5.1–5.3. When history omits a command, bash
+is only a subshell, such as `(cd dir && make)`, runs no DEBUG trap in the shell; bash
+4.4+ records it through `PS0` (appended to any existing `PS0`) when it reaches history.
+Bash 3.2–4.3 has no `PS0` and does not record such a line, nor does bash-preexec when
+the hooks join it. The hooks are tested with bash 3.2, 4.3, 4.4 and 5.1–5.3. When history omits a command, bash
 falls back to the first simple command text; a compound line may therefore have
 partial descriptive text. Host approval/audit still binds the full exact requested
 command independently of this untrusted shell description.

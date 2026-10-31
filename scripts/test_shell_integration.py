@@ -15,21 +15,33 @@ SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'macos/Sources/AkittyKit/
 # runs only the first PROMPT_COMMAND element, so array hooks are only exercised by bash 5.1 or later.
 BASH = os.environ.get('AKITTY_TEST_BASH', '/bin/bash')
 ZSH = os.environ.get('AKITTY_TEST_ZSH', '/bin/zsh')
+BASH_VERSION = tuple(int(part) for part in subprocess.run([BASH, '-c', 'echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}'],
+                                                          capture_output=True, text=True, check=True).stdout.split())
+
+def events(out):
+    """Command text, start and end marks in the order the terminal receives them."""
+    found = []
+    for match in re.finditer(r'\x1b\]772;([^\x07]*)\x07|\x1b\]133;([CD][^\x07]*)\x07', out):
+        found.append(base64.b64decode(match[1]).decode() if match[1] is not None else match[2])
+    return found
 
 class ShellIntegrationTests(unittest.TestCase):
     def bash(self, commands):
         with tempfile.TemporaryDirectory(prefix='akitty-shell-hooks-') as directory:
             env = dict(os.environ, HOME=directory, HISTFILE=os.path.join(directory, 'history'), HISTCONTROL='ignorespace')
             script = commands.format(source=shlex.quote(str(SCRIPT)))
-            result = subprocess.run([BASH, '--noprofile', '--norc', '-i'], input=script,
-                                    text=True, capture_output=True, env=env, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            # Prompts, PS0 included, go to stderr; one pipe keeps their marks in order with command output.
+            result = subprocess.run([BASH, '--noprofile', '--norc', '-i'], input=script, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
             return result.stdout
 
     def test_prompt_array_hooks_run_without_becoming_commands(self):
         out = self.bash('PROMPT_COMMAND=("printf HOOK_A" "printf HOOK_B")\nsource {source}\necho REAL_COMMAND\nexit\n')
         self.assertIn('HOOK_AHOOK_B', out)
-        self.assertEqual(out.count('HOOK_B'), out.count('HOOK_AHOOK_B'), 'each hook runs once per prompt, in order')
+        # Readline echoes the typed input on stderr; count only what the hooks print.
+        ran = re.sub(r'printf HOOK_', '', out)
+        self.assertEqual(ran.count('HOOK_B'), ran.count('HOOK_AHOOK_B'), 'each hook runs once per prompt, in order')
         commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
         self.assertIn('echo REAL_COMMAND', commands)
         self.assertFalse(any('HOOK_' in command for command in commands), commands)
@@ -58,6 +70,17 @@ class ShellIntegrationTests(unittest.TestCase):
         commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
         self.assertIn('echo FRESH_IGNORED', commands)
         self.assertEqual(commands.count('echo PREVIOUS_COMMAND'), 1, commands)
+
+    def test_subshell_only_lines_are_recorded_from_bash_4_4(self):
+        # A line that is only a subshell runs no DEBUG trap in the interactive shell; bash 4.4+ PS0 still sees it.
+        out = self.bash("source {source}\n(exit 7)\n( cd / && echo SUB )\n echo IGNORED\nexit 0\n")
+        if BASH_VERSION < (4, 4):
+            self.assertEqual(events(out), [' echo IGNORED'.strip(), 'C', 'D;0', 'exit 0', 'C'], 'documented limitation')
+            return
+        self.assertEqual(events(out), ['(exit 7)', 'C', 'D;7', '( cd / && echo SUB )', 'C', 'D;0',
+                                       'echo IGNORED', 'C', 'D;0', 'exit 0', 'C'])
+        started = out.index(base64.b64encode(b'( cd / && echo SUB )').decode())
+        self.assertIn('SUB', out[started:out.index('\x1b]133;D;0\x07', started)], 'output falls inside the record')
 
     def test_wrappers_preserve_user_startup_files_and_completion_status(self):
         resources = SCRIPT.parent
@@ -106,8 +129,10 @@ class ShellIntegrationTests(unittest.TestCase):
     def test_existing_debug_trap_declines_quietly_only_in_the_app_wrapper(self):
         # Bash 3.2 hides the profile's trap inside sourced files, so only the first prompt can see it.
         result = self.app_bash("trap 'true' DEBUG\nPROMPT_COMMAND='echo USER_PROMPT'\n",
-                               'echo "TRAP=[$(trap -p DEBUG)]"\nset | grep -c "^__akitty_quiet=" || true\n')
+                               'echo "TRAP=[$(trap -p DEBUG)]"\nset | grep -c "^__akitty_quiet=" || true\n'
+                               'echo "PS0=[${PS0-unset}]"\n')
         self.assertIn("TRAP=[trap -- 'true' DEBUG]", result.stdout, 'the existing trap keeps ownership')
+        self.assertIn('PS0=[unset]', result.stdout, 'a declined integration leaves no PS0 behind')
         self.assertNotIn('\x1b]133;', result.stdout + result.stderr, 'no partial integration is left behind')
         self.assertGreaterEqual(result.stdout.count('USER_PROMPT'), 3, 'the user prompt command still runs every prompt')
         self.assertNotIn('integration unavailable', result.stderr)
