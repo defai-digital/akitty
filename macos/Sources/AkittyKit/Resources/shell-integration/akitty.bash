@@ -49,9 +49,10 @@ __akitty_preexec() {
 }
 __akitty_restore_status() { return "$1"; }
 __akitty_run_previous_prompts() {
-    local hook
+    local hook hook_status=$1
     for hook in "${__akitty_previous_prompts[@]}"; do
-        [[ -z $hook ]] || { __akitty_restore_status "$1"; eval "$hook"; }
+        # Each user hook sees the previous hook's status, just as in Bash's prompt array.
+        [[ -z $hook ]] || { __akitty_restore_status "$hook_status"; eval "$hook"; hook_status=$?; }
     done
 }
 __akitty_precmd() {

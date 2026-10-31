@@ -28,6 +28,11 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn('echo REAL_COMMAND', commands)
         self.assertFalse(any('HOOK_' in command for command in commands), commands)
 
+    def test_prompt_array_preserves_status_between_user_hooks(self):
+        out = self.bash("""PROMPT_COMMAND=("false" 'printf "HOOK_STATUS=%s\\n" "$?"')\nsource {source}\necho READY\nexit\n""")
+        self.assertIn('HOOK_STATUS=1', out)
+        self.assertNotIn('HOOK_STATUS=0', out, 'later prompt hooks must see the previous hook status')
+
     def test_history_ignored_command_never_reports_previous_command(self):
         out = self.bash('source {source}\necho PREVIOUS_COMMAND\n echo FRESH_IGNORED\nexit\n')
         commands = [base64.b64decode(value).decode() for value in re.findall(r'\x1b\]772;([^\x07]*)\x07', out)]
