@@ -62,7 +62,10 @@ partial descriptive text. Host approval/audit still binds the full exact request
 command independently of this untrusted shell description.
 
 Hooks emit OSC 133 A/B/C/D, OSC 7 directory URIs and bounded OSC 772 base64 command
-text. A command starts at C and ends at D; missing completion followed by a new
+text. Like Ghostty's title feature, they also set the OSC 2 title: at each prompt the
+directory (zsh keeps the last three components, bash shows the home directory as `~`),
+and while a command runs its text, with control characters removed. `AKITTY_SHELL_TITLE=0`
+in the environment leaves the title to the user's own hooks. A command starts at C and ends at D; missing completion followed by a new
 prompt/start marks it interrupted. A missing D has unknown exit status. Captured
 output is the ordered raw terminal byte stream between these boundaries, excluding
 intercepted shell/chrome metadata; ANSI bytes remain. It is not separated stdout

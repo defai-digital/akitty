@@ -8,6 +8,8 @@ __akitty_quiet_decline=${__akitty_quiet-}
 __akitty_report_command() {
     local command=${1//$'\n'/ }; command=${command//$'\r'/ }
     printf '\e]772;%s\a\e]133;C\a' "$(printf %s "$command" | /usr/bin/base64 | /usr/bin/tr -d '\r\n')"
+    # While a command runs the tab names it, control characters removed so the title cannot end or escape early.
+    [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${command//[[:cntrl:]]/}"
     __akitty_running=1
 }
 __akitty_report_prompt() {
@@ -17,6 +19,9 @@ __akitty_report_prompt() {
     path=${path// /%20}; path=${path//$'\n'/%0A}; path=${path//$'\r'/%0D}
     path=${path//\#/%23}; path=${path//\?/%3F}; path=${path//$'\e'/%1B}; path=${path//$'\a'/%07}
     printf '\e]7;file://localhost%s\a\e]133;A\a' "$path"
+    # The tab names where the shell is, as Ghostty's title feature does, with the home directory as ~ (the tab keeps
+    # the end of a long path). AKITTY_SHELL_TITLE=0 leaves the title to the user's own hooks.
+    [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || { local title=$PWD; [[ -z $HOME || $HOME == / ]] || title=${title/#"$HOME"/\~}; printf '\e]2;%s\a' "${title//[[:cntrl:]]/}"; }
 }
 PS1="${PS1}${__akitty_mark}"
 if [[ -n ${bash_preexec_imported-}${__bp_imported-} ]]; then

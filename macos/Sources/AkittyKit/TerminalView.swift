@@ -13,6 +13,8 @@ import os
     public private(set) var health = RendererHealth()
     public var onStatus: ((String) -> Void)?
     public var onTitle: ((String) -> Void)?
+    /// The program rang the bell (`BEL`); called once per snapshot that carries it.
+    public var onBell: (() -> Void)?
     var onChrome: ((ChromeDocument?) -> Void)?
     private var presenter: MetalPresenter?
     private var bitmap: CGContext?
@@ -253,7 +255,7 @@ import os
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
-                ringBell(next.bell == true)
+                if next.bell == true { ringBell(); onBell?() }
                 if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
                 redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
                 NSAccessibility.post(element: self, notification: .valueChanged)
@@ -346,8 +348,8 @@ import os
         }
     }
     /// One beep per second at most, so a program that rings in a loop cannot make noise continuously.
-    private func ringBell(_ rang: Bool) {
-        guard rang, Date().timeIntervalSince(lastBell) >= 1 else { return }
+    private func ringBell() {
+        guard Date().timeIntervalSince(lastBell) >= 1 else { return }
         lastBell = Date(); NSSound.beep()
     }
     private func show(_ error: Error) { onStatus?(error.localizedDescription); NSSound.beep() }

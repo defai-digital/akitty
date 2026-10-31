@@ -177,6 +177,8 @@ struct SentRows {
     cols: usize,
     hashes: Vec<u64>,
 }
+/// The window and tab name before a program sets one, and after it clears or resets the title.
+pub const DEFAULT_TITLE: &str = "Akitty";
 
 pub struct Model {
     sent: Option<SentRows>,
@@ -259,7 +261,7 @@ impl Model {
             events,
             size,
             revision: 1,
-            title: "Akitty".into(),
+            title: DEFAULT_TITLE.into(),
             clipboard: Vec::new(),
             bell: false,
             error: None,
@@ -480,13 +482,12 @@ impl Model {
         for event in events {
             match event {
                 Event::Title(title) => {
-                    self.title = title
-                        .chars()
-                        .filter(|c| !c.is_control())
-                        .take(128)
-                        .collect()
+                    let title: String = title.chars().filter(|c| !c.is_control()).take(128).collect();
+                    // A program that clears its title on exit (`ESC ] 2 ; BEL`) hands the tab back to the default
+                    // name, as a title reset does; a blank tab label would name nothing.
+                    self.title = if title.trim().is_empty() { DEFAULT_TITLE.into() } else { title }
                 }
-                Event::ResetTitle => self.title = "Akitty".into(),
+                Event::ResetTitle => self.title = DEFAULT_TITLE.into(),
                 Event::Bell => self.bell = true,
                 Event::ClipboardStore(_, text) => {
                     if self.clipboard.len() < 4 && text.len() <= 65536 {
@@ -1080,6 +1081,16 @@ mod tests {
             assert_eq!(link_index(&mut links, &format!("https://h/{i}")), Some(i));
         }
         assert_eq!(link_index(&mut links, "https://overflow"), None);
+    }
+    #[test]
+    fn clearing_the_title_restores_the_default_instead_of_a_blank_tab() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        model.feed(b"\x1b]2;vim\x07");
+        assert_eq!(model.snapshot(None)["title"], "vim");
+        model.feed(b"\x1b]2;\x07");
+        assert_eq!(model.snapshot(None)["title"], DEFAULT_TITLE);
+        model.feed(b"\x1b]0;ax-code\x07\x1b]0;\t \x07");
+        assert_eq!(model.snapshot(None)["title"], DEFAULT_TITLE);
     }
     #[test]
     fn graphics_query_reply_reaches_the_pty_even_when_split() {

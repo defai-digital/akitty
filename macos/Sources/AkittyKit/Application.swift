@@ -57,20 +57,48 @@ enum TabActivity: Equatable {
     case working(pixels: Data?, width: Int, height: Int)
     /// Work ended while the tab was not in view. Cleared when the tab is shown.
     case finished
+    /// The bell rang while the tab was not in view. Cleared when the tab is shown.
+    case bell
+    /// What assistive technology reads for the mark; nil when there is nothing to show.
+    var accessibilityName: String? {
+        switch self {
+        case .none: return nil
+        case .working: return "Working"
+        case .finished: return "Finished"
+        case .bell: return "Bell"
+        }
+    }
 }
 
-/// The chip's activity mark: the program's own sprite while it works, and a dot once work it did out of view ends.
+/// What a tab and the window show for a shell title. Like Ghostty, a bell that rang while the tab was out of view
+/// prefixes the title with 🔔 until the tab is shown, so a window in the background says which tab wants attention.
+enum TabTitle {
+    /// The core's title before a program sets one and after it clears or resets it.
+    static let defaultTitle = "Akitty"
+    static func label(_ title: String, bell: Bool) -> String { bell ? "🔔 \(title)" : title }
+    /// The window names its selected tab, then the app after an em dash unless the tab still has the default title.
+    static func window(_ title: String, bell: Bool) -> String {
+        let label = label(title, bell: bell)
+        return title == defaultTitle ? label : "\(label) — Akitty"
+    }
+}
+
+/// The chip's activity mark: the program's own sprite while it works, a dot once work it did out of view ends, and a
+/// bell when it rang out of view. The bell lives here as well as in the title because the title truncates its head.
 @MainActor final class TabActivityMark: NSView {
     var activity: TabActivity = .none {
         didSet {
             guard activity != oldValue else { return }
             image = Self.image(for: activity)
             isHidden = activity == .none
-            setAccessibilityLabel(activity == .finished ? "Finished" : activity == .none ? nil : "Working")
+            setAccessibilityLabel(activity.accessibilityName)
             needsDisplay = true
         }
     }
     private var image: NSBitmapImageRep?
+    /// Ghostty's bell glyph, in the warning colour so it reads apart from the working and finished dots.
+    private static let bellImage = NSImage(systemSymbolName: "bell.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold).applying(.init(paletteColors: [.systemOrange])))
     init() {
         super.init(frame: .zero)
         isHidden = true
@@ -102,6 +130,10 @@ enum TabActivity: Equatable {
         case .finished:
             NSColor.systemGreen.setFill()
             NSBezierPath(ovalIn: NSRect(x: bounds.midX - 3.5, y: bounds.midY - 3.5, width: 7, height: 7)).fill()
+        case .bell:
+            guard let bell = Self.bellImage else { return }
+            let size = bell.size
+            bell.draw(in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         case .working:
             guard let image else {
                 // A program that reports work without a sprite gets a plain accent dot.
@@ -170,7 +202,7 @@ enum TabActivity: Equatable {
         // A narrow tab gives its room to the title first.
         shortcutLabel.isHidden = bounds.width < 120
         title.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        let state = activity == .finished ? ", finished" : activity == .none ? "" : ", working"
+        let state = activity.accessibilityName.map { ", \($0.lowercased())" } ?? ""
         setAccessibilityLabel(label + state); setAccessibilityValue(isSelected)
         needsDisplay = true
     }
@@ -269,6 +301,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private var workingTabs: Set<ObjectIdentifier> = []
     /// Tabs whose work ended while they were out of view; each keeps a dot until it is shown.
     private var finishedTabs: Set<ObjectIdentifier> = []
+    /// Tabs whose bell rang while they were out of view; each keeps a bell mark and a 🔔 title until it is shown.
+    private var belledTabs: Set<ObjectIdentifier> = []
     private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
@@ -329,7 +363,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     required init?(coder: NSCoder) { nil }
     func newTab() throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
-        let item = NSTabViewItem(identifier: UUID()); item.label = "Terminal"; item.view = split
+        let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
         let directory = directoryForNewTab()
         let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? NSNotFound
@@ -366,11 +400,16 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             let count = split.arrangedSubviews.count
             if count > 1 { for index in 1..<count { split.setPosition(split.bounds.width * CGFloat(index) / CGFloat(count), ofDividerAt: index - 1) } }
         }
+        // The item keeps the raw title; the chip and the window add the bell prefix when they show it.
         pane.terminal.onTitle = { [weak self, weak split] title in
             guard let self else { return }
             self.tabs.tabViewItems.first { $0.view === split }?.label = title
             self.refreshTabs()
-            if self.tabs.selectedTabViewItem?.view === split { self.window?.title = title == "Akitty" ? title : "\(title) — Akitty" }
+        }
+        // A bell in view only beeps; out of view it marks the tab until the user looks, as Ghostty's bell title does.
+        pane.terminal.onBell = { [weak self, weak split] in
+            guard let self, let split, !self.inView(split) else { return }
+            self.belledTabs.insert(ObjectIdentifier(split)); self.refreshTabs()
         }
         // Every tab reports, not only the selected one: background tabs are the ones whose state matters most.
         pane.terminal.onChrome = { [weak self, weak split] _ in
@@ -391,7 +430,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             tabStrip.addArrangedSubview(chip); tabChips.append(chip)
         }
         for (index, (chip, item)) in zip(tabChips, tabs.tabViewItems).enumerated() {
-            chip.label = item.label; chip.isSelected = item === tabs.selectedTabViewItem; chip.activity = activity(of: item)
+            chip.label = TabTitle.label(item.label, bell: belled(item)); chip.isSelected = item === tabs.selectedTabViewItem; chip.activity = activity(of: item)
             chip.shortcut = shortcut(forTab: index)
             chip.onSelect = { [weak self, weak item] in if let item { self?.draggedTab = item; self?.tabs.selectTabViewItem(item) } }
             chip.onDrag = { [weak self] x in
@@ -401,6 +440,15 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             chip.onClose = { [weak self, weak item] in if let item { self?.closeTab(item) } }
             chip.contextMenu = { [weak self, weak item] in self.flatMap { owner in item.map(owner.tabMenu) } ?? NSMenu() }
         }
+        refreshWindowTitle()
+    }
+    /// The window names the selected tab, so switching tabs or acknowledging its bell renames it at once.
+    private func refreshWindowTitle() {
+        guard let item = tabs.selectedTabViewItem else { return }
+        window?.title = TabTitle.window(item.label, bell: belled(item))
+    }
+    private func belled(_ item: NSTabViewItem) -> Bool {
+        (item.view as? NSSplitView).map { belledTabs.contains(ObjectIdentifier($0)) } ?? false
     }
     /// Moves a tab to a new position, keeping it selected if it was.
     func moveTab(_ item: NSTabViewItem, to index: Int) {
@@ -442,20 +490,26 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     }
     private func activity(of item: NSTabViewItem) -> TabActivity {
         guard let split = item.view as? NSSplitView else { return .none }
+        // A bell asks for the user, so it outranks the sprite until the tab is shown.
+        if belledTabs.contains(ObjectIdentifier(split)) { return .bell }
         if let chrome = workingChrome(in: split) {
             guard let sprite = chrome.sprite else { return .working(pixels: nil, width: 0, height: 0) }
             return .working(pixels: chrome.shownPixels(reduceMotion: reduceMotion), width: sprite.w, height: sprite.h)
         }
         return finishedTabs.contains(ObjectIdentifier(split)) ? .finished : .none
     }
-    /// Showing a tab acknowledges work that finished out of view.
+    /// Showing a tab acknowledges work that finished, and a bell that rang, out of view.
     private func acknowledgeSelectedTab() {
-        guard let split = tabs.selectedTabViewItem?.view as? NSSplitView, finishedTabs.remove(ObjectIdentifier(split)) != nil else { return }
-        refreshTabs()
+        guard let split = tabs.selectedTabViewItem?.view as? NSSplitView else { return }
+        let id = ObjectIdentifier(split)
+        let finished = finishedTabs.remove(id) != nil, belled = belledTabs.remove(id) != nil
+        if finished || belled { refreshTabs() }
     }
     func windowDidBecomeKey(_ notification: Notification) { acknowledgeSelectedTab() }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
-        if window?.isKeyWindow == true, let split = tabViewItem?.view as? NSSplitView { finishedTabs.remove(ObjectIdentifier(split)) }
+        if window?.isKeyWindow == true, let split = tabViewItem?.view as? NSSplitView {
+            finishedTabs.remove(ObjectIdentifier(split)); belledTabs.remove(ObjectIdentifier(split))
+        }
         refreshTabs()
         if let pane = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
             window?.makeFirstResponder(pane.terminal)
@@ -533,7 +587,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         terminal.shutdown(); split.removeArrangedSubview(pane); pane.removeFromSuperview()
         if split.arrangedSubviews.isEmpty, let item = tabs.tabViewItems.first(where: { $0.view === split }) {
             tabs.removeTabViewItem(item)
-            workingTabs.remove(ObjectIdentifier(split)); finishedTabs.remove(ObjectIdentifier(split))
+            workingTabs.remove(ObjectIdentifier(split)); finishedTabs.remove(ObjectIdentifier(split)); belledTabs.remove(ObjectIdentifier(split))
         } else {
             refreshActivity(of: split)
         }

@@ -161,5 +161,27 @@ class ShellIntegrationTests(unittest.TestCase):
         self.assertIn('\x1b]133;B\x07', result.stderr, 'the prompt (on stderr without a terminal) still marks input start')
         self.assertIn('ORDER=[user_precmd __akitty_bp_precmd]', result.stdout, 'prompt start stays the last precmd hook')
 
+    def test_bash_titles_name_the_directory_then_the_command(self):
+        # Like Ghostty's title feature: the prompt names where the shell is (home as ~) and a running command names
+        # itself. Control characters in a path are removed so the title cannot end or escape early.
+        out = self.bash('source {source}\ncd "$HOME"\nmkdir -p "$(printf \'a\\033b\')/c" && cd "$(printf \'a\\033b\')/c"\necho TITLED\nexit\n')
+        titles = re.findall(r'\x1b\]2;([^\x07]*)\x07', out)
+        self.assertEqual(titles[0], os.getcwd(), 'the first prompt names the starting directory in full')
+        self.assertEqual(titles[1:3], ['cd "$HOME"', '~'])
+        self.assertEqual(titles[4:], ['~/ab/c', 'echo TITLED', '~/ab/c', 'exit'])
+        self.assertNotIn('\x1b]2;', self.bash('AKITTY_SHELL_TITLE=0\nsource {source}\necho QUIET\nexit\n'), 'the opt-out emits no title')
+
+    def test_zsh_titles_keep_the_last_three_directories(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-zsh-title-') as directory:
+            home = pathlib.Path(directory)
+            (home / '.zshrc').write_text(f'source {shlex.quote(str(SCRIPT.parent / "akitty.zsh"))}\n')
+            env = dict(os.environ, HOME=directory, ZDOTDIR=directory, HISTFILE=str(home / 'history'))
+            commands = 'cd /\nmkdir -p ~/a/b/c/d && cd ~/a/b/c/d\necho TITLED\nexit\n'
+            result = subprocess.run([ZSH, '-i'], input=commands, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            titles = re.findall(r'\x1b\]2;([^\x07]*)\x07', result.stdout)
+            self.assertEqual(titles[1:3], ['cd /', '/'])
+            self.assertEqual(titles[4:], ['…/b/c/d', 'echo TITLED', '…/b/c/d', 'exit'], 'a deep path keeps its last three directories')
+
 if __name__ == '__main__':
     unittest.main()
