@@ -26,7 +26,8 @@ def events(out):
     return found
 
 def as_core_records(found):
-    """Drops a start that repeats the running command before a prompt, as the core does."""
+    """Drops a start that repeats the running command before a prompt, as the core does: the shell restates at the
+    prompt a line that PS0 or a subshell started, so that a line which ran no command still ends with a record."""
     kept, pending, active = [], None, None
     for event in found:
         if event == 'C':
@@ -94,14 +95,17 @@ class ShellIntegrationTests(unittest.TestCase):
 
     def test_subshell_only_lines_are_recorded(self):
         # A line that is only a subshell runs no DEBUG trap in the interactive shell. Bash 4.4+ reports it from PS0;
-        # older bash turns on functrace so the subshell reports it, and a line can then be started twice.
+        # older bash turns on functrace so the subshell reports it. The prompt restates such a line, so a line that
+        # runs no command (a comment, a function definition) is recorded too, never as an end mark without a start.
         out = self.bash("source {source}\n(exit 7)\n( cd / && echo SUB )\n( echo A ) | cat\n (echo IGNORED_SUB)\n"
-                        " echo IGNORED\nexit 0\n")
+                        " echo IGNORED\n# noted\nf() {{ :; }}\nexit 0\n")
         found = events(out)
-        if BASH_VERSION < (4, 4):
-            found = as_core_records(found)
-        self.assertEqual(found, ['(exit 7)', 'C', 'D;7', '( cd / && echo SUB )', 'C', 'D;0', '( echo A ) | cat', 'C', 'D;0',
-                                 'echo IGNORED', 'C', 'D;0', 'exit 0', 'C'])
+        self.assertEqual(as_core_records(found), ['(exit 7)', 'C', 'D;7', '( cd / && echo SUB )', 'C', 'D;0',
+                                                  '( echo A ) | cat', 'C', 'D;0', 'echo IGNORED', 'C', 'D;0',
+                                                  '# noted', 'C', 'D;0', 'f() { :; }', 'C', 'D;0', 'exit 0', 'C'])
+        for index, event in enumerate(found):
+            if event.startswith('D'):
+                self.assertEqual(found[index - 1], 'C', f'end without start: {found}')
         started = out.index(base64.b64encode(b'( cd / && echo SUB )').decode())
         self.assertIn('SUB', out[started:out.index('\x1b]133;D;0\x07', started)], 'output falls inside the record')
 

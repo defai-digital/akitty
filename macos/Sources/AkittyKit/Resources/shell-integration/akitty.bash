@@ -5,12 +5,15 @@ __akitty_running=
 __akitty_mark='\[\e]133;B\a\]'
 # The app's default-on wrapper declines quietly so every new terminal is not prefixed with a warning.
 __akitty_quiet_decline=${__akitty_quiet-}
-__akitty_report_command() {
+__akitty_start() {
     local command=${1//$'\n'/ }; command=${command//$'\r'/ }
     printf '\e]772;%s\a\e]133;C\a' "$(printf %s "$command" | /usr/bin/base64 | /usr/bin/tr -d '\r\n')"
-    # While a command runs the tab names it, control characters removed so the title cannot end or escape early.
-    [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${command//[[:cntrl:]]/}"
     __akitty_running=1
+}
+__akitty_report_command() {
+    __akitty_start "$1"
+    # While a command runs the tab names it, control characters removed so the title cannot end or escape early.
+    [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${1//[[:cntrl:]]/}"
 }
 __akitty_report_prompt() {
     [[ -z $__akitty_running ]] || printf '\e]133;D;%d\a' "$1"
@@ -118,10 +121,13 @@ __akitty_adopt_prompts() {
 }
 __akitty_precmd() {
     local code=$? ready=1
-    # PS0 or the subshell started a line that ran no DEBUG trap here (it was only a subshell); end it as well.
-    if [[ -n $__akitty_running ]] || { [[ -n $__akitty_ps0$__akitty_functrace && -n $__akitty_ready ]] && __akitty_new_entry; }; then
-        printf '\e]133;D;%d\a' "$code"
+    # A line that reached history without running a DEBUG trap here was started by PS0 or by its subshell, or ran
+    # no command at all (a comment, a function definition). Start it now, which the core folds into the record the
+    # line already has, so that it ends like any other line instead of leaving an end mark with no start.
+    if [[ -z $__akitty_running && -n $__akitty_ps0$__akitty_functrace && -n $__akitty_ready ]] && __akitty_new_entry; then
+        __akitty_start "$__akitty_entry"
     fi
+    [[ -z $__akitty_running ]] || printf '\e]133;D;%d\a' "$code"
     __akitty_ready=
     __akitty_running=
     __akitty_run_previous_prompts "$code"

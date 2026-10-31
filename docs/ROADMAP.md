@@ -107,8 +107,13 @@ the core collapses a repeated start of the same command before a prompt. Qualifi
 macOS bash 3.2.57 and unpatched GNU 4.3.0 and 5.2.0 builds, plus a real PTY through the
 core on bash 3.2 (`actual_shells_record_subshell_only_lines_once_with_output_and_status`).
 
-Remaining: on bash 3.2–4.3 a line that runs no command is not recorded, and
-functrace makes functions inherit RETURN traps; the bash-preexec path keeps its own limits;
+A line that reached history without running a command in the shell (a comment, a
+function definition, or a subshell on these versions) used to leave an end mark with no
+start; the prompt now restates such a line and the core folds the restart, so it is
+recorded like any other.
+
+Remaining: on bash 3.2–4.3 functrace makes functions inherit RETURN traps; the
+bash-preexec path keeps its own limits;
 bash 4.3/4.4 are qualified locally, not in CI; zsh was not re-qualified on Linux.
 
 ## 3. Quick terminal (implemented in 1.1.0; qualification continues)
