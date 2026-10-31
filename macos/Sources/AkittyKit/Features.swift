@@ -5,6 +5,7 @@ public enum NativeCommand: String, CaseIterable, Codable {
     case newWindow = "new-window", newTab = "new-tab", split, closePane = "close-pane"
     case copy, paste, find, findNext = "find-next", findPrevious = "find-previous"
     case fontIncrease = "font-increase", fontDecrease = "font-decrease", fontReset = "font-reset"
+    case agentOverview = "agent-overview"
     public var title: String {
         switch self {
         case .newWindow: return "New Window"
@@ -19,6 +20,7 @@ public enum NativeCommand: String, CaseIterable, Codable {
         case .fontIncrease: return "Increase Font Size"
         case .fontDecrease: return "Decrease Font Size"
         case .fontReset: return "Reset Font Size"
+        case .agentOverview: return "Agent Overview"
         }
     }
 }

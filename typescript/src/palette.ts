@@ -20,6 +20,7 @@ export const commands: readonly Command[] = Object.freeze([
   { id: "font-increase", title: "Increase Font Size", shortcut: "⌘+", keywords: ["zoom", "larger"] },
   { id: "font-decrease", title: "Decrease Font Size", shortcut: "⌘−", keywords: ["zoom", "smaller"] },
   { id: "font-reset", title: "Reset Font Size", shortcut: "⌘0", keywords: ["zoom", "default"] },
+  { id: "agent-overview", title: "Agent Overview", shortcut: "⌥⌘A", keywords: ["agents", "control", "reclaim", "sessions"] },
 ])
 function plainLine(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim()

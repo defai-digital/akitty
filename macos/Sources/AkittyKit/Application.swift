@@ -477,6 +477,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             case .fontIncrease: terminal?.changeFont(1)
             case .fontDecrease: terminal?.changeFont(-1)
             case .fontReset: terminal?.changeFont(nil)
+            case .agentOverview: app?.showAgentOverview(nil)
             }
         } catch { NSAlert(error: error).runModal() }
     }
@@ -773,6 +774,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func command(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String, let command = NativeCommand(rawValue: id) else { return }
         if command == .newWindow { newWindow(nil); return }
+        // The overview is app-wide and opens from any key window, including itself.
+        if command == .agentOverview { showAgentOverview(nil); return }
         guard let window = NSApp.keyWindow?.windowController as? TerminalWindow else {
             // Settings and palette text fields: keep normal editing for the shared Edit menu.
             switch command {
@@ -817,7 +820,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let window = menu("Window"); NSApp.windowsMenu = window
         window.addItem(withTitle: "Minimize",action: #selector(NSWindow.performMiniaturize(_:)),keyEquivalent: "m")
         window.addItem(withTitle: "Enter Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "")
-        let overview = window.addItem(withTitle: "Agent Overview", action: #selector(showAgentOverview(_:)), keyEquivalent: ""); overview.target = self
+        add(.agentOverview, key: "a", modifiers: [.command, .option], to: window)
         window.addItem(.separator())
         for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
     }

@@ -104,7 +104,7 @@ or organization-wide auditing requires a host sink; it is not established by thi
 in-memory ring. Read/export pages before eviction and close. A transport failure
 following dispatch is an uncertain outcome: never blindly retry the command.
 
-**Window → Agent Overview** lists every pane in every window, including the quick
+**Window → Agent Overview** (⌥⌘A, or the command palette) lists every pane in every window, including the quick
 terminal. For each it shows the controller from the core's control lease (host state),
 the program chrome mark, status and progress (reported by programs, unverified), the
 shell-reported directory (untrusted) and whether the shell exited. It reads only these

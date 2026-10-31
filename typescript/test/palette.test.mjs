@@ -8,14 +8,16 @@ vm.runInContext(source, context, {timeout: 1000});
 const list = query => JSON.parse(context.AkittyFeatures.listCommands(query));
 test('bounded deterministic command catalog', () => {
   assert.equal(list('').version, 1);
-  assert.equal(list('').commands.length, 12);
-  assert.equal(new Set(list('').commands.map(x => x.id)).size, 12);
+  assert.equal(list('').commands.length, 13);
+  assert.equal(new Set(list('').commands.map(x => x.id)).size, 13);
   assert.equal(list('').commands.find(command => command.id === 'find-next').shortcut, '⌘G');
   assert.equal(list('').commands.find(command => command.id === 'find-previous').shortcut, '⌘⇧G');
   assert.deepEqual(list('split'), list('split'));
   assert.equal(list('split').commands[0].id, 'split');
   assert.equal(list('next').commands[0].id, 'find-next');
   assert.equal(list('previous').commands[0].id, 'find-previous');
+  assert.equal(list('agent').commands[0].id, 'agent-overview');
+  assert.equal(list('reclaim').commands[0].shortcut, '⌥⌘A');
 });
 test('Unicode normalization and subsequence search', () => {
   assert.equal(list('ｓｐｌｉｔ').commands[0].id, 'split');

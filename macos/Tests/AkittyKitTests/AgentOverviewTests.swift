@@ -47,6 +47,23 @@ final class AgentOverviewTests: XCTestCase {
         XCTFail("timed out")
     }
 
+    @MainActor func testPaletteCommandAndMenuOpenTheOverview() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let controller = try TerminalWindow(app: app, headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; app.agentOverview?.close() }
+        XCTAssertNil(app.agentOverview)
+        controller.perform(.agentOverview)
+        let overview = try XCTUnwrap(app.agentOverview)
+        XCTAssertTrue(overview.window?.isVisible == true)
+        controller.perform(.agentOverview)
+        XCTAssertTrue(app.agentOverview === overview, "reopening reuses the one overview window")
+        app.makeMenu()
+        let item = NSApp.mainMenu?.items.compactMap(\.submenu).first { $0.title == "Window" }?.items.first { $0.title == "Agent Overview" }
+        XCTAssertEqual(item?.keyEquivalent, "a")
+        XCTAssertEqual(item?.keyEquivalentModifierMask, [.command, .option])
+    }
+
     @MainActor func testOverviewListsEveryPaneShowsAndReclaims() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)

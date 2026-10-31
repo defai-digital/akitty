@@ -36,7 +36,8 @@ var AkittyFeatures = (() => {
     { id: "find-previous", title: "Find Previous", shortcut: "\u2318\u21E7G", keywords: ["search", "previous"] },
     { id: "font-increase", title: "Increase Font Size", shortcut: "\u2318+", keywords: ["zoom", "larger"] },
     { id: "font-decrease", title: "Decrease Font Size", shortcut: "\u2318\u2212", keywords: ["zoom", "smaller"] },
-    { id: "font-reset", title: "Reset Font Size", shortcut: "\u23180", keywords: ["zoom", "default"] }
+    { id: "font-reset", title: "Reset Font Size", shortcut: "\u23180", keywords: ["zoom", "default"] },
+    { id: "agent-overview", title: "Agent Overview", shortcut: "\u2325\u2318A", keywords: ["agents", "control", "reclaim", "sessions"] }
   ]);
   function plainLine(value) {
     return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim();
