@@ -112,9 +112,15 @@ function definition, or a subshell on these versions) used to leave an end mark 
 start; the prompt now restates such a line and the core folds the restart, so it is
 recorded like any other.
 
+The zsh ZDOTDIR wrapper was re-qualified on Linux (Ubuntu 26.04.1, zsh 5.9, bash
+5.3.9) on 2026-10-31. The v1.2.2 wrapper reproduced the reported failure there: the
+`compinit` in `/etc/zsh/zshrc` wrote `.zcompdump` into the shell-integration directory,
+which in the app is the signed bundle. The single `.zshenv` that restores the user's
+ZDOTDIR before the system files run passes all 12 shell tests on that box and leaves
+the directory untouched; macOS zsh 5.9 and bash 3.2 pass as well.
+
 Remaining: on bash 3.2–4.3 functrace makes functions inherit RETURN traps; the
-bash-preexec path keeps its own limits;
-bash 4.3/4.4 are qualified locally, not in CI; zsh was not re-qualified on Linux.
+bash-preexec path keeps its own limits; bash 4.3/4.4 are qualified locally, not in CI.
 
 ## 3. Quick terminal (implemented in 1.1.0; qualification continues)
 
