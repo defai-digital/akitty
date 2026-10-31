@@ -76,7 +76,7 @@ impl Session {
             }
             let root = std::path::Path::new(&directory);
             let name = std::path::Path::new(&shell).file_name().and_then(|n|n.to_str()).unwrap_or("");
-            let resource = match name { "bash" => "bashrc", "zsh" => ".zshrc", _ => return Err("shell integration supports bash and zsh only".into()) };
+            let resource = match name { "bash" => "bashrc", "zsh" => ".zshenv", _ => return Err("shell integration supports bash and zsh only".into()) };
             if !root.join(resource).is_file() { return Err("shell integration resources missing".into()); }
             cmd.env("AKITTY_INTEGRATION_DIR", &directory);
             if name == "bash" { cmd.args(["--rcfile", &root.join("bashrc").to_string_lossy(), "-i"]); }

@@ -76,7 +76,7 @@ final class PreferencesTests: XCTestCase {
             TerminalView.integrationDirectory(shell: shell, resources: resources, environment: environment)
         }
         XCTAssertNil(resolve("/bin/zsh"), "missing wrappers start an ordinary shell")
-        try Data().write(to: directory.appendingPathComponent(".zshrc"))
+        try Data().write(to: directory.appendingPathComponent(".zshenv"))
         try Data().write(to: directory.appendingPathComponent("bashrc"))
         XCTAssertEqual(resolve("/bin/zsh"), directory.path)
         XCTAssertEqual(resolve("/opt/homebrew/bin/bash"), directory.path)

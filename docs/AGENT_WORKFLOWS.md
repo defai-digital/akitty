@@ -37,9 +37,10 @@ no user startup file is edited. Hosts using the ABI supply an absolute
 The resources can also be explicitly sourced in an existing interactive shell:
 `source /path/to/shell-integration/akitty.zsh` (or `akitty.bash`).
 
-Zsh runs as an interactive login shell. A bundled ZDOTDIR wrapper loads the user's
-`.zshenv`, `.zprofile` and `.zshrc`, restores their ZDOTDIR, then lets ordinary login
-startup continue. Bash uses an interactive `--rcfile` wrapper and explicitly sources
+Zsh runs as an interactive login shell. A bundled ZDOTDIR `.zshenv` restores the
+user's ZDOTDIR and sources their `.zshenv`, so the system and user `.zprofile`,
+`.zshrc` and `.zlogin` run as usual (a system `compinit` or `HISTFILE` default never
+writes into the app bundle); the hooks load at the first prompt, after those files. Bash uses an interactive `--rcfile` wrapper and explicitly sources
 `/etc/profile` and the first user login profile; its `login_shell` flag is not set.
 A bashrc sourced by that profile still runs normally. When bash-preexec (used by
 tools such as Atuin) is loaded before the hooks, as it is from any startup file in an

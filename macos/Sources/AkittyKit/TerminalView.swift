@@ -91,7 +91,7 @@ import os
     nonisolated static func integrationDirectory(shell: String, resources: URL?, environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
         let path = shell.isEmpty ? environment["SHELL"] ?? "/bin/zsh" : shell
         let wrapper: String
-        switch (path as NSString).lastPathComponent { case "bash": wrapper = "bashrc"; case "zsh": wrapper = ".zshrc"; default: return nil }
+        switch (path as NSString).lastPathComponent { case "bash": wrapper = "bashrc"; case "zsh": wrapper = ".zshenv"; default: return nil }
         guard let directory = resources?.appendingPathComponent("shell-integration"),
               FileManager.default.fileExists(atPath: directory.appendingPathComponent(wrapper).path) else { return nil }
         return directory.path

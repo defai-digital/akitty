@@ -56,7 +56,7 @@ mkdir -p "$app/Contents/Frameworks"
 ditto macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app/Contents/Frameworks/Sparkle.framework"
 cp third_party/sparkle/LICENSE "$app/Contents/Resources/SPARKLE_LICENSE"
 mkdir -p "$app/Contents/Resources/shell-integration"
-for resource in .zshenv .zprofile .zshrc akitty.bash akitty.zsh bashrc; do
+for resource in .zshenv akitty.bash akitty.zsh bashrc; do
     cp "macos/Sources/AkittyKit/Resources/shell-integration/$resource" "$app/Contents/Resources/shell-integration/$resource"
 done
 cp macos/Sources/AkittyKit/Resources/features.js "$app/Contents/Resources/features.js"

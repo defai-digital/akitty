@@ -95,7 +95,7 @@ class ShellIntegrationTests(unittest.TestCase):
             with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix='akitty-startup-') as directory:
                 home = pathlib.Path(directory)
                 files = {'.zshenv': 'export AKITTY_STARTUP_ENV=yes\n',
-                         '.zprofile': 'printf PROFILE\n', '.zshrc': 'printf RC\n', '.zlogin': 'printf LOGIN\n'} if shell == 'zsh' else {
+                         '.zprofile': 'printf PROFILE\n', '.zshrc': "printf RC; PS1='USER> '\n", '.zlogin': 'printf LOGIN\n'} if shell == 'zsh' else {
                          '.bash_profile': 'printf PROFILE; source "$HOME/.bashrc"\n', '.bashrc': 'printf RC\n'}
                 for name, value in files.items():
                     (home / name).write_text(value)
@@ -114,6 +114,9 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertIn('\x1b]133;D;1\x07', result.stdout)
                 if shell == 'zsh':
                     self.assertIn('LOGIN', result.stdout)
+                    # The hooks load at the first prompt, after the user's .zshrc chose its prompt.
+                    self.assertIn("USER> \x1b]133;B\x07", result.stderr)
+                    self.assertTrue(result.stdout.split('LOGIN', 1)[1].startswith('\x1b]7;file://'), result.stdout)
                     if sys.platform == 'darwin':
                         # macOS /etc/zshrc chooses $ZDOTDIR/.zsh_history; other systems leave HISTFILE to the user.
                         self.assertIn('HISTORY=' + str(home / '.zsh_history'), result.stdout)
