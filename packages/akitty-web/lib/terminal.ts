@@ -1416,8 +1416,10 @@ export class Terminal implements ITerminalCore {
 
         this.animationFrameId = requestAnimationFrame(loop);
       } else if (!this.isDisposed && this.isOpen) {
-        // Off-screen: keep the callback alive but do no work. Output is still parsed by write().
-        this.animationFrameId = requestAnimationFrame(loop);
+        // Off-screen: park the loop instead of scheduling empty frames. A hidden pane in a visible window is not
+        // throttled by the browser, so an idle callback at display rate ran for as long as the pane stayed hidden.
+        // Output is still parsed by write(); observeVisibility() restarts the loop when the terminal is shown.
+        this.animationFrameId = undefined;
       }
     };
     loop();
@@ -1436,6 +1438,8 @@ export class Terminal implements ITerminalCore {
       const visible = latest.isIntersecting;
       if (visible && !this.onScreen) this.redrawOnShow = true;
       this.onScreen = visible;
+      // The loop parks itself once it observes onScreen=false; wake it on the hidden-to-visible edge.
+      if (visible && this.isOpen && !this.isDisposed && this.animationFrameId === undefined) this.startRenderLoop();
     });
     this.visibilityObserver.observe(parent);
   }

@@ -550,4 +550,59 @@ describe('Terminal visibility', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  test('stops scheduling frames while off-screen and resumes with a full redraw when shown', async () => {
+    let notify: (entries: { isIntersecting: boolean }[]) => void = () => {};
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: typeof notify) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const frames = vi.spyOn(globalThis, 'requestAnimationFrame');
+
+    try {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 4 });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      term.open(container);
+
+      const renderer = term.renderer!;
+      const original = renderer.render.bind(renderer);
+      const forced: boolean[] = [];
+      renderer.render = ((...args: Parameters<typeof original>) => {
+        forced.push(args[1] === true);
+        return original(...args);
+      }) as typeof renderer.render;
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      await wait(80);
+      expect(frames.mock.calls.length).toBeGreaterThan(1);
+
+      notify([{ isIntersecting: false }]);
+      await wait(40); // the frame already scheduled observes onScreen=false and parks
+      const parkedAt = frames.mock.calls.length;
+      const renderedAt = forced.length;
+      term.write('output while hidden');
+      await wait(120);
+      expect(frames.mock.calls.length).toBe(parkedAt);
+      expect(forced.length).toBe(renderedAt);
+
+      notify([{ isIntersecting: true }]);
+      expect(forced.length).toBe(renderedAt + 1); // restarted synchronously on the visible edge
+      expect(forced[renderedAt]).toBe(true);
+      await wait(80);
+      expect(frames.mock.calls.length).toBeGreaterThan(parkedAt + 1);
+
+      term.dispose();
+      container.remove();
+    } finally {
+      frames.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });
