@@ -78,7 +78,10 @@ impl<'a> Tracker<'a> {
     fn region_scrolled(&mut self, lines: i32) {
         let alt = self.alt();
         let (start, end) = self.tracking.region;
-        self.graphics.scroll(alt, start as i32, end as i32, lines, !alt && start == 0, self.term.grid().history_size());
+        // The text engine clamps SU/SD to the region height. Only upward scrolling
+        // rotates content into history; reverse scrolling never brings history back.
+        let lines = lines.clamp(-((end - start) as i32), (end - start) as i32);
+        self.graphics.scroll(alt, start as i32, end as i32, lines, !alt && start == 0 && lines > 0, self.term.grid().history_size());
         self.tracking.history = self.term.grid().history_size();
     }
 

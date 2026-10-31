@@ -1448,6 +1448,33 @@ mod tests {
     }
 
     #[test]
+    fn reverse_scroll_does_not_pull_scrollback_images_into_the_viewport() {
+        for (reverse, rows) in [("\x1bM", 1), ("\x1b[1T", 1), ("\x1bM", 2), ("\x1b[1T", 2)] {
+            let mut model = Model::new(Size::validate(10, 3).unwrap(), 50);
+            model.cell_px = (8, 16);
+            model.feed(place(1).replace("q=2", &format!("q=2,r={rows},c=1")).as_bytes());
+            model.feed(b"\r\n\r\n\r\n");
+            assert_eq!(model.graphics.placements[0].line, -1);
+            model.feed(b"\x1b[1;1H");
+            model.feed(place(2).as_bytes());
+            model.feed(reverse.as_bytes());
+            assert_eq!(model.graphics.placements[0].line, -1, "history stays in history for {reverse:?}");
+            assert_eq!(model.graphics.placements[1].line, 1, "visible content scrolls down");
+        }
+    }
+
+    #[test]
+    fn oversized_scroll_moves_images_by_the_same_clamped_distance_as_text() {
+        let mut model = Model::new(Size::validate(10, 3).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(place(1).as_bytes());
+        model.feed(b"x\x1b[999S");
+        assert_eq!(model.graphics.placements.len(), 1, "the image stays with the retained text");
+        assert_eq!(model.graphics.placements[0].line, -3);
+        assert_eq!(model.term.grid().history_size(), 3);
+    }
+
+    #[test]
     fn decstbm_scrolls_move_only_placements_inside_the_region() {
         let mut model = Model::new(Size::validate(20, 10).unwrap(), 50);
         model.cell_px = (8, 16);

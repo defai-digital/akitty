@@ -1238,8 +1238,9 @@ impl Graphics {
         } else {
             // Only placements anchored inside the region move; those whose anchor leaves it are deleted. A region
             // starting at the top of the screen has nothing above it but the window edge, so an image there stays
-            // until its last row is gone (the grid clip hides the rest), like text scrolling off the top.
-            let inside = |line: i32, rows: u32| line < bottom && (line >= top || (top == 0 && line + rows as i32 > 0));
+            // until its last row is gone during upward scrolling (the grid clip hides the rest). Reverse
+            // scrolling only moves viewport anchors; even partly visible history must stay in history.
+            let inside = |line: i32, rows: u32| line < bottom && (line >= top || (lines > 0 && top == 0 && line + rows as i32 > 0));
             self.placements.retain_mut(|placement| {
                 if placement.alt != alt || !placement.anchored() || !inside(placement.line, placement.rows) {
                     return true;
