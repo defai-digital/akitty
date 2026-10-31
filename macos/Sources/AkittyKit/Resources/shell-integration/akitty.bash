@@ -21,7 +21,12 @@ __akitty_report_prompt() {
     printf '\e]7;file://localhost%s\a\e]133;A\a' "$path"
     # The tab names where the shell is, as Ghostty's title feature does, with the home directory as ~ (the tab keeps
     # the end of a long path). AKITTY_SHELL_TITLE=0 leaves the title to the user's own hooks.
-    [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || { local title=$PWD; [[ -z $HOME || $HOME == / ]] || title=${title/#"$HOME"/\~}; printf '\e]2;%s\a' "${title//[[:cntrl:]]/}"; }
+    if [[ ${AKITTY_SHELL_TITLE-} != 0 ]]; then
+        local title=$PWD
+        # Only the home directory itself and paths inside it are shortened: a sibling such as $HOME-old is not ~-old.
+        if [[ -n $HOME && $HOME != / && ( $PWD == "$HOME" || $PWD == "$HOME"/* ) ]]; then title=\~${PWD#"$HOME"}; fi
+        printf '\e]2;%s\a' "${title//[[:cntrl:]]/}"
+    fi
 }
 PS1="${PS1}${__akitty_mark}"
 if [[ -n ${bash_preexec_imported-}${__bp_imported-} ]]; then
