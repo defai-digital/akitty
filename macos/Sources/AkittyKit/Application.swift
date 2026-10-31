@@ -29,7 +29,10 @@ import AppKit
     private var terminalStorage: TerminalView?
     var terminal: TerminalView { terminalStorage! }
     let status = NSTextField(labelWithString: "Starting shell…")
+    /// Directory passed at creation. Nil means the Settings directory.
+    let launchDirectory: String?
     init(headless: Bool = false, directory: String? = nil) throws {
+        launchDirectory = directory
         super.init(frame: .zero)
         terminalStorage = try TerminalView(headless: headless, directory: directory)
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
@@ -256,7 +259,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// different tab; the drag follows the tab, not the chip.
     private weak var draggedTab: NSTabViewItem?
     private let headless: Bool
-    /// Starting directory for every tab and split in this window; nil uses the Settings directory.
+    /// Folder this window was opened with. A new tab uses the focused pane's reported
+    /// directory when that path still exists, and this folder otherwise. Splits use this
+    /// folder. Nil uses the Settings directory.
     let directory: String?
     /// Defaults to the system setting. Tests set this to force the sprite onto frame 0.
     var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshTabs() } }
@@ -325,14 +330,32 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     func newTab() throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = "Terminal"; item.view = split
-        tabs.addTabViewItem(item); tabs.selectTabViewItem(item)
-        do { try addPane(to: split) }
+        // Read the focused pane before the new tab becomes selected.
+        let directory = directoryForNewTab()
+        let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? NSNotFound
+        let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
+        if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
+        tabs.selectTabViewItem(item)
+        do { try addPane(to: split, directory: directory) }
         catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
         refreshTabs()
     }
-    private func addPane(to split: NSSplitView) throws {
+    /// The focused pane's current directory, copied at the moment the tab is created.
+    /// A missing or non-directory report falls back to the folder this window was opened with.
+    private func directoryForNewTab() -> String? {
+        guard let terminal = active else { return directory }
+        let reported = (try? terminal.session.snapshot())?.shell?.cwd
+        if let reported, Self.existingDirectory(reported) { return reported }
+        return directory
+    }
+    /// True when `path` is an absolute directory the new shell can start in.
+    static func existingDirectory(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil) throws {
         guard split.arrangedSubviews.count < 8 else { return }
-        let pane = try TerminalPane(headless: headless, directory: directory); split.addArrangedSubview(pane)
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory); split.addArrangedSubview(pane)
         pane.terminal.onExit = { [weak self, weak pane] in
             guard let self, let pane else { return }
             self.close(pane.terminal)

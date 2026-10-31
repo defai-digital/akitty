@@ -180,4 +180,4 @@ this repository. People on those systems use the host that embeds AkiTTY Web.
 
 Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per existing folder (a file uses its
 parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
-The folder applies to every tab and split in that window; Settings supplies the directory otherwise.
+The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses the opened folder. Settings supplies the directory when no folder was opened and the shell has not reported one.

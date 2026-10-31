@@ -141,7 +141,9 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 - Native windows, tabs and split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
 - Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
-  a window whose tabs and splits begin in that folder; a file opens in its folder.
+  a window in that folder; a file opens in its folder. A new tab opens after the current tab,
+  in the focused pane's reported directory when that path still exists, and in the opened
+  folder otherwise. Splits start in the opened folder.
 - Native **Settings… (⌘,)** for font/size, a separate CJK font, shell, starting directory, scrollback,
   Option-as-Alt and update checks. Appearance changes apply to open terminals;
   shell, directory and scrollback changes apply to new terminals. Any installed fixed-pitch font can be chosen.

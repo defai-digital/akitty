@@ -956,6 +956,32 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(controller.directory, directory)
         try controller.newTab()
         XCTAssertEqual(controller.tabs.numberOfTabViewItems, 2)
+        XCTAssertEqual(controller.panes.map(\.launchDirectory), [directory, directory])
+    }
+    @MainActor func testNewTabFollowsTheCurrentTabAndItsReportedDirectory() throws {
+        _ = NSApplication.shared
+        let opened = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let reported = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-tab-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: reported, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: reported) }
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: opened)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        try controller.newTab(); try controller.newTab()
+        controller.selectTab(at: 1)
+        let focused = try XCTUnwrap(controller.active)
+        let encoded = reported.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? reported.path
+        _ = try focused.session.call("feed", ["text": "\u{1b}]7;file://localhost\(encoded)\u{7}"])
+        try controller.newTab()
+        XCTAssertTrue(controller.tabs.selectedTabViewItem === controller.tabs.tabViewItems[2])
+        XCTAssertEqual(controller.panes.map(\.launchDirectory), [opened, opened, reported.path, opened])
+        controller.selectTab(at: 0)
+        let first = try XCTUnwrap(controller.active)
+        _ = try first.session.call("feed", ["text": "\u{1b}]7;file://localhost/does-not-exist/akitty\u{7}"])
+        try controller.newTab()
+        XCTAssertTrue(controller.tabs.selectedTabViewItem === controller.tabs.tabViewItems[1])
+        XCTAssertEqual((controller.tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane }.first?.launchDirectory, opened)
+        XCTAssertFalse(TerminalWindow.existingDirectory("/does-not-exist/akitty"))
+        XCTAssertTrue(TerminalWindow.existingDirectory(opened))
     }
     @MainActor func testOpenedFolderReachesTheShell() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-cwd-\(UUID().uuidString)")
