@@ -80,7 +80,8 @@ test(
       tick();
       snapshot = await feed();
       assert.equal(snapshot.chrome, undefined);
-      assert.equal(snapshot.title, "");
+      // Clearing the title (`ESC ] 2 ; BEL`) hands the tab back to the core's default name; see docs/ABI.md.
+      assert.equal(snapshot.title, "Akitty");
       await call({ op: "close", id });
     } finally {
       child.stdin.end();
