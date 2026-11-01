@@ -24,7 +24,8 @@ final class AgentEventStore: @unchecked Sendable {
               info.st_mode & 0o777 == 0o700 else { throw AkittyError.core("Event directory must be owned by you with mode 0700 and cannot be a symlink.") }
     }
     private func openFile(_ url: URL, writing: Bool) throws -> (Int32, Int) {
-        let fd = Darwin.open(url.path, (writing ? O_RDWR | O_CREAT | O_APPEND : O_RDONLY) | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        // Reject FIFOs at fstat without first blocking in open waiting for a peer.
+        let fd = Darwin.open(url.path, (writing ? O_RDWR | O_CREAT | O_APPEND : O_RDONLY) | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
         guard fd >= 0 else { throw AkittyError.core("Cannot open private event file.") }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
@@ -77,14 +78,17 @@ final class AgentEventStore: @unchecked Sendable {
             }
         }
         Darwin.close(fd)
-        if size + data.count + 512 > segmentLimit {
+        // Admission reserves enough room for one bounded retention marker. Do not reserve
+        // those bytes again here: an admitted large event would otherwise rotate forever
+        // after the marker is written, eventually overflowing the recorder's stack.
+        if size + data.count > segmentLimit {
             if FileManager.default.fileExists(atPath: previous.path) {
                 let (old, _) = try openFile(previous, writing: false); Darwin.close(old)
                 try FileManager.default.removeItem(at: previous)
             }
             try FileManager.default.moveItem(at: current, to: previous)
             sequence -= 1
-            try write(event: "retention_rotated", session: session, provenance: "host", fields: ["older_segments_may_be_missing": true], synchronize: false)
+            try write(event: "retention_rotated", session: "host", provenance: "host", fields: ["older_segments_may_be_missing": true], synchronize: false)
             return try write(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize)
         }
         let (output, _) = try openFile(current, writing: true)
