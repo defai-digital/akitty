@@ -377,7 +377,7 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(kitty(0, "a", [], .release, flags: 1), .none)
         XCTAssertEqual(kitty(36, flags: 1), .legacy); XCTAssertEqual(kitty(48, flags: 1), .legacy); XCTAssertEqual(kitty(51, flags: 1), .legacy)
         XCTAssertEqual(kitty(123, flags: 1), .legacy)
-        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), .legacy)
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), esc("1;65D"))
     }
     func testKittyKeyboardDisambiguatesModifiedAndEscapeKeys() {
         XCTAssertEqual(kitty(8, "c", [.ctrl], flags: 1), esc("99;5u"))
@@ -406,7 +406,20 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(kitty(123, flags: 8), esc("1;1D"))
         XCTAssertEqual(kitty(123, [.numLock], .repeat, flags: 10), esc("1;129:2D"))
         XCTAssertEqual(kitty(123, [.capsLock], .release, flags: 10), esc("1;65:3D"))
-        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), .legacy)
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), esc("1;65D"))
+    }
+    func testKittyKeyboardNonTextKeysKeepLockModifiersWithoutAllKeys() {
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 1), esc("1;65D"))
+        XCTAssertEqual(kitty(122, [.numLock], flags: 1), esc("1;129P"))
+        XCTAssertEqual(kitty(117, [.ctrl, .capsLock], flags: 1), esc("3;69~"))
+        XCTAssertEqual(kitty(53, [.capsLock], flags: 1), esc("27;65u"))
+        XCTAssertEqual(kitty(105, [.numLock], flags: 1), esc("57376;129u"))
+        XCTAssertEqual(kitty(123, [.capsLock], .release, flags: 3), esc("1;65:3D"))
+        XCTAssertEqual(kitty(123, [.numLock], .repeat, flags: 3), esc("1;129:2D"))
+        XCTAssertEqual(kitty(8, "c", [.ctrl, .capsLock], flags: 1), esc("99;5u"))
+        XCTAssertEqual(kitty(36, [.capsLock], flags: 1), .legacy)
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 0), .legacy)
+        XCTAssertEqual(kitty(123, [.capsLock], flags: 4), .legacy)
     }
     func testKittyKeyboardEventTypesAndAlternates() {
         XCTAssertEqual(kitty(8, "c", [.ctrl], .release, flags: 3), esc("99;5:3u"))
