@@ -65,9 +65,22 @@ extension TerminalSession {
     }
     public static func confirm(_ request: AgentCommandRequest, in window: NSWindow) async -> Bool {
         guard window.attachedSheet == nil else { return false }
+        let alert = approvalAlert(request)
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertFirstButtonReturn) }
+            alert.window.makeFirstResponder(alert.buttons[1])
+        }
+    }
+    static func approvalAlert(_ request: AgentCommandRequest) -> NSAlert {
         let alert = NSAlert(); alert.messageText = "Allow \(request.actor) to run this command?"
         alert.informativeText = "Terminal \(request.sessionID)\nDirectory reported by shell: \(request.cwd ?? "unknown")\n\n\(request.command)"
         alert.addButton(withTitle: "Run Command"); alert.addButton(withTitle: "Deny")
-        return await withCheckedContinuation { continuation in alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertFirstButtonReturn) } }
+        alert.buttons[0].keyEquivalent = ""
+        alert.window.defaultButtonCell = alert.buttons[1].cell as? NSButtonCell
+        alert.window.initialFirstResponder = alert.buttons[1]
+        alert.buttons[0].setAccessibilityHelp("Approve this exact command once in the displayed terminal and shell-reported directory.")
+        alert.buttons[1].setAccessibilityHelp("Reject this command.")
+        alert.accessoryView = NSTextField(wrappingLabelWithString: "The directory is reported by the shell and is not verified. Reclaiming control later does not stop a running command.")
+        return alert
     }
 }

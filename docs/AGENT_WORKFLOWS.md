@@ -139,6 +139,14 @@ snapshot fields, never terminal text, so it does not infer agent status from out
 **Show Terminal** focuses the pane; **Reclaim Control** is the same human action as
 the Edit menu item. The overview cannot approve, execute or send input.
 
+Current development preserves accessible cells during status updates and clears a
+removed pane's selection, so actions cannot silently move to another pane. Opening
+the overview focuses the table; arrow keys select a row and Return shows it. The
+Reclaim button explains that running processes continue. Native command approval
+shows the exact command, actor and shell-reported directory, with Deny as the default.
+These are accessibility improvements to existing features. [VoiceOver user
+validation is not complete](ACCESSIBILITY.md).
+
 ## Quick terminal and input
 
 **Shell → Toggle Quick Terminal** shows or hides a persistent terminal window.

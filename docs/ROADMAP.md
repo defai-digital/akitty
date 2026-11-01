@@ -1,6 +1,6 @@
 # AkiTTY implementation roadmap
 
-This plan distinguishes the implementation in version 1.1.0 from remaining qualification.
+This roadmap distinguishes the released 1.2.5 baseline, current development, and remaining qualification.
 The native Mac app uses locally maintained source derived from `alacritty_terminal` 0.26.0 with AkiTTY's own
 Rust/Swift integration and rendering. AkiTTY Web separately uses Ghostty's VT
 parser compiled to WebAssembly and Canvas rendering. Native performance must be
@@ -141,15 +141,37 @@ Acceptance criteria:
 - Test failure paths and lifecycle cleanup; no orphaned shortcut registrations,
   timers, display links, or child processes.
 
+## 4. Existing Agent Overview and accessibility (P1)
+
+Agent Overview already lists panes across windows, tabs, splits and the hidden quick
+terminal. Terminal text, selection, UTF-16 character counts, range reads and cursor
+line are already exposed through AppKit accessibility APIs. Improve and validate
+these foundations rather than scheduling them as new features.
+
+Current development preserves Overview cell objects during status updates, clears
+selection when a pane disappears, establishes keyboard focus and labels each cell's
+source. The approval sheet exposes the exact command and shell-reported directory,
+with Deny as the default. Terminal accessibility gains line/index queries,
+coalesced text-change notifications and concise state-transition announcements.
+
+Acceptance: regression tests for multiple windows/splits/hidden quick terminals,
+stable selection and accessible cells, stale-pane action disabling, Unicode line
+navigation, approval context/default and bounded notification behavior. Exercise
+keyboard and VoiceOver operation in the native app, including denial, reclaim,
+settings, selection and sustained output. Record each result and remaining limitation.
+**VoiceOver user validation is not complete.** See [accessibility](ACCESSIBILITY.md).
+
+Complete terminal navigation, range geometry, cursor tracking through scrollback,
+remote/multiplexer behavior and user validation continue in P1–P2. Sixel stays
+unsupported and is P3, subject to demonstrated compatibility demand. Performance,
+stability and trusted-host execution control remain P0.
+
 ## Outside the current roadmap
 
 - Ghostty configuration compatibility or importing Ghostty's native Zig core/renderer.
 - Third-party plugins, arbitrary script loading, or a public extension ecosystem.
 - Full external esctest qualification. The curated conformance suite remains a
   required gate; passing it does not establish complete xterm/esctest conformance.
-- Dedicated VoiceOver development and VoiceOver user testing. Existing macOS
-  accessible text/selection APIs remain implemented; VoiceOver qualification is
-  not claimed.
 
 Sixel, image clipboard protocols, and custom shaders remain unsupported and are
 not added to this plan. Signing, notarization, and publication continue to follow
