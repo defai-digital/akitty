@@ -44,6 +44,32 @@ function harness(options = {}) {
   };
 }
 
+/** Harness with a switchable writer so a test can reject only after setup succeeds. */
+function controlled(failure) {
+  const state = { accept: true };
+  const writes = [];
+  const ticks = [];
+  const cancelled = [];
+  const client = createTerminalClient({
+    capabilities,
+    write: (sequence) => {
+      if (!state.accept) {
+        if (failure instanceof Error) throw failure;
+        return false;
+      }
+      writes.push(sequence);
+      return true;
+    },
+    schedule: (tick, interval) => {
+      ticks.push({ tick, interval });
+      return () => {
+        cancelled.push(1);
+      };
+    },
+  });
+  return { client, writes, ticks, cancelled, state };
+}
+
 test("only direct AkiTTY TTYs opt into chrome; advanced identity grants no graphics capability", () => {
   assert.deepEqual(
     detectCapabilities(
@@ -254,6 +280,100 @@ test("manual frame or sprite updates stop animation; status updates do not", () 
   }
 });
 
+test("rejected or throwing manual mark and sprite writes keep the running animation alive", () => {
+  for (const failure of [false, new Error("output failed")]) {
+    const h = controlled(failure);
+    assert.equal(h.client.playSprite({ sprite, intervalMs: 150 }), true);
+    const committed = h.client.chrome;
+    const writes = h.writes.length;
+    h.state.accept = false;
+    for (const patch of [{ mark: "idle" }, { sprite: null }]) {
+      if (failure instanceof Error) {
+        assert.throws(
+          () => h.client.updateChrome(patch),
+          (error) => error === failure,
+        );
+      } else {
+        assert.equal(h.client.updateChrome(patch), false);
+      }
+      assert.equal(h.client.chrome, committed, "failed writes do not commit");
+      assert.equal(h.cancelled.length, 0, "failed writes must not stop playback");
+      assert.equal(h.writes.length, writes);
+    }
+    h.state.accept = true;
+    h.ticks[0].tick();
+    assert.equal(h.client.chrome.mark, 1, "the old animation still advances");
+    assert.equal(h.writes.length, writes + 1);
+  }
+});
+
+test("rejected or throwing playSprite replacement keeps the old chrome and scheduler", () => {
+  for (const failure of [false, new Error("output failed")]) {
+    const h = controlled(failure);
+    assert.equal(h.client.playSprite({ sprite, intervalMs: 150 }), true);
+    const committed = h.client.chrome;
+    const writes = h.writes.length;
+    h.state.accept = false;
+    if (failure instanceof Error) {
+      assert.throws(
+        () => h.client.playSprite({ sprite, intervalMs: 200 }),
+        (error) => error === failure,
+      );
+    } else {
+      assert.equal(h.client.playSprite({ sprite, intervalMs: 200 }), false);
+    }
+    assert.equal(h.client.chrome, committed, "a failed replacement does not commit");
+    assert.equal(h.cancelled.length, 0, "a failed replacement must not release the old scheduler");
+    assert.equal(h.ticks.length, 1, "a failed replacement must not start a scheduler");
+    assert.equal(h.writes.length, writes);
+    h.state.accept = true;
+    h.ticks[0].tick();
+    assert.equal(h.client.chrome.mark, 1, "the old animation still advances");
+    assert.equal(h.writes.length, writes + 1);
+    // A successful replacement cancels only the old scheduler and fences its callbacks.
+    assert.equal(h.client.playSprite({ sprite, intervalMs: 200 }), true);
+    assert.equal(h.cancelled.length, 1, "a successful replacement releases the old scheduler once");
+    assert.equal(h.ticks.length, 2, "a successful replacement starts one scheduler");
+    const replaced = h.writes.length;
+    h.ticks[0].tick();
+    assert.equal(h.writes.length, replaced, "fenced callbacks emit nothing");
+    h.ticks[1].tick();
+    assert.equal(h.client.chrome.mark, 1, "the replacement advances");
+    assert.equal(h.writes.length, replaced + 1);
+  }
+});
+
+test("rejected or throwing clearChrome leaves chrome and the running animation intact", () => {
+  for (const failure of [false, new Error("output failed")]) {
+    const h = controlled(failure);
+    assert.equal(h.client.playSprite({ sprite, intervalMs: 150 }), true);
+    const committed = h.client.chrome;
+    const writes = h.writes.length;
+    h.state.accept = false;
+    if (failure instanceof Error) {
+      assert.throws(
+        () => h.client.clearChrome(),
+        (error) => error === failure,
+      );
+    } else {
+      assert.equal(h.client.clearChrome(), false);
+    }
+    assert.equal(h.client.chrome, committed, "a failed clear leaves chrome unchanged");
+    assert.equal(h.cancelled.length, 0, "a failed clear must not stop playback");
+    assert.equal(h.writes.length, writes);
+    h.state.accept = true;
+    h.ticks[0].tick();
+    assert.equal(h.client.chrome.mark, 1, "the animation still advances");
+    assert.equal(h.client.clearChrome(), true);
+    assert.deepEqual(h.client.chrome, {});
+    assert.equal(h.cancelled.length, 1, "an accepted clear still stops playback");
+    const cleared = h.writes.length;
+    assert.equal(h.writes.at(-1), CHROME_CLEAR_SEQUENCE);
+    h.ticks[0].tick();
+    assert.equal(h.writes.length, cleared, "a stopped animation emits no frames");
+  }
+});
+
 test("reduce motion and single-frame sprites remain static", () => {
   for (const options of [{ reduceMotion: true }, {}]) {
     const h = harness(options);
@@ -398,6 +518,108 @@ test("dispose rethrows a lone cleanup failure and aggregates two in chrome-then-
   client.dispose();
   assert.equal(client.setTitle("late"), false);
   assert.equal(writes.length, after);
+});
+
+test("rejected dispose cleanup writes throw descriptive errors and keep disposal permanent", () => {
+  const chromeRejected = "chrome cleanup write was rejected";
+  const titleRejected = "title cleanup write was rejected";
+  const broken = (reject) => {
+    const writes = [];
+    const client = createTerminalClient({
+      capabilities,
+      write: (sequence) => {
+        writes.push(sequence);
+        return !reject(sequence);
+      },
+    });
+    client.setTitle("owned");
+    client.setProgress(0.2);
+    return { client, writes, count: writes.length };
+  };
+
+  for (const [reject, expected] of [
+    [(sequence) => sequence === CHROME_CLEAR_SEQUENCE, chromeRejected],
+    [(sequence) => sequence === titleSequence(""), titleRejected],
+  ]) {
+    const { client, writes, count } = broken(reject);
+    let thrown;
+    try {
+      client.dispose();
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof Error, "a rejected write must not be swallowed");
+    assert.equal(thrown instanceof AggregateError, false);
+    assert.equal(thrown.message, expected);
+    assert.deepEqual(
+      writes.slice(count),
+      [CHROME_CLEAR_SEQUENCE, titleSequence("")],
+      "both cleanups are attempted",
+    );
+    assert.deepEqual(client.chrome, {}, "state is cleared regardless");
+    assert.equal(client.setTitle("late"), false, "disposal is permanent");
+    const after = writes.length;
+    client.dispose();
+    assert.equal(writes.length, after, "repeated dispose remains a no-op");
+  }
+
+  const { client, writes, count } = broken(
+    (sequence) =>
+      sequence === CHROME_CLEAR_SEQUENCE || sequence === titleSequence(""),
+  );
+  let thrown;
+  try {
+    client.dispose();
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof AggregateError, "two rejections are aggregated");
+  assert.deepEqual(
+    thrown.errors.map((error) => error.message),
+    [chromeRejected, titleRejected],
+    "errors keep chrome-then-title order",
+  );
+  assert.deepEqual(writes.slice(count), [CHROME_CLEAR_SEQUENCE, titleSequence("")]);
+  assert.deepEqual(client.chrome, {});
+  assert.equal(client.setTitle("late"), false);
+});
+
+test("rejected cleanup writes aggregate after a cancellation failure in order", () => {
+  const cancelError = new Error("cancel failed");
+  const writes = [];
+  let closing = false;
+  const client = createTerminalClient({
+    capabilities,
+    write: (sequence) => {
+      if (closing) writes.push(sequence);
+      return !closing;
+    },
+    schedule: () => () => {
+      throw cancelError;
+    },
+  });
+  client.setTitle("owned");
+  client.playSprite({ sprite, intervalMs: 150 });
+  closing = true;
+  let thrown;
+  try {
+    client.dispose();
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof AggregateError);
+  assert.equal(thrown.errors[0], cancelError);
+  assert.deepEqual(
+    thrown.errors.map((error) => error.message),
+    [
+      "cancel failed",
+      "chrome cleanup write was rejected",
+      "title cleanup write was rejected",
+    ],
+  );
+  assert.deepEqual(writes, [CHROME_CLEAR_SEQUENCE, titleSequence("")]);
+  assert.deepEqual(client.chrome, {});
+  assert.equal(client.setTitle("late"), false);
 });
 
 test("dispose attempts all cleanup and stays closed when animation cancellation throws", () => {

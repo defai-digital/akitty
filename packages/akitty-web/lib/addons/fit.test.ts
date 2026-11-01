@@ -176,6 +176,203 @@ describe('FitAddon', () => {
 });
 
 // ==========================================================================
+// Maximum dimension cap
+// ==========================================================================
+
+describe('Maximum dimension cap', () => {
+  let addon: FitAddon;
+
+  beforeEach(() => {
+    addon = new FitAddon();
+  });
+
+  afterEach(() => {
+    addon.dispose();
+  });
+
+  /**
+   * 900x480 with 9x16 metrics and the 15px scrollbar reservation is 98x30;
+   * oversized values are only reachable by making the container huge.
+   */
+  const createTerminal = (width: number, height: number, cell: { width: number; height: number }) => {
+    const mockElement = document.createElement('div');
+    Object.defineProperty(mockElement, 'clientWidth', { value: width, configurable: true });
+    Object.defineProperty(mockElement, 'clientHeight', { value: height, configurable: true });
+
+    const calls: Array<{ cols: number; rows: number }> = [];
+    const mockTerminal = {
+      cols: 80,
+      rows: 24,
+      element: mockElement,
+      renderer: {
+        getMetrics: () => ({ width: cell.width, height: cell.height, baseline: 12 }),
+      },
+      resize: (cols: number, rows: number) => {
+        calls.push({ cols, rows });
+        mockTerminal.cols = cols;
+        mockTerminal.rows = rows;
+      },
+    };
+
+    return { mockTerminal, calls };
+  };
+
+  test('proposeDimensions caps columns at 4096 for an oversized container', () => {
+    const { mockTerminal } = createTerminal(1_000_000, 480, { width: 9, height: 16 });
+    addon.activate(mockTerminal as any);
+
+    expect(addon.proposeDimensions()).toEqual({ cols: 4096, rows: 30 });
+  });
+
+  test('proposeDimensions caps rows at 4096 for an oversized container', () => {
+    const { mockTerminal } = createTerminal(900, 1_000_000, { width: 9, height: 16 });
+    addon.activate(mockTerminal as any);
+
+    expect(addon.proposeDimensions()).toEqual({ cols: 98, rows: 4096 });
+  });
+
+  test('fit() resizes with capped dimensions instead of the raw container size', () => {
+    const { mockTerminal, calls } = createTerminal(1_000_000, 1_000_000, { width: 1, height: 1 });
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+
+    expect(calls).toEqual([{ cols: 4096, rows: 4096 }]);
+    expect(mockTerminal.cols).toBe(4096);
+    expect(mockTerminal.rows).toBe(4096);
+  });
+});
+
+// ==========================================================================
+// Reactivation cleanup
+// ==========================================================================
+
+describe('Reactivation cleanup', () => {
+  class FakeResizeObserver {
+    public static instances: FakeResizeObserver[] = [];
+    public observed: Element[] = [];
+    public disconnected = 0;
+
+    constructor(public callback: (entries: unknown[]) => void) {
+      FakeResizeObserver.instances.push(this);
+    }
+
+    public observe(target: Element): void {
+      this.observed.push(target);
+    }
+
+    public unobserve(): void {}
+
+    public disconnect(): void {
+      this.disconnected++;
+    }
+  }
+
+  let addon: FitAddon;
+  let originalResizeObserver: typeof globalThis.ResizeObserver;
+
+  /** 900x480 with 9x16 metrics is 98x30 (15px scrollbar reservation). */
+  const createTerminal = () => {
+    const mockElement = document.createElement('div');
+    Object.defineProperty(mockElement, 'clientWidth', { value: 900, configurable: true });
+    Object.defineProperty(mockElement, 'clientHeight', { value: 480, configurable: true });
+
+    let resizeCallCount = 0;
+    const mockTerminal = {
+      cols: 80,
+      rows: 24,
+      element: mockElement,
+      renderer: {
+        getMetrics: () => ({ width: 9, height: 16, baseline: 12 }),
+      },
+      resize: (cols: number, rows: number) => {
+        resizeCallCount++;
+        mockTerminal.cols = cols;
+        mockTerminal.rows = rows;
+      },
+    };
+
+    return { mockTerminal, getResizeCallCount: () => resizeCallCount };
+  };
+
+  beforeEach(() => {
+    addon = new FitAddon();
+    FakeResizeObserver.instances.length = 0;
+    originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    addon.dispose();
+    globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  test('activate() disconnects the previous observer and observes the new element', () => {
+    const first = createTerminal();
+    const second = createTerminal();
+
+    addon.activate(first.mockTerminal as any);
+    addon.observeResize();
+    addon.activate(second.mockTerminal as any);
+    addon.observeResize();
+
+    expect(FakeResizeObserver.instances).toHaveLength(2);
+    // The first observer is disconnected, so the browser stops delivering the
+    // old element's resize events into this addon.
+    expect(FakeResizeObserver.instances[0]!.disconnected).toBe(1);
+    expect(FakeResizeObserver.instances[0]!.observed).toEqual([first.mockTerminal.element]);
+    // Reactivation observes the new terminal's element, not the stale one.
+    expect(FakeResizeObserver.instances[1]!.observed).toEqual([second.mockTerminal.element]);
+    expect(second.getResizeCallCount()).toBe(0);
+  });
+
+  test('activate() clears a pending debounce so a stale resize cannot fit the new terminal', () => {
+    vi.useFakeTimers();
+    try {
+      const first = createTerminal();
+      const second = createTerminal();
+
+      addon.activate(first.mockTerminal as any);
+      addon.observeResize();
+
+      // A container resize on the first terminal schedules a debounced fit.
+      FakeResizeObserver.instances[0]!.callback([{}]);
+
+      addon.activate(second.mockTerminal as any);
+      vi.advanceTimersByTime(500);
+
+      expect(second.getResizeCallCount()).toBe(0);
+      expect(second.mockTerminal.cols).toBe(80);
+      expect(second.mockTerminal.rows).toBe(24);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('activate() resets the settle window so the new terminal fits immediately', () => {
+    vi.useFakeTimers();
+    try {
+      const first = createTerminal();
+      const second = createTerminal();
+
+      addon.activate(first.mockTerminal as any);
+      addon.fit();
+      expect(first.getResizeCallCount()).toBe(1); // first terminal's settle window is open
+
+      addon.activate(second.mockTerminal as any);
+      addon.fit();
+
+      // Not queued behind the previous terminal's 50ms guard.
+      expect(second.getResizeCallCount()).toBe(1);
+      expect(second.mockTerminal.cols).toBe(98);
+      expect(second.mockTerminal.rows).toBe(30);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ==========================================================================
 // Dimension Calculation Tests
 // ==========================================================================
 

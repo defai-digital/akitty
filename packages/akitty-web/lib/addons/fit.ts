@@ -21,6 +21,7 @@ import type { ITerminalAddon, ITerminalCore } from '../interfaces';
 
 const MINIMUM_COLS = 2;
 const MINIMUM_ROWS = 1;
+const MAXIMUM_DIMENSION = 4096; // Upper bound; terminals reject/garble larger grids
 const DEFAULT_SCROLLBAR_WIDTH = 15; // Reserve space for future scrollback scrollbar
 const RESIZE_DEBOUNCE_MS = 100; // Debounce time for ResizeObserver
 
@@ -47,8 +48,13 @@ export class FitAddon implements ITerminalAddon {
 
   /**
    * Activate the addon (called by Terminal.loadAddon)
+   *
+   * Reactivation must not inherit the previous terminal's observation state:
+   * release the old observer and timers before adopting the new terminal,
+   * otherwise the next observeResize() attaches to the stale element.
    */
   public activate(terminal: ITerminalCore): void {
+    this._cleanup();
     this._terminal = terminal;
   }
 
@@ -56,6 +62,17 @@ export class FitAddon implements ITerminalAddon {
    * Dispose the addon and clean up resources
    */
   public dispose(): void {
+    this._cleanup();
+  }
+
+  /**
+   * Release everything bound to the current terminal
+   *
+   * Shared by activate() and dispose(): cancels the observer and both timers
+   * and resets the resize flags, so a stale settle/debounce callback cannot
+   * refit whatever terminal is adopted next.
+   */
+  private _cleanup(): void {
     // Disconnect ResizeObserver
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
@@ -195,9 +212,16 @@ export class FitAddon implements ITerminalAddon {
     const availableWidth = containerWidth - paddingLeft - paddingRight - DEFAULT_SCROLLBAR_WIDTH;
     const availableHeight = containerHeight - paddingTop - paddingBottom;
 
-    // Calculate dimensions (enforce minimums)
-    const cols = Math.max(MINIMUM_COLS, Math.floor(availableWidth / metrics.width));
-    const rows = Math.max(MINIMUM_ROWS, Math.floor(availableHeight / metrics.height));
+    // Calculate dimensions (enforce minimums, cap at MAXIMUM_DIMENSION so a
+    // pathologically large container cannot propose invalid dimensions)
+    const cols = Math.min(
+      MAXIMUM_DIMENSION,
+      Math.max(MINIMUM_COLS, Math.floor(availableWidth / metrics.width)),
+    );
+    const rows = Math.min(
+      MAXIMUM_DIMENSION,
+      Math.max(MINIMUM_ROWS, Math.floor(availableHeight / metrics.height)),
+    );
 
     return { cols, rows };
   }

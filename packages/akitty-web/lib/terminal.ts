@@ -260,6 +260,24 @@ export class Terminal implements ITerminalCore {
     return Math.max(1, Math.min(bytes, Terminal.SCROLLBACK_MAX_BYTES));
   }
 
+  /**
+   * Reject sizes that are not a sane grid. Host-supplied dimensions reach wasm and the canvas
+   * directly, so every entry point (constructor, resize, mutable options) rejects the same values
+   * before anything is allocated or published. Number.isInteger also rules out NaN and Infinity.
+   */
+  private static validateDimensions(cols: number, rows: number): void {
+    if (
+      !Number.isInteger(cols) ||
+      !Number.isInteger(rows) ||
+      cols < 1 ||
+      rows < 1 ||
+      cols > Terminal.MAX_DIMENSION ||
+      rows > Terminal.MAX_DIMENSION
+    ) {
+      throw new RangeError(`Invalid terminal size ${cols}x${rows}`);
+    }
+  }
+
   // Public properties (xterm.js compatibility)
   public cols: number;
   public rows: number;
@@ -377,6 +395,10 @@ export class Terminal implements ITerminalCore {
   private readonly SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
 
   constructor(options: ITerminalOptions = {}) {
+    // Reject a bad grid before resolving Ghostty or building options, so an invalid constructor
+    // fails immediately instead of surfacing later as a wasm or canvas allocation failure in open().
+    Terminal.validateDimensions(options.cols ?? 80, options.rows ?? 24);
+
     // Use provided Ghostty instance (for test isolation) or get module-level instance
     this.ghostty = options.ghostty ?? getGhostty();
 
@@ -400,12 +422,37 @@ export class Terminal implements ITerminalCore {
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
     (this.options as any) = new Proxy(baseOptions, {
       set: (target: any, prop: string, value: any) => {
+        // Validate the proposed pair before it lands on the target: a rejected cols/rows
+        // assignment must leave both the options object and the terminal state untouched.
+        if (prop === 'cols' || prop === 'rows') {
+          Terminal.validateDimensions(
+            prop === 'cols' ? value : target.cols,
+            prop === 'rows' ? value : target.rows
+          );
+        }
+
         const oldValue = target[prop];
         target[prop] = value;
 
         // Apply runtime changes if terminal is open
         if (this.isOpen) {
-          this.handleOptionChange(prop, value, oldValue);
+          try {
+            this.handleOptionChange(prop, value, oldValue);
+          } catch (error) {
+            // A runtime change can be rejected after it landed on the target. Once renderer.resize
+            // succeeds, a later render failure does not roll back the committed grid, so a dimensions
+            // rollback is only correct while the live grid still disagrees with the proposed options.
+            // When the grid already matches, the resize committed and the option must stay new;
+            // non-dimension options are always rolled back.
+            const dimensionCommitted =
+              (prop === 'cols' || prop === 'rows') &&
+              this.cols === target.cols &&
+              this.rows === target.rows;
+            if (!dimensionCommitted) {
+              target[prop] = oldValue;
+            }
+            throw error;
+          }
         }
 
         return true;
@@ -905,44 +952,63 @@ export class Terminal implements ITerminalCore {
     this.assertOpen();
 
     // Host-supplied sizes reach wasm and the canvas directly; reject anything that is not a sane grid.
-    if (
-      !Number.isInteger(cols) ||
-      !Number.isInteger(rows) ||
-      cols < 1 ||
-      rows < 1 ||
-      cols > Terminal.MAX_DIMENSION ||
-      rows > Terminal.MAX_DIMENSION
-    ) {
-      throw new RangeError(`Invalid terminal size ${cols}x${rows}`);
-    }
+    Terminal.validateDimensions(cols, rows);
 
     if (cols === this.cols && rows === this.rows) {
       return; // No change
     }
 
-    // Update dimensions
+    const oldCols = this.cols;
+    const oldRows = this.rows;
+
+    // Resize WASM terminal before publishing dimensions: a thrown wasm resize leaves
+    // the public size untouched, so an identical retry is not mistaken for a no-op.
+    this.wasmTerm!.resize(cols, rows);
     this.cols = cols;
     this.rows = rows;
-
-    // Resize WASM terminal
-    this.wasmTerm!.resize(cols, rows);
     this.revision++;
 
-    // Resize renderer
-    this.renderer!.resize(cols, rows);
+    try {
+      // Resize renderer
+      this.renderer!.resize(cols, rows);
+    } catch (error) {
+      // Only a renderer that rejected the new grid is rolled back, so wasm and the public
+      // dimensions return to the previous size and an identical retry is not a no-op.
+      this.wasmTerm!.resize(oldCols, oldRows);
+      this.cols = oldCols;
+      this.rows = oldRows;
+      throw error;
+    }
 
-    // Update canvas dimensions
+    // The renderer accepted the new grid, so the resize is committed here. Everything below
+    // must leave wasm, the public dimensions, the renderer and the canvas at the new size even
+    // if the forced render throws; only the paint is retried, not the transaction.
+
+    // Publish the committed pair into the mutable options object as well. Otherwise a direct
+    // resize(100, 30) would leave options.rows at its constructor value, and a later
+    // `options.cols = 120` would pair 120 with that stale row count and resize to 120x24.
+    // defineProperty writes the target behind the Proxy directly: a plain assignment would
+    // re-enter the set trap and schedule a second, reentrant resize. Omitting the other
+    // descriptor fields keeps each existing property writable, enumerable and configurable.
+    Object.defineProperty(this.options, 'cols', { value: cols });
+    Object.defineProperty(this.options, 'rows', { value: rows });
+
     const metrics = this.renderer!.getMetrics();
     this.canvas!.width = metrics.width * cols;
     this.canvas!.height = metrics.height * rows;
     this.canvas!.style.width = `${metrics.width * cols}px`;
     this.canvas!.style.height = `${metrics.height * rows}px`;
 
-    // Fire resize event
-    this.resizeEmitter.fire({ cols, rows });
+    // Reflow moves rows, so links cached at old positions must not resurface. Invalidate before
+    // rendering: a failed render must still drop links that point at pre-reflow rows.
+    this.linkDetector?.invalidateCache();
 
-    // Force full render
+    // Force full render. A failure propagates to the caller but never undoes the new grid.
     this.renderer!.render(this.wasmTerm!, true, this.viewportY, this);
+
+    // Announce the new grid only once it has painted, so no resize event describes a frame
+    // that failed to render.
+    this.resizeEmitter.fire({ cols, rows });
   }
 
   /**
@@ -950,9 +1016,10 @@ export class Terminal implements ITerminalCore {
    */
   clear(): void {
     this.assertOpen();
-    // Send ANSI clear screen and cursor home sequences
-    this.wasmTerm!.write('\x1b[2J\x1b[H');
-    this.revision++;
+    // Send ANSI clear screen and cursor home sequences through the common write path. The erase
+    // must reach the title/bell scanner so the ESC cancels a pending OSC/control string instead of
+    // leaving it mid-sequence, and the link cache must drop rows whose content is gone.
+    this.writeInternal('\x1b[2J\x1b[H');
   }
 
   /**

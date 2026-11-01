@@ -258,14 +258,20 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
 
   function updateChrome(patch: ChromePatch): boolean {
     const next = normalize(patch, chrome);
-    if (patch.sprite !== undefined || patch.mark !== undefined) stopSprite();
-    return send(next);
+    const manual = patch.sprite !== undefined || patch.mark !== undefined;
+    if (!send(next)) return false;
+    // Stop only after an accepted write: a rejected or throwing manual update
+    // must not freeze the running animation while leaving chrome unchanged.
+    if (manual) stopSprite();
+    return true;
   }
 
   function clearChrome(): boolean {
-    stopSprite();
     if (!Object.keys(chrome).length) return false;
-    return send(Object.freeze({}));
+    if (!send(Object.freeze({}))) return false;
+    // Same rule as manual updates: keep animating unless the clear was accepted.
+    stopSprite();
+    return true;
   }
 
   return Object.freeze({
@@ -293,8 +299,11 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
       )
         throw new RangeError("sprite interval must be 50..60000 ms");
       const sprite = validateSprite(input.sprite);
-      stopSprite();
+      // Commit the first frame before releasing the previous scheduler: a
+      // rejected or throwing replacement write must leave the old animation
+      // running instead of freezing it without the new sprite.
       if (!send(normalize({ sprite, mark: 0 }, chrome))) return false;
+      stopSprite();
       if (reduceMotion || sprite.frames.length === 1) return true;
       const token = generation;
       let frame = 0;
@@ -324,8 +333,12 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
         errors.push(error)
       }
       // Attempt every cleanup; preserve cancellation, chrome, then title errors.
+      // A rejected write is a teardown failure too: surface it instead of
+      // reporting success while owned terminal state is left in place.
+      const ownsChrome = Object.keys(chrome).length > 0;
       try {
-        if (Object.keys(chrome).length) write(CHROME_CLEAR_SEQUENCE);
+        if (ownsChrome && !write(CHROME_CLEAR_SEQUENCE))
+          errors.push(new Error("chrome cleanup write was rejected"));
       } catch (error) {
         errors.push(error);
       } finally {
@@ -335,7 +348,8 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
         // Release ownership before writing, so a throwing writer cannot leave it claimed.
         titleOwned = false;
         try {
-          write(titleSequence(""));
+          if (!write(titleSequence("")))
+            errors.push(new Error("title cleanup write was rejected"));
         } catch (error) {
           errors.push(error);
         }
