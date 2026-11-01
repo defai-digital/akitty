@@ -20,8 +20,9 @@ struct AgentOverviewRow: Equatable {
     let programStatus: String?
     let shellDirectory: String?
     let state: String
+    let executionEntry: String
 
-    init(sessionID: UInt64, snapshot: Snapshot?) {
+    init(sessionID: UInt64, snapshot: Snapshot?, requestsEnabled: Bool = false) {
         self.sessionID = sessionID
         title = snapshot?.title ?? ""
         agentControlled = snapshot?.control?.agent == true
@@ -34,8 +35,10 @@ struct AgentOverviewRow: Equatable {
         case .frame?, nil: break
         }
         if let presentation = snapshot?.chrome?.presentation { reported.append(presentation) }
+        if let status = snapshot?.program_status?.presentation { reported.insert(status, at: 0) }
         programStatus = reported.isEmpty ? nil : reported.joined(separator: " · ")
         shellDirectory = snapshot?.shell?.cwd
+        executionEntry = agentControlled ? "Host input lease" : requestsEnabled && snapshot?.shell?.ready == true ? "Request with human approval" : "Observation only"
         if let snapshot, snapshot.exited { state = "Exited (\(snapshot.exit_code.map(String.init) ?? "closed"))" }
         else { state = snapshot == nil ? "Starting" : "Running" }
     }
@@ -50,6 +53,7 @@ struct AgentOverviewRow: Equatable {
         let row: AgentOverviewRow
     }
     private let source: () -> [TerminalWindow]
+    private let requestsEnabled: () -> Bool
     private let onShow: (TerminalWindow, TerminalView) -> Void
     private(set) var entries: [Entry] = []
     let table: NSTableView = AgentOverviewTable()
@@ -59,12 +63,12 @@ struct AgentOverviewRow: Equatable {
     var refreshTimerActive: Bool { timer?.isValid == true }
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
         ("terminal", "Terminal", 180), ("control", "Control (host)", 140), ("program", "Program reports (unverified)", 200),
-        ("directory", "Shell directory (unverified)", 180), ("state", "State", 90)
+        ("directory", "Shell directory (unverified)", 180), ("execution", "Execution entry", 180), ("state", "Shell state", 90)
     ]
 
-    init(source: @escaping () -> [TerminalWindow], onShow: @escaping (TerminalWindow, TerminalView) -> Void) {
-        self.source = source; self.onShow = onShow
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 320), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+    init(source: @escaping () -> [TerminalWindow], requestsEnabled: @escaping () -> Bool = { false }, onShow: @escaping (TerminalWindow, TerminalView) -> Void) {
+        self.source = source; self.requestsEnabled = requestsEnabled; self.onShow = onShow
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 340), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Agent Overview"; window.minSize = NSSize(width: 520, height: 200); window.center()
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -78,8 +82,8 @@ struct AgentOverviewRow: Equatable {
         table.target = self; table.doubleAction = #selector(showSelected(_:))
         table.setAccessibilityLabel("Terminal panes and their controllers")
         table.setAccessibilityHelp("Select a terminal with the arrow keys. Show Terminal focuses it. Reclaim Control returns input to you without stopping its running process.")
-        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
-        let note = NSTextField(wrappingLabelWithString: "Control is enforced by Akitty. Program reports and shell directories are sent by programs in the terminal and are not verified.")
+        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
+        let note = NSTextField(wrappingLabelWithString: "Input control is enforced by Akitty. Local requests require human approval; ordinary program operations are observation only. Program reports and shell directories are unverified.")
         note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor
         showButton.target = self; showButton.action = #selector(showSelected(_:))
         reclaimButton.target = self; reclaimButton.action = #selector(reclaimSelected(_:))
@@ -121,7 +125,7 @@ struct AgentOverviewRow: Equatable {
     func refresh() {
         let selected = table.selectedRow >= 0 && table.selectedRow < entries.count ? entries[table.selectedRow].row.sessionID : nil
         let next = source().flatMap { window in
-            window.panes.map { Entry(window: window, terminal: $0.terminal, row: AgentOverviewRow(sessionID: $0.terminal.session.id, snapshot: $0.terminal.snapshot)) }
+            window.panes.map { Entry(window: window, terminal: $0.terminal, row: AgentOverviewRow(sessionID: $0.terminal.session.id, snapshot: $0.terminal.snapshot, requestsEnabled: requestsEnabled())) }
         }
         if next.map(\.row.sessionID) != entries.map(\.row.sessionID) {
             entries = next
@@ -182,6 +186,7 @@ struct AgentOverviewRow: Equatable {
         case "control": text = item.controller
         case "program": text = item.programStatus ?? "—"
         case "directory": text = item.shellDirectory ?? "—"
+        case "execution": text = item.executionEntry
         default: text = item.state
         }
         let changed = field.stringValue != text

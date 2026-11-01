@@ -10,6 +10,7 @@ mod graphics;
 mod media;
 mod model;
 mod placeholder;
+mod program_status;
 mod session;
 mod shell;
 mod tracker;

@@ -40,3 +40,29 @@ test("host rejects multiline input before acquiring a lease", async () => {
   await assert.rejects(host.execute("agent", "echo hi\nrm file"), RangeError)
   assert.equal(calls.length, 0)
 })
+
+test("unknown dispatch outcome preserves ownership and never retries", async () => {
+  for (const malformed of [false, true]) {
+    const calls = []
+    const host = createCommandHost({ session: 1, approve: async () => true, request: async r => {
+      calls.push(r.op)
+      if (r.op === "control_acquire") return { lease: 3 }
+      if (r.op === "snapshot") return { shell: { ready: true, cwd: "/tmp" } }
+      if (r.op === "command_authorize") return { authorization: 4 }
+      if (r.op === "command_execute") {
+        if (malformed) return { accepted: true }
+        throw new Error("connection lost after possible dispatch")
+      }
+      return {}
+    } })
+    await assert.rejects(host.execute("agent", "echo hi"), /outcome is unknown.*do not retry/)
+    assert.equal(calls.filter(op => op === "command_execute").length, 1)
+    assert.ok(!calls.includes("control_release"))
+  }
+})
+
+test("invisible command formatting is rejected before authority acquisition", async () => {
+  const { calls, host } = fixture()
+  await assert.rejects(host.execute("agent", "echo \u202ehidden"), /formatting/)
+  assert.equal(calls.length, 0)
+})

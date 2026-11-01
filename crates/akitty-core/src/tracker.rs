@@ -22,6 +22,7 @@ use alacritty_terminal::vte::ansi::{
 /// Grid bookkeeping the model keeps between parser runs.
 #[derive(Clone)]
 pub struct Tracking {
+    pub reset_generation: u64,
     /// Mirror of the terminal's scrolling region: 0-based grid lines, end exclusive.
     region: (usize, usize),
     rows: usize,
@@ -31,7 +32,7 @@ pub struct Tracking {
 
 impl Tracking {
     pub fn new(cols: usize, rows: usize) -> Self {
-        Self { region: (0, rows), rows, cols, history: 0 }
+        Self { reset_generation: 0, region: (0, rows), rows, cols, history: 0 }
     }
 }
 
@@ -320,6 +321,7 @@ impl Handler for Tracker<'_> {
     }
 
     fn reset_state(&mut self) {
+        self.tracking.reset_generation = self.tracking.reset_generation.saturating_add(1);
         self.term.reset_state();
         self.graphics.reset();
         self.tracking.region = (0, self.term.grid().screen_lines());

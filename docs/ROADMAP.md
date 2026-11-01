@@ -166,6 +166,23 @@ remote/multiplexer behavior and user validation continue in P1–P2. Sixel stays
 unsupported and is P3, subject to demonstrated compatibility demand. Performance,
 stability and trusted-host execution control remain P0.
 
+## 5. Agent-native integration (source development after 1.2.5)
+
+The first native integration implements bounded OSC 7501 revision 0.4 reports
+alongside OSC 771, a request-only local companion with mandatory human approval,
+source-labeled Overview state, and bounded local timeline/export. See
+[the implementation contract](AGENT_NATIVE.md) for scope and usage.
+
+Acceptance requires parser/lifecycle/ABI tests; no authority from program reports;
+denial/disconnect/timeout/reclaim regressions; a real PTY command with an observed
+filesystem effect; bounded private recording with loss markers; and the canonical
+verification gate plus a built-app smoke. Published binaries are separate evidence.
+
+Next work should validate another real Agent integration against the same request
+contract, then define optional command policy/evidence adapters. Existing ax-trust
+LLM policies do not automatically authorize shell commands. Complete orchestration,
+cloud execution, remote multiplexing and verifiable result attestation are deferred.
+
 ## Outside the current roadmap
 
 - Ghostty configuration compatibility or importing Ghostty's native Zig core/renderer.

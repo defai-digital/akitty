@@ -8,6 +8,7 @@ import os
     private var sessionStorage: TerminalSession?
     public var session: TerminalSession { sessionStorage! }
     public var onExit: (() -> Void)?
+    var onWillShutdown: (() -> Void)?
     private var exitHandled = false
     public private(set) var snapshot: Snapshot?
     public private(set) var health = RendererHealth()
@@ -52,6 +53,7 @@ import os
     /// Physical modifier keys currently down; a flags change alone cannot say which one moved.
     private var heldModifierKeys: Set<UInt16> = []
     private var stopped = false
+    var isShutdown: Bool { stopped }
     private let shutdownGroup = DispatchGroup()
     private var fontSize: CGFloat = 14
     private var preferences = TerminalPreferences.load()
@@ -134,6 +136,7 @@ import os
     }
     public func shutdown(completion: @escaping @Sendable () -> Void = {}) {
         if !stopped {
+            onWillShutdown?(); onWillShutdown = nil
             stopped = true
             timer?.invalidate(); timer = nil
             accessibilityValueTimer?.invalidate(); accessibilityValueTimer = nil
@@ -250,7 +253,7 @@ import os
                 else if let failure = health.failure { onStatus?("Software rendering: \(failure)") }
                 else if next.exited { onStatus?("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
                 else if next.control?.agent == true { onStatus?("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
-                else if let presentation = next.chrome?.presentation { onStatus?(presentation) }
+                else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { onStatus?(presentation) }
                 else { onStatus?("\(next.cols) cols × \(next.rows) rows") }
                 onTitle?(next.title)
                 onChrome?(next.chrome)

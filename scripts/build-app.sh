@@ -28,29 +28,33 @@ trap 'rm -rf "$stage"' EXIT
 app="$stage/Akitty.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/Akitty" "$app/Contents/MacOS/Akitty"
+cp "$bin/akitty-agent" "$app/Contents/MacOS/akitty-agent"
 # Swift may add a build-only package-framework search path. Bundled frameworks
 # live at @executable_path/../Frameworks; remove the private build path before signing.
-python3 - "$app/Contents/MacOS/Akitty" "$PWD/macos/.build/" <<'PYRPATH'
+python3 - "$app/Contents/MacOS/Akitty" "$app/Contents/MacOS/akitty-agent" "$PWD/macos/.build/" <<'PYRPATH'
 import subprocess, sys
-binary, build_root = sys.argv[1:]
-lines = subprocess.check_output(['otool', '-l', binary], text=True).splitlines()
-for index, line in enumerate(lines):
-    if line.strip() != 'cmd LC_RPATH':
-        continue
-    for detail in lines[index + 1:index + 4]:
-        value = detail.strip()
-        if value.startswith('path '):
-            path = value[5:].rsplit(' (offset ', 1)[0]
-            if path.startswith(build_root):
-                subprocess.run(['install_name_tool', '-delete_rpath', path, binary], check=True)
-            break
+*binaries, build_root = sys.argv[1:]
+for binary in binaries:
+    lines = subprocess.check_output(['otool', '-l', binary], text=True).splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != 'cmd LC_RPATH':
+            continue
+        for detail in lines[index + 1:index + 4]:
+            value = detail.strip()
+            if value.startswith('path '):
+                path = value[5:].rsplit(' (offset ', 1)[0]
+                if path.startswith(build_root):
+                    subprocess.run(['install_name_tool', '-delete_rpath', path, binary], check=True)
+                break
 PYRPATH
 # Remove linker debug-map object paths from the distributable executable.
 xcrun strip -S "$app/Contents/MacOS/Akitty"
-python3 - "$app/Contents/MacOS/Akitty" <<'PYSCAN'
+xcrun strip -S "$app/Contents/MacOS/akitty-agent"
+python3 - "$app/Contents/MacOS/Akitty" "$app/Contents/MacOS/akitty-agent" <<'PYSCAN'
 import pathlib, re, sys
-if re.search(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/', pathlib.Path(sys.argv[1]).read_bytes()):
-    raise SystemExit('Packaged executable contains private build paths')
+for executable in sys.argv[1:]:
+    if re.search(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/', pathlib.Path(executable).read_bytes()):
+        raise SystemExit('Packaged executable contains private build paths')
 PYSCAN
 mkdir -p "$app/Contents/Frameworks"
 ditto macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework "$app/Contents/Frameworks/Sparkle.framework"

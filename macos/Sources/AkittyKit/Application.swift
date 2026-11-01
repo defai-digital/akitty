@@ -59,6 +59,7 @@ enum TabActivity: Equatable {
     case finished
     /// The bell rang while the tab was not in view. Cleared when the tab is shown.
     case bell
+    case blocked, reportedError, reportedDone
     /// What assistive technology reads for the mark; nil when there is nothing to show.
     var accessibilityName: String? {
         switch self {
@@ -66,6 +67,9 @@ enum TabActivity: Equatable {
         case .working: return "Working"
         case .finished: return "Finished"
         case .bell: return "Bell"
+        case .blocked: return "Program reports waiting for you"
+        case .reportedError: return "Program reports an error"
+        case .reportedDone: return "Program reports completion; result not verified"
         }
     }
 }
@@ -134,6 +138,9 @@ enum TabTitle {
             guard let bell = Self.bellImage else { return }
             let size = bell.size
             bell.draw(in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        case .blocked, .reportedError, .reportedDone:
+            let name = activity == .blocked ? "pause.circle.fill" : activity == .reportedError ? "exclamationmark.circle.fill" : "checkmark.circle"
+            NSImage(systemSymbolName: name, accessibilityDescription: activity.accessibilityName)?.draw(in: bounds)
         case .working:
             guard let image else {
                 // A program that reports work without a sprite gets a plain accent dot.
@@ -390,6 +397,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil) throws {
         guard split.arrangedSubviews.count < 8 else { return }
         let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory); split.addArrangedSubview(pane)
+        app?.registerAgentTerminal(pane.terminal)
         pane.terminal.onExit = { [weak self, weak pane] in
             guard let self, let pane else { return }
             self.close(pane.terminal)
@@ -492,6 +500,14 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         guard let split = item.view as? NSSplitView else { return .none }
         // A bell asks for the user, so it outranks the sprite until the tab is shown.
         if belledTabs.contains(ObjectIdentifier(split)) { return .bell }
+        let reports = split.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal.snapshot?.program_status?.active }
+        if reports.contains(where: { $0.state == "blocked" }) { return .blocked }
+        if reports.contains(where: { $0.state == "error" }) { return .reportedError }
+        if reports.contains(where: { $0.state == "working" }) {
+            let chrome = split.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal.snapshot?.chrome }.first
+            return .working(pixels: chrome?.shownPixels(reduceMotion: reduceMotion), width: chrome?.sprite?.w ?? 0, height: chrome?.sprite?.h ?? 0)
+        }
+        if reports.contains(where: { $0.state == "done" }) { return .reportedDone }
         if let chrome = workingChrome(in: split) {
             guard let sprite = chrome.sprite else { return .working(pixels: nil, width: 0, height: 0) }
             return .working(pixels: chrome.shownPixels(reduceMotion: reduceMotion), width: sprite.w, height: sprite.h)
@@ -739,6 +755,19 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
 
 @MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
     private var windows: [TerminalWindow] = []
+    private var eventMenuItem: NSMenuItem?
+    private lazy var agentRequests: AgentRequests = {
+        let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
+        requests.onFailure = { [weak self] message in self?.eventMenuItem?.title = "Agent Event Timeline (recording warning)…"; self?.eventMenuItem?.toolTip = message }
+        return requests
+    }()
+    func registerAgentTerminal(_ terminal: TerminalView) { agentRequests.register(terminal) }
+    @objc private func toggleAgentRequests(_ sender: NSMenuItem) {
+        do { try agentRequests.setEnabled(!agentRequests.enabled); sender.state = agentRequests.enabled ? .on : .off }
+        catch { NSAlert(error: error).runModal() }
+    }
+    @objc private func showAgentTimeline(_ sender: Any?) { agentRequests.showTimeline() }
+    @objc private func exportAgentEvents(_ sender: Any?) { agentRequests.exportEvents() }
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController { [unowned self] in
             let window = try TerminalWindow(app: self); windows.append(window); return window
@@ -750,13 +779,13 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func toggleQuickTerminal(_ sender: Any?) {
         do { try quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
     }
-    public func applicationWillTerminate(_ notification: Notification) { quickTerminal.stop() }
+    public func applicationWillTerminate(_ notification: Notification) { agentRequests.stop(); quickTerminal.stop() }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
     private(set) var agentOverview: AgentOverviewController?
     @objc func showAgentOverview(_ sender: Any?) {
         if agentOverview == nil {
-            agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }) { [weak self] window, terminal in
+            agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }, requestsEnabled: { [weak self] in self?.agentRequests.enabled == true }) { [weak self] window, terminal in
                 // A hidden quick terminal is shown through its controller so its hide and focus restore keep working.
                 if window === self?.quickTerminal.terminalWindow, window.window?.isVisible != true {
                     do { try self?.quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
@@ -773,6 +802,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private let quitConfirmation = CloseConfirmation()
     public func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
+        agentRequests.startRecording()
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
         makeMenu()
         do { try configureQuickTerminal(.load()) } catch { NSAlert(error: error).runModal() }
@@ -858,6 +888,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         app.addItem(withTitle: "About Akitty", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         let settings = app.addItem(withTitle: "Settings…", action: #selector(self.settings(_:)), keyEquivalent: ","); settings.target = self
         let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
+        let requests = app.addItem(withTitle: "Enable Local Agent Requests", action: #selector(toggleAgentRequests(_:)), keyEquivalent: ""); requests.target = self
+        let timeline = app.addItem(withTitle: "Agent Event Timeline…", action: #selector(showAgentTimeline(_:)), keyEquivalent: ""); timeline.target = self
+        eventMenuItem = timeline
+        let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("Shell"), edit = menu("Edit"), view = menu("View")
         func add(_ command: NativeCommand, key: String, modifiers: NSEvent.ModifierFlags = [.command], to menu: NSMenu) {
