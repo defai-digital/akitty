@@ -1,0 +1,10 @@
+{
+  "extends": "../packages/akitty-web/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "../packages/akitty-web/lib",
+    "declarationDir": ".types"
+  }
+}

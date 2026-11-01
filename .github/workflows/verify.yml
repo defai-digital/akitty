@@ -5,6 +5,78 @@ on:
 permissions:
   contents: read
 jobs:
+  linux-experimental:
+    name: Experimental Linux agent host and desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: linux/package-lock.json
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf zsh webkit2gtk-driver xvfb python3-venv
+      - run: bash scripts/verify-linux.sh
+      - name: Exercise the actual Tauri approval workflow
+        run: |
+          cargo install tauri-driver --version 2.1.0 --locked
+          python3 -m venv build/linux-ui-test
+          build/linux-ui-test/bin/pip install selenium==4.52.0
+          cp -R macos/Sources/AkittyKit/Resources/shell-integration linux/src-tauri/target/debug/
+          cp linux/THIRD_PARTY_LICENSES.txt linux/src-tauri/target/debug/
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export AKITTY_DESKTOP_BINARY="$PWD/linux/src-tauri/target/debug/akitty-linux-experimental"
+          xvfb-run -a tauri-driver > build/linux-ui-driver.log 2>&1 &
+          driver_pid=$!
+          trap 'kill "$driver_pid" || true' EXIT
+          for attempt in {1..30}; do
+            if curl -sf http://127.0.0.1:4444/status >/dev/null; then break; fi
+            sleep 1
+          done
+          build/linux-ui-test/bin/python linux/tests/desktop_smoke.py
+
+  windows-experimental:
+    name: Experimental Windows amd64
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            linux/package-lock.json
+            windows/package-lock.json
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - run: ./scripts/verify-windows.ps1
+      - run: npm.cmd --prefix windows run package
+      - name: Test the installed WebView2 desktop
+        shell: pwsh
+        run: |
+          cargo install tauri-driver --version 2.1.0 --locked
+          if ($LASTEXITCODE) { throw 'tauri-driver installation failed' }
+          python -m pip install selenium==4.52.0
+          if ($LASTEXITCODE) { throw 'Selenium installation failed' }
+          $version = Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application' -Directory | Where-Object Name -Match '^\d+\.' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile "$env:RUNNER_TEMP/edgedriver.zip"
+          Expand-Archive "$env:RUNNER_TEMP/edgedriver.zip" "$env:RUNNER_TEMP/edgedriver"
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP/edgedriver/msedgedriver.exe"
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Invalid WebDriver signature' }
+          $env:PATH = "$env:RUNNER_TEMP/edgedriver;$env:PATH"
+          $installer = Get-ChildItem windows/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $installed = "$env:RUNNER_TEMP/AkittyInstalled"
+          $process = Start-Process $installer.FullName -ArgumentList '/S',"/D=$installed" -Wait -PassThru
+          if ($process.ExitCode) { throw 'Installer failed' }
+          ./windows/tests/desktop_smoke.ps1 -Application "$installed/akitty-windows-experimental.exe" -Companion "$installed/akitty-agent.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: akitty-windows-amd64-experimental
+          path: windows/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
   required:
     name: Required macOS verification
     runs-on: macos-latest

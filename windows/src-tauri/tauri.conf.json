@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AkiTTY Experimental",
+  "version": "0.1.0",
+  "identifier": "com.defai.akitty.experimental",
+  "build": {
+    "beforeDevCommand": "python scripts/prepare.py && python scripts/licenses.py && npm --prefix ../linux run dev",
+    "beforeBuildCommand": "npm --prefix ../linux run build && python scripts/licenses.py",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../../linux/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AkiTTY \u2014 Experimental Windows",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'",
+      "capabilities": [
+        "main"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "targets": [
+      "nsis"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Experimental Windows terminal with human-controlled agent workflows",
+    "resources": {
+      "../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt",
+      "../shell-integration/akitty.ps1": "shell-integration/akitty.ps1",
+      "binaries/akitty-agent.exe": "akitty-agent.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
+  }
+}
