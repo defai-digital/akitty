@@ -8,7 +8,7 @@ function fixture(approve = async () => true) {
     calls.push(r)
     switch (r.op) {
       case "control_acquire": return { lease: 3 }
-      case "snapshot": return { shell: { ready: true, cwd: "/tmp" } }
+      case "shell_state": return { shell: { ready: true, cwd: "/tmp" } }
       case "command_authorize": return { authorization: 4 }
       case "command_execute": return { accepted: true, after_command_id: 8, completion_untrusted: true }
       default: return {}
@@ -22,7 +22,7 @@ test("host binds exact approved command and directory without releasing on shell
   })
   const receipt = await host.execute("coding-agent", "echo hi")
   assert.deepEqual(receipt, { lease: 3, afterCommandId: 8, completionUntrusted: true })
-  assert.deepEqual(calls.map(r => r.op), ["control_acquire", "snapshot", "command_authorize", "command_execute"])
+  assert.deepEqual(calls.map(r => r.op), ["control_acquire", "shell_state", "command_authorize", "command_execute"])
   assert.equal(calls[2].expected_cwd, "/tmp")
   await host.release(receipt.lease)
   assert.equal(calls.at(-1).op, "control_release")
@@ -47,7 +47,7 @@ test("unknown dispatch outcome preserves ownership and never retries", async () 
     const host = createCommandHost({ session: 1, approve: async () => true, request: async r => {
       calls.push(r.op)
       if (r.op === "control_acquire") return { lease: 3 }
-      if (r.op === "snapshot") return { shell: { ready: true, cwd: "/tmp" } }
+      if (r.op === "shell_state") return { shell: { ready: true, cwd: "/tmp" } }
       if (r.op === "command_authorize") return { authorization: 4 }
       if (r.op === "command_execute") {
         if (malformed) return { accepted: true }
@@ -65,4 +65,22 @@ test("invisible command formatting is rejected before authority acquisition", as
   const { calls, host } = fixture()
   await assert.rejects(host.execute("agent", "echo \u202ehidden"), /formatting/)
   assert.equal(calls.length, 0)
+})
+
+test("host approval reads shell state without consuming pending terminal events", async () => {
+  const calls = []
+  let pendingBell = true
+  const host = createCommandHost({ session: 1, approve: async () => true, request: async r => {
+    calls.push(r.op)
+    if (r.op === "control_acquire") return { lease: 3 }
+    if (r.op === "snapshot") pendingBell = false
+    if (["shell_state", "snapshot"].includes(r.op)) return { shell: { ready: true, cwd: null } }
+    if (r.op === "command_authorize") return { authorization: 4 }
+    if (r.op === "command_execute") return { accepted: true, after_command_id: 8, completion_untrusted: true }
+    return {}
+  } })
+  await host.execute("agent", "echo hi")
+  assert.equal(pendingBell, true, "approval must leave bell and clipboard events for the renderer")
+  assert.ok(calls.includes("shell_state"))
+  assert.ok(!calls.includes("snapshot"))
 })

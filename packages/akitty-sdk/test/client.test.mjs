@@ -399,3 +399,37 @@ test("dispose rethrows a lone cleanup failure and aggregates two in chrome-then-
   assert.equal(client.setTitle("late"), false);
   assert.equal(writes.length, after);
 });
+
+test("dispose attempts all cleanup and stays closed when animation cancellation throws", () => {
+  const cancelError = new Error("cancel failed")
+  const chromeError = new Error("chrome failed")
+  const titleError = new Error("title failed")
+  for (const failWrites of [false, true]) {
+    let closing = false
+    const cleanup = []
+    const h = harness({
+      schedule: () => () => { throw cancelError },
+      write: sequence => {
+        if (closing) cleanup.push(sequence)
+        if (closing && failWrites) {
+          if (sequence === CHROME_CLEAR_SEQUENCE) throw chromeError
+          if (sequence === titleSequence("")) throw titleError
+        }
+        return true
+      },
+    })
+    h.client.setTitle("owned")
+    h.client.playSprite({ sprite, intervalMs: 150 })
+    closing = true
+    assert.throws(() => h.client.dispose(), error => {
+      if (!failWrites) return error === cancelError
+      assert.ok(error instanceof AggregateError)
+      assert.deepEqual(error.errors, [cancelError, chromeError, titleError])
+      return true
+    })
+    assert.deepEqual(cleanup, [CHROME_CLEAR_SEQUENCE, titleSequence("")])
+    assert.deepEqual(h.client.chrome, {})
+    assert.equal(h.client.setTitle("late"), false)
+    h.client.dispose()
+  }
+})
