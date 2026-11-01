@@ -7,6 +7,7 @@ import plistlib
 import subprocess
 import tempfile
 import unittest
+import release_signatures
 
 spec = importlib.util.spec_from_file_location(
     "prepare", Path(__file__).with_name("prepare-release.py")
@@ -173,6 +174,22 @@ def verifier(plist=None, build_stamp=None):
 
 
 class PrepareReleaseTests(unittest.TestCase):
+    def test_every_nested_macho_requires_release_signing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp) / "Akitty.app"
+            binaries = [app / name for name in ["Contents/MacOS/Akitty", "Contents/MacOS/akitty-agent", "Contents/Frameworks/extra.dylib"]]
+            for binary in binaries:
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(bytes.fromhex("cffaedfe") + b"fixture")
+                binary.chmod(0o755)
+            signed = "Authority=Developer ID Application: Test\nTeamIdentifier=N5ZUZDUJS6\nflags=0x10000(runtime)\nTimestamp=now\n"
+            self.assertEqual(release_signatures.verify(app, lambda _: signed), 3)
+            for bad in ["Signature=adhoc\n", signed.replace("N5ZUZDUJS6", "OTHER"), signed.replace("Timestamp=now", ""), signed.replace("runtime", "none")]:
+                with self.subTest(signature=bad), self.assertRaises(ValueError):
+                    release_signatures.verify(app, lambda path: bad if path == binaries[1] else signed)
+            with self.assertRaises(ValueError):
+                release_signatures.verify(app, lambda path: "Signature=adhoc\n" if path == binaries[2] else signed)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

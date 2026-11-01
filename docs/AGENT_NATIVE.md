@@ -1,8 +1,7 @@
 # Native agent workflows
 
-This describes source development after the published 1.2.5 baseline. The download
-and release process remain separate. AkiTTY is the Agent-Native Terminal: program
-activity is visible, input ownership is explicit, and supported execution requests
+Introduced in 1.3.0, these native workflows make program
+activity visible and input ownership explicit. Supported execution requests
 remain subject to human approval. No AX product or cloud account is required.
 
 ## Responsibilities and scope

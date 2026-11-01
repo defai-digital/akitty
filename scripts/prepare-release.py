@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import tomllib
 import xml.etree.ElementTree as ElementTree
+from release_signatures import verify as verify_signatures
 
 ROOT = Path(__file__).resolve().parents[1]
 STAMP_PATH = Path("Contents/Resources/akitty-build.json")
@@ -75,10 +76,13 @@ def verify_package(archive, expected, version, private, run=run):
         if actual["CFBundleShortVersionString"] != version:
             raise ReleaseError("Package and workspace versions differ")
         run("codesign", "--verify", "--deep", "--strict", str(app))
+        verify_signatures(app)
         run("spctl", "--assess", "--type", "execute", str(app))
         run("xcrun", "stapler", "validate", str(app))
         if run("lipo", "-archs", str(app / "Contents/MacOS/Akitty")) != "arm64":
             raise ReleaseError("This release lane expects an Apple Silicon package")
+        if run("lipo", "-archs", str(app / "Contents/MacOS/akitty-agent")) != "arm64":
+            raise ReleaseError("CLI helper must match the Apple Silicon release lane")
         return actual, stamp
 
 

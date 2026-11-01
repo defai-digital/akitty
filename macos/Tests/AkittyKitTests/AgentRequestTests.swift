@@ -121,6 +121,20 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertEqual(snapshot.program_status?.untrusted, true)
     }
 
+    @MainActor func testLateApprovalCannotBeatADelayedTimeoutCallback() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; defer { window.close() }
+        let alert = AgentCommandHost.approvalAlert(AgentCommandRequest(sessionID: 1, actor: "test", command: "echo late", cwd: nil))
+        let pending = Task { await AgentRequests.present(alert, in: window, timeout: 0.1) }
+        try await waitUntil { window.attachedSheet != nil }
+        // A busy main run loop can delay the timer past the nominal expiry.
+        usleep(150_000)
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
+        let accepted = await pending.value
+        XCTAssertFalse(accepted, "the absolute deadline must hold even before the timeout callback runs")
+    }
+
     @MainActor func testDisconnectDisableAndCooldownCannotAuthorize() async throws {
         _ = NSApplication.shared
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -147,8 +161,11 @@ final class AgentRequestTests: XCTestCase {
         let pending = Task.detached { try LocalSocket.request(request, path: path) }
         try await waitUntil { window.attachedSheet != nil }
         try service.setEnabled(false)
-        let reply = try JSONSerialization.jsonObject(with: try await pending.value) as! [String: Any]
-        XCTAssertEqual(reply["ok"] as? Bool, false)
+        do {
+            let reply = try JSONSerialization.jsonObject(with: try await pending.value) as! [String: Any]
+            XCTAssertEqual(reply["ok"] as? Bool, false)
+        } catch { XCTAssertTrue(error.localizedDescription.contains("Dispatch outcome may be unknown")) }
+        try await waitUntil { try window.attachedSheet == nil && terminal.session.snapshot()?.control?.agent == false }
         try service.setEnabled(true)
         let limited = try await Task.detached { try LocalSocket.request(request, path: path) }.value
         XCTAssertTrue(String(decoding: limited, as: UTF8.self).contains("rate limited"))
