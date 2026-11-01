@@ -2,25 +2,66 @@
 
 # AkiTTY
 
-**The Agent-Native Terminal**
+### The Agent-Native Terminal
 
-A native macOS terminal for visible, human-controlled AI agent workflows,
-powered by [Alacritty](https://github.com/alacritty/alacritty),
-with AkiTTY's own Rust integration, Swift/AppKit interface, CoreText/Metal rendering,
-and a small TypeScript feature layer. The app runs on Apple Silicon and macOS 14
-or later; no Zig compiler or runtime is required. Windows and Linux use
-**AkiTTY Web**, the separate browser-canvas terminal inside AX Code Desktop.
+**See agent activity. Approve command requests. Stay in charge.**
 
-| Component | Technology |
+AkiTTY is a native macOS terminal for developers working with AI coding agents.
+See what participating agents report across your terminals, review commands they
+ask AkiTTY to dispatch, and take back terminal input when you need it.
+
+Bring your own agent and keep your ordinary shell workflow. No specific AI
+provider, cloud account or AX product is required.
+
+**Apple Silicon · macOS 14+ · MIT licensed**
+
+[Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
+[What's new in 1.3.0](docs/releases/1.3.0.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
+
+For Windows and Linux, see the separate [AkiTTY Web terminal](#windows-and-linux).
+
+> Only commands submitted through the opt-in request interface use the native
+> human approval workflow. Ordinary agent subprocesses are not intercepted.
+> Activity reports are supplied by programs, not verified execution results.
+
+## Why AkiTTY?
+
+When agents work in several tabs or panes, following their output is only part
+of the job. You also need to see which ones report work or need attention, review
+requests to use a terminal, and know who currently owns its input.
+
+AkiTTY brings those tasks into one native workflow:
+
+| Capability | What you can do |
 | --- | --- |
-| AkiTTY native Mac app | Alacritty terminal engine + AkiTTY's own Rust/Swift implementation |
-| AkiTTY Web | Ghostty VT parser compiled to WebAssembly + Canvas rendering |
-| Ghostty app (separate upstream project) | Ghostty's own Zig core and native platform interfaces |
+| **Observe** | Open Agent Overview to see reported activity and input ownership across windows, tabs, split panes and the hidden quick terminal. |
+| **Approve** | Review the exact command and target terminal in a native sheet before a local agent request is dispatched. Deny is the default. |
+| **Reclaim** | Take back terminal input and revoke unused approvals. Running processes continue; interrupt them separately if needed. |
+| **Inspect** | Review a local timeline of activity and request metadata, with source labels and JSONL export for diagnostics. |
 
-Ghostty informed AkiTTY's design and served as a source reference. The native Mac
-app does not use Ghostty's Zig core or renderer, and does not inherit their
-performance characteristics. AkiTTY Web reuses Ghostty's VT parser; the native
-app and the web terminal have separate engines and rendering paths.
+Already using Ghostty, Kitty, iTerm2 or Warp with a coding agent? AkiTTY is worth
+trying if you want this combination of external-agent visibility, explicit input
+ownership and human-approved command requests. Status reporting and automation
+are not exclusive to AkiTTY; its focus is bringing them together around agents
+you choose. It does not provide a built-in coding agent or replace your agent's
+own permissions.
+
+## 30-second tour
+
+After [installing AkiTTY](#quick-start), the workflow is:
+
+1. **See who needs attention.** Open **Window → Agent Overview (⌥⌘A)** to see
+   panes together, with program reports separate from host input ownership.
+2. **Review a request.** Enable local requests and have an agent submit a command
+   through `akitty-agent`. A native sheet lets you approve or deny it.
+3. **Take input back.** Choose **Edit → Reclaim Terminal Control**, or use
+   **Reclaim Control** in Agent Overview.
+4. **Inspect the record.** Choose **Akitty → Agent Event Timeline** or
+   **Export Agent Events…** to review retained metadata.
+
+[Try the steps below](#try-the-agent-workflow) with a simulated activity report
+and a harmless `pwd` request. An agent must explicitly use these integration
+paths; launching an ordinary CLI alone does not add activity reporting or approval.
 
 ## Quick start
 
@@ -51,113 +92,141 @@ You can also [download the v1.3.0 ZIP](https://download.automatosx.com/akitty/re
 or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.3.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
-## What makes AkiTTY useful
+## Works with your AI agents
 
-AkiTTY brings program-reported identity and activity, trusted-host command approval,
-and observable sessions into one terminal workflow. **Window → Agent Overview (⌥⌘A)**
-already lists panes across windows, tabs, splits, and the hidden quick terminal.
-It separates host-enforced input ownership from unverified program reports, with
-actions to show a pane or reclaim input. Reclaim revokes unused approvals and input
-ownership; it does not stop a running process. Host authentication and policy remain
-the embedding host's responsibility.
+Keep using Claude Code, Codex, OpenCode or another coding agent in a normal shell.
+For AkiTTY-specific workflows, the agent or an adapter must opt in:
 
-Version 1.3.0 adds [native agent workflows](docs/AGENT_NATIVE.md): OSC 7501
-program reports alongside OSC 771 sprites, an opt-in local `akitty-agent` request
-client, and a bounded local event timeline/export. Every local execution request
-requires human approval. Ordinary agent subprocesses are not intercepted. These
-workflows use the explicit request path; they do not govern every operation by an agent.
+| Goal | Integration path |
+| --- | --- |
+| Report work, waiting, completion or errors | Emit OSC 7501 program status through the terminal output stream. |
+| Show a tab sprite, activity mark and pane status/progress | Use OSC 771 directly or the dependency-free [TypeScript/JavaScript SDK](packages/akitty-sdk/README.md). |
+| Ask to run a command in a native terminal pane | Invoke the bundled `akitty-agent` client after the user enables local requests. Every command needs human approval. |
+| Embed terminal control in your own application | Use the [trusted host API](docs/AGENT_WORKFLOWS.md#host-control-and-approval) and supply caller authentication and approval policy. |
 
-AkiTTY gives each participating program a visible identity in its own tab:
-its own small animated icon, working state, and a completion indicator that stays
-until you view the tab. Imagine three AX Code sessions: a translation agent with
-its own sprite and progress, a coding agent showing activity, and a test agent
-leaving a finished dot when its background work ends.
+These are integration paths, not bundled or vendor-certified connectors. An
+agent's normal subprocesses and file tools remain governed by that agent and
+the operating system. SDK capability detection disables presentation updates
+through SSH and multiplexers unless the host explicitly integrates them.
 
-Programs opt in through the dependency-free [terminal SDK](packages/akitty-sdk/README.md),
-which writes OSC 771 through their existing stdout queue. The native app renders
-the tab icon and activity, with text/progress in the pane status line; no separate
-Python status-bar script is needed. Ordinary CLI programs do not gain this behavior
-automatically, and these reports are program-supplied presentation, not verified
-command results. Default detection disables these SDK updates through SSH and
-multiplexers unless a host explicitly integrates them.
+For example, give an agent that can invoke local tools this instruction after
+completing the setup below:
 
-A second integration convenience is AkiTTY Web's ready-made, **read-only** agent
-adapter: `list_sessions`, `read_screen`, and `read_output` expose terminal text,
-including from a Canvas renderer. The host registers the tools; WebMCP additionally
-needs a supporting browser. This is Web-only, and neither the tools nor terminal
-output grant command execution or input ownership.
+> Use the bundled AkiTTY `akitty-agent` client to list panes. Ask me which idle
+> pane to target, then request `pwd` there and wait for native approval. Report
+> the dispatch receipt without treating it as proof of success. Do not resubmit
+> automatically after an uncertain response.
 
-These are AkiTTY's integration strengths, not a claim that other terminals cannot
-show progress or be automated. [Ghostty supports OSC 9;4 progress](https://ghostty.org/docs/install/release-notes/1-2-0),
-and [iTerm2 has a scriptable status bar](https://iterm2.com/documentation-status-bar.html)
-and [Python automation](https://iterm2.com/python-api/). AkiTTY emphasizes the
-combination of program-selected tab identity, activity and completion, with direct
-AX ecosystem integration. See [product scope and host integration](docs/AGENT_WORKFLOWS.md).
+## Try the agent workflow
 
-## New in 1.1.0
+### Observe a program report
 
-- Opt-in bash/zsh shell integration records command boundaries, timestamps,
-  reported working directories and exit status, with bounded per-command output.
-- Trusted native and JavaScript embedding hosts can use exclusive agent control,
-  exact-command one-shot approvals, human reclaim and a bounded audit history.
-  **Window → Agent Overview** lists every pane's controller and program reports.
-  A native sheet asks for approval. The separate SDK `/host` entry accepts a host
-  policy callback; an ax-trust deployment must supply its own authenticated adapter.
-  There is no built-in ax-trust service connection.
-- A persistent quick terminal can be shown/hidden from the Shell menu or an opt-in
-  global shortcut selected in Settings. Hiding preserves its shell session.
-- Drag files/folders into a terminal pane to insert shell-quoted paths; drag text
-  to paste it with the same confirmation policy as the clipboard. Dropping onto
-  the Dock/app continues to open a window at the requested folder.
-- The native default background is deep dark (`#080A0D`), consistently across
-  the core, Metal presentation and software rendering.
+In an AkiTTY pane, run this example, then open **Agent Overview (⌥⌘A)**. It
+simulates a participating program reporting work, then completion:
 
-The new host API does not automatically upgrade AX Code Desktop's vendored Web
-terminal or its PTY service. Shell metadata is untrusted; remote/multiplexer,
-physical IME, sleep/wake and multi-day reliability need their own qualification.
+```sh
+{
+  printf '\033]7501;state=working:app=demo\007'
+  sleep 5
+  printf '\033]7501;state=done:app=demo\007'
+}
+```
 
-## Why AkiTTY exists
+The pane status and tab indicator reflect these reports. They do not prove
+that useful work occurred. **Allow programs to set the status bar** must be
+on in Settings (the default).
 
-AkiTTY began with [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop),
-where we used [ghostty-web](https://github.com/coder/ghostty-web) for the embedded
-terminal. That gave us a foundation for bringing a terminal into the desktop app.
+### Approve a command and reclaim input
 
-As AX Code evolved, we wanted deeper integration and more powerful capabilities,
-including WebMCP support. Those goals led us to build an independent native Mac
-client around Alacritty and maintain a separate web terminal using Ghostty's VT
-parser. [Ghostty](https://github.com/ghostty-org/ghostty) informed the native app's
-design as a source reference. WebMCP is part of this direction; [What is
-implemented](#what-is-implemented) describes what the current release implements.
+1. Leave a local bash/zsh pane at an empty prompt, with shell integration enabled
+   (the default). This is the **target**; a running TUI is not a supported target.
+2. Choose **Akitty → Enable Local Agent Requests**. Requests are off at every
+   app launch, so enabling them is an explicit choice for that run.
+3. Open a **second pane** with **⌘D**, or use another terminal, to run the client.
+   Keep the target idle while the request waits:
 
-Our focus is our **macOS client** and its integration with AX Code. Windows and
-Linux support is [AkiTTY Web](#windows-and-linux), described below. We thank the
-Alacritty, Ghostty, and ghostty-web contributors for the engines and reference
-work that helped make these two implementations possible.
+   ```sh
+   AKITTY_AGENT="$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent"
+   "$AKITTY_AGENT" list
+   # Replace <pane-id> with the target's opaque pane value from the list.
+   "$AKITTY_AGENT" request '<pane-id>' 'pwd'
+   ```
 
-## Windows and Linux
+   If installed system-wide, use `/Applications/Akitty.app/Contents/MacOS/akitty-agent`.
+   If the list has an integer `next_offset`, run `"$AKITTY_AGENT" list <offset>`
+   for the next page. Pane IDs change when AkiTTY restarts.
+4. Review the exact command, target and shell-reported directory in the native
+   sheet. Approve to dispatch once, or deny to leave it unexecuted through this path.
+5. Inspect the target terminal. An accepted receipt means input was queued,
+   not that `pwd` succeeded. Choose **Edit → Reclaim Terminal Control** to type
+   there again. Reclaim does not stop a running command.
+6. Open **Akitty → Agent Event Timeline** to inspect the request and control
+   events, or **Export Agent Events…** to save JSONL metadata.
 
-The downloadable app is macOS-only: Apple Silicon, macOS 14 or later. Windows and
-Linux run AkiTTY through **AkiTTY Web** (`packages/akitty-web`), the canvas terminal
-embedded in [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
+The [native agent guide](docs/AGENT_NATIVE.md) documents request limits, failure
+handling and event retention. A response lost after dispatch can mean the command
+already ran; inspect the terminal before making another request.
 
-AkiTTY Web is a separate implementation from the Mac app. It draws on an HTML canvas
-and parses terminal output with Ghostty's VT parser compiled to WebAssembly. The
-same library runs in a browser on Windows, Linux, and macOS. It has no shell of its
-own. AX Code Desktop starts the process on that operating system, writes the
-output with `term.write()`, and takes keystrokes from `term.onData()`.
+## Agent protocols
 
-In the browser, Ctrl+C is the interrupt on every platform. Links open with
-Ctrl-click or Command-click. The wasm loader accepts a Windows `file://` path
-(`/C:/…` becomes `C:/…`) and a normal browser fetch.
+The native app keeps reported activity separate from command authority:
 
-There is no AkiTTY installer for Windows or Linux. This repository type-checks
-AkiTTY Web and runs its unit tests on macOS. Playwright runs Chromium, Firefox
-and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details are in [the package README](packages/akitty-web/README.md).
+- **OSC 7501 revision 0.4** reports `idle`, `working`, `blocked`, `done` and `error`,
+  with hierarchy and progress. It cannot grant input ownership or approve commands.
+- **OSC 771** supplies small animated sprites, activity marks and completion
+  indicators in tabs, with status text and progress in the pane. The
+  [terminal SDK](packages/akitty-sdk/README.md) writes it through the program's
+  existing serialized stdout writer; no status-bar Python script is needed.
+- **`akitty-agent`** uses an opt-in same-user local socket to request native
+  approval. It does not expose the privileged core control API to terminal programs.
+
+See the [protocol and ABI contract](docs/ABI.md),
+[native request and event contracts](docs/AGENT_NATIVE.md), and
+[embedding host workflow](docs/AGENT_WORKFLOWS.md).
+
+## Architecture and security boundaries
+
+| Component | Technology |
+| --- | --- |
+| AkiTTY native Mac app | AkiTTY-maintained Alacritty terminal engine, Rust PTYs, Swift/AppKit UI, CoreText/Metal rendering and a bundled TypeScript command palette |
+| AkiTTY Web (separate package) | Ghostty VT parser compiled to WebAssembly + Canvas rendering; the embedding host owns the PTY |
+
+Ghostty informed the native app's design and served as a source reference. The
+Mac app does not use Ghostty's Zig core or renderer, and does not inherit their
+performance characteristics. The native app needs no Zig compiler or runtime;
+Zig is only needed to rebuild the Web package's prebuilt wasm. Native and Web
+features require separate integration and qualification.
+
+- **Approval has a defined scope.** Each local request needs human approval bound
+  to the exact command, session lease and reported directory. Commands use the
+  shell's existing OS permissions; this is not an execution sandbox.
+- **Reclaim controls input.** It revokes the lease and unused authorization. It
+  does not undo a command, terminate a process or reverse file changes.
+- **Reports have sources, not execution guarantees.** Program activity and shell
+  metadata can be forged by programs in the PTY. An input-dispatch receipt is not
+  a verified command result.
+- **Events support inspection.** The local store retains two segments of at most
+  4 MiB each, with source and loss markers. It stores command hashes and lengths,
+  not command text or terminal output. Records are locally editable, can miss
+  intermediate reports, and are neither a complete transcript nor tamper-proof
+  evidence. Hashes are not strong secret anonymization.
+- **The app keeps narrow local boundaries.** Local requests create no TCP/HTTP
+  listener. Terminal clipboard reads receive an empty reply; text writes require
+  approval. The bundled TypeScript palette has no shell, filesystem or network
+  bridge and loads no arbitrary user JavaScript.
+
+Read [architecture](docs/ARCHITECTURE.md) and the
+[native trust boundary](docs/AGENT_NATIVE.md#local-request-protocol-and-trust-boundary)
+for implementation details.
 
 ## What is implemented
 
 - Native windows, tabs and split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
+- Bash/zsh shell integration records bounded command observations without editing
+  startup files. A persistent quick terminal has an opt-in global shortcut; hiding
+  it preserves its shell. File drops insert shell-quoted paths, and text drops use
+  the clipboard confirmation policy.
 - Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
   a window in that folder; a file opens in its folder. A new tab opens after the current tab,
   in the focused pane's reported directory when that path still exists, and in the opened
@@ -187,13 +256,39 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 **AkiTTY Web** (`packages/akitty-web`) is the Windows, Linux, and in-browser terminal
 described in [Windows and Linux](#windows-and-linux). It is a private source package.
+Its read-only agent adapter exposes `list_sessions`, `read_screen` and `read_output`;
+the embedding host registers the tools, and WebMCP needs a supporting browser.
+These tools grant neither command execution nor input ownership. The native
+approval service is not inherited by Web or AX Code Desktop's PTY host.
 
 **Program integration:** [`@ax-code/akitty-sdk`](packages/akitty-sdk/README.md) is a
 lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-**Status: 1.3.0.** This is not a drop-in Ghostty replacement.
+## Windows and Linux
+
+The downloadable app is macOS-only: Apple Silicon, macOS 14 or later. Windows and
+Linux run AkiTTY through **AkiTTY Web** (`packages/akitty-web`), the canvas terminal
+embedded in [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
+
+AkiTTY Web is a separate implementation from the Mac app. It draws on an HTML canvas
+and parses terminal output with Ghostty's VT parser compiled to WebAssembly. The
+same library runs in a browser on Windows, Linux, and macOS. It has no shell of its
+own. AX Code Desktop starts the process on that operating system, writes the
+output with `term.write()`, and takes keystrokes from `term.onData()`.
+
+In the browser, Ctrl+C is the interrupt on every platform. Links open with
+Ctrl-click or Command-click. The wasm loader accepts a Windows `file://` path
+(`/C:/…` becomes `C:/…`) and a normal browser fetch.
+
+There is no AkiTTY installer for Windows or Linux. This repository type-checks
+AkiTTY Web and runs its unit tests on macOS. Playwright runs Chromium, Firefox
+and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details are in [the package README](packages/akitty-web/README.md).
+
+## Limitations and roadmap
+
+**Current release: 1.3.0.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current
@@ -217,7 +312,7 @@ validation is not complete.** See [accessibility usage and validation](docs/ACCE
 Performance parity and testing
 on every supported Mac version are not claimed.
 
-## Planned work
+### Planned work
 
 - **Performance and stability:** measure parser/snapshot/rendering costs, reduce
   unnecessary idle and hidden-pane work, and expand malformed-input and PTY
@@ -258,15 +353,13 @@ the Settings starting directory or an opened folder.
 | New window / tab | Command-N / Command-T |
 | Split / close pane | Command-D / Command-W |
 | Command palette | Command-Shift-P |
+| Agent Overview | Option-Command-A |
 | Copy / paste | Command-C / Command-V |
 | Find in scrollback | Command-F |
 | Find next / previous | Command-G / Command-Shift-G |
 | Font larger / smaller / reset | Command-Plus / Command-Minus / Command-0 |
 
-Closing a live terminal asks for confirmation. Terminal-initiated clipboard reads
-receive an empty reply; text writes require approval. Images are never decoded by
-the clipboard confirmation path. Only the bundled, bounded TypeScript code runs;
-it has no shell, filesystem or network bridge.
+Closing a live terminal asks for confirmation.
 
 ## Verification and distribution
 
