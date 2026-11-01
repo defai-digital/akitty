@@ -2,7 +2,8 @@
 
 # AkiTTY
 
-A native macOS terminal powered by [Alacritty](https://github.com/alacritty/alacritty),
+A native macOS terminal for visible, human-controlled AI agent workflows,
+powered by [Alacritty](https://github.com/alacritty/alacritty),
 with AkiTTY's own Rust integration, Swift/AppKit interface, CoreText/Metal rendering,
 and a small TypeScript feature layer. The app runs on Apple Silicon and macOS 14
 or later; no Zig compiler or runtime is required. Windows and Linux use
@@ -49,6 +50,14 @@ or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/t
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## What makes AkiTTY useful
+
+AkiTTY brings program-reported identity and activity, trusted-host command approval,
+and observable sessions into one terminal workflow. **Window → Agent Overview (⌥⌘A)**
+already lists panes across windows, tabs, splits, and the hidden quick terminal.
+It separates host-enforced input ownership from unverified program reports, with
+actions to show a pane or reclaim input. Reclaim revokes unused approvals and input
+ownership; it does not stop a running process. Host authentication and policy remain
+the embedding host's responsibility.
 
 AkiTTY gives each participating program a visible identity in its own tab:
 its own small animated icon, working state, and a completion indicator that stays
@@ -192,9 +201,12 @@ hyperlinks open with Command-click, and underline styles and strikethrough rende
 The Kitty keyboard protocol is implemented (all five flags, press/repeat/release events,
 modifier-only keys); base-layout alternate keys are reported only for US-position keys. Find keeps a bar open,
 highlights every visible literal match, and moves to the next or previous one.
-Full external esctest qualification and dedicated VoiceOver development/user testing
-are outside the current roadmap. Existing accessible text and selection remain
-implemented; VoiceOver behavior is not qualified. Performance parity and testing
+Full external esctest qualification remains outstanding. Accessible terminal text,
+selection, character counts and cursor-line APIs already exist. Current development
+adds line navigation, coalesced text notifications, state announcements and keyboard
+focus improvements to the existing Overview and approval sheet. **VoiceOver user
+validation is not complete.** See [accessibility usage and validation](docs/ACCESSIBILITY.md).
+Performance parity and testing
 on every supported Mac version are not claimed.
 
 ## Planned work
@@ -202,6 +214,10 @@ on every supported Mac version are not claimed.
 - **Performance and stability:** measure parser/snapshot/rendering costs, reduce
   unnecessary idle and hidden-pane work, and expand malformed-input and PTY
   lifecycle stress coverage.
+- **Agent Overview and accessibility:** improve and validate the existing cross-window
+  overview and text accessibility APIs, including keyboard focus, command approval,
+  VoiceOver reading and output-notification behavior. Basic accessibility is P1;
+  complete terminal navigation and scrollback qualification follow in P1–P2.
 - **Shell integration qualification:** broaden startup-hook compatibility and remote/multiplexer coverage beyond the default-on local bash/zsh implementation.
 - **Quick terminal qualification:** expand sleep/wake, Spaces and multi-display checks for the implemented persistent window and configurable global shortcut.
 

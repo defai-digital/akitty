@@ -4,6 +4,82 @@ import AppKit
 
 /// The overview shows host control apart from what programs and shells report, and never reads terminal text.
 final class AgentOverviewTests: XCTestCase {
+    @MainActor func testReturnBelongsToTableAndWindowCloseStopsRefreshTimer() throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        var shown = 0
+        let overview = AgentOverviewController(source: { [controller] }) { _, _ in shown += 1 }
+        defer { overview.close() }
+        overview.showWindow(nil)
+        overview.select(sessionID: controller.panes[0].terminal.session.id)
+        XCTAssertEqual(overview.showButton.keyEquivalent, "", "Return must not override another focused action")
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: overview.window!.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        overview.table.keyDown(with: event)
+        XCTAssertEqual(shown, 1)
+        XCTAssertTrue(overview.refreshTimerActive)
+        overview.window?.performClose(nil)
+        XCTAssertFalse(overview.refreshTimerActive)
+        overview.showWindow(nil)
+        XCTAssertTrue(overview.refreshTimerActive)
+    }
+
+    @MainActor func testRefreshPreservesAccessibleCellsAndRemovedSelectionDoesNotRetargetActions() async throws {
+        _ = NSApplication.shared
+        let first = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let second = try TerminalWindow(app: AkittyApplication(), headless: true)
+        var windows = [first, second]
+        defer { [first, second].forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() } }
+        let terminal = try XCTUnwrap(first.panes.first?.terminal)
+        try await waitUntil(first) { terminal.snapshot != nil }
+        let overview = AgentOverviewController(source: { windows }) { _, _ in }
+        defer { overview.close() }
+        overview.showWindow(nil)
+        overview.select(sessionID: terminal.session.id)
+        XCTAssertTrue(overview.window?.firstResponder === overview.table)
+        let cell = try XCTUnwrap(overview.table.view(atColumn: 1, row: 0, makeIfNecessary: true) as? NSTextField)
+        _ = try terminal.session.acquireControl(actor: "review-agent")
+        try await waitUntil(first) { terminal.snapshot?.control?.agent == true }
+        overview.refresh()
+        XCTAssertTrue(cell === overview.table.view(atColumn: 1, row: 0, makeIfNecessary: true))
+        XCTAssertEqual(cell.accessibilityLabel(), "Control (host): Agent: review-agent")
+        XCTAssertTrue(overview.reclaimButton.isEnabled)
+        XCTAssertEqual(overview.table.selectedRow, 0)
+        windows = [second]
+        overview.refresh()
+        XCTAssertEqual(overview.table.selectedRow, -1)
+        XCTAssertFalse(overview.showButton.isEnabled)
+        XCTAssertFalse(overview.reclaimButton.isEnabled)
+    }
+
+    @MainActor func testOverviewIncludesSplitPanesOtherWindowsAndHiddenQuickTerminal() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let first = try TerminalWindow(app: app, headless: true)
+        let second = try TerminalWindow(app: app, headless: true)
+        var windows = [first, second]
+        let quick = QuickTerminalController {
+            let window = try TerminalWindow(app: app, headless: true)
+            windows.append(window); return window
+        }
+        quick.restoreFocus = {}
+        defer { quick.stop(); windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() } }
+        first.perform(.split)
+        XCTAssertEqual(first.panes.count, 2)
+        try quick.toggle(); quick.hide()
+        let quickID = try XCTUnwrap(quick.terminalWindow?.active?.session.id)
+        let overview = AgentOverviewController(source: { windows }) { _, _ in }
+        defer { overview.close() }
+        XCTAssertEqual(overview.entries.count, 4)
+        XCTAssertTrue(overview.entries.contains { $0.row.sessionID == quickID })
+        overview.select(sessionID: quickID)
+        XCTAssertTrue(overview.showButton.isEnabled)
+        XCTAssertTrue(overview.table.nextKeyView === overview.showButton)
+        XCTAssertTrue(overview.showButton.nextKeyView === overview.reclaimButton)
+        XCTAssertTrue(overview.reclaimButton.accessibilityHelp()?.contains("Does not stop") == true)
+    }
+
     func testRowsKeepHostControlApartFromProgramReports() throws {
         let session = try TerminalSession(headless: true)
         defer { try? session.close() }

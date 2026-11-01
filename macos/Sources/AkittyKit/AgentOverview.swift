@@ -1,5 +1,14 @@
 import AppKit
 
+@MainActor private final class AgentOverviewTable: NSTableView {
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers == "\r", event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+           selectedRow >= 0, let action = doubleAction {
+            NSApp.sendAction(action, to: target, from: self)
+        } else { super.keyDown(with: event) }
+    }
+}
+
 /// One pane in the agent overview, built only from snapshot fields. Sources stay apart: `controller` is the core's
 /// control lease (host state), `programStatus` is program chrome any PTY program can send, and `shellDirectory` is
 /// untrusted shell metadata. Terminal text is never read, so no status is inferred from output.
@@ -34,7 +43,7 @@ struct AgentOverviewRow: Equatable {
 
 /// Lists every terminal pane with who controls it and what its programs report, and offers the human actions that
 /// already exist: show the pane and reclaim control. It never approves, executes, or sends input.
-@MainActor final class AgentOverviewController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+@MainActor final class AgentOverviewController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     struct Entry {
         weak var window: TerminalWindow?
         weak var terminal: TerminalView?
@@ -43,10 +52,11 @@ struct AgentOverviewRow: Equatable {
     private let source: () -> [TerminalWindow]
     private let onShow: (TerminalWindow, TerminalView) -> Void
     private(set) var entries: [Entry] = []
-    let table = NSTableView()
+    let table: NSTableView = AgentOverviewTable()
     let showButton = NSButton(title: "Show Terminal", target: nil, action: nil)
     let reclaimButton = NSButton(title: "Reclaim Control", target: nil, action: nil)
     private var timer: Timer?
+    var refreshTimerActive: Bool { timer?.isValid == true }
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
         ("terminal", "Terminal", 180), ("control", "Control (host)", 140), ("program", "Program reports (unverified)", 200),
         ("directory", "Shell directory (unverified)", 180), ("state", "State", 90)
@@ -58,6 +68,7 @@ struct AgentOverviewRow: Equatable {
         window.title = "Agent Overview"; window.minSize = NSSize(width: 520, height: 200); window.center()
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         for column in Self.columns {
             let item = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
             item.title = column.title; item.width = column.width
@@ -66,11 +77,13 @@ struct AgentOverviewRow: Equatable {
         table.dataSource = self; table.delegate = self; table.usesAlternatingRowBackgroundColors = true
         table.target = self; table.doubleAction = #selector(showSelected(_:))
         table.setAccessibilityLabel("Terminal panes and their controllers")
+        table.setAccessibilityHelp("Select a terminal with the arrow keys. Show Terminal focuses it. Reclaim Control returns input to you without stopping its running process.")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         let note = NSTextField(wrappingLabelWithString: "Control is enforced by Akitty. Program reports and shell directories are sent by programs in the terminal and are not verified.")
         note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor
         showButton.target = self; showButton.action = #selector(showSelected(_:))
         reclaimButton.target = self; reclaimButton.action = #selector(reclaimSelected(_:))
+        reclaimButton.setAccessibilityHelp("Revokes the selected agent's input control and unused command approval. Does not stop the running process.")
         let buttons = NSStackView(views: [note, showButton, reclaimButton]); buttons.orientation = .horizontal; buttons.spacing = 8
         note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let content = NSView()
@@ -82,6 +95,8 @@ struct AgentOverviewRow: Equatable {
             buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
         ])
         window.contentView = content
+        window.initialFirstResponder = table
+        table.nextKeyView = showButton; showButton.nextKeyView = reclaimButton; reclaimButton.nextKeyView = table
         refresh()
     }
     required init?(coder: NSCoder) { nil }
@@ -89,6 +104,7 @@ struct AgentOverviewRow: Equatable {
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         refresh()
+        window?.makeFirstResponder(table)
         // Cached snapshots are read once a second; each pane's own poll keeps them current.
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -97,6 +113,7 @@ struct AgentOverviewRow: Equatable {
         }
     }
     override func close() { timer?.invalidate(); timer = nil; super.close() }
+    func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil }
 
     /// Asks each pane for a snapshot since its last revision, so hidden windows do not show stale control state.
     private func pollPanes() { source().flatMap(\.panes).forEach { $0.terminal.poll() } }
@@ -106,14 +123,26 @@ struct AgentOverviewRow: Equatable {
         let next = source().flatMap { window in
             window.panes.map { Entry(window: window, terminal: $0.terminal, row: AgentOverviewRow(sessionID: $0.terminal.session.id, snapshot: $0.terminal.snapshot)) }
         }
-        if next.map(\.row) != entries.map(\.row) {
+        if next.map(\.row.sessionID) != entries.map(\.row.sessionID) {
             entries = next
             table.reloadData()
+            table.deselectAll(nil)
             if let selected, let index = entries.firstIndex(where: { $0.row.sessionID == selected }) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            } else if selected != nil, window?.isKeyWindow == true {
+                window?.makeFirstResponder(table)
+                NSAccessibility.post(element: table, notification: .focusedUIElementChanged)
             }
         } else {
             entries = next
+            // Keep row/cell accessibility objects alive during progress and control updates.
+            for row in entries.indices {
+                for (column, definition) in Self.columns.enumerated() {
+                    if let field = table.view(atColumn: column, row: row, makeIfNecessary: false) as? NSTextField {
+                        configure(field, column: definition.id, row: entries[row].row)
+                    }
+                }
+            }
         }
         updateButtons()
     }
@@ -142,7 +171,11 @@ struct AgentOverviewRow: Equatable {
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard entries.indices.contains(row), let id = tableColumn?.identifier.rawValue else { return nil }
-        let item = entries[row].row
+        let field = NSTextField(labelWithString: "")
+        configure(field, column: id, row: entries[row].row)
+        return field
+    }
+    private func configure(_ field: NSTextField, column id: String, row item: AgentOverviewRow) {
         let text: String
         switch id {
         case "terminal": text = item.title.isEmpty ? "Terminal \(item.sessionID)" : "\(item.sessionID) · \(item.title)"
@@ -151,11 +184,14 @@ struct AgentOverviewRow: Equatable {
         case "directory": text = item.shellDirectory ?? "—"
         default: text = item.state
         }
-        let field = NSTextField(labelWithString: text)
+        let changed = field.stringValue != text
+        if changed { field.stringValue = text }
+        let label = Self.columns.first { $0.id == id }?.title ?? id
+        field.setAccessibilityLabel(label + ": " + text)
         field.lineBreakMode = .byTruncatingTail
-        if id == "control", item.agentControlled { field.font = .boldSystemFont(ofSize: NSFont.systemFontSize) }
+        field.font = id == "control" && item.agentControlled ? .boldSystemFont(ofSize: NSFont.systemFontSize) : .systemFont(ofSize: NSFont.systemFontSize)
         if id == "program" || id == "directory" { field.textColor = .secondaryLabelColor }
-        return field
+        if changed { NSAccessibility.post(element: field, notification: .valueChanged) }
     }
     func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
 }

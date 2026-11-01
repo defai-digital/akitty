@@ -5,6 +5,13 @@ with Akitty's own Rust integration, Swift/AppKit interface, CoreText/Metal
 rendering, and a small TypeScript feature layer. Its own source is MIT licensed.
 Windows and Linux are reached through the separate AkiTTY Web browser terminal.
 
+The product focus is visible, human-controlled AI agent workflows: program-reported
+identity, trusted-host execution approval, and observable terminal sessions.
+Agent Overview and text accessibility already exist; current work improves their
+focus, navigation, and validation. These controls govern input through AkiTTY's host
+boundary, not operating-system process permissions. See [host workflows](AGENT_WORKFLOWS.md)
+and [accessibility](ACCESSIBILITY.md).
+
 | Component | Technology |
 | --- | --- |
 | AkiTTY native Mac app | Alacritty terminal engine + Akitty-owned Rust/Swift code |
@@ -82,8 +89,8 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
    failures. Public files are checked for secrets, machine paths and agent files.
 6. Build and smoke-test the app before committing/pushing. Signing/notarization,
    release publication and independent artifact verification are separate gates.
-   Full external esctest qualification and dedicated VoiceOver development/user
-   testing are outside the current roadmap, not release gates.
+   Full external esctest qualification remains outstanding. VoiceOver operation
+   testing is planned; automated accessibility tests do not establish user validation.
 
 Version 1.1.0 adds opt-in bash/zsh shell observations, trusted host command control,
 a persistent quick terminal, quoted file/text drops and a deep-dark default background.
@@ -95,9 +102,9 @@ Performance/stability and broader platform/workflow qualification remain in [the
 Shell integration (on by default for bash/zsh since 1.2.0) and the opt-in quick terminal are native features;
 they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
 public extension ecosystem are outside the current roadmap. Sixel, image clipboard
-protocols, and custom shaders remain unsupported. Dedicated VoiceOver work and
-user testing are outside this roadmap; existing macOS accessible text/selection
-APIs remain part of the implementation.
+protocols, and custom shaders remain unsupported. Existing macOS accessible text/selection
+APIs and Agent Overview are maintained features. VoiceOver testing and focused
+accessibility improvements are P1; user validation is not complete.
 
 The Kitty keyboard protocol is advertised because
 `KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option

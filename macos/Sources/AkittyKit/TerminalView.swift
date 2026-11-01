@@ -32,6 +32,7 @@ import os
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
     private var timer: Timer?
+    private var accessibilityValueTimer: Timer?
     /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
     /// Uptime seconds of the last changed snapshot or local input. Output, typing and graphics alike keep the
@@ -135,6 +136,7 @@ import os
         if !stopped {
             stopped = true
             timer?.invalidate(); timer = nil
+            accessibilityValueTimer?.invalidate(); accessibilityValueTimer = nil
             stopRefreshLink()
             pendingClipboard.removeAll()
             let cleanup = session.prepareClose(), group = shutdownGroup
@@ -258,7 +260,7 @@ import os
                 if next.bell == true { ringBell(); onBell?() }
                 if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
                 redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
-                NSAccessibility.post(element: self, notification: .valueChanged)
+                updateAccessibility(previous: previous, next: next)
             }
             showClipboardRequest()
         } catch { show(error) }
@@ -652,6 +654,48 @@ import os
     public override func accessibilityVisibleCharacterRange() -> NSRange { NSRange(location: 0, length: accessibilityNumberOfCharacters()) }
     public override func accessibilityString(for range: NSRange) -> String? { attributedSubstring(forProposedRange: range, actualRange: nil)?.string }
     public override func accessibilityInsertionPointLineNumber() -> Int { snapshot?.cursor.row ?? 0 }
+    public override func accessibilityLine(for index: Int) -> Int {
+        guard index >= 0, index <= accessibilityNumberOfCharacters(), let lines = snapshot?.lines, !lines.isEmpty else { return NSNotFound }
+        var start = 0
+        for (line, text) in lines.enumerated() {
+            let end = start + text.utf16.count
+            if index <= end { return line }
+            start = end + 1
+        }
+        return NSNotFound
+    }
+    public override func accessibilityRange(forLine line: Int) -> NSRange {
+        guard let lines = snapshot?.lines, lines.indices.contains(line) else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: lines.prefix(line).reduce(0) { $0 + $1.utf16.count + 1 }, length: lines[line].utf16.count)
+    }
+    private func updateAccessibility(previous: Snapshot?, next: Snapshot) {
+        // Coalesce output bursts, including a trailing update, without reading output aloud.
+        if previous?.lines != next.lines, accessibilityValueTimer == nil {
+            accessibilityValueTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.stopped else { return }
+                    self.accessibilityValueTimer = nil
+                    NSAccessibility.post(element: self, notification: .valueChanged)
+                }
+            }
+        }
+        guard window?.isKeyWindow == true, let message = Self.accessibilityAnnouncement(previous: previous, next: next) else { return }
+        NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested, userInfo: [
+            .announcement: message, .priority: NSAccessibilityPriorityLevel.medium.rawValue
+        ])
+    }
+    /// Announce state transitions, never progress frames, command output, or claimed authenticated identities.
+    static func accessibilityAnnouncement(previous: Snapshot?, next: Snapshot) -> String? {
+        guard let previous else { return nil }
+        if previous.control?.agent != next.control?.agent || previous.control?.owner != next.control?.owner {
+            return next.control?.agent == true ? "Terminal input is controlled by \(next.control?.owner ?? "agent"). Use Reclaim Terminal Control to take input back."
+                : "Terminal input returned to you. Running processes have not been stopped."
+        }
+        if next.chrome?.mark == .error, previous.chrome?.mark != .error { return "Program reports an error." }
+        if previous.chrome?.mark == .busy, next.chrome?.mark == .idle { return "Program reports it is idle." }
+        if next.exited, !previous.exited { return "Terminal shell exited." }
+        return nil
+    }
 }
 
 /// Forwards display-link ticks without keeping the view alive; a released view leaves the link to its `deinit`.
