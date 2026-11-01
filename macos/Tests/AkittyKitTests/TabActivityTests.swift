@@ -51,6 +51,29 @@ final class TabActivityTests: XCTestCase {
         controller.refreshUpdateReminder(nil)
     }
 
+    @MainActor func testWorkingSpriteComesFromThePaneThatReportsWork() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        controller.reduceMotion = false
+        // Split the first tab so the chrome-busy pane comes first and the reporting one second.
+        controller.perform(.split)
+        XCTAssertEqual(controller.panes.count, 2)
+        let chromeBusy = controller.panes[0], reporting = controller.panes[1]
+        // The first pane's chrome looks busy and carries a different sprite, but its program status never reports work.
+        // An implementation that selects by chrome isWorking would pick this pane and its sprite instead.
+        let chromeBusyFrame = Data([0xAA, 0xBB, 0xCC, 0xFF])
+        _ = try chromeBusy.terminal.session.call("chrome", [
+            "progress": "indeterminate",
+            "sprite": ["w": 1, "h": 1, "frames": [chromeBusyFrame.base64EncodedString()]]
+        ])
+        try working(reporting, mark: 0)
+        // Only the second pane's program status reports work, so its sprite must win.
+        _ = try reporting.terminal.session.call("feed", ["text": "\u{1b}]7501;state=working\u{7}"])
+        try await waitUntil(controller) { controller.tabChips[0].activity != .none }
+        XCTAssertEqual(controller.tabChips[0].activity, .working(pixels: frame0, width: 1, height: 1))
+    }
+
     @MainActor func testWorkThatEndsOutOfViewKeepsADotUntilTheTabIsShown() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)

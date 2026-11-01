@@ -572,10 +572,13 @@ export class SelectionManager {
     // Double-click - select word
     canvas.addEventListener('dblclick', (e: MouseEvent) => {
       const cell = this.pixelToCell(e.offsetX, e.offsetY);
-      const word = this.getWordAtCell(cell.col, cell.row);
+      const absoluteRow = this.viewportRowToAbsolute(cell.row);
+      // Word boundaries must be read from the same absolute scrollback/screen
+      // line that selection uses, not from screen-buffer row `cell.row` (which
+      // is wrong while scrolled into history).
+      const word = this.getWordAtCell(cell.col, absoluteRow);
 
       if (word) {
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
         this.selectionStart = { col: word.startCol, absoluteRow };
         this.selectionEnd = { col: word.endCol, absoluteRow };
         this.requestRender();
@@ -839,10 +842,15 @@ export class SelectionManager {
   }
 
   /**
-   * Get word boundaries at a cell position
+   * Get word boundaries at a cell position on an absolute buffer row
+   * (scrollback rows 0..scrollbackLength-1, then screen rows).
    */
-  private getWordAtCell(col: number, row: number): { startCol: number; endCol: number } | null {
-    const line = this.wasmTerm.getLine(row);
+  private getWordAtCell(col: number, absoluteRow: number): { startCol: number; endCol: number } | null {
+    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const line =
+      absoluteRow < scrollbackLength
+        ? this.wasmTerm.getScrollbackLine(absoluteRow)
+        : this.wasmTerm.getLine(absoluteRow - scrollbackLength);
     if (!line) return null;
 
     // Word characters: letters, numbers, underscore, dash

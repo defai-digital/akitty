@@ -358,8 +358,11 @@ export class InputHandler {
     // Extract modifiers
     const mods = this.extractModifiers(event);
 
-    // Handle simple special keys that produce standard sequences
-    if (mods === Mods.NONE || mods === Mods.SHIFT) {
+    // Handle simple special keys that produce standard sequences.
+    // Shifted special keys (Shift+Tab, Shift+Delete, Shift+F1...) must go through
+    // the Ghostty KeyEncoder so the Shift modifier is encoded (e.g. ESC[Z, ESC[3;2~)
+    // instead of being dropped like an unmodified key.
+    if (mods === Mods.NONE) {
       let simpleOutput: string | null = null;
 
       switch (key) {

@@ -337,3 +337,65 @@ test("dispose clears only owned title/chrome and remains closed after a teardown
   assert.equal(closing.setProgress(0.3), false);
   assert.equal(writes.length, count);
 });
+
+test("dispose rethrows a lone cleanup failure and aggregates two in chrome-then-title order", () => {
+  const chromeError = new Error("clear failed");
+  const titleError = new Error("title failed");
+  const broken = (failures) => {
+    const writes = [];
+    const client = createTerminalClient({
+      capabilities,
+      write: (sequence) => {
+        writes.push(sequence);
+        if (sequence === CHROME_CLEAR_SEQUENCE && failures.includes("chrome"))
+          throw chromeError;
+        if (sequence === titleSequence("") && failures.includes("title"))
+          throw titleError;
+        return true;
+      },
+    });
+    client.setTitle("owned");
+    client.setProgress(0.2);
+    return { client, writes, count: writes.length };
+  };
+
+  for (const [failures, expected] of [
+    [["chrome"], chromeError],
+    [["title"], titleError],
+  ]) {
+    const { client, writes, count } = broken(failures);
+    let thrown;
+    try {
+      client.dispose();
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown, expected, "a lone failure is rethrown unchanged");
+    assert.deepEqual(
+      writes.slice(count),
+      [CHROME_CLEAR_SEQUENCE, titleSequence("")],
+      "both cleanups are attempted",
+    );
+    assert.deepEqual(client.chrome, {}, "state is cleared");
+    assert.equal(client.setTitle("late"), false, "disposal is permanent");
+    const after = writes.length;
+    client.dispose();
+    assert.equal(writes.length, after, "repeated dispose remains a no-op");
+  }
+
+  const { client, writes, count } = broken(["chrome", "title"]);
+  let thrown;
+  try {
+    client.dispose();
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof AggregateError, "two failures are aggregated");
+  assert.deepEqual(thrown.errors, [chromeError, titleError]);
+  assert.deepEqual(writes.slice(count), [CHROME_CLEAR_SEQUENCE, titleSequence("")]);
+  assert.deepEqual(client.chrome, {});
+  const after = writes.length;
+  client.dispose();
+  assert.equal(client.setTitle("late"), false);
+  assert.equal(writes.length, after);
+});

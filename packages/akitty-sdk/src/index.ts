@@ -318,13 +318,28 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
       stopSprite();
       // Invalidate queued ticks before attempting teardown, even if the writer throws.
       disposed = true;
+      // Both cleanups are attempted even when the first fails. Errors are kept in
+      // chrome-then-title order so a title failure cannot mask a chrome failure.
+      const errors: unknown[] = [];
       try {
         if (Object.keys(chrome).length) write(CHROME_CLEAR_SEQUENCE);
+      } catch (error) {
+        errors.push(error);
       } finally {
         chrome = Object.freeze({});
-        if (titleOwned) write(titleSequence(""));
-        titleOwned = false;
       }
+      if (titleOwned) {
+        // Release ownership before writing, so a throwing writer cannot leave it claimed.
+        titleOwned = false;
+        try {
+          write(titleSequence(""));
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1)
+        throw new AggregateError(errors, "terminal client dispose failed");
     },
   });
 }

@@ -583,6 +583,71 @@ describe('InputHandler', () => {
     });
   });
 
+  describe('Shifted Special Keys', () => {
+    test('Shift+Tab encodes back-tab as ESC[Z instead of a plain tab', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      // Unmodified Tab is still the simple \t path
+      simulateKey(container, createKeyEvent('Tab', 'Tab'));
+      expect(dataReceived[0]).toBe('\t');
+
+      // Shift+Tab must be encoded by Ghostty with the Shift modifier (ESC[Z)
+      simulateKey(container, createKeyEvent('Tab', 'Tab', { shift: true }));
+      expect(dataReceived.length).toBe(2);
+      expect(dataReceived[1]).toBe('\x1b[Z');
+    });
+
+    test('Shift+Delete encodes a shifted delete sequence distinct from Delete', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      simulateKey(container, createKeyEvent('Delete', 'Delete'));
+      const unmodified = dataReceived[0];
+      expect(unmodified).toBe('\x1b[3~');
+
+      simulateKey(container, createKeyEvent('Delete', 'Delete', { shift: true }));
+      expect(dataReceived.length).toBe(2);
+      // Shifted delete carries the modifier instead of collapsing to ESC[3~
+      expect(dataReceived[1]).not.toBe(unmodified);
+      expect(dataReceived[1].startsWith('\x1b')).toBe(true);
+      // xterm encodes Shift+Delete as CSI 3;2~
+      expect(dataReceived[1]).toBe('\x1b[3;2~');
+    });
+
+    test('Shift+F1 encodes a shifted function-key sequence distinct from F1', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      simulateKey(container, createKeyEvent('F1', 'F1'));
+      const unmodified = dataReceived[0];
+      expect(unmodified).toBe('\x1bOP');
+
+      simulateKey(container, createKeyEvent('F1', 'F1', { shift: true }));
+      expect(dataReceived.length).toBe(2);
+      expect(dataReceived[1]).not.toBe(unmodified);
+      expect(dataReceived[1].startsWith('\x1b')).toBe(true);
+    });
+  });
+
   describe('Arrow Keys', () => {
     test('encodes Up arrow', () => {
       const handler = new InputHandler(
