@@ -78,12 +78,13 @@ public enum KittyKeyEncoder {
         // Repeats look like presses unless the app asked for event types; releases need that flag.
         if input.event == .release, !events { return .none }
         let significant = input.modifiers.subtracting(.locks)
-        // Lock state is only worth reporting when the app asked for every key.
-        let modifierValue = 1 + ((allKeys ? input.modifiers : significant).rawValue & 0xff)
+        // Enhanced non-text reports carry lock state; alternate-key/text flags alone keep legacy modifiers.
+        let nonTextModifiers = (allKeys || flags & (disambiguate | reportEvents) != 0) ? input.modifiers : significant
+        let modifierValue = 1 + (nonTextModifiers.rawValue & 0xff)
         let unclaimed: KittyKeyResult = input.event == .release ? .none : .legacy
 
         if let function = functional[input.keyCode] {
-            if !allKeys, significant.isEmpty, input.event == .press || !events { return .legacy }
+            if !allKeys, nonTextModifiers.isEmpty, input.event == .press || !events { return .legacy }
             let suffix = events && input.event != .press ? ":\(input.event.rawValue)" : ""
             let mods = modifierValue
             let number = function.final == "~" ? "\(function.number)" : "1"
@@ -113,7 +114,8 @@ public enum KittyKeyEncoder {
         guard claimed else { return unclaimed }
         let shifted = input.modifiers.contains(.shift) ? input.shiftedKey.flatMap { $0 == key ? nil : $0 } : nil
         let base = input.baseLayoutKey.flatMap { $0 == key ? nil : $0 }
-        return .bytes(csiU(code: key, shifted: shifted, base: base, input: input, mods: modifierValue, flags: flags, text: input.text))
+        let textModifiers = 1 + ((allKeys ? input.modifiers : significant).rawValue & 0xff)
+        return .bytes(csiU(code: key, shifted: shifted, base: base, input: input, mods: textModifiers, flags: flags, text: input.text))
     }
 
     /// Press or release of a modifier key on its own; only reported with "all keys as escape codes".
