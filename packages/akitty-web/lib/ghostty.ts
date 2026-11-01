@@ -187,53 +187,53 @@ export class KeyEncoder {
 
   encode(event: KeyEvent): Uint8Array {
     const eventPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
-    const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
-    if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
-
-    const view = new DataView(this.exports.memory.buffer);
-    const eventPtr = view.getUint32(eventPtrPtr, true);
-    this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
-
-    this.exports.ghostty_key_event_set_action(eventPtr, event.action);
-    this.exports.ghostty_key_event_set_key(eventPtr, event.key);
-    this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
-
-    if (event.utf8) {
-      const encoder = new TextEncoder();
-      const utf8Bytes = encoder.encode(event.utf8);
-      const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
-      new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
-      this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
-      this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
+    let eventPtr = 0;
+    try {
+      const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
+      if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
+      eventPtr = new DataView(this.exports.memory.buffer).getUint32(eventPtrPtr, true);
+    } finally {
+      this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
     }
 
     const bufferSize = 32;
-    const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
-    const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+    let bufPtr = 0;
+    let writtenPtr = 0;
+    try {
+      this.exports.ghostty_key_event_set_action(eventPtr, event.action);
+      this.exports.ghostty_key_event_set_key(eventPtr, event.key);
+      this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
 
-    const encodeResult = this.exports.ghostty_key_encoder_encode(
-      this.encoder,
-      eventPtr,
-      bufPtr,
-      bufferSize,
-      writtenPtr
-    );
+      if (event.utf8) {
+        const utf8Bytes = new TextEncoder().encode(event.utf8);
+        const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
+        if (utf8Ptr === 0) throw new Error('Failed to allocate key text (out of memory)');
+        new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
+        this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
+        this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
+      }
 
-    if (encodeResult !== 0) {
-      this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-      this.exports.ghostty_wasm_free_usize(writtenPtr);
+      bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
+      writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+      if (bufPtr === 0 || writtenPtr === 0) throw new Error('Failed to allocate key buffer (out of memory)');
+
+      const encodeResult = this.exports.ghostty_key_encoder_encode(
+        this.encoder,
+        eventPtr,
+        bufPtr,
+        bufferSize,
+        writtenPtr
+      );
+      if (encodeResult !== 0) throw new Error(`Failed to encode key: ${encodeResult}`);
+
+      // Any allocation above may have grown memory and detached older views, so read through fresh ones.
+      const bytesWritten = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
+      return new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
+    } finally {
+      if (bufPtr) this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
+      if (writtenPtr) this.exports.ghostty_wasm_free_usize(writtenPtr);
       this.exports.ghostty_key_event_free(eventPtr);
-      throw new Error(`Failed to encode key: ${encodeResult}`);
     }
-
-    const bytesWritten = view.getUint32(writtenPtr, true);
-    const encoded = new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
-
-    this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-    this.exports.ghostty_wasm_free_usize(writtenPtr);
-    this.exports.ghostty_key_event_free(eventPtr);
-
-    return encoded;
   }
 
   dispose(): void {
@@ -286,6 +286,9 @@ export class GhosttyTerminal {
   private writeBufferPtr: number = 0;
   private writeBufferSize: number = 0;
   private static readonly WRITE_BUFFER_MAX = 1 << 20;
+  /** Most reply bytes forwarded per readResponse(); anything beyond is dropped. */
+  static readonly RESPONSE_READ_MAX = 64 * 1024;
+  private static readonly decoder = new TextDecoder();
   private static readonly encoder = new TextEncoder();
 
   constructor(
@@ -360,6 +363,7 @@ export class GhosttyTerminal {
   // ==========================================================================
 
   write(data: string | Uint8Array): void {
+    if (!this.handle) return;
     this.viewportValid = false;
     const maxBuffered = GhosttyTerminal.WRITE_BUFFER_MAX;
 
@@ -377,37 +381,37 @@ export class GhosttyTerminal {
       data = GhosttyTerminal.encoder.encode(data);
     }
 
-    const length = data.length;
-    if (length === 0) return;
-    if (length <= maxBuffered) {
-      const ptr = this.ensureWriteBuffer(length);
-      new Uint8Array(this.memory.buffer, ptr, length).set(data);
-      this.exports.ghostty_terminal_write(this.handle, ptr, length);
-      return;
+    // Very large writes are fed in buffer-sized chunks (the parser keeps state across calls) so the
+    // shared wasm heap never has to grow to hold the whole input at once.
+    for (let start = 0; start < data.length; start += maxBuffered) {
+      const chunk = data.subarray(start, Math.min(start + maxBuffered, data.length));
+      const ptr = this.ensureWriteBuffer(chunk.length);
+      new Uint8Array(this.memory.buffer, ptr, chunk.length).set(chunk);
+      this.exports.ghostty_terminal_write(this.handle, ptr, chunk.length);
     }
-
-    // Rare very large write: use a one-off allocation rather than pinning a large buffer.
-    const ptr = this.exports.ghostty_wasm_alloc_u8_array(length);
-    new Uint8Array(this.memory.buffer, ptr, length).set(data);
-    this.exports.ghostty_terminal_write(this.handle, ptr, length);
-    this.exports.ghostty_wasm_free_u8_array(ptr, length);
   }
 
   private ensureWriteBuffer(needed: number): number {
     if (this.writeBufferPtr && this.writeBufferSize >= needed) return this.writeBufferPtr;
     if (this.writeBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.writeBufferPtr, this.writeBufferSize);
+      this.writeBufferPtr = 0;
+      this.writeBufferSize = 0;
     }
     const size = Math.min(
       GhosttyTerminal.WRITE_BUFFER_MAX,
       Math.max(needed, this.writeBufferSize * 2, 4096)
     );
-    this.writeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(size);
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(size);
+    // A zero pointer would make the caller copy over address 0 of the heap every terminal shares.
+    if (ptr === 0) throw new Error('Failed to allocate write buffer (out of memory)');
+    this.writeBufferPtr = ptr;
     this.writeBufferSize = size;
-    return this.writeBufferPtr;
+    return ptr;
   }
 
   resize(cols: number, rows: number): void {
+    if (!this.handle) return;
     if (cols === this._cols && rows === this._rows) return;
     this._cols = cols;
     this._rows = rows;
@@ -417,7 +421,13 @@ export class GhosttyTerminal {
     this.initCellPool();
   }
 
+  /** True once free() has released the wasm terminal; every wasm call is then skipped. */
+  get isFreed(): boolean {
+    return !this.handle;
+  }
+
   free(): void {
+    if (!this.handle) return;
     if (this.writeBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.writeBufferPtr, this.writeBufferSize);
       this.writeBufferPtr = 0;
@@ -431,7 +441,14 @@ export class GhosttyTerminal {
       this.exports.ghostty_wasm_free_u8_array(this.scrollbackBufferPtr, this.scrollbackBufferSize);
       this.scrollbackBufferPtr = 0;
     }
+    if (this.graphemeBufferPtr) {
+      this.exports.ghostty_wasm_free_u8_array(this.graphemeBufferPtr, 16 * 4);
+      this.graphemeBufferPtr = 0;
+      this.graphemeBuffer = null;
+    }
     this.exports.ghostty_terminal_free(this.handle);
+    // The handle is a heap address that may be reused by another terminal; never call into it again.
+    this.handle = 0 as TerminalHandle;
   }
 
   // ==========================================================================
@@ -723,22 +740,35 @@ export class GhosttyTerminal {
    * - DSR 6 (cursor position): Returns \x1b[row;colR
    * - DSR 5 (operating status): Returns \x1b[0n
    */
-  readResponse(): string | null {
-    if (!this.hasResponse()) return null;
+  readResponse(maxBytes: number = GhosttyTerminal.RESPONSE_READ_MAX): string | null {
+    if (!this.handle || !this.hasResponse()) return null;
 
-    const bufSize = 256; // Most responses are small
+    const bufSize = 4096;
     const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufSize);
+    if (bufPtr === 0) return null;
 
+    const chunks: string[] = [];
+    let total = 0;
     try {
-      const bytesRead = this.exports.ghostty_terminal_read_response(this.handle, bufPtr, bufSize);
-
-      if (bytesRead <= 0) return null;
-
-      const bytes = new Uint8Array(this.memory.buffer, bufPtr, bytesRead);
-      return new TextDecoder().decode(bytes.slice());
+      // Drain everything queued: each call returns at most bufSize bytes and keeps the rest in wasm,
+      // so a single read per write let replies pile up and reach the PTY long after their query.
+      // Bytes past maxBytes are read and discarded; a flood of queries must not become a flood of input.
+      while (this.hasResponse()) {
+        const bytesRead = this.exports.ghostty_terminal_read_response(this.handle, bufPtr, bufSize);
+        if (bytesRead <= 0) break;
+        if (total < maxBytes) {
+          const keep = Math.min(bytesRead, maxBytes - total);
+          const bytes = new Uint8Array(this.memory.buffer, bufPtr, keep);
+          chunks.push(GhosttyTerminal.decoder.decode(bytes, { stream: true }));
+        }
+        total += bytesRead;
+      }
     } finally {
       this.exports.ghostty_wasm_free_u8_array(bufPtr, bufSize);
     }
+    chunks.push(GhosttyTerminal.decoder.decode());
+    const response = chunks.join('');
+    return response.length > 0 ? response : null;
   }
 
   /**
@@ -813,6 +843,7 @@ export class GhosttyTerminal {
    * @returns Array of codepoints, or null on error
    */
   getGrapheme(row: number, col: number): number[] | null {
+    if (!this.handle) return null;
     // Allocate buffer on first use (16 codepoints should be enough for any grapheme)
     if (!this.graphemeBuffer) {
       this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4);
@@ -851,6 +882,7 @@ export class GhosttyTerminal {
    * @returns Array of codepoints, or null on error
    */
   getScrollbackGrapheme(offset: number, col: number): number[] | null {
+    if (!this.handle) return null;
     // Reuse the same buffer as getGrapheme
     if (!this.graphemeBuffer) {
       this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4);

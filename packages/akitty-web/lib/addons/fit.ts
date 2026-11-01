@@ -43,6 +43,7 @@ export class FitAddon implements ITerminalAddon {
   private _resizeDebounceTimer?: ReturnType<typeof setTimeout>;
   private _resizeSettleTimer?: ReturnType<typeof setTimeout>;
   private _isResizing: boolean = false;
+  private _resizeMissed: boolean = false;
 
   /**
    * Activate the addon (called by Terminal.loadAddon)
@@ -72,6 +73,7 @@ export class FitAddon implements ITerminalAddon {
       this._resizeSettleTimer = undefined;
     }
     this._isResizing = false;
+    this._resizeMissed = false;
     this._terminal = undefined;
   }
 
@@ -119,6 +121,12 @@ export class FitAddon implements ITerminalAddon {
       this._resizeSettleTimer = setTimeout(() => {
         this._resizeSettleTimer = undefined;
         this._isResizing = false;
+        // A container change that landed inside the settle window was dropped; fit once now (a no-op
+        // when it was only our own canvas resize echoing back).
+        if (this._resizeMissed) {
+          this._resizeMissed = false;
+          this.fit();
+        }
       }, 50);
     }
   }
@@ -213,8 +221,9 @@ export class FitAddon implements ITerminalAddon {
 
     // Create ResizeObserver that watches for external size changes
     this._resizeObserver = new ResizeObserver((entries) => {
-      // Ignore resize events while we're actively resizing
+      // Defer resize events while we're actively resizing; the settle timer refits once afterwards
       if (this._isResizing) {
+        this._resizeMissed = true;
         return;
       }
 

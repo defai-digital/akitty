@@ -47,6 +47,7 @@ import os
     private var pendingClipboard: [String] = []
     private var clipboardPromptOpen = false
     private var lastBell = Date.distantPast
+    private var lastErrorBeep: TimeInterval = -.infinity
     private var lastGrid: (Int, Int) = (0, 0)
     /// Key codes whose press went out as a Kitty escape, so only those get a release.
     private var kittyDown: [UInt16: KittyKeyInput] = [:]
@@ -285,6 +286,9 @@ import os
     }
     private func redraw(imageOnly: Bool = false) {
         guard let snapshot, bounds.width > 0, bounds.height > 0, !stopped else { return }
+        // A pane in a background tab is out of the window: skip the raster work and remember that the
+        // whole grid needs drawing. Moving back into the window lays the view out, which redraws it.
+        guard window != nil else { pendingDamage = nil; return }
         // An image-only frame goes straight to the GPU: new placements and textures, redraw, no text work.
         if imageOnly, let presenter, presenter.layered, !(snapshot.images ?? []).isEmpty, pendingDamage == [], !rasterInFlight {
             do {
@@ -357,7 +361,14 @@ import os
         guard Date().timeIntervalSince(lastBell) >= 1 else { return }
         lastBell = Date(); NSSound.beep()
     }
-    private func show(_ error: Error) { onStatus?(error.localizedDescription); NSSound.beep() }
+    /// Reports a failure. The beep is rate-limited like the bell: a snapshot that keeps failing (an oversized
+    /// screen, too many image fragments) fails on every 30-60 Hz poll and must not beep continuously.
+    private func show(_ error: Error) {
+        onStatus?(error.localizedDescription)
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastErrorBeep >= 1 else { return }
+        lastErrorBeep = now; NSSound.beep()
+    }
     public func send(_ text: String, paste: Bool = false) {
         guard !stopped else { return }
         do {
@@ -604,7 +615,7 @@ import os
     @discardableResult func acceptDrop(from pasteboard: NSPasteboard) -> Bool {
         guard !stopped else { return false }
         do {
-            guard try session.snapshot()?.control?.agent != true else { throw AkittyError.core("Reclaim terminal control before dropping files or text.") }
+            guard try session.shellState().control?.agent != true else { throw AkittyError.core("Reclaim terminal control before dropping files or text.") }
             guard let text = try DropPolicy.text(from: pasteboard) else { return false }
             window?.makeFirstResponder(self); paste(text); return true
         } catch { show(error); return false }

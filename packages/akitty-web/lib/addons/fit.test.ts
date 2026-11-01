@@ -347,4 +347,35 @@ describe('External resize refit', () => {
     expect(mockTerminal.cols).toBe(98);
     expect(mockTerminal.rows).toBe(30);
   });
+  test('a container resize inside the guard window is refit once the guard ends', async () => {
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal();
+    const original = globalThis.ResizeObserver;
+    let observed: ((entries: unknown[]) => void) | undefined;
+    globalThis.ResizeObserver = class {
+      constructor(callback: (entries: unknown[]) => void) {
+        observed = callback;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    } as any;
+    try {
+      addon.activate(mockTerminal as any);
+      addon.observeResize();
+      addon.fit();
+      expect(getResizeCallCount()).toBe(1);
+
+      // The container changes while the guard from our own resize is still active.
+      mockTerminal.cols = 50;
+      mockTerminal.rows = 20;
+      observed!([{}]);
+      expect(getResizeCallCount()).toBe(1);
+
+      await settleGuard();
+      expect(getResizeCallCount()).toBe(2);
+      expect(mockTerminal.cols).toBe(98);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
 });

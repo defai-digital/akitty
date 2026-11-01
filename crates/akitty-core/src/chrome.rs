@@ -16,6 +16,10 @@ pub const MAX_SPRITE_FRAMES: usize = 4;
 /// clipboard is still within the decoded limit, but its base64 wire form is larger than this.
 const MAX_OSC_BODY: usize = 65_536;
 const CHROME_OSC: &[u8] = b"771;";
+/// Cap for a forwarded (unintercepted) OSC body. The parser buffers OSC strings without
+/// limit, so `printf '\e]0;'; yes` would grow memory forever. 128 KiB holds the base64 wire
+/// form of the largest accepted OSC 52 clipboard (64 KiB decoded) with room to spare.
+const MAX_FORWARDED_OSC: usize = 131_072;
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -280,6 +284,9 @@ enum State {
     /// An unintercepted OSC, already handed to the parser. Later bytes are copied through.
     Forward,
     ForwardEsc,
+    /// A forwarded OSC that outgrew its cap. The parser was sent CAN; the tail is dropped.
+    Discard,
+    DiscardEsc,
 }
 
 /// Pulls chrome and shell metadata out before the VT parser sees it.
@@ -289,6 +296,8 @@ pub struct Filter {
     state: State,
     buffer: Vec<u8>,
     overflow: bool,
+    /// Body bytes of the current forwarded OSC handed to the parser so far.
+    forwarded: usize,
 }
 
 /// True for an intercepted OSC body or a still-ambiguous prefix.
@@ -342,6 +351,7 @@ impl Filter {
                                 self.buffer.push(byte);
                                 // Decide before the body can exceed the cap. OSC 52 diverges at its first byte.
                                 if !osc_is_intercepted(&self.buffer) {
+                                    self.forwarded = self.buffer.len();
                                     pass.extend_from_slice(b"\x1b]");
                                     pass.append(&mut self.buffer);
                                     self.state = State::Forward;
@@ -371,12 +381,33 @@ impl Filter {
                             pass.push(byte);
                             self.state = State::Ground;
                         }
-                        _ => pass.push(byte),
+                        _ if self.forwarded >= MAX_FORWARDED_OSC => {
+                            // Cancel the parser's copy and drop the rest up to the terminator.
+                            pass.push(0x18);
+                            self.state = State::Discard;
+                        }
+                        _ => {
+                            self.forwarded += 1;
+                            pass.push(byte);
+                        }
                     },
                     State::ForwardEsc => {
                         if byte == b'\\' {
                             pass.push(0x1b);
                             pass.push(b'\\');
+                            self.state = State::Ground;
+                        } else {
+                            self.state = State::Esc;
+                            continue;
+                        }
+                    }
+                    State::Discard => match byte {
+                        0x07 | 0x18 | 0x1a => self.state = State::Ground,
+                        0x1b => self.state = State::DiscardEsc,
+                        _ => {}
+                    },
+                    State::DiscardEsc => {
+                        if byte == b'\\' {
                             self.state = State::Ground;
                         } else {
                             self.state = State::Esc;
@@ -426,5 +457,55 @@ impl Filter {
         let mut bytes = vec![0x1b, b']'];
         bytes.extend_from_slice(&body);
         out.push(Segment::Pass(bytes));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn passed(segments: Vec<Segment>) -> Vec<u8> {
+        segments
+            .into_iter()
+            .flat_map(|segment| match segment {
+                Segment::Pass(bytes) => bytes,
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unterminated_forwarded_osc_is_cancelled_at_the_cap() {
+        let mut filter = Filter::default();
+        let mut forwarded = passed(filter.feed(b"\x1b]0;"));
+        let chunk = vec![b'y'; 4096];
+        for _ in 0..(MAX_FORWARDED_OSC / chunk.len() + 8) {
+            forwarded.extend(passed(filter.feed(&chunk)));
+        }
+        // The parser saw a bounded body followed by CAN, and nothing of the tail.
+        assert!(forwarded.len() <= MAX_FORWARDED_OSC + 8, "{}", forwarded.len());
+        assert_eq!(forwarded.last(), Some(&0x18));
+        // The terminator ends the discard; later output passes through again.
+        assert_eq!(passed(filter.feed(b"yyy\x07after")), b"after");
+    }
+
+    #[test]
+    fn forwarded_osc_within_the_cap_is_untouched() {
+        let mut filter = Filter::default();
+        let body = vec![b'A'; 90_000];
+        let mut input = b"\x1b]52;c;".to_vec();
+        input.extend_from_slice(&body);
+        input.extend_from_slice(b"\x1b\\next");
+        assert_eq!(passed(filter.feed(&input)), input);
+    }
+
+    #[test]
+    fn discarded_tail_honours_st_and_a_following_escape() {
+        let mut filter = Filter::default();
+        let mut input = b"\x1b]2;".to_vec();
+        input.extend(vec![b'z'; MAX_FORWARDED_OSC + 10]);
+        input.extend_from_slice(b"\x1b[31mred");
+        let out = passed(filter.feed(&input));
+        assert!(out.ends_with(b"\x18\x1b[31mred"));
     }
 }

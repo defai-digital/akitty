@@ -180,7 +180,12 @@ public final class LocalRequestServer: @unchecked Sendable {
             source.setEventHandler { [weak self] in
                 while let self, self.isActive(activeGeneration) {
                     let client = accept(fd, nil, nil)
-                    if client < 0 { break }
+                    if client < 0 {
+                        // Out of descriptors, the pending connection stays queued and the source fires again at
+                        // once. Back off on this background queue instead of spinning a core until one frees up.
+                        if errno == EMFILE || errno == ENFILE { usleep(100_000) }
+                        break
+                    }
                     do { try LocalSocket.configure(client, timeout: 3) } catch { Darwin.close(client); continue }
                     guard fcntl(client, F_SETFL, 0) == 0 else { Darwin.close(client); continue }
                     let token = UUID()

@@ -124,6 +124,19 @@ fn clipboard_is_bounded_text_event_not_host_write() {
     assert_eq!(t.snapshot()["clipboard"], json!([]));
 }
 #[test]
+fn shell_state_reads_summaries_without_consuming_snapshot_events() {
+    let t = Terminal::new(20, 3);
+    t.feed("\x1b]7;file://host/tmp\x07\x07\x1b]52;c;aGVsbG8=\x07");
+    let state = call(json!({"op":"shell_state","id":t.0}));
+    assert_eq!(state["shell"]["untrusted"], true, "{state}");
+    assert_eq!(state["control"]["owner"], "human", "{state}");
+    let snapshot = t.snapshot();
+    assert_eq!(snapshot["bell"], true, "{snapshot}");
+    assert_eq!(snapshot["clipboard"], json!(["hello"]));
+    assert_eq!(snapshot["shell"], state["shell"]);
+    assert_eq!(response(json!({"op":"shell_state","id":999_999}))["ok"], false);
+}
+#[test]
 fn bell_is_reported_once_and_osc_terminators_do_not_ring() {
     let t = Terminal::new(20, 3);
     t.feed("\x1b]0;title\x07\x1b]52;c;aGVsbG8=\x07");

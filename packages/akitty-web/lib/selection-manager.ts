@@ -57,6 +57,8 @@ export class SelectionManager {
   // Store bound event handlers for cleanup
   private boundMouseUpHandler: ((e: MouseEvent) => void) | null = null;
   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
+  private contextMenuTimer: ReturnType<typeof setTimeout> | undefined;
+  private contextMenuReset: (() => void) | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseDownHandler: ((e: MouseEvent) => void) | null = null;
@@ -410,6 +412,14 @@ export class SelectionManager {
       this.boundContextMenuHandler = null;
     }
 
+    // Cancel a pending context-menu restore and its document listeners, which would otherwise keep
+    // this manager alive until the next click anywhere on the page
+    if (this.contextMenuTimer !== undefined) {
+      clearTimeout(this.contextMenuTimer);
+      this.contextMenuTimer = undefined;
+    }
+    this.contextMenuReset?.();
+
     // Clean up document click listener
     if (this.boundClickHandler) {
       document.removeEventListener('click', this.boundClickHandler);
@@ -612,7 +622,11 @@ export class SelectionManager {
 
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first
-      setTimeout(() => {
+      if (this.contextMenuTimer !== undefined) clearTimeout(this.contextMenuTimer);
+      this.contextMenuTimer = setTimeout(() => {
+        this.contextMenuTimer = undefined;
+        // A second right-click before the first menu closed: drop the earlier one-time listeners.
+        this.contextMenuReset?.();
         // Listen for when the context menu closes (user clicks away or selects an option)
         const resetTextarea = () => {
           this.textarea.style.pointerEvents = 'none';
@@ -627,7 +641,9 @@ export class SelectionManager {
           document.removeEventListener('click', resetTextarea);
           document.removeEventListener('contextmenu', resetTextarea);
           this.textarea.removeEventListener('blur', resetTextarea);
+          if (this.contextMenuReset === resetTextarea) this.contextMenuReset = null;
         };
+        this.contextMenuReset = resetTextarea;
 
         // Reset on any of these events (menu closed)
         document.addEventListener('click', resetTextarea, { once: true });

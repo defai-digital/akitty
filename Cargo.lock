@@ -29,6 +29,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

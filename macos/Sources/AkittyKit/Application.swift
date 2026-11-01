@@ -330,6 +330,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         self.app = app
         let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "Akitty"; window.minSize = NSSize(width: 400,height: 250); window.center()
+        // The controller owns the window and is itself released from windowWillClose; a window that also
+        // releases itself on close risks an over-release, as every other window in the app already avoids.
+        window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self; tabs.delegate = self; tabs.tabViewType = .noTabsNoBorder
         let content = NSView()
@@ -385,7 +388,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// A missing or non-directory report falls back to the folder this window was opened with.
     private func directoryForNewTab() -> String? {
         guard let terminal = active else { return directory }
-        let reported = (try? terminal.session.snapshot())?.shell?.cwd
+        let reported = (try? terminal.session.shellState())?.shell?.cwd
         if let reported, Self.existingDirectory(reported) { return reported }
         return directory
     }
@@ -504,7 +507,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         if reports.contains(where: { $0.state == "blocked" }) { return .blocked }
         if reports.contains(where: { $0.state == "error" }) { return .reportedError }
         if reports.contains(where: { $0.state == "working" }) {
-            let chrome = split.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal.snapshot?.chrome }.first
+            // Take the chrome of the same first pane whose report is working, not the first pane's.
+            let chrome = split.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal.snapshot }
+                .first { $0.program_status?.active?.state == "working" }?.chrome
             return .working(pixels: chrome?.shownPixels(reduceMotion: reduceMotion), width: chrome?.sprite?.w ?? 0, height: chrome?.sprite?.h ?? 0)
         }
         if reports.contains(where: { $0.state == "done" }) { return .reportedDone }

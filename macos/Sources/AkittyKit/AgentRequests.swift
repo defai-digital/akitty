@@ -149,15 +149,26 @@ import AgentIPC
     static func present(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, valid: @escaping () -> Bool = { true }) async -> Bool {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         return await withCheckedContinuation { continuation in
-            let timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak window, weak alert] _ in
-                MainActor.assumeIsolated { if let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) } }
-            }
-            let cancellation = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak window, weak alert] _ in
-                MainActor.assumeIsolated { if !valid(), let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) } }
-            }
+            // The continuation must resume exactly once. If the window closes underneath the sheet (a shell
+            // exiting closes its window directly), AppKit may never call the completion handler; without the
+            // fallback below the request would hang and the server would answer "busy" until restarted.
+            let once = ResumeOnce(continuation)
+            var timers: [Timer] = []
+            let finish: (Bool) -> Void = { approved in timers.forEach { $0.invalidate() }; once.resume(approved) }
+            timers.append(Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak window, weak alert] _ in
+                MainActor.assumeIsolated {
+                    if let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) }
+                    else { finish(false) }
+                }
+            })
+            timers.append(Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak window, weak alert] _ in
+                MainActor.assumeIsolated {
+                    guard let alert, let window, window.attachedSheet === alert.window else { finish(false); return }
+                    if !valid() { window.endSheet(alert.window, returnCode: .alertSecondButtonReturn) }
+                }
+            })
             alert.beginSheetModal(for: window) {
-                timer.invalidate(); cancellation.invalidate()
-                continuation.resume(returning: $0 == .alertFirstButtonReturn && ProcessInfo.processInfo.systemUptime < deadline && valid())
+                finish($0 == .alertFirstButtonReturn && ProcessInfo.processInfo.systemUptime < deadline && valid())
             }
             alert.window.makeFirstResponder(alert.buttons[1])
         }
@@ -207,5 +218,14 @@ import AgentIPC
         panel.message = "Exports retained local metadata with command hashes. Program and shell reports are unverified; records may have gaps."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try store.export().write(to: url, options: .atomic) } catch { NSAlert(error: error).runModal() }
+    }
+}
+
+/// Resumes a checked continuation at most once; later calls are ignored. Main-thread only.
+private final class ResumeOnce: @unchecked Sendable {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+    func resume(_ value: Bool) {
+        continuation?.resume(returning: value); continuation = nil
     }
 }
