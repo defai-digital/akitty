@@ -18,6 +18,50 @@ use std::collections::HashMap;
 pub const MAX_PIXELS: u64 = 8 * 1024 * 1024;
 /// RGBA bytes one session may hold across all images.
 pub const MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+/// RGBA bytes all sessions together may hold. Without it, 64 sessions at the per-session limit could pin 8 GiB.
+pub const MAX_GLOBAL_BYTES: usize = 512 * 1024 * 1024;
+
+/// Image bytes held across sessions, shared by every [`Graphics`]. Reservations are atomic, so concurrent
+/// sessions cannot overshoot the cap together.
+#[derive(Clone)]
+pub struct Budget {
+    used: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    cap: usize,
+}
+
+impl Budget {
+    #[cfg(test)]
+    pub fn isolated(cap: usize) -> Self {
+        Self { used: Default::default(), cap }
+    }
+    fn used(&self) -> usize {
+        self.used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Takes `bytes` from the budget, or returns false when that would pass its cap.
+    fn reserve(&self, bytes: usize) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.used.try_update(SeqCst, SeqCst, |used| used.checked_add(bytes).filter(|total| *total <= self.cap)).is_ok()
+    }
+    fn release(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Default for Budget {
+    /// Sessions share one process-wide budget. Unit tests run in parallel inside one process, so each test's
+    /// graphics gets its own budget there; tests that need sharing clone one explicitly.
+    fn default() -> Self {
+        #[cfg(test)]
+        {
+            Self::isolated(MAX_GLOBAL_BYTES)
+        }
+        #[cfg(not(test))]
+        {
+            static GLOBAL: std::sync::OnceLock<Budget> = std::sync::OnceLock::new();
+            GLOBAL.get_or_init(|| Budget { used: Default::default(), cap: MAX_GLOBAL_BYTES }).clone()
+        }
+    }
+}
 /// Base64 bytes accumulated for one chunked transmission.
 const MAX_PENDING_BASE64: usize = 48 * 1024 * 1024;
 /// One APC string (a single chunk); the protocol itself uses 4 KiB chunks.
@@ -402,15 +446,54 @@ pub struct Graphics {
     pending: Option<Pending>,
     /// Image number (`I=`) to image id; the newest transmission for a number wins.
     numbers: HashMap<u32, u32>,
+    /// RGBA bytes held by this session; always equal to its share of `budget`.
     bytes: usize,
+    budget: Budget,
     next_generation: u64,
     next_auto_id: u32,
+}
+
+impl Drop for Graphics {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
 }
 
 impl Graphics {
     #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+    #[cfg(test)]
+    pub fn with_budget(budget: Budget) -> Self {
+        let mut graphics = Self::default();
+        graphics.budget = budget;
+        graphics
+    }
+
+    /// True when this session's total can move from `self.bytes - old` to that plus `new` within both caps.
+    fn fits(&self, old: usize, new: usize) -> bool {
+        let after = self.bytes - old + new;
+        after <= MAX_TOTAL_BYTES && self.budget.used() - self.bytes + after <= self.budget.cap
+    }
+
+    fn release_bytes(&mut self, freed: usize) {
+        self.bytes -= freed;
+        self.budget.release(freed);
+    }
+
+    /// Moves the session total to `total`, reserving the growth from the shared budget. Returns false (and
+    /// changes nothing) when another session took the room since `fits` was checked.
+    fn set_bytes(&mut self, total: usize) -> bool {
+        if total > self.bytes {
+            if !self.budget.reserve(total - self.bytes) {
+                return false;
+            }
+        } else {
+            self.budget.release(self.bytes - total);
+        }
+        self.bytes = total;
+        true
     }
 
     /// Handles one APC payload (everything after `G`).
@@ -581,15 +664,14 @@ impl Graphics {
             }
         }
         let old = self.images.get(&id).map_or(0, |image| image.memory());
-        while self.bytes - old + decoded.rgba.len() > MAX_TOTAL_BYTES && self.evict_one(id) {}
-        if self.bytes - old + decoded.rgba.len() > MAX_TOTAL_BYTES {
+        while !self.fits(old, decoded.rgba.len()) && self.evict_one(id) {}
+        if !self.fits(old, decoded.rgba.len()) || !self.set_bytes(self.bytes - old + decoded.rgba.len()) {
             return self.fail(&command, "ENOSPC", "image memory limit reached");
         }
         // Transmissions for an existing id replace it entirely: all placements
         // of the old image go first, so a=T re-creates exactly one placement.
         self.placements.retain(|placement| placement.image != id);
         self.cascade();
-        self.bytes = self.bytes - old + decoded.rgba.len();
         self.next_generation += 1;
         self.images.insert(
             id,
@@ -797,8 +879,10 @@ impl Graphics {
         let frame_len = width as usize * height as usize * 4;
         // The first added frame also materializes frame 1 as a separate copy.
         let needed = frame_len * if count == 1 { 2 } else { 1 };
-        while self.bytes + needed > MAX_TOTAL_BYTES && self.evict_one(id) {}
-        if self.bytes + needed > MAX_TOTAL_BYTES { return self.fail(&command, "ENOSPC", "image memory limit reached"); }
+        while !self.fits(0, needed) && self.evict_one(id) {}
+        if !self.fits(0, needed) || !self.set_bytes(self.bytes + needed) {
+            return self.fail(&command, "ENOSPC", "image memory limit reached");
+        }
         let image = self.images.get_mut(&id).expect("eviction keeps the target image");
         if image.frames.is_empty() { image.frames.push(Frame { rgba: image.rgba.clone(), gap_ms: 0 }); }
         let mut canvas = if command.cols != 0 {
@@ -811,7 +895,6 @@ impl Graphics {
         // A new frame defaults to a 40 ms gap; a negative gap makes it gapless.
         let gap_ms = if gap > 0 { gap as u32 } else if gap < 0 { 0 } else { DEFAULT_GAP_MS };
         image.frames.push(Frame { rgba: canvas, gap_ms });
-        self.bytes += needed;
         Outcome { reply: reply(&command, None, id), advance: None }
     }
 
@@ -892,7 +975,7 @@ impl Graphics {
         let image = self.images.get_mut(&id).expect("checked above");
         let index = (command.rows.max(1).min(image.frame_count()) - 1) as usize;
         let removed = image.frames.remove(index);
-        self.bytes -= removed.rgba.len();
+        { let freed = removed.rgba.len(); self.bytes -= freed; self.budget.release(freed); }
         let animation = image.animation.get_or_insert_with(Animation::default);
         if index == 0 { animation.root_gap = image.frames[0].gap_ms; }
         let current = if animation.current > index || animation.current >= image.frames.len() {
@@ -906,7 +989,7 @@ impl Graphics {
         // One frame left: it is the image again and the duplicate copy goes.
         if image.frames.len() == 1 {
             let last = image.frames.pop().expect("one frame left");
-            self.bytes -= image.rgba.len();
+            { let freed = image.rgba.len(); self.bytes -= freed; self.budget.release(freed); }
             image.rgba = last.rgba;
             animation.current = 0;
             self.next_generation += 1;
@@ -1127,7 +1210,7 @@ impl Graphics {
             }
             keep
         });
-        self.bytes -= freed;
+        self.release_bytes(freed);
         self.prune_numbers();
     }
 
@@ -1143,7 +1226,7 @@ impl Graphics {
             }
             keep
         });
-        self.bytes -= freed;
+        self.release_bytes(freed);
         self.prune_numbers();
     }
 
@@ -1188,7 +1271,7 @@ impl Graphics {
             return false;
         };
         let freed = self.images.remove(&victim).map_or(0, |image| image.memory());
-        self.bytes -= freed;
+        self.release_bytes(freed);
         self.placements.retain(|p| p.image != victim);
         self.cascade();
         true
@@ -1208,7 +1291,7 @@ impl Graphics {
             }
             keep
         });
-        self.bytes -= freed;
+        self.release_bytes(freed);
         self.prune_numbers();
         self.cancel_pending();
     }
@@ -1284,7 +1367,7 @@ impl Graphics {
         self.placements.clear();
         self.numbers.clear();
         self.pending = None;
-        self.bytes = 0;
+        self.set_bytes(0);
     }
 }
 
@@ -1654,6 +1737,34 @@ mod tests {
         assert!(!graphics.images.contains_key(&2));
         graphics.handle(b"a=d,d=A", &pinned);
         assert!(graphics.images.is_empty() && graphics.bytes() == 0);
+    }
+
+    #[test]
+    fn sessions_share_one_image_budget_and_return_it_when_dropped() {
+        // 64x64 RGBA = 16 KiB per image; the shared cap holds five.
+        let image = 64 * 64 * 4;
+        let budget = Budget::isolated(5 * image);
+        let pixels = encode(&vec![0u8; image]);
+        let pinned = Context { line: 0, col: 0, alt: false, ..context() };
+        let place = |graphics: &mut Graphics, id: u32| {
+            let outcome = graphics.handle(format!("a=T,f=32,s=64,v=64,i={id},q=1,C=1;{pixels}").as_bytes(), &pinned);
+            String::from_utf8(outcome.reply).unwrap()
+        };
+        let mut first = Graphics::with_budget(budget.clone());
+        let mut second = Graphics::with_budget(budget.clone());
+        for id in 1..=3 { assert_eq!(place(&mut first, id), ""); }
+        for id in 1..=2 { assert_eq!(place(&mut second, id), ""); }
+        assert_eq!(budget.used(), 5 * image);
+        // Both sessions are far under their own limit, but together they hold the whole budget.
+        assert!(place(&mut second, 3).contains("ENOSPC"));
+        // Freed images and dropped sessions give their bytes back.
+        second.handle(b"a=d,d=I,i=1", &pinned);
+        assert_eq!(budget.used(), 4 * image);
+        assert_eq!(place(&mut second, 3), "");
+        drop(first);
+        assert_eq!(budget.used(), 2 * image);
+        second.reset();
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

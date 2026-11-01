@@ -124,7 +124,7 @@ freed as soon as their last placement goes away. When a new image would exceed
 the limits the core first evicts images without placements (oldest first), then
 those whose placements are all in scrollback, before failing with `ENOSPC`;
 placement overflow evicts scrollback placements first. Images are at most 8 Mi
-pixels, one session holds at most 128 MiB of pixels and 256 placements, and zlib
+pixels, one session holds at most 128 MiB of pixels and 256 placements, all sessions together at most 512 MiB of pixels (a transmission that would pass it, after evicting this session's evictable images, fails with `ENOSPC`), and zlib
 output is capped at the declared size and a hard 128 MiB ceiling. Deletes implement every `d=` mode
 (a/A visible-only, i/I and n/N by id or number with optional `p=`, c/C at the
 cursor, p/P and q/Q at 1-based x=,y= coordinates (q adds z=), x/X by column,

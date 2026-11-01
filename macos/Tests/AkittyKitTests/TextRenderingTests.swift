@@ -41,6 +41,24 @@ final class TextRenderingTests: XCTestCase {
         XCTAssertEqual(Data(bytes: a.data!, count: length), Data(bytes: b.data!, count: length))
         XCTAssertEqual(Data(bytes: a.data!, count: length), Data(bytes: c.data!, count: length))
     }
+    /// The glyph cache is keyed without colour, so the same character in different colours must still draw in each
+    /// cell's own colour, on both the batched ASCII path and the clipped per-glyph path.
+    func testSameCharacterInDifferentColoursKeepsEachColour() throws {
+        let context = try render("\u{1b}[1;1H\u{1b}[38;2;255;0;0mW\u{1b}[38;2;0;255;0mW\u{1b}[2;1H\u{1b}[38;2;255;0;0m中\u{1b}[38;2;0;255;0m中")
+        func dominant(row: Int, col: Int, columns: Int) -> String {
+            let box = region(row: row, col: col, columns: columns)
+            var best: [UInt8] = [0, 0, 0, 0]
+            for y in box.y { for x in box.x {
+                let p = pixel(context, x, y)  // BGRA
+                if Int(p[1]) + Int(p[2]) > Int(best[1]) + Int(best[2]) { best = p }
+            } }
+            return best[2] > best[1] ? "red" : "green"
+        }
+        XCTAssertEqual(dominant(row: 0, col: 0, columns: 1), "red")
+        XCTAssertEqual(dominant(row: 0, col: 1, columns: 1), "green")
+        XCTAssertEqual(dominant(row: 1, col: 0, columns: 2), "red")
+        XCTAssertEqual(dominant(row: 1, col: 2, columns: 2), "green")
+    }
     func testWideGlyphIsCentredInItsTwoColumnBoxAndStaysInside() throws {
         let context = try render("\u{1b}[2;3H中")
         let box = region(row: 1, col: 2, columns: 2)

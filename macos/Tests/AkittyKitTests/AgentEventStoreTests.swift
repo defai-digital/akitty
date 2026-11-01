@@ -4,6 +4,19 @@ import Darwin
 @testable import AkittyKit
 
 final class AgentEventStoreTests: XCTestCase {
+    @MainActor func testQueuedAppendsStayOrderedWithSynchronousOnesAndAreVisibleToExport() throws {
+        let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentEventStore(directory: root)
+        var failures: [String] = []
+        for i in 0..<20 { store.appendLater(event: "queued", session: "s", provenance: "host", fields: ["index": i]) { failures.append($0) } }
+        try store.append(event: "durable", session: "s", provenance: "host", synchronize: true)
+        let events = try store.export().split(separator: 10).map { try JSONSerialization.jsonObject(with: Data($0)) as! [String: Any] }
+        XCTAssertEqual(events.map { $0["event"] as? String }, Array(repeating: "queued", count: 20) + ["durable"])
+        XCTAssertEqual(events.compactMap { ($0["fields"] as? [String: Any])?["index"] as? Int }, Array(0..<20))
+        XCTAssertTrue(failures.isEmpty)
+    }
+
     @MainActor func testBoundedRotationSurvivesReopeningAndMarksRetentionLoss() throws {
         let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
