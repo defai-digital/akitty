@@ -111,13 +111,41 @@ struct Quad {
     final class PendingCount: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
+        /// Frames submitted and completed so far. One queue completes in submission order, so every frame up to
+        /// `completed` has finished sampling whatever textures it used.
+        private var submittedFrames: UInt64 = 0, completedFrames: UInt64 = 0
         var count: Int { lock.lock(); defer { lock.unlock() }; return value }
-        func add(_ delta: Int) { lock.lock(); value += delta; lock.unlock() }
+        var submitted: UInt64 { lock.lock(); defer { lock.unlock() }; return submittedFrames }
+        var completed: UInt64 { lock.lock(); defer { lock.unlock() }; return completedFrames }
+        func add(_ delta: Int) {
+            lock.lock(); value += delta
+            if delta > 0 { submittedFrames += UInt64(delta) } else { completedFrames += UInt64(-delta) }
+            lock.unlock()
+        }
+    }
+    /// Textures replaced while a frame could still sample them, tagged with the last frame that might. Once that frame
+    /// completes they are reused for the next same-sized allocation, so a busy GPU no longer costs one or two fresh
+    /// window-sized textures per frame.
+    private var retired: [(texture: MTLTexture, frame: UInt64)] = []
+    private static let maxRetired = 4
+    private func retire(_ texture: MTLTexture) {
+        retired.append((texture, pending.submitted))
+        if retired.count > Self.maxRetired { retired.removeFirst(retired.count - Self.maxRetired) }
+    }
+    private func makeTexture(width: Int, height: Int) throws -> MTLTexture {
+        let completed = pending.completed
+        if let index = retired.firstIndex(where: { $0.frame <= completed && $0.texture.width == width && $0.texture.height == height }) {
+            return retired.remove(at: index).texture
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { throw AkittyError.core("Metal texture allocation failed") }
+        return texture
     }
     /// `damage` is the range of bitmap pixel rows that changed since the last call (nil: all of them).
     func update(bitmap: CGContext, damage: Range<Int>? = nil) throws {
         // Leaving the layered path frees its layer and image textures.
-        if layered { layered = false; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = [] }
+        if layered { layered = false; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = [] }
         texture = try upload(into: texture, bitmap: bitmap, damage: damage)
         view.needsDisplay = true
     }
@@ -151,10 +179,9 @@ struct Quad {
             }
             return current
         }
-        // A frame still owns the current texture (or the size changed): give this one a fresh, fully uploaded texture.
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: bitmap.width, height: bitmap.height, mipmapped: false)
-        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
-        guard let next = device.makeTexture(descriptor: descriptor) else { throw AkittyError.core("Metal texture allocation failed") }
+        // A frame still owns the current texture (or the size changed): give this one a free, fully uploaded texture.
+        let next = try makeTexture(width: bitmap.width, height: bitmap.height)
+        if let current { retire(current) }
         next.replace(region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height), mipmapLevel: 0, withBytes: data, bytesPerRow: bitmap.bytesPerRow)
         return next
     }
@@ -184,9 +211,8 @@ struct Quad {
                 imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: binding.texture)
                 continue
             }
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: entry.width, height: entry.height, mipmapped: false)
-            descriptor.usage = .shaderRead; descriptor.storageMode = .shared
-            guard let texture = device.makeTexture(descriptor: descriptor) else { throw AkittyError.core("Metal texture allocation failed") }
+            let texture = try makeTexture(width: entry.width, height: entry.height)
+            if let old = imageTextures[placement.id]?.texture { retire(old) }
             bgra.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
             imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: texture)
         }
@@ -292,7 +318,9 @@ struct Quad {
 
 /// Decoded Kitty graphics images, refreshed from the core when a placement's generation changes.
 final class ImageStore: @unchecked Sendable {
-    /// Raw pixels exactly as the core returns them: straight-alpha RGBA, ready for a Metal texture.
+    /// One image's pixels. The store keeps a single copy: `device` (premultiplied device-RGB BGRA, what both the
+    /// Metal textures and the software layer bitmaps use) when conversion succeeds, leaving `rgba` empty; otherwise
+    /// the core's straight-alpha RGBA. Keeping both, plus a CGImage, held each image three to four times over.
     struct Entry { let generation: UInt64; let width: Int; let height: Int; let rgba: Data; var image: CGImage? = nil; var device: Data? = nil }
     private let lock = NSLock()
     private var table: [UInt32: Entry] = [:]
@@ -304,7 +332,9 @@ final class ImageStore: @unchecked Sendable {
         var result: [UInt32: CGImage] = [:]
         for (id, entry) in table {
             if let image = entry.image { result[id] = image; continue }
-            guard let image = Self.makeImage(entry.rgba, width: entry.width, height: entry.height) else { continue }
+            let made = entry.device.flatMap { Self.makeDeviceImage($0, width: entry.width, height: entry.height) }
+                ?? Self.makeImage(entry.rgba, width: entry.width, height: entry.height)
+            guard let image = made else { continue }
             table[id]?.image = image; result[id] = image
         }
         return result
@@ -316,10 +346,10 @@ final class ImageStore: @unchecked Sendable {
             lock.lock(); let current = table[id]?.generation; lock.unlock()
             guard current != placement.gen,
                   let pixels = session.imagePixels(id, width: placement.w, height: placement.h) else { continue }
+            // Converted here, off the main thread, so the Metal path only uploads. The raw copy is dropped once converted.
+            let device = Self.devicePixels(pixels, width: placement.w, height: placement.h)
             lock.lock()
-            // Converted here, off the main thread, so the Metal path only uploads.
-            table[id] = Entry(generation: placement.gen, width: placement.w, height: placement.h, rgba: pixels,
-                              device: Self.devicePixels(pixels, width: placement.w, height: placement.h))
+            table[id] = Entry(generation: placement.gen, width: placement.w, height: placement.h, rgba: device == nil ? pixels : Data(), device: device)
             lock.unlock()
         }
         lock.lock(); table = table.filter { wanted[$0.key] != nil }; lock.unlock()
@@ -336,6 +366,14 @@ final class ImageStore: @unchecked Sendable {
             return true
         }
         return drawn ? out : nil
+    }
+    /// A CGImage over pixels already in the layer bitmaps' format (see `devicePixels`), so drawing it needs no conversion.
+    static func makeDeviceImage(_ pixels: Data, width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0, pixels.count >= width * height * 4, let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
     static func makeImage(_ pixels: Data, width: Int, height: Int) -> CGImage? {
         guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
@@ -363,8 +401,11 @@ final class GridRasterizer: @unchecked Sendable {
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
     }
-    private struct GlyphKey: Hashable { var style: UInt8, fg: UInt32, text: String }
+    /// Lines take their colour from the context at draw time, so the key is colour-free: truecolor gradient output
+    /// (one colour per cell) reuses one entry per character instead of flushing the whole cache every few frames.
+    private struct GlyphKey: Hashable { var style: UInt8, text: String }
     static let margin: CGFloat = 8
+    private static let colorFromContext = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
     private static let maxGlyphs = 8192
     /// Truecolor output can name any of 16.7M colours, so the colour cache is capped like the glyph cache.
     static let maxColors = 4096
@@ -538,11 +579,11 @@ final class GridRasterizer: @unchecked Sendable {
                 CellGlyphs.draw(scalar, in: box, scale: scale, color: color(cell.fg), context: context); continue
             }
             let style = (cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)
-            let key = GlyphKey(style: UInt8(style), fg: Self.pack(cell.fg), text: text)
+            let key = GlyphKey(style: UInt8(style), text: text)
             let glyph: Glyph
             if let cached = glyphs[key] { glyph = cached }
             else {
-                let attrs: [NSAttributedString.Key: Any] = [.font: faces[style], .foregroundColor: color(cell.fg), .ligature: 0]
+                let attrs: [NSAttributedString.Key: Any] = [.font: faces[style], Self.colorFromContext: true, .ligature: 0]
                 let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
                 let ascii = text.utf8.allSatisfy { $0 < 0x80 }
                 glyph = Glyph(line: line, ink: ascii ? nil : CTLineGetBoundsWithOptions(line, .useGlyphPathBounds), run: ascii ? Self.run(of: line) : nil)
@@ -560,7 +601,7 @@ final class GridRasterizer: @unchecked Sendable {
                 batches[key]!.positions += run.positions.map { CGPoint(x: $0.x + origin.x, y: $0.y + origin.y) }
                 continue
             }
-            context.saveGState(); context.clip(to: box)
+            context.saveGState(); context.clip(to: box); context.setFillColor(color(cell.fg))
             if let ink = glyph.ink {
                 let place = GlyphFonts.placement(ink: ink, box: box, baseline: box.minY + descent + 2, centre: item.columns == 2)
                 context.translateBy(x: place.origin.x, y: place.origin.y); context.scaleBy(x: place.scale, y: place.scale); context.textPosition = .zero

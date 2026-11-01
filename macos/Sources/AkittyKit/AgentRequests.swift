@@ -10,7 +10,9 @@ import AgentIPC
     private var timer: Timer?
     private var sessions: [UInt64: String] = [:]
     private var cursors: [UInt64: UInt64] = [:]
-    private var reports: [UInt64: ProgramStatus] = [:]
+    /// Program-status state counts last recorded per pane. Only a change in counts is recorded: progress and message
+    /// updates arrive at 2 Hz from a busy program and would otherwise rotate host records out of retention.
+    private var reports: [UInt64: [String: Int]] = [:]
     private weak var pendingWindow: NSWindow?
     private weak var pendingSheet: NSWindow?
     private var timeline: NSWindowController?
@@ -57,8 +59,11 @@ import AgentIPC
     }
     func stop() { try? setEnabled(false); collectAll(); timer?.invalidate(); timer = nil }
     private func persist(event: String, id: UInt64, provenance: String = "host", fields: [String: Any] = [:]) {
-        do { try store.append(event: event, session: sessions[id] ?? "unknown", provenance: provenance, fields: ["pane_session_id": id].merging(fields) { _, new in new }) }
-        catch { failure = error.localizedDescription }
+        later(event, session: sessions[id] ?? "unknown", provenance: provenance, fields: ["pane_session_id": id].merging(fields) { _, new in new })
+    }
+    /// Routine observations are written off the main thread; the store keeps them in order with synchronous appends.
+    private func later(_ event: String, session: String, provenance: String, fields: [String: Any]) {
+        store.appendLater(event: event, session: session, provenance: provenance, fields: fields) { [weak self] message in self?.failure = message }
     }
     private func collectAll() {
         for terminal in source() where !terminal.isShutdown { register(terminal); record(terminal) }
@@ -68,20 +73,22 @@ import AgentIPC
         do {
             let page = try JSONSerialization.jsonObject(with: terminal.session.controlAudit(after: after)) as? [String: Any]
             if let oldest = page?["oldest_seq"] as? UInt64, oldest > after + 1 {
-                try store.append(event: "source_gap", session: sessions[id] ?? "unknown", provenance: "host", fields: ["after": after, "oldest_available": oldest])
+                later("source_gap", session: sessions[id] ?? "unknown", provenance: "host", fields: ["after": after, "oldest_available": oldest])
             }
             for event in page?["events"] as? [[String: Any]] ?? [] {
                 guard let sequence = event["seq"] as? UInt64, let name = event["event"] as? String else { continue }
                 var fields: [String: Any] = ["pane_session_id": id, "core_sequence": sequence, "observed_time_ms": event["time_ms"] ?? NSNull()]
                 if let command = event["command"] as? String { fields["command_sha256"] = AgentEventStore.digest(command); fields["command_bytes"] = command.utf8.count }
                 if let actor = event["actor"] as? String { fields["host_actor_label"] = actor }
-                try store.append(event: name, session: sessions[id] ?? "unknown", provenance: name.contains("untrusted") ? "shell_untrusted" : "host", fields: fields)
+                later(name, session: sessions[id] ?? "unknown", provenance: name.contains("untrusted") ? "shell_untrusted" : "host", fields: fields)
                 cursors[id] = sequence
             }
-            if let status = terminal.snapshot?.program_status, reports[id] != status {
+            if let status = terminal.snapshot?.program_status {
                 let counts = Dictionary(grouping: status.records, by: \.state).mapValues(\.count)
-                try store.append(event: "program_status_observed", session: sessions[id] ?? "unknown", provenance: "program_untrusted", fields: ["pane_session_id": id, "state_counts": counts])
-                reports[id] = status
+                if reports[id] != counts {
+                    later("program_status_observed", session: sessions[id] ?? "unknown", provenance: "program_untrusted", fields: ["pane_session_id": id, "state_counts": counts])
+                    reports[id] = counts
+                }
             }
         } catch { failure = error.localizedDescription }
     }

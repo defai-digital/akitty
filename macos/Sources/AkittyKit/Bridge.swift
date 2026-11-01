@@ -460,7 +460,12 @@ public final class TerminalSession: @unchecked Sendable {
         guard let id = value?["id"] as? UInt64 else { throw AkittyError.core("No terminal handle") }
         self.id = id
     }
-    deinit { try? close() }
+    // Backstop for a session dropped without shutdown(). The core close can wait up to a second for a child
+    // that ignores SIGHUP, and the last reference is often released on the main thread, so close off it.
+    deinit {
+        guard let cleanup = prepareClose() else { return }
+        DispatchQueue.global(qos: .utility).async { try? cleanup() }
+    }
     public func close() throws {
         try close { id in _ = try CoreBridge.call(["op": "close", "id": id]) }
     }

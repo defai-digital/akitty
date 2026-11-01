@@ -3,12 +3,16 @@ import CryptoKit
 import Darwin
 
 /// Private, bounded local metadata. Hashes redact command text; they are not attestations or tamper protection.
-@MainActor final class AgentEventStore {
+/// Every file operation runs on one serial queue: `append` waits for its write (callers that need the record on disk
+/// before continuing), `appendLater` does not (the periodic recorder, which must not do file I/O on the main thread),
+/// and `export` waits behind any queued writes, so readers always see everything recorded before them.
+final class AgentEventStore: @unchecked Sendable {
     let directory: URL
     let segmentLimit: Int
     private let instance = UUID().uuidString
     private var sequence: UInt64 = 0
     private var writerLock: FileHandle?
+    private let queue = DispatchQueue(label: "com.defai.akitty.agent-events")
     init(directory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Akitty/agent-events"), segmentLimit: Int = 4 * 1_048_576) {
         self.directory = directory; self.segmentLimit = max(4096, segmentLimit)
     }
@@ -30,6 +34,19 @@ import Darwin
         return (fd, Int(info.st_size))
     }
     func append(event: String, session: String, provenance: String, fields: [String: Any] = [:], synchronize: Bool = false) throws {
+        try queue.sync { try write(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize) }
+    }
+    /// Queues an unsynchronized append and returns at once; a failure is reported to `failed` on the main queue.
+    func appendLater(event: String, session: String, provenance: String, fields: [String: Any] = [:], failed: @escaping @MainActor (String) -> Void) {
+        let fields = UncheckedFields(value: fields)
+        queue.async {
+            do { try self.write(event: event, session: session, provenance: provenance, fields: fields.value, synchronize: false) }
+            catch { let message = error.localizedDescription; DispatchQueue.main.async { failed(message) } }
+        }
+    }
+    private struct UncheckedFields: @unchecked Sendable { let value: [String: Any] }
+    private func write(event: String, session: String, provenance: String, fields: [String: Any], synchronize: Bool) throws {
+        dispatchPrecondition(condition: .onQueue(queue))
         try prepare()
         if writerLock == nil {
             let (lock, _) = try openFile(directory.appendingPathComponent("writer.lock"), writing: true)
@@ -55,8 +72,8 @@ import Darwin
                 let retained = tail.lastIndex(of: 10).map { size - tail.count + $0 + 1 } ?? 0
                 guard ftruncate(fd, off_t(retained)) == 0 else { Darwin.close(fd); throw AkittyError.core("Cannot recover incomplete event tail.") }
                 Darwin.close(fd); sequence -= 1
-                try append(event: "incomplete_record_dropped", session: session, provenance: "host", fields: ["dropped_bytes": size - retained])
-                return try append(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize)
+                try write(event: "incomplete_record_dropped", session: session, provenance: "host", fields: ["dropped_bytes": size - retained], synchronize: false)
+                return try write(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize)
             }
         }
         Darwin.close(fd)
@@ -67,8 +84,8 @@ import Darwin
             }
             try FileManager.default.moveItem(at: current, to: previous)
             sequence -= 1
-            try append(event: "retention_rotated", session: session, provenance: "host", fields: ["older_segments_may_be_missing": true])
-            return try append(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize)
+            try write(event: "retention_rotated", session: session, provenance: "host", fields: ["older_segments_may_be_missing": true], synchronize: false)
+            return try write(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize)
         }
         let (output, _) = try openFile(current, writing: true)
         let handle = FileHandle(fileDescriptor: output, closeOnDealloc: true)
@@ -84,6 +101,9 @@ import Darwin
         }
     }
     func export() throws -> Data {
+        try queue.sync(execute: read)
+    }
+    private func read() throws -> Data {
         try prepare()
         var result = Data()
         for name in ["previous.jsonl", "events.jsonl"] {
