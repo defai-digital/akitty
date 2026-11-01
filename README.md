@@ -47,8 +47,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v1.2.5 ZIP](https://download.automatosx.com/akitty/releases/download/v1.2.5/AkiTTY-1.2.5-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.2.5).
+You can also [download the v1.3.0 ZIP](https://download.automatosx.com/akitty/releases/download/v1.3.0/AkiTTY-1.3.0-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.3.0).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## What makes AkiTTY useful
@@ -61,11 +61,11 @@ actions to show a pane or reclaim input. Reclaim revokes unused approvals and in
 ownership; it does not stop a running process. Host authentication and policy remain
 the embedding host's responsibility.
 
-Current development adds [native agent workflows](docs/AGENT_NATIVE.md): OSC 7501
+Version 1.3.0 adds [native agent workflows](docs/AGENT_NATIVE.md): OSC 7501
 program reports alongside OSC 771 sprites, an opt-in local `akitty-agent` request
 client, and a bounded local event timeline/export. Every local execution request
 requires human approval. Ordinary agent subprocesses are not intercepted. These
-additions are source development, not capabilities of the published 1.2.5 download.
+workflows use the explicit request path; they do not govern every operation by an agent.
 
 AkiTTY gives each participating program a visible identity in its own tab:
 its own small animated icon, working state, and a completion indicator that stays
@@ -193,7 +193,7 @@ lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-**Status: 1.2.5.** This is not a drop-in Ghostty replacement.
+**Status: 1.3.0.** This is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current

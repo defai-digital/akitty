@@ -52,11 +52,11 @@ public enum LocalSocket {
         try data.withUnsafeMutableBytes { bytes in
             while offset < count {
                 let remaining = deadline - ProcessInfo.processInfo.systemUptime
-                guard remaining > 0 else { throw AgentIPCError.failure("Local frame deadline expired.") }
+                guard remaining > 0 else { throw AgentIPCError.failure("Local frame deadline expired. Dispatch outcome may be unknown; do not retry automatically.") }
                 var readiness = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
                 let ready = Darwin.poll(&readiness, 1, Int32(max(1, ceil(remaining * 1000))))
                 if ready < 0 && errno == EINTR { continue }
-                guard ready > 0 else { throw AgentIPCError.failure("Local frame deadline expired.") }
+                guard ready > 0 else { throw AgentIPCError.failure("Local frame deadline expired. Dispatch outcome may be unknown; do not retry automatically.") }
                 let read = recv(fd, bytes.baseAddress!.advanced(by: offset), count - offset, 0)
                 if read < 0 && errno == EINTR { continue }
                 guard read > 0 else { throw AgentIPCError.failure("Local connection closed or timed out. Dispatch outcome may be unknown; do not retry automatically.") }
@@ -73,15 +73,23 @@ public enum LocalSocket {
         guard count > 0, count <= frameLimit else { throw AgentIPCError.failure("Invalid local request size.") }
         return try readExact(count, from: fd, deadline: deadline)
     }
-    public static func writeFrame(_ data: Data, to fd: Int32) throws {
+    public static func writeFrame(_ data: Data, to fd: Int32, timeout: TimeInterval = 3) throws {
+        guard timeout.isFinite, timeout > 0, timeout <= 135 else { throw AgentIPCError.failure("Invalid local frame timeout.") }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         guard !data.isEmpty, data.count <= frameLimit else { throw AgentIPCError.failure("Local frame exceeds 16 KiB.") }
         var size = UInt32(data.count).bigEndian
         var frame = withUnsafeBytes(of: &size) { Data($0) }; frame.append(data)
         try frame.withUnsafeBytes { bytes in
             var offset = 0
             while offset < frame.count {
-                let sent = send(fd, bytes.baseAddress!.advanced(by: offset), frame.count - offset, 0)
-                if sent < 0 && errno == EINTR { continue }
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0 else { throw AgentIPCError.failure("Local write deadline expired. Dispatch outcome may be unknown; do not retry automatically.") }
+                var readiness = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let ready = Darwin.poll(&readiness, 1, Int32(max(1, ceil(remaining * 1000))))
+                if ready < 0 && errno == EINTR { continue }
+                guard ready > 0 else { throw AgentIPCError.failure("Local write deadline expired. Dispatch outcome may be unknown; do not retry automatically.") }
+                let sent = send(fd, bytes.baseAddress!.advanced(by: offset), frame.count - offset, MSG_DONTWAIT)
+                if sent < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) { continue }
                 guard sent > 0 else { throw AgentIPCError.failure("Local response failed. Dispatch outcome may be unknown; do not retry automatically.") }
                 offset += sent
             }
@@ -112,14 +120,24 @@ public final class LocalRequestServer: @unchecked Sendable {
     private let lock = NSLock()
     private var source: DispatchSourceRead?
     private var running = false
-    private var occupied = false
+    private var requestToken: UUID?
+    private var activeClient: Int32 = -1
+    private var activeTask: Task<Void, Never>?
     private var socketIdentity: ino_t = 0
     private var lockDescriptor: Int32 = -1
     private var generation: UInt64 = 0
     public init(path: String = LocalSocket.defaultPath) { self.path = path }
     private var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
     private func isActive(_ expected: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return running && generation == expected }
-    private func finishRequest() { lock.lock(); occupied = false; lock.unlock() }
+    private func finishRequest(_ client: Int32, token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        Darwin.close(client)
+        if requestToken == token { requestToken = nil; activeClient = -1; activeTask = nil }
+    }
+    private func track(_ task: Task<Void, Never>, token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if requestToken == token { activeTask = task } else { task.cancel() }
+    }
     public func start(handler: @escaping Handler) throws {
         guard !isRunning else { throw AgentIPCError.failure("Local request server is already running.") }
         let directory = (path as NSString).deletingLastPathComponent
@@ -155,16 +173,24 @@ public final class LocalRequestServer: @unchecked Sendable {
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global(qos: .userInitiated))
             source.setCancelHandler { Darwin.close(fd) }
             source.setEventHandler { [weak self] in
-                while let self, self.isRunning {
+                while let self, self.isActive(activeGeneration) {
                     let client = accept(fd, nil, nil)
                     if client < 0 { break }
                     do { try LocalSocket.configure(client, timeout: 3) } catch { Darwin.close(client); continue }
                     guard fcntl(client, F_SETFL, 0) == 0 else { Darwin.close(client); continue }
-                    self.lock.lock(); let busy = self.occupied; if !busy { self.occupied = true }; self.lock.unlock()
-                    if busy { Darwin.close(client); continue }
-                    Task { [weak self] in
+                    let token = UUID()
+                    self.lock.lock()
+                    let busy = self.requestToken != nil || !self.running || self.generation != activeGeneration
+                    if !busy { self.requestToken = token; self.activeClient = client }
+                    self.lock.unlock()
+                    if busy {
+                        let reply = Data("{\"version\":1,\"ok\":false,\"error\":\"Local server busy; request not dispatched. Retry later.\"}".utf8)
+                        try? LocalSocket.writeFrame(reply, to: client, timeout: 0.1)
+                        Darwin.close(client); continue
+                    }
+                    let task = Task { [weak self] in
                         guard let self else { Darwin.close(client); return }
-                        defer { Darwin.close(client); self.finishRequest() }
+                        defer { self.finishRequest(client, token: token) }
                         do {
                             var uid: uid_t = 0, gid: gid_t = 0, pid: pid_t = 0
                             var length = socklen_t(MemoryLayout<pid_t>.size)
@@ -172,20 +198,27 @@ public final class LocalRequestServer: @unchecked Sendable {
                                   getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else { throw AgentIPCError.failure("Local caller credentials unavailable or not permitted.") }
                             let request = try LocalSocket.readFrame(from: client, timeout: 3)
                             let peer = LocalPeer(uid: uid, pid: pid, descriptor: client, enabled: { [weak self] in self?.isActive(activeGeneration) == true })
+                            guard peer.connected, !Task.isCancelled else { return }
                             let response = await handler(request, peer)
+                            guard !Task.isCancelled else { return }
                             try LocalSocket.writeFrame(response, to: client)
                         } catch {
                             let reply = try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])
                             if let reply { try? LocalSocket.writeFrame(reply, to: client) }
                         }
                     }
+                    self.track(task, token: token)
                 }
             }
             self.source = source; lockDescriptor = ownership; started = true; source.resume()
         } catch { Darwin.close(fd); throw error }
     }
     public func stop() {
-        lock.lock(); running = false; lock.unlock()
+        lock.lock(); running = false
+        // Shutdown wakes blocked I/O; the owning task alone closes its descriptor.
+        if activeClient >= 0 { _ = shutdown(activeClient, SHUT_RDWR) }
+        activeTask?.cancel(); activeTask = nil; activeClient = -1; requestToken = nil
+        lock.unlock()
         source?.cancel(); source = nil
         var info = stat()
         if socketIdentity != 0, lstat(path, &info) == 0, info.st_ino == socketIdentity { _ = unlink(path) }

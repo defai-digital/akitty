@@ -1,6 +1,6 @@
 # AkiTTY implementation roadmap
 
-This roadmap distinguishes the released 1.2.5 baseline, current development, and remaining qualification.
+This roadmap distinguishes the 1.3.0 implementation baseline and remaining qualification.
 The native Mac app uses locally maintained source derived from `alacritty_terminal` 0.26.0 with AkiTTY's own
 Rust/Swift integration and rendering. AkiTTY Web separately uses Ghostty's VT
 parser compiled to WebAssembly and Canvas rendering. Native performance must be
@@ -166,7 +166,7 @@ remote/multiplexer behavior and user validation continue in P1–P2. Sixel stays
 unsupported and is P3, subject to demonstrated compatibility demand. Performance,
 stability and trusted-host execution control remain P0.
 
-## 5. Agent-native integration (source development after 1.2.5)
+## 5. Agent-native integration (introduced in 1.3.0)
 
 The first native integration implements bounded OSC 7501 revision 0.4 reports
 alongside OSC 771, a request-only local companion with mandatory human approval,

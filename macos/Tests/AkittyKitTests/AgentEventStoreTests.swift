@@ -8,7 +8,7 @@ final class AgentEventStoreTests: XCTestCase {
         let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let store = AgentEventStore(directory: root, segmentLimit: 4096)
-        for i in 0..<50 { try store.append(event: "test", session: "durable-session", provenance: "host", fields: ["index": i]) }
+        for i in 0..<50 { try store.append(event: "test", session: "durable-session", provenance: "host", fields: ["index": i], synchronize: true) }
         let data = try AgentEventStore(directory: root, segmentLimit: 4096).export()
         XCTAssertLessThanOrEqual(data.count, 8192)
         let events = try data.split(separator: 10).map { try JSONSerialization.jsonObject(with: Data($0)) as! [String: Any] }
@@ -87,4 +87,44 @@ final class AgentEventStoreTests: XCTestCase {
         XCTAssertThrowsError(try second.start { data, _ in data })
         var info = stat(); XCTAssertEqual(lstat(path, &info), 0); XCTAssertEqual(info.st_mode & S_IFMT, S_IFSOCK)
     }
+    func testWriteDeadlineBoundsANonReadingPeer() throws {
+        var pair: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        defer { Darwin.close(pair[0]); Darwin.close(pair[1]) }
+        try LocalSocket.configure(pair[0], timeout: 3)
+        var small: Int32 = 1024
+        XCTAssertEqual(setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &small, socklen_t(MemoryLayout<Int32>.size)), 0)
+        let fill = [UInt8](repeating: 1, count: 4096)
+        while fill.withUnsafeBytes({ send(pair[0], $0.baseAddress, $0.count, MSG_DONTWAIT) }) > 0 {}
+        let start = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try LocalSocket.writeFrame(Data("blocked".utf8), to: pair[0], timeout: 0.05))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.3)
+    }
+
+    func testRestartAcceptsRequestsWhileOldHandlerIsStillSuspended() async throws {
+        let root = URL(fileURLWithPath: "/tmp/akitty-restart-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("socket").path
+        let server = LocalRequestServer(path: path)
+        let gate = AsyncStream<Void>.makeStream(), entered = DispatchSemaphore(value: 0)
+        defer { gate.continuation.finish(); server.stop() }
+        try server.start { data, _ in
+            entered.signal()
+            for await _ in gate.stream { break }
+            return data
+        }
+        let fd = try LocalSocket.descriptor(); defer { Darwin.close(fd) }
+        XCTAssertEqual(try LocalSocket.withAddress(path) { Darwin.connect(fd, $0, $1) }, 0)
+        try LocalSocket.writeFrame(Data("old".utf8), to: fd)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        let busy = try await Task.detached { try LocalSocket.request(Data("busy".utf8), path: path) }.value
+        XCTAssertTrue(String(decoding: busy, as: UTF8.self).contains("request not dispatched"))
+        server.stop()
+        try server.start { data, _ in data }
+        do {
+            let reply = try await Task.detached { try LocalSocket.request(Data("new".utf8), path: path) }.value
+            XCTAssertEqual(reply, Data("new".utf8))
+        } catch { XCTFail("restarted listener must not inherit the old handler's busy slot: \(error)") }
+    }
+
 }

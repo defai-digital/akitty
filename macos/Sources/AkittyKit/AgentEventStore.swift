@@ -75,6 +75,13 @@ import Darwin
         try handle.write(contentsOf: data)
         if synchronize { try handle.synchronize() }
         try handle.close()
+        if synchronize {
+            // File fsync alone does not commit a newly created or rotated directory entry.
+            let directoryFD = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard directoryFD >= 0 else { throw AkittyError.core("Cannot open event directory for synchronization.") }
+            defer { Darwin.close(directoryFD) }
+            guard fsync(directoryFD) == 0 else { throw AkittyError.core("Cannot synchronize event directory.") }
+        }
     }
     func export() throws -> Data {
         try prepare()

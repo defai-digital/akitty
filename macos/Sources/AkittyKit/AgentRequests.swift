@@ -147,14 +147,18 @@ import AgentIPC
         }
     }
     static func present(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, valid: @escaping () -> Bool = { true }) async -> Bool {
-        await withCheckedContinuation { continuation in
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        return await withCheckedContinuation { continuation in
             let timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak window, weak alert] _ in
                 MainActor.assumeIsolated { if let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) } }
             }
             let cancellation = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak window, weak alert] _ in
                 MainActor.assumeIsolated { if !valid(), let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) } }
             }
-            alert.beginSheetModal(for: window) { timer.invalidate(); cancellation.invalidate(); continuation.resume(returning: $0 == .alertFirstButtonReturn && valid()) }
+            alert.beginSheetModal(for: window) {
+                timer.invalidate(); cancellation.invalidate()
+                continuation.resume(returning: $0 == .alertFirstButtonReturn && ProcessInfo.processInfo.systemUptime < deadline && valid())
+            }
             alert.window.makeFirstResponder(alert.buttons[1])
         }
     }

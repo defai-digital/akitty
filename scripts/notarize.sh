@@ -44,8 +44,11 @@ if [[ -d "$framework" ]]; then
     done < <(find "$framework/Versions/B" -depth -type d \( -name '*.xpc' -o -name '*.app' \) -print0)
     codesign --force --options runtime --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$framework"
 fi
+# The plain CLI is nested code too; signing only the outer app preserves its ad-hoc signature.
+codesign --force --options runtime --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$app/Contents/MacOS/akitty-agent"
 codesign --force --options runtime --entitlements macos/Release.entitlements --sign "$AKITTY_SIGNING_IDENTITY" --timestamp "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
+python3 scripts/release_signatures.py "$app"
 ditto -c -k --keepParent "$app" .internal/release/Akitty-submit.zip
 xcrun notarytool submit .internal/release/Akitty-submit.zip --keychain-profile "$AKITTY_NOTARY_PROFILE" --wait --output-format json > .internal/release/notary.json
 python3 - <<'PY'
