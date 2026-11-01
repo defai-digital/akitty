@@ -350,6 +350,7 @@ export class Terminal implements ITerminalCore {
   // Lifecycle state
   private isOpen = false;
   private isDisposed = false;
+  private resizePaintPending = false;
   private addedParentTabIndex = false;
   private animationFrameId?: number;
 
@@ -475,7 +476,7 @@ export class Terminal implements ITerminalCore {
    * This enables xterm.js compatibility where options can be changed at runtime
    */
   private handleOptionChange(key: string, newValue: any, oldValue: any): void {
-    if (newValue === oldValue) return;
+    if (newValue === oldValue && !(this.resizePaintPending && (key === 'cols' || key === 'rows'))) return;
 
     switch (key) {
       case 'disableStdin':
@@ -955,6 +956,7 @@ export class Terminal implements ITerminalCore {
     Terminal.validateDimensions(cols, rows);
 
     if (cols === this.cols && rows === this.rows) {
+      if (this.resizePaintPending) this.finishResize(cols, rows);
       return; // No change
     }
 
@@ -983,7 +985,12 @@ export class Terminal implements ITerminalCore {
     // The renderer accepted the new grid, so the resize is committed here. Everything below
     // must leave wasm, the public dimensions, the renderer and the canvas at the new size even
     // if the forced render throws; only the paint is retried, not the transaction.
+    this.resizePaintPending = true;
+    this.finishResize(cols, rows);
+  }
 
+  /** Finish a committed resize, including retries after a transient paint failure. */
+  private finishResize(cols: number, rows: number): void {
     // Publish the committed pair into the mutable options object as well. Otherwise a direct
     // resize(100, 30) would leave options.rows at its constructor value, and a later
     // `options.cols = 120` would pair 120 with that stale row count and resize to 120x24.
@@ -1008,6 +1015,7 @@ export class Terminal implements ITerminalCore {
 
     // Announce the new grid only once it has painted, so no resize event describes a frame
     // that failed to render.
+    this.resizePaintPending = false;
     this.resizeEmitter.fire({ cols, rows });
   }
 

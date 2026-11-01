@@ -426,6 +426,48 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('an identical resize retries a failed paint without reflowing the committed grid again', async () => {
+      for (const viaOptions of [false, true]) {
+        const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+        term.open(container!);
+        try {
+          const renderer = (term as any).renderer;
+          const wasm = (term as any).wasmTerm;
+          const originalRender = renderer.render.bind(renderer);
+          const originalResize = wasm.resize.bind(wasm);
+          let paints = 0, reflows = 0;
+          renderer.render = (...args: any[]) => {
+            paints++;
+            if (paints === 1) throw new Error('temporary paint failure');
+            return originalRender(...args);
+          };
+          wasm.resize = (cols: number, rows: number) => {
+            reflows++;
+            return originalResize(cols, rows);
+          };
+          const events: Array<{ cols: number; rows: number }> = [];
+          term.onResize(event => events.push(event));
+          const request = () => {
+            if (viaOptions) term.options.cols = 100;
+            else term.resize(100, 24);
+          };
+
+          expect(request).toThrow('temporary paint failure');
+          expect([term.cols, term.rows]).toEqual([100, 24]);
+          expect(events).toEqual([]);
+          request();
+          expect(paints).toBe(2);
+          expect(reflows).toBe(1);
+          expect(events).toEqual([{ cols: 100, rows: 24 }]);
+          request();
+          expect(paints).toBe(2);
+          expect(events).toHaveLength(1);
+        } finally {
+          term.dispose();
+        }
+      }
+    });
+
     test('options.cols assignment keeps 80x24 when wasm resize throws once and the retry succeeds', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
       term.open(container!);
