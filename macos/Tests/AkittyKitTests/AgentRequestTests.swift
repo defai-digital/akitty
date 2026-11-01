@@ -150,6 +150,25 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertFalse(accepted, "a request whose window went away must resolve, and never as approved")
     }
 
+    @MainActor func testCompletedApprovalReleasesItsValidationContext() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; defer { window.close() }
+        var alert: NSAlert? = AgentCommandHost.approvalAlert(AgentCommandRequest(sessionID: 1, actor: "test", command: "echo cleanup", cwd: nil))
+        weak var context: NSObject?
+        var pending: Task<Bool, Never>? = {
+            let retained = NSObject(), displayed = alert!
+            context = retained
+            return Task { await AgentRequests.present(displayed, in: window, timeout: 30, valid: { retained.isEqual(retained) }) }
+        }()
+        try await waitUntil { window.attachedSheet != nil }
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertSecondButtonReturn)
+        let accepted = await pending!.value
+        XCTAssertFalse(accepted)
+        pending = nil; alert = nil; window.close()
+        try await waitUntil { context == nil }
+    }
+
     @MainActor func testDisconnectDisableAndCooldownCannotAuthorize() async throws {
         _ = NSApplication.shared
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }

@@ -130,9 +130,9 @@ import AgentIPC
                     window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
                     let alert = AgentCommandHost.approvalAlert(request, callerDescription: "Connection opened by OS process \(peer.pid), user \(peer.uid). Agent/product identity and shell-reported directory are not verified. This command uses your shell's permissions. Reclaim returns input without stopping it.")
                     self.pendingWindow = window; self.pendingSheet = alert.window
-                    let accepted = await Self.present(alert, in: window) { [weak self, weak terminal] in
+                    let accepted = await Self.present(alert, in: window, valid: { [weak self, weak terminal] in
                         self?.enabled == true && peer.connected && terminal?.window === window
-                    }
+                    })
                     self.pendingWindow = nil; self.pendingSheet = nil
                     self.nextPromptTime = ProcessInfo.processInfo.systemUptime + self.cooldownInterval
                     return accepted && self.enabled && peer.connected
