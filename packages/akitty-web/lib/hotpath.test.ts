@@ -561,10 +561,11 @@ describe('Terminal visibility', () => {
     })
     vi.stubGlobal("cancelAnimationFrame", (id: number) => pending.delete(id))
     const term = await createIsolatedTerminal({ cols: 20, rows: 4 })
+    const terminal = term as any
     const container = document.createElement("div")
     try {
       term.open(container)
-      (term as any)[animation]()
+      terminal[animation]()
       term.dispose()
       // A scrollbar callback already queued before disposal must not create another frame chain.
       const callbacks = [...pending.values()]
