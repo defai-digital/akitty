@@ -552,6 +552,10 @@ impl Model {
     }
     /// The snapshot JSON, serialized once from typed rows.
     pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> Result<String, String> {
+        self.snapshot_json_within(since, compact, MAX_SNAPSHOT_BYTES)
+    }
+
+    fn snapshot_json_within(&mut self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
         if self.exited { self.program_status.finish_work(); }
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
@@ -784,10 +788,6 @@ impl Model {
             if partial { self.links = links; }
             return Err(format!("placeholder fragments exceed the {MAX_FRAGMENTS} per-snapshot limit"));
         }
-        // The snapshot will be returned: this is the point at which the reported flags
-        // may advance to match what the client is about to receive.
-        self.reported_transient = transient;
-        self.reported_animating = reported_animating;
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
@@ -817,8 +817,10 @@ impl Model {
             kitty_flags: kitty_flags(content.mode),
             offset: content.display_offset,
             history: self.term.grid().history_size(),
-            clipboard: std::mem::take(&mut self.clipboard),
-            bell: std::mem::take(&mut self.bell),
+            // Copied, not taken: an oversized snapshot below is discarded, and these one-shot
+            // events must survive for the next poll instead of vanishing with it.
+            clipboard: self.clipboard.clone(),
+            bell: self.bell,
             error: &self.error,
             exited: self.exited,
             exit_code: self.exit_code,
@@ -830,6 +832,18 @@ impl Model {
             dirty: partial.then_some(dirty_rows),
         };
         let json = serde_json::to_string(&snapshot).expect("snapshot fields serialize");
+        if json.len() > max_bytes {
+            // Fail before committing anything the client would never receive. `sent` is
+            // dropped so the next poll sends a full snapshot rather than a diff against it.
+            self.sent = None;
+            return Err("snapshot exceeds 8 MiB".into());
+        }
+        // The snapshot will be returned: this is the point at which the reported flags and
+        // one-shot events may advance to match what the client is about to receive.
+        self.reported_transient = transient;
+        self.reported_animating = reported_animating;
+        self.clipboard.clear();
+        self.bell = false;
         // A crowded link table is rebuilt by the next full snapshot instead of growing without bound.
         let crowded = partial && self.links.len() > MAX_LINKS / 2;
         self.sent = (!crowded).then_some(SentRows {
@@ -1022,6 +1036,8 @@ fn underline_style(flags: Flags) -> Option<u8> {
     }
 }
 const MAX_LINKS: usize = 256;
+/// Largest serialized snapshot; leaves room for the response envelope inside the 8 MiB ABI limit.
+const MAX_SNAPSHOT_BYTES: usize = 8 * 1_048_576 - 256;
 const MAX_LINK_BYTES: usize = 2048;
 /// Placeholder fragments per snapshot; rows already cap cells at 32,768.
 const MAX_FRAGMENTS: usize = 4096;
@@ -1411,6 +1427,34 @@ mod tests {
         let parked: Value = serde_json::from_str(&model.snapshot_json(Some(revision), true).unwrap()).unwrap();
         assert_eq!(parked["changed"], true, "{parked}");
         assert_eq!(parked["animating"], false, "{parked}");
+    }
+
+    #[test]
+    fn oversized_snapshot_keeps_one_shot_events_for_the_next_poll() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        model.feed(b"hello\x07\x1b]52;c;aGk=\x07");
+        assert!(model.snapshot_json_within(None, true, 16).is_err(), "a tiny limit must reject the build");
+        let next: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
+        assert_eq!(next["bell"], true, "{next}");
+        assert_eq!(next["clipboard"], json!(["hi"]), "{next}");
+        let after: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
+        assert_eq!(after["bell"], false, "delivered events are cleared: {after}");
+        assert_eq!(after["clipboard"], json!([]), "{after}");
+    }
+
+    #[test]
+    fn combining_marks_per_cell_are_capped() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        let flood = format!("a{}b", "\u{301}".repeat(10_000));
+        model.feed(flood.as_bytes());
+        let first = model.term.grid()[Line(0)][Column(0)].zerowidth().map_or(0, <[char]>::len);
+        assert_eq!(first, crate::tracker::MAX_COMBINING_PER_CELL);
+        // Output after the flood still lands normally in the next cell.
+        assert_eq!(model.term.grid()[Line(0)][Column(1)].c, 'b');
+        // A wide character takes its marks on the leading cell, under the same cap.
+        model.feed(format!("\r\n\u{4e2d}{}", "\u{301}".repeat(100)).as_bytes());
+        let wide = model.term.grid()[Line(1)][Column(0)].zerowidth().map_or(0, <[char]>::len);
+        assert_eq!(wide, crate::tracker::MAX_COMBINING_PER_CELL);
     }
 
     /// A 2x2 RGB frame, base64 of 12 zero bytes; small enough to inline.

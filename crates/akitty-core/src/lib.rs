@@ -46,6 +46,7 @@ enum Request {
     CommandDeny { id: u64, lease: u64 },
     ControlAudit { id: u64, after: Option<u64> },
     CommandHistory { id: u64, after: Option<u64> },
+    ShellState { id: u64 },
     CommandOutput { id: u64, command_id: u64 },
     Close {
         id: u64,
@@ -151,6 +152,18 @@ pub fn request(bytes: &[u8]) -> Value {
 }
 
 /// The serialized response envelope for one request.
+fn lock_registry() -> std::sync::MutexGuard<'static, Registry> {
+    REGISTRY.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct CreatingSlot;
+
+impl Drop for CreatingSlot {
+    fn drop(&mut self) {
+        lock_registry().creating -= 1;
+    }
+}
+
 fn respond(bytes: &[u8]) -> Vec<u8> {
     let result = match guarded(bytes) {
         Ok(Reply::Json(json)) => return format!(r#"{{"version":{ABI_VERSION},"ok":true,"data":{json}}}"#).into_bytes(),
@@ -193,6 +206,9 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
             let id = registry.next_id;
             registry.creating += 1;
             drop(registry);
+            // Releases the reserved slot even if `Session::new` panics; `guarded` catches the
+            // panic, and without this each one would leak a slot until Create always failed.
+            let reservation = CreatingSlot;
             let created = session::Session::new(
                 cols,
                 rows,
@@ -202,11 +218,8 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 scrollback.unwrap_or(5000),
                 shell_integration_dir,
             );
-            let mut registry = REGISTRY
-                .get()
-                .unwrap()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut registry = lock_registry();
+            std::mem::forget(reservation);
             registry.creating -= 1;
             let session = Arc::new(created?);
             registry.sessions.insert(id, session);
@@ -231,6 +244,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 | Request::CommandDeny { id, .. }
                 | Request::ControlAudit { id, .. }
                 | Request::CommandHistory { id, .. }
+                | Request::ShellState { id }
                 | Request::CommandOutput { id, .. }
                 | Request::Input { id, .. }
                 | Request::InputBytes { id, .. }
@@ -259,6 +273,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 Request::CommandExecute { lease, authorization, command, .. } => session.command_execute(lease, authorization, command),
                 Request::ControlAudit { after, .. } => session.control_audit(after.unwrap_or(0)),
                 Request::CommandHistory { after, .. } => session.command_history(after.unwrap_or(0)),
+                Request::ShellState { .. } => session.shell_state(),
                 Request::CommandOutput { command_id, .. } => session.command_output(command_id),
                 Request::Snapshot { since, compact, .. } => return session.snapshot(since, compact.unwrap_or(false)).map(Reply::Json),
                 Request::Input { text, paste, .. } => {

@@ -1,5 +1,15 @@
 import type { IDisposable, IEvent } from './interfaces';
 
+function reportListenerError(error: unknown): void {
+  if (typeof globalThis.reportError === 'function') {
+    globalThis.reportError(error);
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
+  }
+}
+
 export class EventEmitter<T> {
   private listeners: Array<(arg: T) => void> = [];
 
@@ -7,8 +17,14 @@ export class EventEmitter<T> {
     // Snapshot so a listener removing itself cannot shift iteration past its
     // successor, and listeners added during dispatch never see the current event.
     const listeners = this.listeners.slice();
+    // A throwing listener (e.g. a host IPC channel already closed) must not abort the caller midway
+    // through a write or keypress, nor starve the listeners after it; report it asynchronously instead.
     for (const listener of listeners) {
-      listener(arg);
+      try {
+        listener(arg);
+      } catch (error) {
+        reportListenerError(error);
+      }
     }
   }
 

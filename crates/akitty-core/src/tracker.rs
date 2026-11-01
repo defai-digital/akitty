@@ -11,6 +11,7 @@
 use crate::graphics::Graphics;
 use crate::model::Events;
 use alacritty_terminal::grid::{Dimensions, GridCell};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{
@@ -18,6 +19,11 @@ use alacritty_terminal::vte::ansi::{
     KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, PrivateMode, Rgb, ScpCharPath, ScpUpdateMode,
     StandardCharset, TabulationClearMode, cursor_icon::CursorIcon,
 };
+
+/// Combining marks kept per cell. The engine appends every zero-width character to the
+/// previous cell without limit, so `a` followed by millions of U+0301 grew memory without
+/// bound and made every snapshot of that cell oversized. Real grapheme clusters stay far below this.
+pub const MAX_COMBINING_PER_CELL: usize = 16;
 
 /// Grid bookkeeping the model keeps between parser runs.
 #[derive(Clone)]
@@ -98,6 +104,22 @@ impl<'a> Tracker<'a> {
         }
     }
 
+    /// True when the cell the engine would attach a zero-width character to already holds
+    /// [`MAX_COMBINING_PER_CELL`] marks. Mirrors the engine's own target-cell choice.
+    fn combining_full(&self) -> bool {
+        let grid = self.term.grid();
+        let cursor = &grid.cursor;
+        let mut column = cursor.point.column;
+        if !cursor.input_needs_wrap {
+            column.0 = column.saturating_sub(1);
+        }
+        let row = &grid[cursor.point.line];
+        if row[column].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            column.0 = column.saturating_sub(1);
+        }
+        row[column].zerowidth().is_some_and(|marks| marks.len() >= MAX_COMBINING_PER_CELL)
+    }
+
     /// Rows `clear_viewport` will rotate into history: one past the last
     /// viewport row holding an occupied cell, mirroring alacritty's own scan.
     fn viewport_rows_in_use(&self) -> i32 {
@@ -131,6 +153,9 @@ impl Handler for Tracker<'_> {
     }
 
     fn input(&mut self, c: char) {
+        if unicode_width::UnicodeWidthChar::width(c) == Some(0) && self.combining_full() {
+            return;
+        }
         let before = self.term.grid().cursor.point;
         self.term.input(c);
         self.wrap_scrolled(before);

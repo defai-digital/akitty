@@ -63,7 +63,7 @@ extension TerminalSession {
         let lease = try session.acquireControl(actor: actor)
         var dispatchAttempted = false
         do {
-            guard let snapshot = try session.snapshot(), let shell = snapshot.shell, shell.ready else { throw AkittyError.core("An integrated shell prompt is required.") }
+            guard let shell = try session.shellState().shell, shell.ready else { throw AkittyError.core("An integrated shell prompt is required.") }
             let request = AgentCommandRequest(sessionID: session.id, actor: actor, command: command, cwd: shell.cwd)
             guard try await approve(request) else { try session.denyCommand(lease: lease); throw AkittyError.core("Command execution denied.") }
             let authorization = try session.authorizeCommand(lease: lease, command: command, expectedDirectory: request.cwd)

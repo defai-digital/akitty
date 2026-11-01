@@ -309,6 +309,11 @@ public struct ChromeDocument: Codable, Equatable, Sendable {
     }
 }
 
+public struct ShellState: Codable, Sendable {
+    public let shell: ShellSummary?
+    public let control: ControlSummary?
+}
+
 public struct ShellSummary: Codable, Sendable {
     public let cwd: String?
     public let ready: Bool
@@ -459,6 +464,10 @@ public final class TerminalSession: @unchecked Sendable {
     public func close() throws {
         try close { id in _ = try CoreBridge.call(["op": "close", "id": id]) }
     }
+    private var isClosed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return closed
+    }
     private func markClosed() -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { return false }
@@ -494,13 +503,13 @@ public final class TerminalSession: @unchecked Sendable {
     /// Pass the snapshot you hold as `base` (and its revision as `since`) to receive only the rows that changed;
     /// the result is always a complete snapshot.
     public func snapshot(since: UInt64? = nil, base: Snapshot? = nil) throws -> Snapshot? {
-        let data: Data = try {
-            lock.lock(); defer { lock.unlock() }
-            guard !closed else { throw AkittyError.core("Session is closed") }
-            var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true]
-            if let since { request["since"] = since }
-            return try CoreBridge.raw(request)
-        }()
+        // Only the closed check needs the lock. Holding it across the core call would make main-thread
+        // input, resize and mouse reports wait behind a large background snapshot. Session IDs are never
+        // reused, so a close that lands meanwhile just makes the core answer with an error.
+        guard !isClosed else { throw AkittyError.core("Session is closed") }
+        var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true]
+        if let since { request["since"] = since }
+        let data = try CoreBridge.raw(request)
         // The cells are most of a busy snapshot; they are read by hand and the rest by JSONDecoder.
         let scanned = CellScanner.split(data)
         let reply = try JSONDecoder().decode(SnapshotReply.self, from: scanned?.rest ?? data)
@@ -522,13 +531,18 @@ public final class TerminalSession: @unchecked Sendable {
         // Check the pixel cap before multiplication so even Int.max input fails safely.
         guard width > 0, height > 0, width <= (8 * 1_048_576) / height else { return nil }
         let count = width * height * 4
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { return nil }
+        // As with snapshots, the copy (up to 32 MiB) runs without the session lock; a closed ID reads as 0.
+        guard !isClosed else { return nil }
         var data = Data(count: count)
         let copied = data.withUnsafeMutableBytes { raw in
             akitty_image_read_v1(id, image, raw.bindMemory(to: UInt8.self).baseAddress, count)
         }
         return copied == count ? data : nil
+    }
+    /// Shell and control summaries read without taking a snapshot. A snapshot hands its pending
+    /// bell, clipboard request and animation transition to whoever asked, so only the poller may take one.
+    public func shellState() throws -> ShellState {
+        try JSONDecoder().decode(ShellState.self, from: call("shell_state"))
     }
     public func commandHistory(after: UInt64 = 0) throws -> Data { try call("command_history", ["after": after]) }
     public func commandOutput(_ commandID: UInt64) throws -> Data { try call("command_output", ["command_id": commandID]) }

@@ -45,3 +45,24 @@ describe('EventEmitter', () => {
     expect(seen).toEqual([1, 2, 102]);
   });
 });
+
+describe('EventEmitter listener isolation', () => {
+  test('a throwing listener does not abort fire or starve later listeners', async () => {
+    const emitter = new EventEmitter<number>();
+    const seen: number[] = [];
+    const reported: unknown[] = [];
+    const original = globalThis.reportError;
+    globalThis.reportError = (error: unknown) => reported.push(error);
+    try {
+      emitter.event(() => {
+        throw new Error('closed channel');
+      });
+      emitter.event((arg) => seen.push(arg));
+      expect(() => emitter.fire(7)).not.toThrow();
+    } finally {
+      globalThis.reportError = original;
+    }
+    expect(seen).toEqual([7]);
+    expect(reported).toHaveLength(1);
+  });
+});

@@ -42,6 +42,17 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(snapshot.textOffset(row: 0, col: 5), 5)
         XCTAssertNil(try session.snapshot(since: snapshot.revision))
     }
+    func testShellStateDoesNotConsumeSnapshotBellOrClipboard() throws {
+        let session = try TerminalSession(cols: 20, rows: 3, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{7}\u{1b}]52;c;aGVsbG8=\u{7}"])
+        let state = try session.shellState()
+        XCTAssertEqual(state.control?.owner, "human")
+        XCTAssertEqual(state.shell?.untrusted, true)
+        let snapshot = try XCTUnwrap(session.snapshot())
+        XCTAssertEqual(snapshot.bell, true)
+        XCTAssertEqual(snapshot.clipboard, ["hello"])
+    }
     func testClosedSessionCannotBeUsedAndCloseIsIdempotent() throws {
         let session = try TerminalSession(headless: true)
         try session.close(); try session.close()

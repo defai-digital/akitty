@@ -245,6 +245,21 @@ class TitleBellScanner {
 // ============================================================================
 
 export class Terminal implements ITerminalCore {
+  /** Largest accepted column or row count; keeps wasm and canvas allocations bounded. */
+  static readonly MAX_DIMENSION = 4096;
+  /**
+   * Ghostty bounds scrollback in bytes, not lines: a page costs about 13 bytes per cell and the
+   * smallest budget still keeps one page (~1 MiB). Convert the xterm-style line count with headroom,
+   * and never pass 0, which the wasm build treats as unlimited.
+   */
+  private static readonly SCROLLBACK_BYTES_PER_CELL = 16;
+  private static readonly SCROLLBACK_MAX_BYTES = 512 * 1024 * 1024;
+  static scrollbackBytes(lines: number | undefined, cols: number): number {
+    const safeLines = Number.isFinite(lines) && (lines as number) > 0 ? Math.floor(lines as number) : 0;
+    const bytes = safeLines * Math.max(1, cols) * Terminal.SCROLLBACK_BYTES_PER_CELL;
+    return Math.max(1, Math.min(bytes, Terminal.SCROLLBACK_MAX_BYTES));
+  }
+
   // Public properties (xterm.js compatibility)
   public cols: number;
   public rows: number;
@@ -317,6 +332,7 @@ export class Terminal implements ITerminalCore {
   // Lifecycle state
   private isOpen = false;
   private isDisposed = false;
+  private addedParentTabIndex = false;
   private animationFrameId?: number;
 
   // Addons
@@ -523,12 +539,7 @@ export class Terminal implements ITerminalCore {
    */
   private buildWasmConfig(): GhosttyTerminalConfig | undefined {
     const theme = this.options.theme;
-    const scrollback = this.options.scrollback;
-
-    // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
-      return undefined;
-    }
+    const scrollback = Terminal.scrollbackBytes(this.options.scrollback, this.cols);
 
     // Build palette array from theme colors
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
@@ -587,6 +598,7 @@ export class Terminal implements ITerminalCore {
       // Make parent focusable if it isn't already
       if (!parent.hasAttribute('tabindex')) {
         parent.setAttribute('tabindex', '0');
+        this.addedParentTabIndex = true;
       }
 
       // Mark as contenteditable so browser extensions (Vimium, etc.) recognize
@@ -891,6 +903,18 @@ export class Terminal implements ITerminalCore {
    */
   resize(cols: number, rows: number): void {
     this.assertOpen();
+
+    // Host-supplied sizes reach wasm and the canvas directly; reject anything that is not a sane grid.
+    if (
+      !Number.isInteger(cols) ||
+      !Number.isInteger(rows) ||
+      cols < 1 ||
+      rows < 1 ||
+      cols > Terminal.MAX_DIMENSION ||
+      rows > Terminal.MAX_DIMENSION
+    ) {
+      throw new RangeError(`Invalid terminal size ${cols}x${rows}`);
+    }
 
     if (cols === this.cols && rows === this.rows) {
       return; // No change
@@ -1529,6 +1553,10 @@ export class Terminal implements ITerminalCore {
       this.element.removeAttribute('role');
       this.element.removeAttribute('aria-label');
       this.element.removeAttribute('aria-multiline');
+      if (this.addedParentTabIndex) {
+        this.element.removeAttribute('tabindex');
+        this.addedParentTabIndex = false;
+      }
     }
 
     // Remove document-level listeners unconditionally when document exists:

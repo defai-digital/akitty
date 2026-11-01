@@ -128,6 +128,12 @@ impl Session {
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
         Ok(self.model.lock().map_err(|_| "terminal unavailable")?.shell.history(after))
     }
+    /// Shell and control summaries without a snapshot's side effects: a snapshot consumes
+    /// pending bell and clipboard events, so hosts must not take one just to read the cwd.
+    pub fn shell_state(&self) -> Result<Value, String> {
+        let model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        Ok(serde_json::json!({"shell": model.shell.summary(), "control": model.control.summary()}))
+    }
     pub fn command_output(&self, id: u64) -> Result<Value, String> {
         self.model.lock().map_err(|_| "terminal unavailable")?.shell.command_output(id)
     }
@@ -369,6 +375,24 @@ fn read_pty(fd: i32, buffer: &mut [u8], hung_up: bool) -> Result<Option<usize>, 
     Err(format!("PTY read failed: {error}"))
 }
 
+const MAX_REPLY_BACKLOG: usize = 65_536;
+const REPLY_BACKLOG_ERROR: &str = "terminal replies dropped: the program is not reading them";
+
+/// Queues terminal replies (DSR, DA, ...) for the PTY. A program that floods queries without
+/// reading the answers (e.g. `cat` of a captured log) must not take the session down, so once
+/// the unread backlog reaches the cap new replies are dropped. Returns false when it dropped.
+fn queue_replies(output: &mut VecDeque<(Vec<u8>, usize, bool)>, response_pending: &mut usize, replies: Vec<u8>) -> bool {
+    if replies.is_empty() {
+        return true;
+    }
+    if *response_pending + replies.len() > MAX_REPLY_BACKLOG {
+        return false;
+    }
+    *response_pending += replies.len();
+    output.push_back((replies, 0, false));
+    true
+}
+
 fn run(
     master: Box<dyn portable_pty::MasterPty + Send>,
     mut child: ChildGuard,
@@ -384,13 +408,10 @@ fn run(
     let mut io_error = None;
     while !stop.load(Ordering::SeqCst) {
         let replies = model.lock().map_err(|_| "terminal state poisoned")?.expire_sync();
-        if !replies.is_empty() {
-            response_pending += replies.len();
-            if response_pending > 65536 {
-                io_error = Some("terminal response backpressure limit".into());
-                break;
-            }
-            output.push_back((replies, 0, false));
+        if !queue_replies(&mut output, &mut response_pending, replies)
+            && let Ok(mut state) = model.lock()
+        {
+            state.error = Some(REPLY_BACKLOG_ERROR.into());
         }
         for command in rx.try_iter().take(16) {
             match command {
@@ -457,13 +478,8 @@ fn run(
                 Ok(Some(count)) => {
                     let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
                     let replies = state.feed(&buffer[..count]);
-                    if !replies.is_empty() {
-                        response_pending += replies.len();
-                        if response_pending > 65536 {
-                            io_error = Some("terminal response backpressure limit".into());
-                            break;
-                        }
-                        output.push_back((replies, 0, false));
+                    if !queue_replies(&mut output, &mut response_pending, replies) {
+                        state.error = Some(REPLY_BACKLOG_ERROR.into());
                     }
                 }
                 Ok(None) => {},
@@ -607,5 +623,27 @@ mod tests {
         // The queued input is the only message; no resize followed it.
         assert!(matches!(rx.try_recv(), Ok(Command::Input(_))));
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn reply_flood_is_dropped_at_the_backlog_cap_instead_of_ending_the_session() {
+        let mut output = VecDeque::new();
+        let mut pending = 0;
+        let reply = b"\x1b[1;1R".to_vec();
+        let mut dropped = 0;
+        for _ in 0..20_000 {
+            if !queue_replies(&mut output, &mut pending, reply.clone()) {
+                dropped += 1;
+            }
+        }
+        assert!(pending <= MAX_REPLY_BACKLOG);
+        assert_eq!(pending, output.iter().map(|(bytes, _, _)| bytes.len()).sum::<usize>());
+        assert!(dropped > 0);
+        assert!(queue_replies(&mut output, &mut pending, Vec::new()), "empty replies are never a drop");
     }
 }

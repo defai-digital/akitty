@@ -66,7 +66,14 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | program_chrome | id, enabled | When false, `OSC 771` no longer changes the document |
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
-sessions and 5,000 scrollback lines per session. Input/reply queues are bounded.
+sessions and 5,000 scrollback lines per session. Input/reply queues are bounded:
+when a program leaves more than 64 KiB of terminal replies (DSR, DA, ...) unread,
+further replies are dropped and the snapshot `error` says so; the session stays up.
+A cell keeps at most 16 combining marks; later ones are dropped. A forwarded OSC body
+longer than 128 KiB is cancelled (the parser sees CAN) and its tail is discarded up to
+the terminator. A snapshot that would exceed the 8 MiB response limit is an error and
+does not consume its pending bell, clipboard requests or animation transitions; the
+next successful snapshot carries them, and the next poll after a failure is a full one.
 Snapshots include authoritative Rust cell coordinates, colors, flags, cursor,
 mode state, visible text, title, clipboard requests and lifecycle/error status.
 Swift converts cells to UTF-16 offsets only for macOS text/accessibility APIs.
@@ -151,7 +158,7 @@ that exceeds this bound returns an error rather than omitting visible images;
 unresolved placeholders do not count toward the limit. Successful `cell_size`
 changes invalidate the snapshot revision so cached placeholder geometry refreshes.
 
-**Program chrome.** A session holds one chrome document: a one-line status, a mark, a progress value, and an optional sprite. Two entries share one validator. A program sends `OSC 771` as `ESC ] 771 ; <json> BEL` or `ESC ] 771 ; <json> ST` (`ESC \`). The JSON is the document itself (no `op` or `id`). A host sends the same fields to `akitty_request_v1` as `{ "op": "chrome", "id", ... }`. `OSC 771` is removed from the byte stream before the terminal parser, including when it is rejected or its body exceeds 64 KiB, so it never appears as grid text. That cap applies only to `OSC 771`. Every other OSC sequence, including title `OSC 0` and `OSC 2` and a clipboard `OSC 52` whose base64 is larger than 64 KiB, passes through unchanged. The shell title stays the window title and the tab label; chrome text does not replace it. A title that is empty after control characters are removed (`ESC ] 2 ; BEL`, as a program clearing its title on exit sends) restores the default `Akitty`, as the title reset `CSI 23 t` does, so a tab is never blank. There is no video decoder and no plugin or script runtime.
+**Program chrome.** A session holds one chrome document: a one-line status, a mark, a progress value, and an optional sprite. Two entries share one validator. A program sends `OSC 771` as `ESC ] 771 ; <json> BEL` or `ESC ] 771 ; <json> ST` (`ESC \`). The JSON is the document itself (no `op` or `id`). A host sends the same fields to `akitty_request_v1` as `{ "op": "chrome", "id", ... }`. `OSC 771` is removed from the byte stream before the terminal parser, including when it is rejected or its body exceeds 64 KiB, so it never appears as grid text. That cap applies only to `OSC 771`. Every other OSC sequence, including title `OSC 0` and `OSC 2` and a clipboard `OSC 52` whose base64 is larger than 64 KiB, passes through unchanged up to a 128 KiB body. The shell title stays the window title and the tab label; chrome text does not replace it. A title that is empty after control characters are removed (`ESC ] 2 ; BEL`, as a program clearing its title on exit sends) restores the default `Akitty`, as the title reset `CSI 23 t` does, so a tab is never blank. There is no video decoder and no plugin or script runtime.
 
 Each accepted update replaces the whole document. Omitted fields clear the previous ones. `"clear": true` removes the document and skips the other checks. An empty update is an error and does not replace anything. A rejected update, from either entry, leaves the previous document in place. `OSC 771` that fails validation is consumed and reported only by leaving the document unchanged. The ABI returns `{ "ok": false, "error" }`.
 
@@ -222,6 +229,7 @@ These are additive schema-1 operations; no C symbols or existing fields change.
 | Operation | Fields after id | Result / behavior |
 | --- | --- | --- |
 | command_history | after? (default 0) | commands with id > after, oldest_id, last_id, untrusted |
+| shell_state | none | `{shell, control}`, the same summaries a snapshot carries, without consuming the snapshot's pending bell, clipboard or animation state |
 | command_output | command_id | command_id, output_base64, truncated, complete, untrusted; unknown/evicted id fails |
 | control_acquire | actor | exclusive lease; actor 1–64 UTF-8 bytes without controls |
 | control_release | lease | return control; stale lease fails |

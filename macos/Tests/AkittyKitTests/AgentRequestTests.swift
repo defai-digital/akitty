@@ -135,6 +135,19 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertFalse(accepted, "the absolute deadline must hold even before the timeout callback runs")
     }
 
+    @MainActor func testClosingTheWindowUnderAnApprovalSheetResolvesAsDenied() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let alert = AgentCommandHost.approvalAlert(AgentCommandRequest(sessionID: 1, actor: "test", command: "echo gone", cwd: nil))
+        let pending = Task { await AgentRequests.present(alert, in: window, timeout: 30) }
+        try await waitUntil { window.attachedSheet != nil }
+        // A shell exiting closes its window directly, bypassing the sheet guard in windowShouldClose.
+        window.close()
+        let accepted = await pending.value
+        XCTAssertFalse(accepted, "a request whose window went away must resolve, and never as approved")
+    }
+
     @MainActor func testDisconnectDisableAndCooldownCannotAuthorize() async throws {
         _ = NSApplication.shared
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
