@@ -10,7 +10,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import type { Terminal } from './terminal';
+import { Ghostty } from './ghostty';
+import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
 /**
@@ -88,6 +89,45 @@ describe('Terminal', () => {
       });
       expect(term.cols).toBe(120);
       expect(term.rows).toBe(40);
+    });
+
+    test('rejects noninteger and out-of-range dimensions before allocating', async () => {
+      const ghostty = await Ghostty.load();
+      const invalid: Array<{ cols: number; rows: number }> = [
+        { cols: 0, rows: 24 },
+        { cols: 80, rows: 0 },
+        { cols: -1, rows: 24 },
+        { cols: 80, rows: -1 },
+        { cols: 80.5, rows: 24 },
+        { cols: 80, rows: 24.5 },
+        { cols: Number.NaN, rows: 24 },
+        { cols: 80, rows: Number.POSITIVE_INFINITY },
+        { cols: Terminal.MAX_DIMENSION + 1, rows: 24 },
+        { cols: 80, rows: Terminal.MAX_DIMENSION + 1 },
+      ];
+
+      for (const dims of invalid) {
+        expect(() => new Terminal({ ...dims, ghostty })).toThrow(RangeError);
+      }
+    });
+
+    test('accepts the smallest and largest valid dimensions', async () => {
+      const ghostty = await Ghostty.load();
+
+      const smallest = new Terminal({ cols: 1, rows: 1, ghostty });
+      expect([smallest.cols, smallest.rows]).toEqual([1, 1]);
+      smallest.dispose();
+
+      const largest = new Terminal({
+        cols: Terminal.MAX_DIMENSION,
+        rows: Terminal.MAX_DIMENSION,
+        ghostty,
+      });
+      expect([largest.cols, largest.rows]).toEqual([
+        Terminal.MAX_DIMENSION,
+        Terminal.MAX_DIMENSION,
+      ]);
+      largest.dispose();
     });
   });
 
@@ -276,6 +316,170 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('resize() syncs options so a later options.cols assignment keeps the direct rows', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container!);
+
+      const resizeEvents: Array<{ cols: number; rows: number }> = [];
+      term.onResize((event) => resizeEvents.push(event));
+
+      term.resize(100, 30);
+      expect([term.cols, term.rows]).toEqual([100, 30]);
+
+      // A direct resize must publish the committed pair into the mutable options. Without it this
+      // single-column assignment would pair 120 with the constructor's stale row count of 24.
+      term.options.cols = 120;
+
+      const wasmTerm = (term as any).wasmTerm;
+      expect([term.cols, term.rows]).toEqual([120, 30]);
+      expect([term.options.cols, term.options.rows]).toEqual([120, 30]);
+      expect(wasmTerm.getDimensions()).toEqual({ cols: 120, rows: 30 });
+      // No intermediate 120x24 resize may be announced either.
+      expect(resizeEvents).toEqual([
+        { cols: 100, rows: 30 },
+        { cols: 120, rows: 30 },
+      ]);
+
+      term.dispose();
+    });
+
+    test('resize() preserves 80x24 when wasm resize throws once and the retry succeeds', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container!);
+
+      const wasmTerm = (term as any).wasmTerm;
+      const originalResize = wasmTerm.resize.bind(wasmTerm);
+      let attempts = 0;
+      wasmTerm.resize = (cols: number, rows: number) => {
+        attempts++;
+        if (attempts === 1) throw new Error('wasm resize failed');
+        originalResize(cols, rows);
+      };
+
+      expect(() => term.resize(100, 30)).toThrow('wasm resize failed');
+      // The thrown wasm resize must not publish the new size, so the identical
+      // retry below is not treated as a no-op.
+      expect(term.cols).toBe(80);
+      expect(term.rows).toBe(24);
+
+      term.resize(100, 30);
+      expect(term.cols).toBe(100);
+      expect(term.rows).toBe(30);
+      expect(attempts).toBe(2);
+
+      term.dispose();
+    });
+
+    test('resize() keeps the committed 100x30 grid when render throws once', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container!);
+
+      const renderer = (term as any).renderer;
+      const originalRender = renderer.render.bind(renderer);
+      let renderAttempts = 0;
+      renderer.render = (...args: any[]) => {
+        renderAttempts++;
+        if (renderAttempts === 1) throw new Error('render failed');
+        originalRender(...args);
+      };
+
+      // Count invalidations instead of relying on reflowed content, so the assertion is about
+      // the commit path and not about how the wasm reflows this particular text.
+      const detector = (term as any).linkDetector;
+      const originalInvalidate = detector.invalidateCache.bind(detector);
+      let invalidations = 0;
+      detector.invalidateCache = () => {
+        invalidations++;
+        originalInvalidate();
+      };
+
+      const resizeEvents: Array<{ cols: number; rows: number }> = [];
+      term.onResize((event) => resizeEvents.push(event));
+
+      expect(() => term.resize(100, 30)).toThrow('render failed');
+
+      // The renderer accepted the new grid before the paint failed, so nothing is rolled back:
+      // wasm, the public dimensions, the renderer's canvas all describe the new size.
+      const wasmTerm = (term as any).wasmTerm;
+      const metrics = renderer.getMetrics();
+      const canvas = (term as any).canvas;
+      expect([term.cols, term.rows]).toEqual([100, 30]);
+      expect(wasmTerm.getDimensions()).toEqual({ cols: 100, rows: 30 });
+      expect([canvas.width, canvas.height]).toEqual([metrics.width * 100, metrics.height * 30]);
+      expect([canvas.style.width, canvas.style.height]).toEqual([
+        `${metrics.width * 100}px`,
+        `${metrics.height * 30}px`,
+      ]);
+
+      // Links are invalidated even though the frame never painted, and the resize event is not
+      // fired because it describes a painted frame.
+      expect(invalidations).toBe(1);
+      expect(resizeEvents).toEqual([]);
+
+      // A later resize renders the committed grid and reports the final size exactly once.
+      term.resize(120, 40);
+      expect(renderAttempts).toBe(2);
+      expect(wasmTerm.getDimensions()).toEqual({ cols: 120, rows: 40 });
+      expect(invalidations).toBe(2);
+      expect(resizeEvents).toEqual([{ cols: 120, rows: 40 }]);
+
+      term.dispose();
+    });
+
+    test('options.cols assignment keeps 80x24 when wasm resize throws once and the retry succeeds', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container!);
+
+      const wasmTerm = (term as any).wasmTerm;
+      const originalResize = wasmTerm.resize.bind(wasmTerm);
+      let attempts = 0;
+      wasmTerm.resize = (cols: number, rows: number) => {
+        attempts++;
+        if (attempts === 1) throw new Error('wasm resize failed');
+        originalResize(cols, rows);
+      };
+
+      expect(() => { term.options.cols = 100; }).toThrow('wasm resize failed');
+      // The rejected assignment must roll the option back, so the options object
+      // and the public dimensions agree on the old grid.
+      expect(term.options.cols).toBe(80);
+      expect(term.cols).toBe(80);
+      expect(term.rows).toBe(24);
+
+      // A rolled-back option differs from the requested value, so the identical
+      // assignment is retried instead of being swallowed by oldValue equality.
+      term.options.cols = 100;
+      expect(term.options.cols).toBe(100);
+      expect(term.cols).toBe(100);
+      expect(term.rows).toBe(24);
+      expect(attempts).toBe(2);
+
+      term.dispose();
+    });
+
+    test('resize() does not return a cached URL link at its old position after reflow', async () => {
+      const term = await createIsolatedTerminal({ cols: 100, rows: 24 });
+      term.open(container!);
+
+      // Soft-wrapped line: at 100 cols the URL lands on wrapped row 1 (cols 20-43).
+      // The hard second line keeps content below it after the reflow.
+      term.write('A'.repeat(120) + 'https://example.com/docs' + '\r\n' + 'Z'.repeat(80));
+      const detector = (term as any).linkDetector;
+      const oldRow = viewportRowToAbsolute(term, 1);
+      const cached = await detector.getLinkAt(20, oldRow);
+      expect(cached?.text).toBe('https://example.com/docs');
+
+      // Widening to 200 cols unwraps the line: the URL moves to row 0 cols 120-143
+      // and the Z line shifts up into the old row.
+      term.resize(200, 24);
+
+      await expect(detector.getLinkAt(20, oldRow)).resolves.toBeUndefined();
+      const moved = await detector.getLinkAt(120, viewportRowToAbsolute(term, 0));
+      expect(moved?.text).toBe('https://example.com/docs');
+
+      term.dispose();
+    });
+
     test('resize() throws if not open', async () => {
       const term = await createIsolatedTerminal();
       expect(() => term.resize(100, 30)).toThrow('must be opened');
@@ -288,6 +492,47 @@ describe('Terminal', () => {
       term.open(container!);
 
       expect(() => term.clear()).not.toThrow();
+
+      term.dispose();
+    });
+
+    test('clear() drops links cached from a real provider', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container!);
+
+      // The registered UrlRegexProvider populates the real link cache for this row.
+      term.write('https://example.com/docs');
+      const detector = (term as any).linkDetector;
+      const row = viewportRowToAbsolute(term, 0);
+      const cached = await detector.getLinkAt(0, row);
+      expect(cached?.text).toBe('https://example.com/docs');
+
+      term.clear();
+
+      // The screen is empty again, so the same lookup must not surface the cached link.
+      await expect(detector.getLinkAt(0, row)).resolves.toBeUndefined();
+
+      term.dispose();
+    });
+
+    test('clear() cancels a pending OSC so a later BEL rings instead of setting the title', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container!);
+
+      const titles: string[] = [];
+      let bells = 0;
+      term.onTitleChange((title) => titles.push(title));
+      term.onBell(() => bells++);
+
+      // Leave an OSC payload unterminated across the write boundary, then clear mid-sequence.
+      term.write('\x1b]2;Stale Title');
+      term.clear();
+
+      // Back in ground state, this BEL must ring rather than terminate the abandoned OSC.
+      term.write('\x07');
+
+      expect(bells).toBe(1);
+      expect(titles).toEqual([]);
 
       term.dispose();
     });
@@ -2607,6 +2852,100 @@ describe('Options Proxy handleOptionChange', () => {
     expect(term.rows).toBe(40);
 
     term.dispose();
+  });
+
+  test('options.cols assignment keeps the committed grid when render throws once', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+
+    const renderer = (term as any).renderer;
+    const originalRender = renderer.render.bind(renderer);
+    let renderAttempts = 0;
+    renderer.render = (...args: any[]) => {
+      renderAttempts++;
+      if (renderAttempts === 1) throw new Error('render failed');
+      originalRender(...args);
+    };
+
+    // Count invalidations instead of relying on reflowed content, so the assertion is about
+    // the commit path and not about how the wasm reflows this particular text.
+    const detector = (term as any).linkDetector;
+    const originalInvalidate = detector.invalidateCache.bind(detector);
+    let invalidations = 0;
+    detector.invalidateCache = () => {
+      invalidations++;
+      originalInvalidate();
+    };
+
+    const resizeEvents: Array<{ cols: number; rows: number }> = [];
+    term.onResize((event) => resizeEvents.push(event));
+
+    // resize() commits the new grid before the forced paint, so the render failure surfaces
+    // to the caller but must not roll the option back: options stay in step with the grid.
+    expect(() => { term.options.cols = 100; }).toThrow('render failed');
+
+    const wasmTerm = (term as any).wasmTerm;
+    const metrics = renderer.getMetrics();
+    const canvas = (term as any).canvas;
+    expect([term.options.cols, term.options.rows]).toEqual([100, 24]);
+    expect([term.cols, term.rows]).toEqual([100, 24]);
+    expect(wasmTerm.getDimensions()).toEqual({ cols: 100, rows: 24 });
+    expect([canvas.width, canvas.height]).toEqual([metrics.width * 100, metrics.height * 24]);
+    expect([canvas.style.width, canvas.style.height]).toEqual([
+      `${metrics.width * 100}px`,
+      `${metrics.height * 24}px`,
+    ]);
+
+    // Links are invalidated even though the frame never painted, and no resize event describes
+    // a frame that failed to render.
+    expect(invalidations).toBe(1);
+    expect(resizeEvents).toEqual([]);
+
+    // A later mutation renders the committed grid and reports the final size exactly once.
+    term.options.cols = 120;
+    expect(renderAttempts).toBe(2);
+    expect(term.options.cols).toBe(120);
+    expect(wasmTerm.getDimensions()).toEqual({ cols: 120, rows: 24 });
+    expect(invalidations).toBe(2);
+    expect(resizeEvents).toEqual([{ cols: 120, rows: 24 }]);
+
+    term.dispose();
+  });
+
+  test('rejected cols/rows assignment rolls back before options or terminal state change', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    let resizeCount = 0;
+    term.onResize(() => resizeCount++);
+
+    for (const key of ['cols', 'rows'] as const) {
+      for (const value of [0, -1, 1.5, Number.NaN, Terminal.MAX_DIMENSION + 1]) {
+        expect(() => {
+          term.options[key] = value;
+        }).toThrow(RangeError);
+        // Both the proxy target and the published grid must be untouched.
+        expect([term.options.cols, term.options.rows]).toEqual([80, 24]);
+        expect([term.cols, term.rows]).toEqual([80, 24]);
+      }
+    }
+    expect(resizeCount).toBe(0);
+
+    term.dispose();
+  });
+
+  test('rejected cols/rows assignment before open leaves options untouched', async () => {
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+
+    expect(() => {
+      term.options.rows = 0;
+    }).toThrow(RangeError);
+
+    expect([term.options.cols, term.options.rows]).toEqual([80, 24]);
+    expect([term.cols, term.rows]).toEqual([80, 24]);
   });
 
   test('handleOptionChange not called before terminal is open', async () => {

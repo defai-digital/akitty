@@ -170,6 +170,9 @@ impl Session {
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
         let previous_dirty = model.control.dirty;
         let checked = model.control.human_input(); model.revision += 1; checked?;
+        // Zero bytes never reach the PTY, so the prompt was not edited: keep it authorizable
+        // instead of leaving the dirty flag set by human_input behind.
+        if bytes.is_empty() { model.control.dirty = previous_dirty; return self.enqueue_input(bytes); }
         if let Err(error) = self.enqueue_input(bytes) { model.control.dirty = previous_dirty; return Err(error); }
         model.term.scroll_display(Scroll::Bottom); model.revision += 1;
         Ok(())
@@ -581,6 +584,42 @@ mod tests {
         assert!(session.input_bytes(vec![1; 65549]).is_err());
         session.close().unwrap();
         assert!(session.input_bytes(vec![1]).is_err());
+    }
+
+    #[test]
+    fn empty_input_leaves_the_integrated_prompt_authorizable() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        // A headless model with a fake PTY queue behaves like a live shell prompt.
+        let (tx, rx) = mpsc::sync_channel(1);
+        session.commands = Some(tx);
+        session.input(String::new(), false).unwrap();
+        session.input_bytes(Vec::new()).unwrap();
+        assert!(rx.try_recv().is_err(), "empty input must not reach the PTY");
+        assert!(!session.model.lock().unwrap().control.dirty, "empty input must not edit the prompt");
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        session.command_authorize(lease, "echo hi".into(), None).unwrap();
+        session.control_release(Some(lease)).unwrap();
+        // Real bytes still edit the prompt, so the guard stays effective.
+        session.input_bytes(b"x".to_vec()).unwrap();
+        assert!(session.model.lock().unwrap().control.dirty);
+        assert!(matches!(rx.try_recv(), Ok(Command::Input(bytes)) if bytes == b"x"));
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        assert!(session.command_authorize(lease, "echo hi".into(), None).is_err());
+    }
+
+    #[test]
+    fn empty_input_still_reports_headless_and_leased_prompts() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        // Without a PTY even an empty payload keeps the existing transport error.
+        assert_eq!(session.input_bytes(Vec::new()).unwrap_err(), "headless session has no PTY");
+        assert!(!session.model.lock().unwrap().control.dirty);
+        // An agent-controlled prompt still rejects human typing, empty or not.
+        let _lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let error = session.input_bytes(Vec::new()).unwrap_err();
+        assert!(error.contains("agent controls this terminal"), "{error}");
+        assert!(!session.model.lock().unwrap().control.dirty);
     }
 
     #[test]
