@@ -77,6 +77,11 @@ public enum LocalSocket {
         guard timeout.isFinite, timeout > 0, timeout <= 135 else { throw AgentIPCError.failure("Invalid local frame timeout.") }
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         guard !data.isEmpty, data.count <= frameLimit else { throw AgentIPCError.failure("Local frame exceeds 16 KiB.") }
+        // On Darwin, a partial AF_UNIX send can wait for SO_SNDTIMEO even with MSG_DONTWAIT.
+        // Set descriptor nonblocking mode as well so the absolute deadline bounds every send.
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw AgentIPCError.failure("Cannot bound local frame writes.") }
+        defer { _ = fcntl(fd, F_SETFL, flags) }
         var size = UInt32(data.count).bigEndian
         var frame = withUnsafeBytes(of: &size) { Data($0) }; frame.append(data)
         try frame.withUnsafeBytes { bytes in

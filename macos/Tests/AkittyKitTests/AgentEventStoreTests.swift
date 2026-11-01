@@ -94,10 +94,8 @@ final class AgentEventStoreTests: XCTestCase {
         try LocalSocket.configure(pair[0], timeout: 3)
         var small: Int32 = 1024
         XCTAssertEqual(setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &small, socklen_t(MemoryLayout<Int32>.size)), 0)
-        let fill = [UInt8](repeating: 1, count: 4096)
-        while fill.withUnsafeBytes({ send(pair[0], $0.baseAddress, $0.count, MSG_DONTWAIT) }) > 0 {}
         let start = ProcessInfo.processInfo.systemUptime
-        XCTAssertThrowsError(try LocalSocket.writeFrame(Data("blocked".utf8), to: pair[0], timeout: 0.05))
+        XCTAssertThrowsError(try LocalSocket.writeFrame(Data(repeating: 1, count: 16_384), to: pair[0], timeout: 0.05))
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.3)
     }
 
