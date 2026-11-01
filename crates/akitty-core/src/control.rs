@@ -80,11 +80,19 @@ impl Control {
         }
         self.record("dispatched",Some(command.into())); self.awaiting_completion = true; Ok(())
     }
+    /// A consumed grant whose dispatch was rejected is not a running command: without this the
+    /// next unrelated `OSC 133;D` would be reported as that command's completion.
+    pub fn dispatch_failed(&mut self) {
+        self.awaiting_completion = false; self.record("dispatch_failed",None);
+    }
     pub fn observed_completion(&mut self) {
         if self.awaiting_completion {
             self.record("shell_completion_observed_untrusted",None); self.awaiting_completion = false;
         }
     }
+    /// Sequence of the last appended audit event, so wrappers can tell a state-only rejection
+    /// (no audit) from one that recorded evidence the host must still see.
+    pub fn audit_seq(&self) -> u64 { self.seq }
     pub fn summary(&self) -> Value {
         json!({"owner":self.lease.as_ref().map(|l|l.1.as_str()).unwrap_or("human"),"agent":self.lease.is_some(),"audit_seq":self.seq})
     }

@@ -8,6 +8,7 @@
  * take precedence over regex-detected URLs.
  */
 
+import { cellChar } from '../codepoint';
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
 
 /**
@@ -52,8 +53,8 @@ export class UrlRegexProvider implements ILinkProvider {
       return;
     }
 
-    // Convert line cells to text
-    const lineText = this.lineToText(line);
+    // Convert line cells to text, keeping the cell column for every text index
+    const { text: lineText, cellByTextIndex } = this.lineToText(line);
 
     // Reset regex state (global flag maintains state)
     UrlRegexProvider.URL_REGEX.lastIndex = 0;
@@ -62,15 +63,21 @@ export class UrlRegexProvider implements ILinkProvider {
     let match: RegExpExecArray | null = UrlRegexProvider.URL_REGEX.exec(lineText);
     while (match !== null) {
       let url = match[0];
-      const startX = match.index;
-      let endX = match.index + url.length - 1; // Inclusive end
+      const startIndex = match.index;
+      let endIndex = startIndex + url.length - 1; // Inclusive end
 
       // Strip trailing punctuation
       const stripped = url.replace(UrlRegexProvider.TRAILING_PUNCTUATION, '');
       if (stripped.length < url.length) {
         url = stripped;
-        endX = startX + url.length - 1;
+        endIndex = startIndex + url.length - 1;
       }
+
+      // Regex offsets are UTF-16 code-unit indices, but link ranges are cell
+      // columns; the two diverge after astral codepoints (two UTF-16 code units
+      // in a single cell, and one UTF-16 code unit per spacer cell).
+      const startX = cellByTextIndex[startIndex] ?? startIndex;
+      const endX = cellByTextIndex[endIndex] ?? endIndex;
 
       // Skip if URL is too short (e.g., just "http://")
       if (url.length > 8) {
@@ -97,28 +104,39 @@ export class UrlRegexProvider implements ILinkProvider {
   }
 
   /**
-   * Convert a buffer line to plain text string
+   * Convert a buffer line to plain text and record the cell column that
+   * produced every UTF-16 index in that text.
+   *
+   * One cell contributes its codepoint's text: a single UTF-16 code unit for
+   * BMP characters, two for astral codepoints. Null, missing, control, and
+   * otherwise-invalid cells each contribute one space. The per-index mapping
+   * is what lets regex match offsets (UTF-16 indices) be translated back to
+   * cell columns.
    */
-  private lineToText(line: IBufferLineForUrlProvider): string {
+  private lineToText(line: IBufferLineForUrlProvider): {
+    text: string;
+    cellByTextIndex: number[];
+  } {
     const chars: string[] = [];
+    const cellByTextIndex: number[] = [];
 
     for (let x = 0; x < line.length; x++) {
       const cell = line.getCell(x);
-      if (!cell) {
-        chars.push(' ');
-        continue;
-      }
+      const codepoint = cell ? cell.getCodepoint() : 0;
+      // Empty and control cells read as one space. cellChar guards the rest
+      // (negative, surrogate, and above U+10FFFF raw values), so an invalid
+      // codepoint still contributes exactly one space instead of throwing.
+      const char = codepoint === 0 || codepoint < 32 ? ' ' : cellChar(codepoint);
 
-      const codepoint = cell.getCodepoint();
-      // Skip null characters and control characters
-      if (codepoint === 0 || codepoint < 32) {
-        chars.push(' ');
-      } else {
-        chars.push(String.fromCodePoint(codepoint));
+      chars.push(char);
+      // Astral codepoints are a surrogate pair, so both code units map to the
+      // same cell column.
+      for (let unit = 0; unit < char.length; unit++) {
+        cellByTextIndex.push(x);
       }
     }
 
-    return chars.join('');
+    return { text: chars.join(''), cellByTextIndex };
   }
 
   dispose(): void {

@@ -126,10 +126,12 @@ final class AgentRequestTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; defer { window.close() }
         let alert = AgentCommandHost.approvalAlert(AgentCommandRequest(sessionID: 1, actor: "test", command: "echo late", cwd: nil))
-        let pending = Task { await AgentRequests.present(alert, in: window, timeout: 0.1) }
+        var instant: TimeInterval = 0
+        let pending = Task { await AgentRequests.present(alert, in: window, timeout: 30, now: { instant }) }
         try await waitUntil { window.attachedSheet != nil }
-        // A busy main run loop can delay the timer past the nominal expiry.
-        usleep(150_000)
+        // Advance past the absolute deadline before the real timer fires. A short
+        // real timeout could remove the sheet before a loaded runner observes it.
+        instant = 31
         window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
         let accepted = await pending.value
         XCTAssertFalse(accepted, "the absolute deadline must hold even before the timeout callback runs")

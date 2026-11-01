@@ -237,6 +237,42 @@ describe('SelectionManager', () => {
       term.dispose();
     });
 
+    test('getSelection omits the spacer cell after a wide character (漢a)', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+
+      // 漢 is two cells wide, so cell 1 is its zero-width spacer; "a" is cell 2.
+      term.write('漢a\r\n');
+
+      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
+      setSelectionAbsolute(term, 0, scrollbackLen, 2, scrollbackLen);
+
+      const selMgr = (term as any).selectionManager;
+      expect(selMgr.getSelection()).toBe('漢a');
+
+      term.dispose();
+    });
+
+    test('getSelection omits the spacer cell before a trailing wide character (a漢b)', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+
+      // Cells: 0="a", 1="漢", 2=spacer, 3="b".
+      term.write('a漢b\r\n');
+
+      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
+      setSelectionAbsolute(term, 0, scrollbackLen, 3, scrollbackLen);
+
+      const selMgr = (term as any).selectionManager;
+      expect(selMgr.getSelection()).toBe('a漢b');
+
+      term.dispose();
+    });
+
     test('getSelection extracts text spanning scrollback and screen', async () => {
       if (!container) return;
 
@@ -581,6 +617,108 @@ describe('SelectionManager', () => {
       document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       outside.remove();
       expect(selMgr.mouseDownTarget).toBeNull();
+    });
+  });
+
+  describe('Canvas listener cleanup', () => {
+    test('dispose() removes the five canvas selection listeners with identical references', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      const selMgr = (term as any).selectionManager;
+      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
+
+      // Snapshot the stored references before dispose nulls them.
+      const stored: Array<[string, (e: MouseEvent) => void]> = [
+        ['mousedown', selMgr.boundCanvasMouseDownHandler],
+        ['mousemove', selMgr.boundCanvasMouseMoveHandler],
+        ['mouseleave', selMgr.boundCanvasMouseLeaveHandler],
+        ['mouseenter', selMgr.boundCanvasMouseEnterHandler],
+        ['dblclick', selMgr.boundCanvasDblClickHandler],
+      ];
+      for (const [type, handler] of stored) {
+        expect(typeof handler).toBe('function');
+        expect(type).toBeTruthy();
+      }
+
+      const removed: Array<[string, unknown]> = [];
+      const origRemove = canvas.removeEventListener;
+      (canvas as any).removeEventListener = function (type: string, listener: any, options?: any) {
+        removed.push([type, listener]);
+        return origRemove.call(this, type, listener, options);
+      };
+      try {
+        selMgr.dispose();
+      } finally {
+        canvas.removeEventListener = origRemove;
+      }
+
+      for (const [type, handler] of stored) {
+        const match = removed.find(([, removedHandler]) => removedHandler === handler);
+        expect(match?.[0]).toBe(type);
+      }
+
+      term.dispose();
+    });
+
+    test('a disposed manager no longer reacts to canvas selection events', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      term.write('Hello World\r\n');
+
+      const selMgr = (term as any).selectionManager;
+      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
+
+      // The live manager reacts to a canvas mousedown: it starts a selection.
+      canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+      expect(selMgr.isSelecting).toBe(true);
+
+      selMgr.dispose();
+
+      // Reset every observable the handlers mutate, so any remaining listener
+      // would be visible as a state change after the events below.
+      selMgr.isSelecting = false;
+      selMgr.selectionStart = null;
+      selMgr.selectionEnd = null;
+      selMgr.mouseDownTarget = null;
+      selMgr.dirtySelectionRows.clear();
+
+      canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+      canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      canvas.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+      canvas.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      canvas.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+
+      expect(selMgr.isSelecting).toBe(false);
+      expect(selMgr.selectionStart).toBeNull();
+      expect(selMgr.hasSelection()).toBe(false);
+
+      term.dispose();
+    });
+
+    test('repeated dispose() is safe and keeps the manager inert', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      const selMgr = (term as any).selectionManager;
+      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
+
+      expect(() => {
+        selMgr.dispose();
+        selMgr.dispose();
+      }).not.toThrow();
+
+      canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+      document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+
+      expect(selMgr.isSelecting).toBe(false);
+      expect(selMgr.mouseDownTarget).toBeNull();
+
+      term.dispose();
     });
   });
 });

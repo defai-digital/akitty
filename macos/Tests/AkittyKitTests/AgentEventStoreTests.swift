@@ -91,7 +91,9 @@ final class AgentEventStoreTests: XCTestCase {
         let start = ProcessInfo.processInfo.systemUptime
         XCTAssertThrowsError(try LocalSocket.readFrame(from: reader, timeout: 0.07))
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.3)
-        _ = shutdown(reader, SHUT_RDWR); XCTAssertEqual(group.wait(timeout: .now() + 1), .success)
+        // Sender scheduling/cleanup is separate from the 0.3-second read bound
+        // above; loaded CI workers can take longer to resume the sender.
+        _ = shutdown(reader, SHUT_RDWR); XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
         let root = URL(fileURLWithPath: "/tmp/akitty-listener-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("socket").path

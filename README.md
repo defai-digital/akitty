@@ -16,7 +16,7 @@ provider, cloud account or AX product is required.
 **Apple Silicon · macOS 14+ · MIT licensed**
 
 [Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
-[What's new in 1.3.0](docs/releases/1.3.0.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
+[What's new in 1.3.1](docs/releases/1.3.1.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
 
 For Windows and Linux, see the separate [AkiTTY Web terminal](#windows-and-linux).
 
@@ -88,8 +88,8 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 ## Manual download
 
-You can also [download the v1.3.0 ZIP](https://download.automatosx.com/akitty/releases/download/v1.3.0/AkiTTY-1.3.0-macOS-arm64.zip)
-or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.3.0).
+You can also [download the v1.3.1 ZIP](https://download.automatosx.com/akitty/releases/download/v1.3.1/AkiTTY-1.3.1-macOS-arm64.zip)
+or visit the [GitHub release](https://github.com/defai-digital/akitty/releases/tag/v1.3.1).
 Unzip it, move **Akitty.app** into **Applications**, and open it.
 
 ## Works with your AI agents
@@ -288,7 +288,7 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 ## Limitations and roadmap
 
-**Current release: 1.3.0.** AkiTTY is not a drop-in Ghostty replacement.
+**Current release: 1.3.1.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current

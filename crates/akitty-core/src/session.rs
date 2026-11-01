@@ -197,33 +197,40 @@ impl Session {
     pub fn control_acquire(&self, actor: String) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if model.exited { return Err("shell has exited".into()); }
-        let result = model.control.acquire(actor); model.revision += 1; result
+        let result = model.control.acquire(actor); if result.is_ok() { model.revision += 1; } result
     }
     pub fn control_release(&self, lease: Option<u64>) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-        let result = model.control.release(lease); model.revision += 1; result
+        let result = model.control.release(lease); if result.is_ok() { model.revision += 1; } result
     }
     pub fn command_authorize(&self, lease: u64, command: String, expected_cwd: Option<String>) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if model.exited || !model.shell.ready || model.control.dirty { return Err("command requires an unedited integrated shell prompt".into()); }
         let cwd = model.shell.cwd.clone();
         if cwd != expected_cwd { return Err("working directory changed since approval request".into()); }
-        let result = model.control.authorize(lease,command,cwd); model.revision += 1; result
+        let seq = model.control.audit_seq();
+        let result = model.control.authorize(lease,command,cwd);
+        if result.is_ok() || model.control.audit_seq() != seq { model.revision += 1; }
+        result
     }
     pub fn command_deny(&self, lease: u64) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-        let result = model.control.deny(lease); model.revision += 1; result
+        let result = model.control.deny(lease); if result.is_ok() { model.revision += 1; } result
     }
     pub fn command_execute(&self, lease: u64, authorization: u64, command: String) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         let cwd = model.shell.cwd.clone();
         // Consume even on readiness or queue failure: retry always needs fresh approval.
-        let consumed = model.control.consume(lease,authorization,&command,&cwd); model.revision += 1; consumed?;
+        // A rejected consume only invalidates the snapshot when it appended audit.
+        let seq = model.control.audit_seq();
+        let consumed = model.control.consume(lease,authorization,&command,&cwd);
+        if consumed.is_ok() || model.control.audit_seq() != seq { model.revision += 1; }
+        consumed?;
         if model.exited || !model.shell.ready || model.control.dirty {
-            model.control.record("dispatch_failed",None); return Err("command requires an unedited integrated shell prompt".into());
+            model.control.dispatch_failed(); return Err("command requires an unedited integrated shell prompt".into());
         }
         if let Err(error) = self.enqueue_input(format!("{command}\r").into_bytes()) {
-            model.control.record("dispatch_failed",None); return Err(error);
+            model.control.dispatch_failed(); return Err(error);
         }
         model.shell.ready = false; model.control.dirty = true; model.revision += 1;
         Ok(json!({"accepted":true,"after_command_id":model.shell.summary()["last_command_id"],"completion_untrusted":true}))
@@ -233,14 +240,20 @@ impl Session {
     }
     pub fn resize(&self, cols: usize, rows: usize) -> Result<(), String> {
         let size = Size::validate(cols, rows)?;
+        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if let Some(sender) = &self.commands {
-            sender
-                .try_send(Command::Resize(size))
-                .map_err(|e| format!("resize rejected: {e}"))?;
+            // Record the grid before the send so a concurrent pixel-size push repeats
+            // this request instead of the worker's still-stale applied size.
+            let previous = model.requested_size;
+            model.requested_size = size;
+            if let Err(error) = sender.try_send(Command::Resize(size)) {
+                model.requested_size = previous;
+                return Err(format!("resize rejected: {error}"));
+            }
         } else {
-            let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
             model.term.resize(size);
             model.size = size;
+            model.requested_size = size;
             model.revision += 1;
         }
         Ok(())
@@ -251,7 +264,9 @@ impl Session {
         }
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         let previous = model.cell_px;
-        let size = model.size;
+        // Repeat the latest queued grid, not the applied one, so a scale change cannot
+        // re-send an older grid after the new resize the host already recorded.
+        let size = model.requested_size;
         model.cell_px = (width, height);
         // Push a PTY resize so TIOCGWINSZ reports the new pixel size even
         // though the grid itself did not change. Headless sessions just store it.
@@ -580,6 +595,20 @@ mod tests {
     }
 
     #[test]
+    fn cell_size_repeats_the_requested_grid_while_a_resize_is_still_queued() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (tx, rx) = mpsc::sync_channel(2);
+        session.commands = Some(tx);
+        // The grid resize is only queued; the worker has not applied it to model.size yet.
+        session.resize(30, 5).unwrap();
+        // A scale change then re-sends the cell size, which must repeat the queued grid.
+        session.set_cell_size(10, 20).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Command::Resize(size)) if (size.cols, size.rows) == (30, 5)));
+        assert!(matches!(rx.try_recv(), Ok(Command::Resize(size)) if (size.cols, size.rows) == (30, 5)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn set_cell_size_pushes_a_pty_resize_without_a_grid_change() {
         let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let (tx, rx) = mpsc::sync_channel(1);
@@ -623,6 +652,105 @@ mod tests {
         // The queued input is the only message; no resize followed it.
         assert!(matches!(rx.try_recv(), Ok(Command::Input(_))));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rejected_queue_dispatch_never_reports_a_shell_completion() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
+        // A headless session has no PTY, so the grant is consumed and then the queue rejects it.
+        assert!(session.command_execute(lease, authorization, "echo hi".into()).is_err());
+        // An unrelated completion report must not be attributed to the rejected command.
+        session.feed(b"\x1b]133;D\x07").unwrap();
+        let audit = session.control_audit(0).unwrap();
+        let events: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert!(events.contains(&"dispatched"), "{audit}");
+        assert!(events.contains(&"dispatch_failed"), "{audit}");
+        assert!(!events.contains(&"shell_completion_observed_untrusted"), "{audit}");
+    }
+
+    #[test]
+    fn rejected_readiness_dispatch_never_reports_a_shell_completion() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
+        // The prompt left while the grant was pending, so consume succeeds and dispatch is refused.
+        session.model.lock().unwrap().shell.ready = false;
+        assert!(session.command_execute(lease, authorization, "echo hi".into()).is_err());
+        session.feed(b"\x1b]133;D\x07").unwrap();
+        let audit = session.control_audit(0).unwrap();
+        let events: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert!(events.contains(&"dispatch_failed"), "{audit}");
+        assert!(!events.contains(&"shell_completion_observed_untrusted"), "{audit}");
+    }
+
+    #[test]
+    fn rejected_control_operations_leave_the_snapshot_revision_unchanged() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let since = first["revision"].as_u64();
+        let unchanged = |session: &Session| {
+            let snapshot: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+            assert_eq!(snapshot["changed"], false, "{snapshot}");
+        };
+        assert!(session.control_acquire("second".into()).is_err());
+        unchanged(&session);
+        assert!(session.control_release(Some(lease + 1)).is_err());
+        unchanged(&session);
+        assert!(session.command_deny(lease + 1).is_err());
+        unchanged(&session);
+        // Successful operations still invalidate the revision a client polls with.
+        session.command_deny(lease).unwrap();
+        let denied: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(denied["changed"], true, "{denied}");
+        session.control_release(Some(lease)).unwrap();
+        let released: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(released["changed"], true, "{released}");
+    }
+
+    #[test]
+    fn stale_authorize_leaves_the_snapshot_revision_unchanged() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let since = first["revision"].as_u64();
+        // A stale lease fails before any audit append, so the snapshot must stay unchanged.
+        assert!(session.command_authorize(lease + 1, "echo hi".into(), None).is_err());
+        let stale: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(stale["changed"], false, "{stale}");
+        // A failure that does append audit must still reach the host through a new revision.
+        assert!(session.command_authorize(lease, "\u{1}".into(), None).is_err());
+        let rejected: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(rejected["changed"], true, "{rejected}");
+    }
+
+    #[test]
+    fn stale_execute_leaves_the_snapshot_revision_unchanged() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let since = first["revision"].as_u64();
+        // A stale lease fails before consume, so the snapshot must stay unchanged.
+        assert!(session.command_execute(lease + 1, 1, "echo hi".into()).is_err());
+        let stale: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(stale["changed"], false, "{stale}");
+        // A rejected dispatch would append dispatch_failed; a stale lease never reaches it.
+        let audit = session.control_audit(0).unwrap();
+        let events: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert!(!events.contains(&"dispatch_failed"), "{audit}");
+        // A grant mismatch does append audit, so it must still invalidate the snapshot.
+        let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
+        let baseline: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let baseline = baseline["revision"].as_u64();
+        assert!(session.command_execute(lease, authorization, "echo nope".into()).is_err());
+        let mismatch: Value = serde_json::from_str(&session.snapshot(baseline, true).unwrap()).unwrap();
+        assert_eq!(mismatch["changed"], true, "{mismatch}");
     }
 }
 

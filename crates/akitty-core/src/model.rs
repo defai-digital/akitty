@@ -211,6 +211,9 @@ pub struct Model {
     pub parser: Processor,
     pub events: Events,
     pub size: Size,
+    /// Latest grid a PTY resize successfully queued; the worker applies it to [`Self::size`]
+    /// later, so a pixel-size push must repeat this instead of the still-stale applied grid.
+    pub requested_size: Size,
     pub revision: u64,
     pub title: String,
     pub clipboard: Vec<String>,
@@ -266,6 +269,7 @@ impl Model {
             parser: Processor::new(),
             events,
             size,
+            requested_size: size,
             revision: 1,
             title: DEFAULT_TITLE.into(),
             clipboard: Vec::new(),
