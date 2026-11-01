@@ -2059,6 +2059,8 @@ export class Terminal implements ITerminalCore {
   private fadeInScrollbar(): void {
     const startTime = Date.now();
     const animate = () => {
+      // A pending scrollbar callback can outlive dispose(); do not restart its frame chain.
+      if (this.isDisposed || !this.isOpen) return
       if (!this.onScreen) {
         // Hidden: snap to the final opacity; the forced redraw on show paints it.
         this.scrollbarOpacity = 1;
@@ -2087,6 +2089,8 @@ export class Terminal implements ITerminalCore {
     const startTime = Date.now();
     const startOpacity = this.scrollbarOpacity;
     const animate = () => {
+      // A pending scrollbar callback can outlive dispose(); do not restart its frame chain.
+      if (this.isDisposed || !this.isOpen) return
       if (!this.onScreen) {
         this.scrollbarVisible = false;
         this.scrollbarOpacity = 0;

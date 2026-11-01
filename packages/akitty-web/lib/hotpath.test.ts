@@ -551,6 +551,33 @@ describe('Terminal visibility', () => {
     }
   });
 
+  test.each(["fadeInScrollbar", "fadeOutScrollbar"])("stops %s callbacks after disposal", async (animation) => {
+    let nextId = 0
+    const pending = new Map<number, FrameRequestCallback>()
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextId++
+      pending.set(id, callback)
+      return id
+    })
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => pending.delete(id))
+    const term = await createIsolatedTerminal({ cols: 20, rows: 4 })
+    const container = document.createElement("div")
+    try {
+      term.open(container)
+      (term as any)[animation]()
+      term.dispose()
+      // A scrollbar callback already queued before disposal must not create another frame chain.
+      const callbacks = [...pending.values()]
+      pending.clear()
+      callbacks.forEach((callback) => callback(0))
+      expect(pending.size).toBe(0)
+    } finally {
+      term.dispose()
+      container.remove()
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('stops scheduling frames while off-screen and resumes with a full redraw when shown', async () => {
     let notify: (entries: { isIntersecting: boolean }[]) => void = () => {};
     vi.stubGlobal(
