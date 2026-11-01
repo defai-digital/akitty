@@ -1,4 +1,4 @@
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.2.1";
 export const CHROME_CLEAR_SEQUENCE = '\x1b]771;{"clear":true}\x07';
 
 export type Status = Readonly<{
@@ -315,12 +315,15 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
     clearChrome,
     dispose() {
       if (disposed) return;
-      stopSprite();
-      // Invalidate queued ticks before attempting teardown, even if the writer throws.
-      disposed = true;
-      // Both cleanups are attempted even when the first fails. Errors are kept in
-      // chrome-then-title order so a title failure cannot mask a chrome failure.
-      const errors: unknown[] = [];
+      // Close before calling host cleanup, which can throw or reenter the client.
+      disposed = true
+      const errors: unknown[] = []
+      try {
+        stopSprite()
+      } catch (error) {
+        errors.push(error)
+      }
+      // Attempt every cleanup; preserve cancellation, chrome, then title errors.
       try {
         if (Object.keys(chrome).length) write(CHROME_CLEAR_SEQUENCE);
       } catch (error) {

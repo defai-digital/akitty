@@ -47,8 +47,8 @@ export function createCommandHost(options: Readonly<{
       const lease = identifier((await call("control_acquire", { actor })).lease)
       let dispatchAttempted = false
       try {
-        const snapshot = await call("snapshot")
-        const shell = object(snapshot.shell)
+        const state = await call("shell_state")
+        const shell = object(state.shell)
         if (shell.ready !== true || !(shell.cwd === null || typeof shell.cwd === "string")) throw new RangeError("integrated shell prompt required")
         const cwd = shell.cwd
         const approval = Object.freeze({ session, actor, command, cwd })
