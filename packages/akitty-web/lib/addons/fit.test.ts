@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { vi } from 'vitest';
 import { FitAddon } from './fit';
 
 // ============================================================================
@@ -377,5 +378,142 @@ describe('External resize refit', () => {
     } finally {
       globalThis.ResizeObserver = original;
     }
+  });
+});
+
+// ==========================================================================
+// Direct fit() during the settle window
+// ==========================================================================
+
+describe('Direct fit() during the settle window', () => {
+  let addon: FitAddon;
+
+  beforeEach(() => {
+    addon = new FitAddon();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    addon.dispose();
+    vi.useRealTimers();
+  });
+
+  /**
+   * The container size is mutable so a test can model a real layout change
+   * between fits. Metrics are 9x16 with a 15px scrollbar reservation:
+   * 900x480 -> 98x30, 500x240 -> 53x15.
+   */
+  const createFittableTerminal = (size: { width: number; height: number }) => {
+    const mockElement = document.createElement('div');
+    Object.defineProperty(mockElement, 'clientWidth', {
+      get: () => size.width,
+      configurable: true,
+    });
+    Object.defineProperty(mockElement, 'clientHeight', {
+      get: () => size.height,
+      configurable: true,
+    });
+
+    let resizeCallCount = 0;
+    const mockTerminal = {
+      cols: 80,
+      rows: 24,
+      element: mockElement,
+      renderer: {
+        getMetrics: () => ({ width: 9, height: 16, baseline: 12 }),
+      },
+      resize: (cols: number, rows: number) => {
+        resizeCallCount++;
+        mockTerminal.cols = cols;
+        mockTerminal.rows = rows;
+      },
+    };
+
+    return { mockTerminal, getResizeCallCount: () => resizeCallCount };
+  };
+
+  test('fit() called during the 50ms guard is queued and applied once the guard ends', () => {
+    const size = { width: 900, height: 480 };
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal(size);
+    addon.activate(mockTerminal as any);
+
+    // First fit opens the re-entrancy window for 50ms.
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+    expect(mockTerminal.cols).toBe(98);
+    expect(mockTerminal.rows).toBe(30);
+
+    // The container shrinks while the guard is still active; this direct
+    // request used to be dropped on the early return.
+    size.width = 500;
+    size.height = 240;
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    // The single trailing fit applies the final dimensions.
+    vi.advanceTimersByTime(50);
+    expect(getResizeCallCount()).toBe(2);
+    expect(mockTerminal.cols).toBe(53);
+    expect(mockTerminal.rows).toBe(15);
+  });
+
+  test('the queued trailing fit does not start a resize feedback loop', () => {
+    const size = { width: 900, height: 480 };
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal(size);
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    size.width = 500;
+    size.height = 240;
+    addon.fit();
+    vi.advanceTimersByTime(50);
+    expect(getResizeCallCount()).toBe(2);
+    expect(mockTerminal.cols).toBe(53);
+
+    // The trailing fit's own settle window must not trigger another resize.
+    vi.advanceTimersByTime(500);
+    expect(getResizeCallCount()).toBe(2);
+    expect(mockTerminal.cols).toBe(53);
+    expect(mockTerminal.rows).toBe(15);
+  });
+
+  test('a queued fit whose proposal matches the applied dimensions stays a no-op', () => {
+    const size = { width: 900, height: 480 };
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal(size);
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    // This is the own-canvas-resize echo case: queue a request without any
+    // layout change, then settle. The proposal equals the applied dimensions.
+    addon.fit();
+    vi.advanceTimersByTime(50);
+    expect(getResizeCallCount()).toBe(1);
+
+    vi.advanceTimersByTime(500);
+    expect(getResizeCallCount()).toBe(1);
+  });
+
+  test('dispose() clears a queued fit instead of applying it later', () => {
+    const size = { width: 900, height: 480 };
+    const { mockTerminal, getResizeCallCount } = createFittableTerminal(size);
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect(getResizeCallCount()).toBe(1);
+
+    size.width = 500;
+    size.height = 240;
+    addon.fit(); // queued during the guard
+
+    addon.dispose();
+    vi.advanceTimersByTime(1000);
+
+    expect(getResizeCallCount()).toBe(1);
+    expect(mockTerminal.cols).toBe(98);
+    expect(mockTerminal.rows).toBe(30);
   });
 });

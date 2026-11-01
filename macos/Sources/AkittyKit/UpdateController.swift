@@ -29,8 +29,22 @@ import os
     func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) { setReminder(nil) }
     func standardUserDriverWillFinishUpdateSession() { setReminder(nil) }
     func setReminder(_ version: String?) {
-        // Treat feed display text as untrusted even though the feed is signed.
-        availableVersion = version.map { String($0.filter { !$0.isNewline && !$0.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) }.prefix(32)) }
+        // Treat feed display text as untrusted even though the feed is signed. Drop control and Unicode format (Cf)
+        // scalars — zero-width and directional marks draw nothing — then trim edge whitespace, which is also blank
+        // but sits in the separator categories (ASCII space, NBSP, ideographic space). Trimming precedes the cap so
+        // padding cannot displace real version text. Text that sanitizes to empty is not a version and must clear
+        // the reminder, or a blank "Update Available" button is created.
+        let cleaned = version.map { raw -> String in
+            let stripped = raw.filter { character in
+                guard !character.isNewline else { return false }
+                return !character.unicodeScalars.contains { scalar in
+                    scalar.properties.generalCategory == .control || scalar.properties.generalCategory == .format
+                }
+            }
+            let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+            return String(trimmed.prefix(32))
+        }
+        availableVersion = cleaned.flatMap { $0.isEmpty ? nil : $0 }
         onReminderChanged?(availableVersion)
     }
 }

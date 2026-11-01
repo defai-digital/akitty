@@ -17,11 +17,18 @@ BASE_URL="https://download.automatosx.com/akitty"
 
 # These are script-level so the EXIT trap still sees them after a failure inside
 # any function; they start empty and are filled in as the install progresses.
-work="" zip="" staging="" backup="" dest="" lock="" lock_owned=""
-# Set only while acquire_lock() is between mkdir and recording ownership; signals
-# that arrive then are deferred so they cannot run cleanup before lock_owned is
-# assigned and leak a lock this process created.
-lock_acquiring=0 lock_signal=""
+work="" zip="" staging="" backup="" dest="" lock="" lock_owned="" inner_pid=""
+# Destination the inner installer will lock, derived in entry mode from the same
+# argument it receives. Kept at script level so on_signal's cleanup can identify a
+# lock the escalated inner left behind.
+entry_dest=""
+# Set while this process holds a handle-shaped gap: acquire_lock() between mkdir
+# and recording ownership, or entry mode between starting the inner installer and
+# recording its PID. Signals that arrive then are only recorded (deferred_signal),
+# because acting immediately would run cleanup before lock_owned names the lock
+# this process created (leaking it) or before inner_pid names the child just
+# spawned (orphaning it). Each window's owner clears its flag and finalizes.
+lock_acquiring=0 inner_acquiring=0 deferred_signal=""
 
 die() { echo "akitty: $*" >&2; exit 1; }
 say() { echo "akitty: $*" >&2; }
@@ -63,6 +70,18 @@ release_lock() {
     # Remove only the lock this process acquired, even if a signal interrupted
     # owner initialization; a foreign or stale lock is never adopted.
     [ -n "$lock_owned" ] || return 0
+    # The lock path may have been removed and recreated by another installer
+    # that now owns it; an owner that is not this PID means the lock is not ours
+    # to delete. An owner-less lock is still ours (a signal can arrive between
+    # the atomic mkdir and writing the owner file), so it is removed as before.
+    if [ -f "$lock_owned/owner" ]; then
+        local owner=""
+        owner="$(cat "$lock_owned/owner" 2>/dev/null || true)"
+        if [ "$owner" != "$$" ]; then
+            lock_owned=""; lock=""
+            return 0
+        fi
+    fi
     rm -rf "$lock_owned" || true
     lock_owned=""; lock=""
 }
@@ -98,30 +117,72 @@ cleanup() {
 # let the installer resume and even print success after the signal, so those
 # handlers clean up, restore the default disposition, and re-raise the same
 # signal to terminate. EXIT then runs cleanup again; every step is idempotent.
-# While a lock is being acquired the signal is only recorded: cleanup would run
-# before lock_owned names the lock this process just created and leak it.
+# While a lock or the inner child is being acquired the signal is only recorded:
+# cleanup would run before lock_owned names the lock this process just created,
+# or before inner_pid names the child it just spawned.
 on_signal() { # SIGNAME
     local sig="$1"
-    if [ "$lock_acquiring" = 1 ]; then
-        lock_signal="$sig"
+    if [ "$lock_acquiring" = 1 ] || [ "$inner_acquiring" = 1 ]; then
+        deferred_signal="$sig"
         return 0
+    fi
+    # Entry mode runs the downloaded installer as a background child. Stop and
+    # reap it before this process removes the work directory it runs from and
+    # dies, so a signal delivered only to this PID can never leave the inner
+    # installer running (and reporting success) after the entry is gone.
+    if [ -n "$inner_pid" ]; then
+        local child="$inner_pid" waited=0
+        inner_pid=""
+        kill -s "$sig" "$child" 2>/dev/null || true
+        # The graceful wait is bounded: a child that ignores INT/TERM, or is
+        # stuck, would otherwise block this handler forever and the entry could
+        # never exit. bash reaps an exited child itself, so kill -0 stops
+        # matching as soon as the child is gone; 50 x 0.1s is the ~5s window.
+        while [ "$waited" -lt 50 ] && kill -0 "$child" 2>/dev/null; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        # Escalate after the grace window so the child cannot outlive the entry
+        # that owns the directory it runs from; wait then reaps it either way.
+        kill -KILL "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+        # The child is reaped; drop a lock the escalation left behind so the next
+        # install into the same destination is not blocked by a dead owner.
+        release_escalated_lock "$child"
     fi
     cleanup
     trap - "$sig"
     kill -s "$sig" $$
 }
 
-# Finish a termination deferred while the lock was being acquired, once the lock
-# state is settled. The EXIT trap does not run when the shell dies by a signal,
-# so clean up first, restore the default disposition, and re-raise the recorded
-# signal so the installer terminates by it instead of resuming or exiting 1.
+release_escalated_lock() { # dead inner pid
+    # An inner child killed by the escalation above never runs its own EXIT trap,
+    # so the destination lock it created would outlive it and block every later
+    # install. Remove that lock only when its owner file still names exactly the
+    # dead child: a missing or different owner belongs to another installer (or
+    # cannot be attributed), and unrelated staging and backup directories are
+    # never touched. A graceful inner exit already released its lock, so this is
+    # a no-op then.
+    local child="$1" stale="" owner=""
+    [ -n "$entry_dest" ] || return 0
+    stale="$entry_dest/.akitty-install.lock"
+    [ -f "$stale/owner" ] || return 0
+    owner="$(cat "$stale/owner" 2>/dev/null || true)"
+    [ "$owner" = "$child" ] || return 0
+    rm -rf "$stale" || true
+}
+
+# Finish a termination deferred during one of the acquire windows, once the
+# handle it was waiting for exists. Re-entering on_signal keeps a single
+# termination path: the inner child is stopped and reaped, cleanup runs, and the
+# recorded signal is re-raised. The EXIT trap does not run when the shell dies by
+# a signal, so the installer terminates by that signal instead of resuming or
+# exiting 1. Clearing the slot first bounds this to one level of recursion.
 finalize_deferred_signal() {
-    [ -n "$lock_signal" ] || return 0
-    local sig="$lock_signal"
-    lock_signal=""
-    cleanup
-    trap - "$sig"
-    kill -s "$sig" $$
+    [ -n "$deferred_signal" ] || return 0
+    local sig="$deferred_signal"
+    deferred_signal=""
+    on_signal "$sig"
 }
 trap cleanup EXIT
 trap 'on_signal INT' INT
@@ -213,7 +274,12 @@ install_inner() {
             die "cannot replace the existing $dest/Akitty.app"
         fi
     fi
-    mv "$staging/Akitty.app" "$dest/Akitty.app" || die "cannot move the app into $dest"
+    # rename(2) refuses an occupied destination, so a path that appears after the
+    # backup move can never be nested into: /bin/mv would move staging/Akitty.app
+    # inside it, report success, and let the old app be deleted below.
+    /usr/bin/perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+        "$staging/Akitty.app" "$dest/Akitty.app" 2>/dev/null \
+        || die "cannot move the app into $dest"
     if [ -n "$backup" ]; then
         rm -rf "$backup" || say "previous AkiTTY preserved at $backup/Akitty.app"
         backup=""
@@ -224,11 +290,43 @@ install_inner() {
 }
 
 if [ "${1:-}" != "--inner" ]; then
+    # The inner installer locks the destination named by the same argument it
+    # receives, so derive that path here: if the escalation in on_signal kills the
+    # inner before its own cleanup runs, the entry can still identify its lock.
+    case "${1:-}" in
+        "") if [ -n "${HOME:-}" ]; then entry_dest="$HOME/Applications"; fi ;;
+        --system) entry_dest="/Applications" ;;
+    esac
     command -v curl >/dev/null 2>&1 || die "curl is required"
     work="$(mktemp -d "${TMPDIR:-/tmp}/akitty-entry.XXXXXX")" || die "cannot create a temporary directory"
     fetch "$BASE_URL/install" "$work/install"
-    bash "$work/install" --inner "$@"
-    exit $?
+    # Run the downloaded installer in the background and wait for it: bash defers
+    # a trap while waiting for a foreground child, so a signal sent only to this
+    # PID would let the inner installer finish and print success first. Tracking
+    # the child lets on_signal forward the signal and reap it before cleanup.
+    # With job control off an async child inherits SIGINT ignored and could never
+    # trap the forwarded signal, so reset the dispositions before the exec.
+    # The PID only exists after the fork, so a signal delivered in that window is
+    # recorded (inner_acquiring) instead of acted on, then finalized below once
+    # inner_pid is assigned; that path goes through on_signal, so the child is
+    # stopped as well and never left orphaned.
+    inner_acquiring=1
+    /usr/bin/perl -e '$SIG{INT} = "DEFAULT"; $SIG{TERM} = "DEFAULT"; exec @ARGV' \
+        bash "$work/install" --inner "$@" &
+    inner_pid=$!
+    inner_acquiring=0
+    finalize_deferred_signal
+    status=0
+    wait "$inner_pid" || status=$?
+    # A killer outside this process (SIGKILL from another session, or any signal
+    # this entry never forwarded) makes wait report 128+N even though on_signal
+    # never ran, so the destination lock that child held would survive it and
+    # block every later install. Only a status of 128 or more can mean the child
+    # skipped its own EXIT trap; the exact-owner check inside the release makes a
+    # graceful exit, a foreign owner, and an owner-less lock no-ops.
+    if [ "$status" -ge 128 ]; then release_escalated_lock "$inner_pid"; fi
+    inner_pid=""
+    exit "$status"
 else
     shift
     install_inner "$@"

@@ -63,6 +63,15 @@ export class SelectionManager {
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseDownHandler: ((e: MouseEvent) => void) | null = null;
 
+  // Canvas selection listeners are stored so dispose can detach exactly these
+  // references. Anonymous handlers would keep reacting to a disposed manager
+  // for as long as the canvas stayed attached to the DOM.
+  private boundCanvasMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseLeaveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseEnterHandler: (() => void) | null = null;
+  private boundCanvasDblClickHandler: ((e: MouseEvent) => void) | null = null;
+
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
   private autoScrollDirection: number = 0; // -1 = up, 0 = none, 1 = down
@@ -173,6 +182,10 @@ export class SelectionManager {
       let lineText = '';
       for (let col = colStart; col <= colEnd; col++) {
         const cell = line[col];
+        // A wide character's spacer cell (width 0) holds no text of its own:
+        // skip it rather than copying a synthetic space, matching
+        // BufferLine.translateToString.
+        if (cell && cell.width === 0) continue;
         if (cell && isRenderableCodepoint(cell.codepoint)) {
           // Use grapheme lookup for cells with multi-codepoint characters
           let char: string;
@@ -405,9 +418,14 @@ export class SelectionManager {
       this.boundDocumentMouseDownHandler = null;
     }
 
+    // Clean up canvas listeners. The renderer still owns a live canvas here
+    // (the terminal disposes components before detaching the canvas), and each
+    // removal must use the identical stored reference to take effect.
+    const canvas = this.renderer.getCanvas();
+    this.removeCanvasSelectionListeners(canvas);
+
     // Clean up context menu event listener
     if (this.boundContextMenuHandler) {
-      const canvas = this.renderer.getCanvas();
       canvas.removeEventListener('contextmenu', this.boundContextMenuHandler);
       this.boundContextMenuHandler = null;
     }
@@ -425,8 +443,33 @@ export class SelectionManager {
       document.removeEventListener('click', this.boundClickHandler);
       this.boundClickHandler = null;
     }
+  }
 
-    // Canvas event listeners will be cleaned up when canvas is removed from DOM
+  /**
+   * Detach the five canvas selection listeners, clearing each reference so a
+   * repeated dispose is a no-op.
+   */
+  private removeCanvasSelectionListeners(canvas: HTMLCanvasElement): void {
+    if (this.boundCanvasMouseDownHandler) {
+      canvas.removeEventListener('mousedown', this.boundCanvasMouseDownHandler);
+      this.boundCanvasMouseDownHandler = null;
+    }
+    if (this.boundCanvasMouseMoveHandler) {
+      canvas.removeEventListener('mousemove', this.boundCanvasMouseMoveHandler);
+      this.boundCanvasMouseMoveHandler = null;
+    }
+    if (this.boundCanvasMouseLeaveHandler) {
+      canvas.removeEventListener('mouseleave', this.boundCanvasMouseLeaveHandler);
+      this.boundCanvasMouseLeaveHandler = null;
+    }
+    if (this.boundCanvasMouseEnterHandler) {
+      canvas.removeEventListener('mouseenter', this.boundCanvasMouseEnterHandler);
+      this.boundCanvasMouseEnterHandler = null;
+    }
+    if (this.boundCanvasDblClickHandler) {
+      canvas.removeEventListener('dblclick', this.boundCanvasDblClickHandler);
+      this.boundCanvasDblClickHandler = null;
+    }
   }
 
   // ==========================================================================
@@ -440,7 +483,7 @@ export class SelectionManager {
     const canvas = this.renderer.getCanvas();
 
     // Mouse down - start selection or clear existing
-    canvas.addEventListener('mousedown', (e: MouseEvent) => {
+    this.boundCanvasMouseDownHandler = (e: MouseEvent) => {
       if (e.button === 0) {
         // Left click only
 
@@ -464,10 +507,11 @@ export class SelectionManager {
         this.selectionEnd = { col: cell.col, absoluteRow };
         this.isSelecting = true;
       }
-    });
+    };
+    canvas.addEventListener('mousedown', this.boundCanvasMouseDownHandler);
 
     // Mouse move on canvas - update selection
-    canvas.addEventListener('mousemove', (e: MouseEvent) => {
+    this.boundCanvasMouseMoveHandler = (e: MouseEvent) => {
       if (this.isSelecting) {
         // Mark current selection rows as dirty before updating
         this.markCurrentSelectionDirty();
@@ -480,10 +524,11 @@ export class SelectionManager {
         // Check if near edges for auto-scroll
         this.updateAutoScroll(e.offsetY, canvas.clientHeight);
       }
-    });
+    };
+    canvas.addEventListener('mousemove', this.boundCanvasMouseMoveHandler);
 
     // Mouse leave - check for auto-scroll when leaving canvas during drag
-    canvas.addEventListener('mouseleave', (e: MouseEvent) => {
+    this.boundCanvasMouseLeaveHandler = (e: MouseEvent) => {
       if (this.isSelecting) {
         // Determine scroll direction based on where mouse left
         const rect = canvas.getBoundingClientRect();
@@ -493,14 +538,16 @@ export class SelectionManager {
           this.startAutoScroll(1); // Scroll down
         }
       }
-    });
+    };
+    canvas.addEventListener('mouseleave', this.boundCanvasMouseLeaveHandler);
 
     // Mouse enter - stop auto-scroll when mouse returns to canvas
-    canvas.addEventListener('mouseenter', () => {
+    this.boundCanvasMouseEnterHandler = () => {
       if (this.isSelecting) {
         this.stopAutoScroll();
       }
-    });
+    };
+    canvas.addEventListener('mouseenter', this.boundCanvasMouseEnterHandler);
 
     // Document-level mousemove for tracking mouse position during drag outside canvas
     this.boundDocumentMouseMoveHandler = (e: MouseEvent) => {
@@ -570,7 +617,7 @@ export class SelectionManager {
     document.addEventListener('mouseup', this.boundMouseUpHandler);
 
     // Double-click - select word
-    canvas.addEventListener('dblclick', (e: MouseEvent) => {
+    this.boundCanvasDblClickHandler = (e: MouseEvent) => {
       const cell = this.pixelToCell(e.offsetX, e.offsetY);
       const absoluteRow = this.viewportRowToAbsolute(cell.row);
       // Word boundaries must be read from the same absolute scrollback/screen
@@ -589,7 +636,8 @@ export class SelectionManager {
           this.selectionChangedEmitter.fire();
         }
       }
-    });
+    };
+    canvas.addEventListener('dblclick', this.boundCanvasDblClickHandler);
 
     // Right-click (context menu) - position textarea to show browser's native menu
     // This allows Copy/Paste options to appear in the context menu

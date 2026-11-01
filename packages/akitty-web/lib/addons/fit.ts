@@ -84,8 +84,10 @@ export class FitAddon implements ITerminalAddon {
    * Does nothing if dimensions cannot be calculated or haven't changed.
    */
   public fit(): void {
-    // Prevent re-entrant calls during resize
+    // A fit requested while our own resize is still settling must not be lost:
+    // queue it for the settle timer, exactly like a ResizeObserver callback.
     if (this._isResizing) {
+      this._resizeMissed = true;
       return;
     }
 
@@ -121,8 +123,8 @@ export class FitAddon implements ITerminalAddon {
       this._resizeSettleTimer = setTimeout(() => {
         this._resizeSettleTimer = undefined;
         this._isResizing = false;
-        // A container change that landed inside the settle window was dropped; fit once now (a no-op
-        // when it was only our own canvas resize echoing back).
+        // A container change or a direct fit() that landed inside the settle window was
+        // queued; fit once now (a no-op when it was only our own canvas resize echoing back).
         if (this._resizeMissed) {
           this._resizeMissed = false;
           this.fit();

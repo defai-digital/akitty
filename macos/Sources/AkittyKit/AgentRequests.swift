@@ -153,8 +153,9 @@ import AgentIPC
             return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])) ?? Data()
         }
     }
-    static func present(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, valid: @escaping () -> Bool = { true }) async -> Bool {
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    // The injected monotonic clock lets tests cross the deadline without racing AppKit's timer.
+    static func present(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, valid: @escaping () -> Bool = { true }) async -> Bool {
+        let deadline = now() + timeout
         return await withCheckedContinuation { continuation in
             // The continuation must resume exactly once. If the window closes underneath the sheet (a shell
             // exiting closes its window directly), AppKit may never call the completion handler; without the
@@ -175,7 +176,7 @@ import AgentIPC
                 }
             })
             alert.beginSheetModal(for: window) {
-                finish($0 == .alertFirstButtonReturn && ProcessInfo.processInfo.systemUptime < deadline && valid())
+                finish($0 == .alertFirstButtonReturn && now() < deadline && valid())
             }
             alert.window.makeFirstResponder(alert.buttons[1])
         }
