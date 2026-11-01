@@ -131,3 +131,9 @@ pages before eviction/close for durable auditing. Commands may contain secrets;
 retention and access control belong to the host. A transport failure after dispatch
 can mean the command already ran: do not blindly retry. See the complete
 [host contract](../../docs/AGENT_WORKFLOWS.md) and [ABI](../../docs/ABI.md).
+
+Source development preserves input ownership when dispatch throws or its receipt
+is invalid: inspect and reclaim rather than retry. Native/SDK command helpers also
+reject Unicode format controls that could conceal text in approval UI. The bundled
+[`akitty-agent` request client](../../docs/AGENT_NATIVE.md) is a separate, opt-in
+native transport; it does not expose this privileged host entry to terminal programs.

@@ -12,6 +12,12 @@ focus, navigation, and validation. These controls govern input through AkiTTY's 
 boundary, not operating-system process permissions. See [host workflows](AGENT_WORKFLOWS.md)
 and [accessibility](ACCESSIBILITY.md).
 
+Native agent development adds a separate bounded OSC 7501 record model, an opt-in
+same-user request-only Unix socket, the bundled `akitty-agent` client, and a private
+bounded event store. The app retains command approval authority; no ABI control
+operations are exposed over IPC. Requests queue exact terminal input, not verified
+process execution. See [native agent contracts and scope](AGENT_NATIVE.md).
+
 | Component | Technology |
 | --- | --- |
 | AkiTTY native Mac app | Alacritty terminal engine + Akitty-owned Rust/Swift code |

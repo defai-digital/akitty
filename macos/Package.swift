@@ -5,15 +5,17 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingL
 let rustLibrary = ProcessInfo.processInfo.environment["AKITTY_RUST_LIB_DIR"] ?? root + "/target/debug"
 let package = Package(
     name: "Akitty", platforms: [.macOS(.v14)],
-    products: [.executable(name: "Akitty", targets: ["Akitty"])],
+    products: [.executable(name: "Akitty", targets: ["Akitty"]), .executable(name: "akitty-agent", targets: ["AkittyAgent"])],
     dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")],
     targets: [
         .systemLibrary(name: "AkittyCore", path: "Bridge"),
-        .target(name: "AkittyKit", dependencies: ["AkittyCore", .product(name: "Sparkle", package: "Sparkle")], exclude: ["Resources"],
+        .target(name: "AgentIPC"),
+        .executableTarget(name: "AkittyAgent", dependencies: ["AgentIPC"]),
+        .target(name: "AkittyKit", dependencies: ["AkittyCore", "AgentIPC", .product(name: "Sparkle", package: "Sparkle")], exclude: ["Resources"],
                 linkerSettings: [.unsafeFlags(["-L", rustLibrary, "-lakitty_core", "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
                                  .linkedFramework("AppKit"), .linkedFramework("MetalKit"),
                                  .linkedFramework("Carbon"), .linkedFramework("CoreText"), .linkedFramework("JavaScriptCore")]),
         .executableTarget(name: "Akitty", dependencies: ["AkittyKit"]),
-        .testTarget(name: "AkittyKitTests", dependencies: ["AkittyKit"])
+        .testTarget(name: "AkittyKitTests", dependencies: ["AkittyKit", "AgentIPC"])
     ], swiftLanguageModes: [.v5]
 )

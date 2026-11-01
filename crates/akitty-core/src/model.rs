@@ -3,6 +3,7 @@ use alacritty_terminal::grid::Dimensions;
 use crate::chrome::{self, Chrome, Filter as ChromeFilter, Segment as ChromeSegment};
 use crate::graphics::{self, ApcFilter, Graphics, Segment};
 use crate::placeholder;
+use crate::program_status::{self, ProgramStatuses};
 use crate::tracker::{Tracker, Tracking};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode, cell::{Flags, LineLength}};
@@ -165,6 +166,7 @@ struct SnapshotOut<'a> {
     chrome: Option<Value>,
     shell: Value,
     control: Value,
+    program_status: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     partial: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +192,8 @@ pub struct Model {
     chrome_filter: ChromeFilter,
     pub shell: crate::shell::Shell,
     pub control: crate::control::Control,
+    pub program_status: ProgramStatuses,
+    status_reset_generation: u64,
     /// When false, a terminal `OSC 771` sequence does not change [`Self::chrome`].
     /// The C ABI chrome request still does.
     program_chrome: bool,
@@ -250,6 +254,8 @@ impl Model {
             chrome_filter: ChromeFilter::default(),
             shell: crate::shell::Shell::default(),
             control: crate::control::Control::default(),
+            program_status: ProgramStatuses::default(),
+            status_reset_generation: 0,
             program_chrome: true,
             reported_transient: false,
             reported_animating: false,
@@ -345,7 +351,7 @@ impl Model {
                 },
                 ChromeSegment::Shell(body) => {
                     self.shell.observe(&body);
-                    if body == b"133;A" { self.control.dirty = false; }
+                    if body == b"133;A" { self.control.dirty = false; self.program_status.finish_work(); }
                     if body.starts_with(b"133;D") { self.control.observed_completion(); }
                 },
                 // A program sequence is consumed either way, so it never lands in the grid.
@@ -354,6 +360,12 @@ impl Model {
                     if self.program_chrome {
                         let _ = self.chrome.apply_bytes(&payload);
                     }
+                }
+                ChromeSegment::ProgramStatus(payload) => {
+                    if payload == b"?" {
+                        if self.program_chrome && !overflowed { replies.extend_from_slice(program_status::REPLY); }
+                    } else if self.program_chrome { self.program_status.apply(&payload); }
+                    if replies.len() > 65536 { replies.clear(); overflowed = true; self.error = Some("terminal reply limit exceeded".into()); }
                 }
             }
         }
@@ -439,6 +451,10 @@ impl Model {
     }
     /// Drops alternate-screen images when that screen is left.
     fn track_screen(&mut self) {
+        if self.status_reset_generation != self.tracking.reset_generation {
+            self.program_status.clear();
+            self.status_reset_generation = self.tracking.reset_generation;
+        }
         let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
         if alt != self.in_alt {
             self.graphics.cancel_pending();
@@ -536,6 +552,7 @@ impl Model {
     }
     /// The snapshot JSON, serialized once from typed rows.
     pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> Result<String, String> {
+        if self.exited { self.program_status.finish_work(); }
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
             self.revision = self.revision.saturating_add(1);
@@ -808,6 +825,7 @@ impl Model {
             chrome: self.chrome.to_json(now),
             shell: self.shell.summary(),
             control: self.control.summary(),
+            program_status: self.program_status.to_json(),
             partial: partial.then_some(true),
             dirty: partial.then_some(dirty_rows),
         };

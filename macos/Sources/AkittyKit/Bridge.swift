@@ -317,6 +317,40 @@ public struct ShellSummary: Codable, Sendable {
     public let untrusted: Bool
 }
 
+public struct ProgramStatusRecord: Codable, Equatable, Sendable {
+    public let id: String
+    public let state: String
+    public let app: String?
+    public let title: String?
+    public let msg: String?
+    public let kind: String?
+    public let progress: UInt8?
+    var presentation: String {
+        let identity = title ?? app ?? (id.isEmpty ? "Program" : id)
+        let detail = [kind, msg].compactMap { $0 }.joined(separator: ": ")
+        return Self.displayText("\(identity): \(state)\(progress.map { " \($0)%" } ?? "")\(detail.isEmpty ? "" : " · " + detail)")
+    }
+    // Do not allow a report to reorder or conceal trusted UI text with directional controls.
+    static func displayText(_ value: String) -> String {
+        String(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0)
+            && !(0x202A...0x202E).contains($0.value) && !(0x2066...0x2069).contains($0.value)
+            && ![0x200B, 0x200E, 0x200F, 0xFEFF].contains($0.value) }.prefix(512))
+    }
+}
+public struct ProgramStatus: Codable, Equatable, Sendable {
+    public let source: String
+    public let untrusted: Bool
+    public let records: [ProgramStatusRecord]
+    var active: ProgramStatusRecord? {
+        let priority = ["blocked", "error", "working", "done", "idle"]
+        return records.min { (priority.firstIndex(of: $0.state) ?? 5) < (priority.firstIndex(of: $1.state) ?? 5) }
+    }
+    var presentation: String? {
+        guard let active else { return nil }
+        return "Reported: \(active.presentation)\(records.count > 1 ? " · \(records.count) reports" : "")"
+    }
+}
+
 public struct Snapshot: Codable, Sendable {
     public let changed: Bool
     public let revision: UInt64
@@ -325,6 +359,7 @@ public struct Snapshot: Codable, Sendable {
     public let title: String
     public let shell: ShellSummary?
     public let control: ControlSummary?
+    public let program_status: ProgramStatus?
     /// For a partial snapshot, only the cells of the `dirty` rows; `TerminalSession.snapshot` merges them.
     public internal(set) var cells: [Cell]
     /// For a partial snapshot, the text of the `dirty` rows in order.

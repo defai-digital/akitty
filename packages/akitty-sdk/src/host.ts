@@ -26,6 +26,7 @@ function bounded(value: string, limit: number, name: string): void {
   if (typeof value !== "string" || !value.trim() || new TextEncoder().encode(value).length > limit || /[\x00-\x1f\x7f-\x9f]/u.test(value)) {
     throw new RangeError(`${name} must be nonempty, bounded and without controls`)
   }
+  if (name === "command" && /\p{Cf}/u.test(value)) throw new RangeError("command must not contain invisible formatting characters")
 }
 
 /** Policy decisions belong to the host: e.g. native approval UI or an authenticated ax-trust adapter.
@@ -44,6 +45,7 @@ export function createCommandHost(options: Readonly<{
     async execute(actor: string, command: string): Promise<DispatchReceipt> {
       bounded(actor, 64, "actor"); bounded(command, 4096, "command")
       const lease = identifier((await call("control_acquire", { actor })).lease)
+      let dispatchAttempted = false
       try {
         const snapshot = await call("snapshot")
         const shell = object(snapshot.shell)
@@ -55,12 +57,18 @@ export function createCommandHost(options: Readonly<{
           throw new Error("command execution denied")
         }
         const authorization = identifier((await call("command_authorize", { lease, command, expected_cwd: cwd })).authorization)
+        dispatchAttempted = true
         const receipt = await call("command_execute", { lease, authorization, command })
         if (receipt.accepted !== true || receipt.completion_untrusted !== true) throw new RangeError("invalid dispatch receipt")
         return Object.freeze({ lease, afterCommandId: identifier(receipt.after_command_id), completionUntrusted: true as const })
       } catch (error) {
+        if (dispatchAttempted) throw new Error("dispatch outcome is unknown; inspect the terminal and reclaim control; do not retry automatically", { cause: error })
         try { await call("control_release", { lease }) }
-        catch (cleanupError) { throw new AggregateError([error, cleanupError], "command failed; lease cleanup also failed") }
+        catch (cleanupError) {
+          if (!(cleanupError instanceof Error && cleanupError.message.includes("stale or invalid control lease"))) {
+            throw new AggregateError([error, cleanupError], "command failed; lease cleanup also failed")
+          }
+        }
         throw error
       }
     },

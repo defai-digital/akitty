@@ -4,6 +4,39 @@ The public header is `include/akitty.h`. Swift's mirrored header is checked byte
 for byte during verification. `akitty_abi_version()` must equal 1 before any call.
 No Rust layout, engine type or pointer to a session crosses this boundary.
 
+## Program status addition (source development after 1.2.5)
+
+Full and partial snapshots add `program_status`:
+
+```json
+{"source":"osc7501","untrusted":true,"records":[{"id":"build/test","state":"blocked","app":"builder","title":null,"msg":"Review result","kind":"permission","progress":50}]}
+```
+
+This independent report collection does not replace `chrome`, alter `control`,
+populate command history, approve an operation or verify a result. Optional record
+fields are nullable; `app` includes current ancestor inheritance. Records are ordered
+least recently updated first and capped at 256. Consumers must tolerate new fields.
+
+The stream filter implements [OSC 7501 revision 0.4](https://www.superlogical.com/rex/docs/build/program-status),
+including BEL/ST termination, chunking/cancellation, capability queries, key/value
+syntax, hierarchical ids and subtree clearing. Reports replace whole records.
+Unknown keys are ignored, malformed pairs skipped, repeated keys take their last
+valid value; invalid state/id or invalid free text cannot change existing records.
+Limits are checked before committing: whole sequence 4096 bytes, key 16 bytes,
+id 128 bytes / 8 segments of at most 32 bytes, app 32 bytes, message 2048 decoded
+bytes / 2732 encoded, title 192 decoded / 256 encoded. Base64 must decode as
+control-free UTF-8. `progress` is an integer percentage, distinct from OSC 771's
+0..1 fraction. The protocol's unknown-key behavior does not relax ABI request
+`deny_unknown_fields` validation.
+
+`working`, `blocked` and `idle` records clear at the next OSC 133 A prompt or PTY
+child exit; `done` and `error` survive. RIS clears every record, DECSTR and alternate
+screen switches preserve them. There is no heartbeat or TTL. Capability replies
+advertise the five implemented states and three blocked kinds. When program chrome
+is disabled, incoming reports are consumed without updates or capability replies.
+Neither reports nor replies contain host authorization. The [native request-only
+IPC and event export](AGENT_NATIVE.md) are separate host contracts, not ABI operations.
+
 `akitty_request_v1(data,len)` borrows up to 1 MiB of UTF-8 JSON for the call. The
 caller must provide a valid readable slice. The result is an owned buffer of up
 to 8 MiB. Pass that exact pointer and length to `akitty_buffer_free_v1` once; never

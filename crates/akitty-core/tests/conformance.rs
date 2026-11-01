@@ -32,6 +32,23 @@ impl Drop for Terminal {
     }
 }
 #[test]
+fn program_status_is_additive_untrusted_and_never_creates_control_authority() {
+    let t = Terminal::new(20, 4);
+    let initial = t.snapshot();
+    t.feed("\x1b]771;{\"mark\":\"busy\"}\x07");
+    t.feed("\x1b]7501;state=blocked:kind=permission:app=agent:msg=QXBwcm92ZT8=\x1b\\");
+    let delta = call(json!({"op":"snapshot", "id":t.0, "since":initial["revision"], "compact":true}));
+    assert_eq!(delta["program_status"]["untrusted"], true);
+    assert_eq!(delta["program_status"]["records"][0]["state"], "blocked");
+    assert_eq!(delta["chrome"]["mark"], "busy");
+    assert_eq!(delta["control"]["owner"], "human");
+    assert_eq!(call(json!({"op":"control_audit", "id":t.0}))["events"], json!([]));
+    t.feed("\x1b]7501;state=done\x07");
+    assert_eq!(t.snapshot()["control"]["owner"], "human");
+    assert_eq!(call(json!({"op":"command_history", "id":t.0}))["commands"], json!([]));
+}
+
+#[test]
 fn schema_one_snapshots_keep_keyed_cells_unless_compact_is_requested() {
     let t = Terminal::new(20, 4);
     t.feed("\x1b[1;3;4:3;9;38;2;1;2;3;58;2;4;5;6mA\x1b[0m");

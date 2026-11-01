@@ -3,6 +3,10 @@
 This document describes the native workflow and SDK host additions in AkiTTY 1.1.0.
 The separate Web terminal and its embedding host retain their own adoption and release process.
 
+Post-1.2.5 source development adds [OSC 7501 reports, local execution requests and
+bounded durable event metadata](AGENT_NATIVE.md). These do not change the trust
+boundary below: status and shell observations are not execution authority or proof.
+
 ## Product strengths and scope
 
 The native app's distinctive workflow is **per-program tab identity**: an integrating

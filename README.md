@@ -2,6 +2,8 @@
 
 # AkiTTY
 
+**The Agent-Native Terminal**
+
 A native macOS terminal for visible, human-controlled AI agent workflows,
 powered by [Alacritty](https://github.com/alacritty/alacritty),
 with AkiTTY's own Rust integration, Swift/AppKit interface, CoreText/Metal rendering,
@@ -58,6 +60,12 @@ It separates host-enforced input ownership from unverified program reports, with
 actions to show a pane or reclaim input. Reclaim revokes unused approvals and input
 ownership; it does not stop a running process. Host authentication and policy remain
 the embedding host's responsibility.
+
+Current development adds [native agent workflows](docs/AGENT_NATIVE.md): OSC 7501
+program reports alongside OSC 771 sprites, an opt-in local `akitty-agent` request
+client, and a bounded local event timeline/export. Every local execution request
+requires human approval. Ordinary agent subprocesses are not intercepted. These
+additions are source development, not capabilities of the published 1.2.5 download.
 
 AkiTTY gives each participating program a visible identity in its own tab:
 its own small animated icon, working state, and a completion indicator that stays

@@ -267,6 +267,7 @@ pub enum Segment {
     Document(Vec<u8>),
     /// Bounded shell metadata; never grants input authority.
     Shell(Vec<u8>),
+    ProgramStatus(Vec<u8>),
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -292,7 +293,7 @@ pub struct Filter {
 
 /// True for an intercepted OSC body or a still-ambiguous prefix.
 fn osc_is_intercepted(body: &[u8]) -> bool {
-    [CHROME_OSC, b"133;", b"7;", b"772;"].iter().any(|prefix| body.starts_with(prefix) || prefix.starts_with(body))
+    [CHROME_OSC, b"133;", b"7;", b"772;", b"7501;"].iter().any(|prefix| body.starts_with(prefix) || prefix.starts_with(body))
 }
 
 impl Filter {
@@ -399,6 +400,10 @@ impl Filter {
         self.state = State::Ground;
         if !overflow && body.starts_with(b"771;") {
             out.push(Segment::Document(body[4..].to_vec()));
+        } else if body.starts_with(b"7501;") {
+            if !overflow && body.len() + 2 + terminator.len() <= 4096 {
+                out.push(Segment::ProgramStatus(body[5..].to_vec()));
+            }
         } else if body.starts_with(b"133;") || body.starts_with(b"7;") || body.starts_with(b"772;") {
             out.push(Segment::Shell(body));
         } else if !overflow {
