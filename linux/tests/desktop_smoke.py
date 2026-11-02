@@ -97,8 +97,12 @@ try:
         wait.until(lambda d:not d.find_elements(By.CSS_SELECTOR,'#tabs button'))
     print('PASS: real Tauri desktop + native PTY + CLI denial/approval + exact once effect + reclaim + redacted timeline')
 except Exception:
+    try:
+        driver.save_screenshot(str(output / 'failure.png'))
+        (output / 'failure.html').write_text(driver.page_source, encoding='utf-8')
+    except Exception as diagnostic_error:
+        print('Could not capture failure evidence:', diagnostic_error)
     print(driver.find_element(By.TAG_NAME, 'body').text)
-    print('FAILURE_SCREENSHOT=' + driver.get_screenshot_as_base64())
     raise
 finally:
     driver.quit()
