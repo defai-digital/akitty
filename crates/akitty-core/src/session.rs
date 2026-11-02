@@ -22,6 +22,9 @@ pub struct Session {
     commands: Option<mpsc::SyncSender<Command>>,
     stop: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
+    /// Serializes snapshot build/commit pairs. Held across serialization, which runs outside the model lock:
+    /// without it two hosts could commit events a snapshot never carried.
+    snapshot_lock: Mutex<()>,
     /// Self-pipe the worker polls next to the PTY: a queued command or a stop must not wait
     /// for the idle timeout. Absent on headless sessions, which have no worker.
     wake: Option<Arc<Wake>>,
@@ -109,6 +112,7 @@ impl Session {
                 commands: None,
                 stop,
                 pending,
+                snapshot_lock: Mutex::new(()),
                 wake: None,
                 worker: Mutex::new(None),
             });
@@ -184,16 +188,38 @@ impl Session {
             commands: Some(tx),
             stop,
             pending,
+            snapshot_lock: Mutex::new(()),
             wake: Some(wake),
             worker: Mutex::new(Some(worker)),
         })
     }
-    /// Snapshot JSON, already serialized; see [`Model::snapshot_json`].
+    /// Snapshot JSON, already serialized. The model lock covers the build and the commit only: serialization
+    /// (1–19 ms on a dense screen) runs after it is released, so the PTY worker keeps feeding.
     pub fn snapshot(&self, since: Option<u64>, compact: bool) -> Result<String, String> {
+        self.snapshot_within(since, compact, crate::model::MAX_SNAPSHOT_BYTES)
+    }
+    /// `snapshot` with the size bound passed in, so a test can drive the oversize branch without an 8 MiB screen.
+    fn snapshot_within(&self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
+        // Two concurrent snapshots must not interleave build and commit, or one would consume events the
+        // other never delivered. This lock, not the model lock, spans the serialization.
+        let _serialize = self.snapshot_lock.lock().map_err(|_| "terminal unavailable")?;
+        let built = {
+            let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+            // Real PTY sessions expire in the worker, which owns delivery of replies.
+            if self.commands.is_none() { model.expire_sync(); }
+            model.build_snapshot(since, compact)?
+        };
+        let Some((value, commit)) = built else { return Ok(crate::model::UNCHANGED_SNAPSHOT.into()) };
+        let json = serde_json::to_string(&value).expect("snapshot fields serialize");
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-        // Real PTY sessions expire in the worker, which owns delivery of replies.
-        if self.commands.is_none() { model.expire_sync(); }
-        model.snapshot_json(since, compact)
+        if json.len() > max_bytes {
+            // Nothing the client would never receive may be committed; `sent` is dropped so the
+            // next poll sends a full snapshot rather than a diff against it.
+            model.forget_sent();
+            return Err("snapshot exceeds 8 MiB".into());
+        }
+        model.commit_snapshot(commit);
+        Ok(json)
     }
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
         Ok(self.model.lock().map_err(|_| "terminal unavailable")?.shell.history(after))
@@ -364,14 +390,16 @@ impl Session {
         Ok(())
     }
     pub fn read_image(&self, image: u32, out: &mut [u8]) -> usize {
-        let Ok(model) = self.model.lock() else { return 0 };
-        match model.graphics.images.get(&image) {
-            Some(found) if found.rgba.len() <= out.len() => {
-                out[..found.rgba.len()].copy_from_slice(&found.rgba);
-                found.rgba.len()
-            }
-            _ => 0,
-        }
+        // Hold the pixels by reference count under the lock, then copy outside it: a frame can be tens of MiB
+        // and the worker must not wait for the copy. The held buffer is the frame that was on display.
+        let pixels = {
+            let Ok(model) = self.model.lock() else { return 0 };
+            let Some(found) = model.graphics.images.get(&image) else { return 0 };
+            if found.rgba.len() > out.len() { return 0; }
+            Arc::clone(&found.rgba)
+        };
+        out[..pixels.len()].copy_from_slice(&pixels);
+        pixels.len()
     }
     pub fn scroll(&self, lines: i32) -> Result<(), String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
@@ -1055,6 +1083,30 @@ mod tests {
     }
 
     #[test]
+    fn oversized_snapshot_keeps_events_and_forces_a_full_retry() {
+        let session = Session::new(20, 4, None, None, true, 5000, None).unwrap();
+        session.feed(b"hello").unwrap();
+        let since = serde_json::from_str::<Value>(&session.snapshot(None, true).unwrap()).unwrap()["revision"].as_u64();
+        // One changed row plus queued events: against the retained base this poll would be a partial diff.
+        session.feed(b"world\x07\x1b]52;c;aGk=\x07").unwrap();
+        // The bound is injected, so the fixed production message is what the branch returns.
+        let error = session.snapshot_within(since, true, 16).unwrap_err();
+        assert_eq!(error, "snapshot exceeds 8 MiB", "{error}");
+        // Nothing was committed, so the one-shot events ride the next successful poll.
+        let next: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(next["bell"], true, "{next}");
+        assert_eq!(next["clipboard"], json!(["hi"]), "{next}");
+        assert!(next["lines"][0].as_str().unwrap().starts_with("helloworld"), "{next}");
+        // The discarded base forces a full snapshot rather than a diff against it.
+        assert_eq!(next.get("partial"), None, "{next}");
+        // Control: the full commit restored a base, so a one-row change diffs again.
+        let revision = next["revision"].as_u64();
+        session.feed(b"z").unwrap();
+        let partial: Value = serde_json::from_str(&session.snapshot(revision, true).unwrap()).unwrap();
+        assert_eq!(partial["partial"], true, "{partial}");
+    }
+
+    #[test]
     fn rejected_cell_size_send_rolls_back_pixels_without_a_revision_bump() {
         let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.set_cell_size(10, 20).unwrap();
@@ -1337,6 +1389,134 @@ mod tests {
         // The wake pipe delivers the echo on the next poll (about 1 ms here). Without it input waits
         // for the 250 ms idle poll; the bound sits far from both so a loaded CI host cannot flake it.
         assert!(median < std::time::Duration::from_millis(50), "median echo latency {median:?}");
+    }
+
+    #[test]
+    fn read_image_returns_the_frame_on_display_after_an_animation_advance() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        // 2x1 RGBA: red | green.
+        session.feed(b"\x1b_Ga=t,f=32,s=2,v=1,i=1,q=2;/wAA/wD/AP8=\x1b\\").unwrap();
+        let mut out = [0u8; 8];
+        assert_eq!(session.read_image(1, &mut out), 8);
+        assert_eq!(out, [255, 0, 0, 255, 0, 255, 0, 255]);
+        // Frame 2 copies frame 1 and overwrites the left pixel; showing it changes what read_image hands out.
+        session.feed(b"\x1b_Ga=f,i=1,c=1,x=0,s=1,v=1,X=1,q=2;AP8A/w==\x1b\\").unwrap();
+        session.feed(b"\x1b_Ga=a,i=1,c=2\x1b\\").unwrap();
+        let mut shown = [0u8; 8];
+        assert_eq!(session.read_image(1, &mut shown), 8);
+        assert_eq!(shown, [0, 255, 0, 255, 0, 255, 0, 255], "the shown frame, not the transmitted one");
+        // A buffer that cannot hold the image, or an id that names nothing, reads nothing.
+        assert_eq!(session.read_image(1, &mut [0u8; 7]), 0);
+        assert_eq!(session.read_image(9, &mut shown), 0);
+    }
+
+    #[test]
+    fn events_arriving_between_build_and_commit_wait_for_the_next_snapshot() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x07\x1b]52;c;aGk=\x07").unwrap();
+        // A first snapshot delivers the events rung before it, so only the late ones are under test.
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        assert_eq!(first["bell"], true, "{first}");
+        assert_eq!(first["clipboard"], json!(["hi"]), "{first}");
+        // Build, then let the worker feed a bell and an OSC 52 while the snapshot is being serialized.
+        let (value, commit) = {
+            let mut model = lock_model(&session.model);
+            model.build_snapshot(None, true).unwrap().expect("the feed made a snapshot change")
+        };
+        session.feed(b"\x07\x1b]52;c;b3RoZXI=\x07").unwrap();
+        let sent = serde_json::to_string(&value).unwrap();
+        lock_model(&session.model).commit_snapshot(commit);
+        let delivered: Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(delivered["bell"], false, "the snapshot carries only what its build saw: {delivered}");
+        assert_eq!(delivered["clipboard"], json!([]), "{delivered}");
+        // The late events survive the commit and reach the next poll exactly once.
+        let next: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        assert_eq!(next["bell"], true, "{next}");
+        assert_eq!(next["clipboard"], json!(["other"]), "{next}");
+        let after: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        assert_eq!(after["bell"], false, "a delivered event is not repeated: {after}");
+        assert_eq!(after["clipboard"], json!([]), "{after}");
+    }
+
+    #[test]
+    fn an_abandoned_build_consumes_no_one_shot_event() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x07\x1b]52;c;aGk=\x07").unwrap();
+        // The oversize path builds, never commits, and drops the diff base; nothing may be consumed.
+        let _ = {
+            let mut model = lock_model(&session.model);
+            model.build_snapshot(None, true).unwrap().expect("the feed made a snapshot change")
+        };
+        lock_model(&session.model).forget_sent();
+        let next: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        assert_eq!(next["bell"], true, "{next}");
+        assert_eq!(next["clipboard"], json!(["hi"]), "{next}");
+    }
+
+    #[test]
+    fn a_dropped_diff_base_forces_a_full_snapshot() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"hello").unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let since = first["revision"].as_u64();
+        // One changed row against a held base is a partial snapshot.
+        session.feed(b"x").unwrap();
+        let partial: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        assert_eq!(partial["partial"], true, "{partial}");
+        // Without the base the next poll must carry every row, which is what the oversize path leaves behind.
+        let revision = partial["revision"].as_u64();
+        lock_model(&session.model).forget_sent();
+        session.feed(b"y").unwrap();
+        let full: Value = serde_json::from_str(&session.snapshot(revision, true).unwrap()).unwrap();
+        assert_eq!(full["changed"], true, "{full}");
+        assert!(full.get("partial").is_none() && full.get("dirty").is_none(), "a full snapshot has no row delta: {full}");
+    }
+
+    #[test]
+    fn concurrent_snapshots_on_a_live_pty_never_lose_a_bell() {
+        let session = Session::new(40, 10, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        // Let the shell install its line editing before the first command, as the echo test does.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        session.input_bytes(b"\r".to_vec()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let stop = AtomicBool::new(false);
+        let reported: usize = std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut bells = 0;
+                        while !stop.load(Ordering::SeqCst) {
+                            // Serializing outside the model lock is what keeps this loop from stalling the
+                            // worker; a panic here would poison the session and fail the join.
+                            let json = session.snapshot(None, true).expect("a live session snapshots");
+                            let snapshot: Value = serde_json::from_str(&json).expect("snapshot is JSON");
+                            if snapshot["bell"].as_bool().unwrap_or(false) { bells += 1; }
+                            // Yield the model lock so the PTY worker keeps feeding between polls.
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                        }
+                        bells
+                    })
+                })
+                .collect();
+            // Each line makes the shell ring one bell on the PTY.
+            for _ in 0..8 {
+                session.input_bytes(b"printf '\\a'\r".to_vec()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while { let (rung, sent) = lock_model(&session.model).bell_counts(); rung == 0 || sent < rung } {
+                assert!(Instant::now() < deadline, "the shell's bells never reached a snapshot");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            stop.store(true, Ordering::SeqCst);
+            readers.into_iter().map(|reader| reader.join().expect("no snapshot panicked")).sum()
+        });
+        assert!(reported > 0, "every rung bell is reported at least once");
+        // A final poll sees no outstanding bell, and the counters agree that everything was delivered.
+        let last: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        assert_eq!(last["bell"], false, "{last}");
+        let (rung, sent) = lock_model(&session.model).bell_counts();
+        assert_eq!((rung, sent), (rung, rung), "every bell rung was delivered exactly once");
     }
 }
 
