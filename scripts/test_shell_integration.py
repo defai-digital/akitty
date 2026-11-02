@@ -10,10 +10,12 @@ import re
 import select
 import signal
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import termios
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'macos/Sources/AkittyKit/Resources/shell-integration/akitty.bash'
@@ -239,6 +241,7 @@ class ShellIntegrationTests(unittest.TestCase):
         env = shell_environment(str(home), ZDOTDIR=str(home), TERM='xterm-256color', **extra)
         pid, fd = pty.fork()
         if pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
             os.chdir(home / 'project')
             os.execve(ZSH, [ZSH, '-i'], env)
         output = bytearray()
@@ -250,7 +253,11 @@ class ShellIntegrationTests(unittest.TestCase):
                     try: output.extend(os.read(fd, 65536))
                     except OSError: return
         try:
-            send('', 1.5)
+            # A fixed startup sleep can send the first command before the hosted runner's shell is ready.
+            deadline = time.monotonic() + 10
+            while b'P> \x1b]133;B\x07' not in output and time.monotonic() < deadline:
+                send('', 0.05)
+            self.assertIn(b'P> \x1b]133;B\x07', output, repr(bytes(output)))
             yield send, output
         finally:
             # Close before TemporaryDirectory removes HOME; otherwise the exit hook recreates it.
@@ -282,7 +289,7 @@ class ShellIntegrationTests(unittest.TestCase):
                     send(line + '\r')
                 file = home / 'Library/Application Support/Akitty/folder-history'
                 saved = [line.split('\t')[3] for line in file.read_text().splitlines()]
-                self.assertEqual(saved, ['echo kept'], 'space-prefixed, HISTORY_IGNORE, hook-rejected and multi-line lines are not saved')
+                self.assertEqual(saved, ['echo kept'], repr(bytes(output)))
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
 
     def test_zsh_tab_and_arrows_offer_this_folders_commands(self):
@@ -336,7 +343,7 @@ class ShellIntegrationTests(unittest.TestCase):
             with self.zsh_pty(home, rc) as (send, output):
                 send('echo visible\r'); send('echo private\r')
                 calls = (home / 'hook-calls').read_text().splitlines()
-                self.assertEqual(calls.count('echo visible'), 1)
+                self.assertEqual(calls.count('echo visible'), 1, repr((calls, bytes(output))))
                 self.assertEqual(calls.count('echo private'), 1)
                 saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
                 self.assertIn('echo visible', saved)
