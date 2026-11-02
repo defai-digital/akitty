@@ -151,7 +151,7 @@ struct CursorOut {
 
 /// The typed snapshot payload; serializing it produces schema-1 JSON byte for byte.
 #[derive(Serialize)]
-struct SnapshotOut {
+pub(crate) struct SnapshotOut {
     changed: bool,
     revision: u64,
     cols: usize,
@@ -198,19 +198,23 @@ struct SentRows {
 }
 
 /// The unchanged answer to a `since` poll with nothing new.
-const UNCHANGED_SNAPSHOT: &str = r#"{"changed":false}"#;
+pub(crate) const UNCHANGED_SNAPSHOT: &str = r#"{"changed":false}"#;
 
 /// The model state a sent snapshot owns: reported flags, one-shot events and row hashes.
-struct SnapshotCommit {
+pub(crate) struct SnapshotCommit {
     transient: bool,
     reported_animating: bool,
+    /// Clipboard entries the snapshot carried, counted from the front of the queue.
+    clipboard: usize,
+    /// Bells rung when the snapshot was built; a later commit leaves newer ones for the next poll.
+    bells: u64,
     revision: u64,
     cols: usize,
     hashes: Vec<u64>,
     crowded: bool,
 }
 /// Snapshot fields plus the commit that grants them delivery; `None` is the unchanged answer.
-type BuiltSnapshot = Option<(SnapshotOut, SnapshotCommit)>;
+pub(crate) type BuiltSnapshot = Option<(SnapshotOut, SnapshotCommit)>;
 /// The window and tab name before a program sets one, and after it clears or resets the title.
 pub const DEFAULT_TITLE: &str = "Akitty";
 
@@ -249,8 +253,11 @@ pub struct Model {
     pub revision: u64,
     pub title: String,
     pub clipboard: Vec<String>,
-    /// BEL seen since the last snapshot; the client decides how to sound it.
-    pub bell: bool,
+    /// BEL count since the model was created; snapshot reports `rung != sent`, so a bell that rings while a
+    /// snapshot serializes is delivered by the next poll instead of being cleared by this one.
+    bells_rung: u64,
+    /// BEL count the last delivered snapshot carried.
+    bells_sent: u64,
     pub error: Option<String>,
     pub exited: bool,
     pub exit_code: Option<u32>,
@@ -305,7 +312,8 @@ impl Model {
             revision: 1,
             title: DEFAULT_TITLE.into(),
             clipboard: Vec::new(),
-            bell: false,
+            bells_rung: 0,
+            bells_sent: 0,
             error: None,
             exited: false,
             exit_code: None,
@@ -538,8 +546,10 @@ impl Model {
                     self.title = if title.trim().is_empty() { DEFAULT_TITLE.into() } else { title }
                 }
                 Event::ResetTitle => self.title = DEFAULT_TITLE.into(),
-                Event::Bell => self.bell = true,
+                Event::Bell => self.bells_rung = self.bells_rung.saturating_add(1),
                 Event::ClipboardStore(_, text) => {
+                    // Entries are only appended (never evicted), so a commit can drain the front of the queue
+                    // and leave whatever arrived after its build for the next snapshot.
                     if self.clipboard.len() < 4 && text.len() <= 65536 {
                         self.clipboard.push(text);
                     }
@@ -572,7 +582,7 @@ impl Model {
         false
     }
     /// The snapshot as a parsed value with cells expanded to keyed objects (see
-    /// [`expand_cell`]); the wire path uses [`Self::snapshot_json`].
+    /// [`expand_cell`]); the wire path builds and serializes around the model lock instead.
     #[cfg(test)]
     pub fn snapshot(&mut self, since: Option<u64>) -> Value {
         let mut snapshot: Value =
@@ -584,21 +594,26 @@ impl Model {
         }
         snapshot
     }
-    /// The snapshot JSON, serialized once from typed rows.
+    /// The snapshot JSON, serialized once from typed rows, under one lock. Test-only: the wire path in
+    /// `Session::snapshot` splits build, serialization and commit so the PTY worker is not stalled by a
+    /// multi-millisecond `serde_json::to_string`.
+    #[cfg(test)]
     pub fn snapshot_json(&mut self, since: Option<u64>, compact: bool) -> Result<String, String> {
         self.snapshot_json_within(since, compact, MAX_SNAPSHOT_BYTES)
     }
 
-    /// Advances the reported flags, clears one-shot events and records the row hashes a
-    /// snapshot just delivered. Only call with the commit of a serialized snapshot: a
-    /// build that was never sent consumes nothing. Build, serialize and commit all run under
-    /// one model lock; a commit applied later would clear a bell or clipboard request that
-    /// arrived after the build.
-    fn commit_snapshot(&mut self, commit: SnapshotCommit) {
+    /// Advances the reported flags, clears the one-shot events this snapshot carried and records the row hashes
+    /// it delivered. A build that was never sent consumes nothing, and a commit applied after newer input
+    /// arrived only takes what its own build carried: clipboard entries beyond the sent count and bells rung
+    /// after the build stay queued for the next snapshot.
+    pub(crate) fn commit_snapshot(&mut self, commit: SnapshotCommit) {
         self.reported_transient = commit.transient;
         self.reported_animating = commit.reported_animating;
-        self.clipboard.clear();
-        self.bell = false;
+        self.clipboard.drain(..commit.clipboard.min(self.clipboard.len()));
+        self.bells_sent = commit.bells;
+        // The hashes describe the rows the client actually received and carry the revision it now polls with, so
+        // they stay a valid diff base even when the screen moved on while this snapshot serialized: the next
+        // `since` poll compares against these hashes, not against the current revision.
         self.sent = (!commit.crowded).then_some(SentRows {
             revision: commit.revision,
             cols: commit.cols,
@@ -606,6 +621,18 @@ impl Model {
         });
     }
 
+    /// Drops the row hashes a client could diff against, so the next snapshot is a full one.
+    pub(crate) fn forget_sent(&mut self) {
+        self.sent = None;
+    }
+
+    /// Bells rung so far and bells the last delivered snapshot carried; equal means nothing is pending.
+    #[cfg(test)]
+    pub(crate) fn bell_counts(&self) -> (u64, u64) {
+        (self.bells_rung, self.bells_sent)
+    }
+
+    #[cfg(test)]
     fn snapshot_json_within(&mut self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
         let Some((value, commit)) = self.build_snapshot(since, compact)? else {
             return Ok(UNCHANGED_SNAPSHOT.into());
@@ -614,14 +641,14 @@ impl Model {
         if json.len() > max_bytes {
             // Fail before committing anything the client would never receive. `sent` is
             // dropped so the next poll sends a full snapshot rather than a diff against it.
-            self.sent = None;
+            self.forget_sent();
             return Err("snapshot exceeds 8 MiB".into());
         }
         self.commit_snapshot(commit);
         Ok(json)
     }
 
-    fn build_snapshot(&mut self, since: Option<u64>, compact: bool) -> Result<BuiltSnapshot, String> {
+    pub(crate) fn build_snapshot(&mut self, since: Option<u64>, compact: bool) -> Result<BuiltSnapshot, String> {
         if self.exited { self.program_status.finish_work(); }
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
@@ -635,7 +662,7 @@ impl Model {
         let animating = self.graphics.animating();
         if since == Some(self.revision)
             && self.clipboard.is_empty()
-            && !self.bell
+            && self.bells_rung == self.bells_sent
             && transient == self.reported_transient
             && animating == self.reported_animating
         {
@@ -884,9 +911,10 @@ impl Model {
             offset: content.display_offset,
             history: self.term.grid().history_size(),
             // Copied, not taken: an oversized snapshot below is discarded, and these one-shot
-            // events must survive for the next poll instead of vanishing with it.
+            // events must survive for the next poll instead of vanishing with it. The commit
+            // records the same counts, so a later commit drains only what this snapshot carried.
             clipboard: self.clipboard.clone(),
-            bell: self.bell,
+            bell: self.bells_rung != self.bells_sent,
             error: self.error.clone(),
             exited: self.exited,
             exit_code: self.exit_code,
@@ -903,6 +931,8 @@ impl Model {
             SnapshotCommit {
                 transient,
                 reported_animating,
+                clipboard: self.clipboard.len(),
+                bells: self.bells_rung,
                 revision: self.revision,
                 cols: self.size.cols,
                 hashes,
@@ -1094,7 +1124,7 @@ fn underline_style(flags: Flags) -> Option<u8> {
 }
 const MAX_LINKS: usize = 256;
 /// Largest serialized snapshot; leaves room for the response envelope inside the 8 MiB ABI limit.
-const MAX_SNAPSHOT_BYTES: usize = 8 * 1_048_576 - 256;
+pub(crate) const MAX_SNAPSHOT_BYTES: usize = 8 * 1_048_576 - 256;
 const MAX_LINK_BYTES: usize = 2048;
 /// Placeholder fragments per snapshot; rows already cap cells at 32,768.
 const MAX_FRAGMENTS: usize = 4096;

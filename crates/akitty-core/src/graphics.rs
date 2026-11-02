@@ -13,6 +13,7 @@ use base64::Engine;
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Largest accepted image: 8 Mi pixels (32 MiB of RGBA).
 pub const MAX_PIXELS: u64 = 8 * 1024 * 1024;
@@ -221,8 +222,9 @@ impl ApcFilter {
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    /// The pixels of the frame on display; frame 1 while nothing animates.
-    pub rgba: Vec<u8>,
+    /// The pixels of the frame on display; frame 1 while nothing animates. Shared with the frame it was shown
+    /// from, so advancing an animation is a reference-count move instead of a full-frame copy.
+    pub rgba: Arc<Vec<u8>>,
     pub generation: u64,
     /// Created while the alternate screen was active; dropped when it is left.
     pub alt: bool,
@@ -230,14 +232,16 @@ pub struct Image {
     /// freed as soon as its last placement goes away.
     pub idless: bool,
     /// Animation frames, entry 0 being the transmitted image (frame 1). Empty until the first `a=f` materializes the
-    /// root as `frames[0]`; from then on `rgba` is a copy of the frame on display.
+    /// root as `frames[0]`; from then on `rgba` shares the frame on display.
     frames: Vec<Frame>,
     /// Playback state, created by the first animation command.
     animation: Option<Animation>,
 }
 
 impl Image {
-    /// Every byte this image counts against the session budget.
+    /// Every byte this image counts against the session budget. Budgets count each frame plus the displayed
+    /// copy even when `rgba` shares a frame's buffer, so the limits bound real memory from above and keep the
+    /// accounting a limit must have: an animation advance can never grow a charge or free one.
     fn memory(&self) -> usize {
         self.rgba.len() + self.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
     }
@@ -257,9 +261,11 @@ impl Image {
         if index == 0 { self.animation.as_ref().map_or(0, |animation| animation.root_gap) } else { self.frames[index].gap_ms }
     }
 
-    /// Pixels of one frame (0-based), writable; frame 1 of an image without frames is `rgba` itself.
+    /// Pixels of one frame (0-based), writable; frame 1 of an image without frames is `rgba` itself. Copy on write:
+    /// a buffer still shared with `rgba` or another frame is cloned first, so an edit never reaches a frame the
+    /// caller did not name.
     fn frame_mut(&mut self, index: usize) -> &mut Vec<u8> {
-        if self.frames.is_empty() { &mut self.rgba } else { &mut self.frames[index].rgba }
+        if self.frames.is_empty() { Arc::make_mut(&mut self.rgba) } else { Arc::make_mut(&mut self.frames[index].rgba) }
     }
 
     fn frame(&self, index: usize) -> &[u8] {
@@ -269,7 +275,7 @@ impl Image {
 
 /// One animation frame at full image size.
 struct Frame {
-    rgba: Vec<u8>,
+    rgba: Arc<Vec<u8>>,
     /// Milliseconds this frame is displayed; 0 is gapless. Unused for frame 1, whose gap is `Animation::root_gap`.
     gap_ms: u32,
 }
@@ -691,7 +697,7 @@ impl Graphics {
             Image {
                 width: decoded.width,
                 height: decoded.height,
-                rgba: decoded.rgba,
+                rgba: Arc::new(decoded.rgba),
                 generation: self.next_generation,
                 alt: context.alt,
                 idless,
@@ -837,15 +843,11 @@ impl Graphics {
         if command.id != 0 { command.id } else { self.numbers.get(&command.number).copied().unwrap_or(0) }
     }
 
-    /// Shows frame `index` of `id`: `rgba` becomes its pixels and the generation moves so the renderer re-uploads.
+    /// Shows frame `index` of `id`: `rgba` shares its pixels and the generation moves so the renderer re-uploads.
     fn show(&mut self, id: u32, index: usize) {
         let Some(image) = self.images.get_mut(&id) else { return };
         if let Some(animation) = image.animation.as_mut() { animation.current = index; }
-        if !image.frames.is_empty() {
-            let frame = std::mem::take(&mut image.frames[index].rgba);
-            image.rgba.copy_from_slice(&frame);
-            image.frames[index].rgba = frame;
-        }
+        if !image.frames.is_empty() { image.rgba = Arc::clone(&image.frames[index].rgba); }
         self.next_generation += 1;
         image.generation = self.next_generation;
     }
@@ -873,7 +875,9 @@ impl Graphics {
         let gap = command.gap.unwrap_or(0);
         let number = if command.rows == 0 || command.rows > count { count + 1 } else { command.rows };
         if number <= count {
-            // Editing a frame in place costs no memory; a gap given with it replaces the frame's gap.
+            // Editing a frame in place costs no budget charge: a buffer still shared with the display (or a
+            // reader) is copied first, so the edit never reaches pixels another holder still shows. A gap
+            // given with it replaces the frame's gap.
             let index = number as usize - 1;
             let image = self.images.get_mut(&id).expect("image looked up above");
             compose_rect(image.frame_mut(index), width, height, &piece, command.rect_x, command.rect_y, overwrite);
@@ -897,14 +901,16 @@ impl Graphics {
             return self.fail(&command, "ENOSPC", "image memory limit reached");
         }
         let image = self.images.get_mut(&id).expect("eviction keeps the target image");
-        if image.frames.is_empty() { image.frames.push(Frame { rgba: image.rgba.clone(), gap_ms: 0 }); }
+        if image.frames.is_empty() { image.frames.push(Frame { rgba: Arc::clone(&image.rgba), gap_ms: 0 }); }
         let mut canvas = if command.cols != 0 {
             image.frames[command.cols as usize - 1].rgba.clone()
         } else {
             let [r, g, b, a] = command.off_y.to_be_bytes();
-            [r, g, b, a].repeat(width as usize * height as usize)
+            Arc::new([r, g, b, a].repeat(width as usize * height as usize))
         };
-        compose_rect(&mut canvas, width, height, &piece, command.rect_x, command.rect_y, overwrite);
+        // Copy on write: a base frame that is still shared with the display is copied before the blend.
+        let pixels = Arc::make_mut(&mut canvas);
+        compose_rect(pixels, width, height, &piece, command.rect_x, command.rect_y, overwrite);
         // A new frame defaults to a 40 ms gap; a negative gap makes it gapless.
         let gap_ms = if gap > 0 { gap as u32 } else if gap < 0 { 0 } else { DEFAULT_GAP_MS };
         image.frames.push(Frame { rgba: canvas, gap_ms });
@@ -1901,7 +1907,7 @@ mod tests {
             assert!(outcome.reply.is_empty(), "case {id}: {:?}", String::from_utf8_lossy(&outcome.reply));
             let image = &graphics.images[&id];
             assert_eq!((image.width, image.height), (width, height), "case {id}");
-            assert_eq!(image.rgba, expected, "case {id}");
+            assert_eq!(image.rgba.as_slice(), expected.as_slice(), "case {id}");
         }
     }
 
@@ -1918,7 +1924,7 @@ mod tests {
             encoder.write_header().unwrap().write_image_data(&[0, 1]).unwrap();
         }
         graphics.handle(format!("a=t,f=100,i=1,q=2;{}", encode(&indexed)).as_bytes(), &context());
-        assert_eq!(graphics.images[&1].rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(graphics.images[&1].rgba.as_slice(), vec![255, 0, 0, 255, 0, 255, 0, 255].as_slice());
         // 1-bit grayscale packs eight pixels per byte, MSB first.
         let gray1 = png_file(png::ColorType::Grayscale, png::BitDepth::One, 8, 1, &[0b1010_1010]);
         let gray1_outcome = graphics.handle(format!("a=t,f=100,i=2,q=1;{}", encode(&gray1)).as_bytes(), &context());
@@ -1955,7 +1961,7 @@ mod tests {
         // s=/v= are pixel dimensions, not the inflate bound: only S= sizes the zlib output.
         let ok = graphics.handle(format!("a=t,f=100,o=z,s=2,v=2,S={},i=1,q=2;{packed}", file.len()).as_bytes(), &context());
         assert!(ok.reply.is_empty());
-        assert_eq!(graphics.images[&1].rgba, vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+        assert_eq!(graphics.images[&1].rgba.as_slice(), vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22].as_slice());
         // A too-small S= still refuses even though s= is large enough.
         let outcome = graphics.handle(format!("a=t,f=100,o=z,s=9999,v=9999,S=4,i=2;{packed}").as_bytes(), &context());
         assert!(String::from_utf8(outcome.reply).unwrap().contains("EINVAL"));
@@ -1980,7 +1986,7 @@ mod tests {
         let name = encode(path.as_os_str().as_encoded_bytes());
         let outcome = graphics.handle(format!("a=T,t=t,f=100,o=z,S={},i=1,q=1;{name}", packed.len()).as_bytes(), &context());
         assert!(outcome.reply.is_empty(), "{}", String::from_utf8_lossy(&outcome.reply));
-        assert_eq!(graphics.images[&1].rgba, vec![7; 64 * 64 * 4]);
+        assert_eq!(graphics.images[&1].rgba.as_slice(), vec![7; 64 * 64 * 4].as_slice());
         assert!(!path.exists());
     }
 
@@ -2402,7 +2408,7 @@ mod tests {
         assert_eq!(image.frame_count(), 3);
         assert_eq!(image.frame(1), [255, 0, 0, 255, 0, 255, 0, 255]);
         assert_eq!(image.frame(2), [127, 0, 128, 255, 0, 255, 0, 255]);
-        assert_eq!(image.rgba, image.frame(0), "frame 1 stays on display");
+        assert_eq!(image.rgba.as_slice(), image.frame(0), "frame 1 stays on display");
         // Frame 1 is gapless until a=a r=1 z= gives it a gap; nothing plays before s=3.
         graphics.handle(b"a=a,i=1,r=1,z=50", &context());
         let start = std::time::Instant::now();
@@ -2425,7 +2431,7 @@ mod tests {
         assert!(!graphics.animating());
         // c= shows a frame directly; d=f deletes frames until the image is a still again.
         graphics.handle(b"a=a,i=1,c=1", &context());
-        assert_eq!(graphics.images[&1].rgba, [255, 0, 0, 255, 255, 0, 0, 255]);
+        assert_eq!(graphics.images[&1].rgba.as_slice(), &[255, 0, 0, 255, 255, 0, 0, 255][..]);
         let before = graphics.bytes();
         graphics.handle(b"a=d,d=f,i=1,r=2", &context());
         assert_eq!((graphics.images[&1].frame_count(), graphics.bytes()), (2, before - 8));
@@ -2433,6 +2439,47 @@ mod tests {
         assert_eq!((graphics.images[&1].frame_count(), graphics.bytes()), (1, 8));
         graphics.handle(b"a=d,d=F,i=1", &context());
         assert!(graphics.images.is_empty() && graphics.placements.is_empty());
+    }
+
+    #[test]
+    fn showing_a_frame_shares_its_pixels_and_composition_copies_before_writing() {
+        let mut graphics = Graphics::default();
+        let red = encode(&[255, 0, 0, 255, 255, 0, 0, 255]);
+        graphics.handle(format!("a=T,f=32,s=2,v=1,i=1,q=2;{red}").as_bytes(), &context());
+        // Frame 2: frame 1 with the right pixel green. Frame 3: frame 1 with the left pixel green.
+        graphics.handle(format!("a=f,i=1,c=1,x=1,s=1,v=1,X=1,q=2;{}", encode(&[0, 255, 0, 255])).as_bytes(), &context());
+        graphics.handle(format!("a=f,i=1,c=1,x=0,s=1,v=1,X=1,q=2;{}", encode(&[0, 255, 0, 255])).as_bytes(), &context());
+        let frame = |graphics: &Graphics, index: usize| graphics.images[&1].frame(index).to_vec();
+        assert_eq!(frame(&graphics, 1), [255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(frame(&graphics, 2), [0, 255, 0, 255, 255, 0, 0, 255]);
+        let bytes = graphics.bytes();
+        // Showing a frame is a reference-count move: no frame's pixels change and no bytes move.
+        graphics.handle(b"a=a,i=1,c=2", &context());
+        assert_eq!(graphics.images[&1].rgba.as_slice(), frame(&graphics, 1).as_slice(), "the display follows c=");
+        assert_eq!((frame(&graphics, 0), frame(&graphics, 1), frame(&graphics, 2)), (vec![255, 0, 0, 255, 255, 0, 0, 255], vec![255, 0, 0, 255, 0, 255, 0, 255], vec![0, 255, 0, 255, 255, 0, 0, 255]));
+        assert_eq!(graphics.bytes(), bytes);
+        // Editing the displayed frame in place copies first, so the frame it was shown from keeps its pixels.
+        graphics.handle(format!("a=f,i=1,r=2,x=1,s=1,v=1,X=1,q=2;{}", encode(&[0, 0, 255, 255])).as_bytes(), &context());
+        assert_eq!(frame(&graphics, 0), [255, 0, 0, 255, 255, 0, 0, 255], "frame 1 is untouched");
+        assert_eq!(frame(&graphics, 1), [255, 0, 0, 255, 0, 0, 255, 255], "the edit lands on frame 2");
+        assert_eq!(frame(&graphics, 2), [0, 255, 0, 255, 255, 0, 0, 255], "frame 3 is untouched");
+        assert_eq!(graphics.images[&1].rgba.as_slice(), [255, 0, 0, 255, 0, 0, 255, 255], "the display follows the edit");
+    }
+
+    #[test]
+    fn animation_advance_only_switches_the_displayed_buffer() {
+        let mut graphics = Graphics::default();
+        graphics.handle(format!("a=T,f=32,s=1,v=1,i=1,q=2;{}", encode(&[255, 0, 0, 255])).as_bytes(), &context());
+        graphics.handle(format!("a=f,i=1,z=50,q=2;{}", encode(&[0, 255, 0, 255])).as_bytes(), &context());
+        graphics.handle(b"a=a,i=1,r=1,z=10,s=3,v=1", &context());
+        let bytes = graphics.bytes();
+        let start = std::time::Instant::now();
+        assert!(!graphics.tick(start), "the first tick only starts frame 1's gap");
+        assert!(graphics.tick(start + std::time::Duration::from_millis(10)));
+        assert_eq!(graphics.images[&1].rgba.as_slice(), [0, 255, 0, 255], "the display shows frame 2");
+        assert_eq!(graphics.images[&1].frame(0), [255, 0, 0, 255], "frame 1 keeps its pixels");
+        assert_eq!(graphics.images[&1].frame(1), [0, 255, 0, 255], "frame 2 keeps its pixels");
+        assert_eq!(graphics.bytes(), bytes, "an advance neither charges nor frees bytes");
     }
 
     #[test]
@@ -2466,7 +2513,7 @@ mod tests {
         assert!(error(&mut graphics, "a=c,i=2,r=1,c=1,w=1,x=2").contains("out of bounds"));
         // Without frames a=c works on frame 1 itself: copy the left pixel over the right one.
         assert!(error(&mut graphics, "a=c,i=2,r=1,c=1,w=1,x=1,C=1").ends_with(";OK\x1b\\"));
-        assert_eq!(graphics.images[&2].rgba, [1, 2, 3, 255, 1, 2, 3, 255]);
+        assert_eq!(graphics.images[&2].rgba.as_slice(), &[1, 2, 3, 255, 1, 2, 3, 255][..]);
         // A chunked a=f continues across chunks that carry a=f, m and q only.
         let chunk = encode(&[9, 9, 9, 255, 9, 9, 9, 255]);
         let (head, tail) = chunk.split_at(4);
@@ -2556,7 +2603,7 @@ mod tests {
         let name = encode(path.as_os_str().as_encoded_bytes());
         let outcome = graphics.handle(format!("a=T,t=t,f=24,s=2,v=1,i=6;{name}").as_bytes(), &context());
         assert_eq!(outcome.reply, b"\x1b_Gi=6;OK\x1b\\");
-        assert_eq!(graphics.images[&6].rgba, [1, 2, 3, 255, 4, 5, 6, 255]);
+        assert_eq!(graphics.images[&6].rgba.as_slice(), &[1, 2, 3, 255, 4, 5, 6, 255][..]);
         assert!(!path.exists(), "the terminal deletes temp files it read");
         // Kitten icat probes each medium with a real one-pixel object; the probe reads it and consumes a temp file.
         let query = |graphics: &mut Graphics, medium: char, name: &str| {
