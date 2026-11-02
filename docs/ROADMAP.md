@@ -22,9 +22,11 @@ Establish repeatable baselines before changing hot paths. Priorities are:
 
 - Measure input throughput, full/partial snapshot cost, typing latency, idle
   wakeups, and memory with several panes and graphics workloads.
-- Evaluate reducing full-grid snapshot hashing (scroll-aware partial snapshots)
-  while preserving protocol ordering and queue bounds. Filter-buffer copies and
-  per-slice event draining were reduced after 1.3.5 (about 20% more feed throughput).
+- Partial snapshots carry a `shift` when the screen scrolled, so streaming output
+  sends only new rows; snapshots serialize outside the model lock and animation
+  frames are shared rather than copied. Filter-buffer copies and per-slice event
+  draining were reduced after 1.3.5 (about 20% more feed throughput). Scrolled
+  frames still repaint the whole bitmap; a bitmap scroll remains to evaluate.
 - The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
   up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
 - Hidden panes (background tabs, occluded windows, a hidden app) poll at 4 Hz; the

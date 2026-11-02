@@ -550,6 +550,37 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(object["partial"] as? Bool, true)
         XCTAssertEqual(object["dirty"] as? [Int], [0])
     }
+    func testAScrolledPartialShiftsTheHeldRowsBeforeReplacingTheDirtyOnes() throws {
+        let session = try TerminalSession(cols: 16, rows: 6, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix"])
+        let held = try XCTUnwrap(try session.snapshot())
+        // One newline past the bottom scrolls the screen by exactly one row.
+        _ = try session.call("feed", ["text": "\r\nseven"])
+        let wire = try session.call("snapshot", ["since": held.revision])
+        let partial = try JSONDecoder().decode(Snapshot.self, from: wire)
+        XCTAssertEqual(partial.partial, true)
+        XCTAssertEqual(partial.shift, 1)
+        XCTAssertEqual(partial.dirty, [5])
+        let merged = try XCTUnwrap(held.applying(partial))
+        XCTAssertTrue(merged.lines[0].hasPrefix("two"), "held rows moved up by the shift before the dirty rows applied")
+        XCTAssertEqual(merged.cells.filter { $0.row == 5 }.map(\.text).joined(), "seven", "the new bottom row replaced its copy")
+        // The same state, asked for directly: the merge must not depend on the partial form.
+        let full = try XCTUnwrap(try session.snapshot())
+        XCTAssertEqual(merged.lines, full.lines)
+        XCTAssertEqual(merged.cells.map { "\($0.row),\($0.col),\($0.text)" }, full.cells.map { "\($0.row),\($0.col),\($0.text)" })
+        // A shift the client cannot apply is rejected rather than guessed at, so the caller asks again in full.
+        func altered(_ change: (inout [String: Any]) -> Void) throws -> Snapshot {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+            change(&object)
+            return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertNil(held.applying(try altered { $0["shift"] = 0 }), "a zero shift is not a shift")
+        XCTAssertNil(held.applying(try altered { $0["shift"] = -1 }), "a negative shift is not a shift")
+        XCTAssertNil(held.applying(try altered { $0["shift"] = held.rows }), "shifting the whole screen drops every held row")
+        XCTAssertNil(held.applying(try altered { $0["dirty"] = [4]; $0["lines"] = ["x"] }),
+                     "rows with no source row must be replaced, or the update lands on the wrong rows")
+    }
     func testWrongBaselineFallsBackToAFullSnapshot() throws {
         let session = try TerminalSession(cols: 20, rows: 4, headless: true)
         defer { try? session.close() }

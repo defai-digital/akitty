@@ -188,6 +188,9 @@ pub(crate) struct SnapshotOut {
     partial: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dirty: Option<Vec<usize>>,
+    /// Rows the client moves up before replacing `dirty`; omitted unless the screen scrolled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shift: Option<usize>,
 }
 
 /// What the client holds after the last snapshot sent: lets the next one carry only changed rows.
@@ -727,10 +730,29 @@ impl Model {
             (Some(sent), true) => (0..rows).map(|r| sent.hashes[r] != hashes[r]).collect(),
             _ => vec![true; rows],
         };
+        // Streaming output scrolls the screen, which changes every row's hash and would send the whole
+        // screen as a full snapshot every frame. When most rows changed, try the baseline shifted up by
+        // the distance the screen actually moved: the rows that merely moved keep their content, so only
+        // the new bottom rows (and any genuinely changed row) are dirty.
+        let changed = dirty.iter().filter(|changed| **changed).count();
+        let mut shift = None;
+        if partial && changed > rows / 2
+            && let Some(sent) = self.sent.as_ref()
+            && let Some(k) = scroll_shift(&hashes, &sent.hashes)
+        {
+            let shifted: Vec<bool> = (0..rows).map(|r| r + k >= rows || hashes[r] != sent.hashes[r + k]).collect();
+            let rows_dirty = shifted.iter().filter(|changed| **changed).count();
+            // Only when the shifted comparison is clearly cheaper than the direct one.
+            if rows_dirty < changed {
+                dirty = shifted;
+                shift = Some(k);
+            }
+        }
         // When every row changed a partial buys nothing, and a full snapshot also rebuilds the link table.
         let partial = partial && dirty.iter().any(|changed| !changed);
         if !partial {
             dirty.fill(true);
+            shift = None;
         }
         let content = self.term.renderable_content();
         let mut cells = Vec::new();
@@ -924,6 +946,7 @@ impl Model {
             program_status: self.program_status.to_json(),
             partial: partial.then_some(true),
             dirty: partial.then_some(dirty_rows),
+            shift,
         };
         self.links = links;
         Ok(Some((
@@ -1123,6 +1146,38 @@ fn underline_style(flags: Flags) -> Option<u8> {
     }
 }
 const MAX_LINKS: usize = 256;
+/// Shift candidates scored per snapshot when detecting a scrolled screen. Candidates come from where the
+/// first few rows' hashes appear in the baseline, so a screen of repeated identical rows can offer many;
+/// bounding them keeps detection at a few row scans instead of a quadratic search.
+const MAX_SHIFT_CANDIDATES: usize = 8;
+/// Anchor rows used to seed shift candidates. More than one so a redrawn top row (a clock in a status
+/// line, a tmux/screen bar, a prompt) does not hide the scroll the rows below it still show.
+const SHIFT_ANCHOR_ROWS: usize = 4;
+/// The row distance `k` the screen most likely scrolled up by: the candidate whose rows of `hashes` best
+/// match `sent` shifted by `k`. Rows with no baseline counterpart (the bottom `k`) are not matches. A shift
+/// must reuse at least half the screen, so a partial built from it is always worth sending.
+fn scroll_shift(hashes: &[u64], sent: &[u64]) -> Option<usize> {
+    let rows = hashes.len();
+    if rows < 3 || sent.len() != rows { return None; }
+    let floor = rows.div_ceil(2);
+    let mut candidates: Vec<usize> = Vec::new();
+    // Row `a` of the new screen holds baseline row `a + k`; anchor on the first few rows so the top one
+    // changing does not leave the scroll undetected.
+    for a in 0..rows.min(SHIFT_ANCHOR_ROWS) {
+        for k in 1..rows - a {
+            if sent[a + k] != hashes[a] || candidates.contains(&k) { continue; }
+            if candidates.len() == MAX_SHIFT_CANDIDATES { break; }
+            candidates.push(k);
+        }
+        if candidates.len() == MAX_SHIFT_CANDIDATES { break; }
+    }
+    let mut best: Option<(usize, usize)> = None;
+    for k in candidates {
+        let matches = (0..rows - k).filter(|r| hashes[*r] == sent[r + k]).count();
+        if matches >= floor && best.is_none_or(|(best, _)| matches > best) { best = Some((matches, k)); }
+    }
+    best.map(|(_, k)| k)
+}
 /// Largest serialized snapshot; leaves room for the response envelope inside the 8 MiB ABI limit.
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 8 * 1_048_576 - 256;
 const MAX_LINK_BYTES: usize = 2048;
@@ -1276,11 +1331,24 @@ mod tests {
         let selected = model.snapshot(None);
         assert!(selected["cells"].as_array().unwrap().iter().any(|c| c["row"] == 0 && c["col"] == 4 && c["selected"] == true));
     }
-    /// What a client does with a snapshot: replace dirty rows of its copy, keep the rest.
-    fn apply(base: &mut (Vec<Value>, Vec<String>), snapshot: &Value) {
+    /// What a client does with a snapshot: shift the held rows up by `shift`, then replace dirty rows of
+    /// its copy and keep the rest.
+    fn apply(base: &mut (Vec<Value>, Vec<String>), snapshot: &Value, cols: usize) {
         let incoming: Vec<Value> = snapshot["cells"].as_array().unwrap().clone();
         if snapshot.get("partial") == Some(&json!(true)) {
             let dirty: Vec<usize> = snapshot["dirty"].as_array().unwrap().iter().map(|r| r.as_u64().unwrap() as usize).collect();
+            let shift = snapshot.get("shift").map_or(0, |k| k.as_u64().unwrap() as usize);
+            if shift > 0 {
+                // Rows without a source are blank (`cols` spaces) until a dirty row covers them, as on the wire.
+                base.1.drain(..shift);
+                base.1.resize(base.1.len() + shift, " ".repeat(cols));
+                base.0.retain_mut(|cell| {
+                    let row = cell["row"].as_u64().unwrap() as usize;
+                    if row < shift { return false; }
+                    cell["row"] = json!(row - shift);
+                    true
+                });
+            }
             base.0.retain(|c| !dirty.contains(&(c["row"].as_u64().unwrap() as usize)));
             base.0.extend(incoming);
             for (slot, line) in dirty.iter().zip(snapshot["lines"].as_array().unwrap()) {
@@ -1318,7 +1386,7 @@ mod tests {
             }
             let snapshot = model.snapshot(since);
             partials += usize::from(snapshot.get("partial") == Some(&json!(true)));
-            apply(&mut client, &snapshot);
+            apply(&mut client, &snapshot, 24);
             since = snapshot["revision"].as_u64();
             let mut fresh = Model::new(Size::validate(24, 5).unwrap(), 100);
             // A second model that saw the same history, asked for a full snapshot, is the reference.
@@ -1350,6 +1418,101 @@ mod tests {
             assert_eq!(client.1, expected_lines, "lines diverged after step {index}");
         }
         assert!(partials >= 8, "most steps should have been partial, got {partials}");
+    }
+    /// Feeds `steps` in order, merging each partial into a client copy and comparing it with a second
+    /// model that saw the same bytes and answers with a full snapshot. Returns every snapshot sent.
+    fn merged_steps(steps: &[&[u8]], cols: usize, rows: usize) -> Vec<Value> {
+        let size = Size::validate(cols, rows).unwrap();
+        let mut model = Model::new(size, 100);
+        let mut client: (Vec<Value>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut since = None;
+        let mut sent = Vec::new();
+        for (index, step) in steps.iter().enumerate() {
+            model.feed(step);
+            let snapshot = model.snapshot(since);
+            apply(&mut client, &snapshot, cols);
+            since = snapshot["revision"].as_u64();
+            let mut fresh = Model::new(size, 100);
+            for earlier in &steps[..=index] { fresh.feed(earlier); }
+            let full = fresh.snapshot(None);
+            let mut expected: Vec<Value> = full["cells"].as_array().unwrap().clone();
+            expected.sort_by_key(|c| (c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap()));
+            assert_eq!(client.0, expected, "cells diverged after step {index}");
+            let lines: Vec<String> = full["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
+            assert_eq!(client.1, lines, "lines diverged after step {index}");
+            sent.push(snapshot);
+        }
+        sent
+    }
+    #[test]
+    fn scrolled_output_sends_only_the_new_bottom_rows() {
+        // One line per row, then one newline per step: the screen scrolls once, then three times.
+        let sent = merged_steps(
+            &[b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix", b"\r\nseven", b"\r\neight\r\nnine\r\nten"],
+            16,
+            6,
+        );
+        assert_eq!(sent[1]["partial"], true);
+        assert_eq!(sent[1]["shift"], 1);
+        assert_eq!(sent[1]["dirty"], json!([5]));
+        assert_eq!(sent[1]["lines"], json!(["seven           "]));
+        assert_eq!(sent[2]["partial"], true);
+        assert_eq!(sent[2]["shift"], 3);
+        assert_eq!(sent[2]["dirty"], json!([3, 4, 5]));
+    }
+    #[test]
+    fn a_scrolling_body_under_a_redrawn_status_row_still_shifts() {
+        // The status row changes every step, so the baseline's row 0 is gone; the body rows in the scroll
+        // region below it still show the scroll, and only the status row and the new bottom row are sent.
+        let sent = merged_steps(
+            &[
+                b"\x1b[2;6r\x1b[2;1Hone\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[1;1Hstatus 12:00",
+                b"\x1b[1;1Hstatus 12:01\x1b[6;1H\nsix",
+            ],
+            16,
+            6,
+        );
+        assert_eq!(sent[1]["partial"], true);
+        assert_eq!(sent[1]["shift"], 1);
+        assert_eq!(sent[1]["dirty"], json!([0, 5]));
+        assert_eq!(sent[1]["lines"], json!([format!("{:<16}", "status 12:01"), format!("{:<16}", "six")]));
+    }
+    #[test]
+    fn a_scrolled_back_viewport_shifts_the_same_way() {
+        // Display offset only changes which rows are visible; the rows themselves still scroll.
+        let mut model = Model::new(Size::validate(12, 4).unwrap(), 100);
+        model.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        model.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(2));
+        let first = model.snapshot(None);
+        assert_eq!(first["offset"], 2);
+        model.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(-1));
+        model.revision += 1;
+        let partial = model.snapshot(first["revision"].as_u64());
+        assert_eq!(partial["partial"], true);
+        assert_eq!(partial["shift"], 1);
+        assert_eq!(partial["dirty"], json!([3]));
+    }
+    #[test]
+    fn unrelated_content_gets_no_shift() {
+        let mut model = Model::new(Size::validate(16, 6).unwrap(), 100);
+        model.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        let first = model.snapshot(None);
+        // A cleared screen shares no rows with the baseline, so the shift never applies.
+        model.feed(b"\x1b[2J\x1b[Hzzz");
+        let snapshot = model.snapshot(first["revision"].as_u64());
+        assert!(snapshot.get("shift").is_none(), "{snapshot}");
+        assert!(snapshot.get("partial").is_none(), "every row changed: full snapshot");
+    }
+    #[test]
+    fn partials_that_do_not_scroll_omit_the_shift_key() {
+        let mut model = Model::new(Size::validate(20, 5).unwrap(), 100);
+        model.feed(b"alpha\r\nbeta\r\ngamma\r\ndelta\r\nepsilon");
+        let first = model.snapshot(None);
+        model.feed(b"\x1b[1;1HZ");
+        // Byte identity: no key, no null, for every partial that is not a scroll.
+        let json = model.snapshot_json(Some(first["revision"].as_u64().unwrap()), true).unwrap();
+        assert!(json.contains(r#""partial":true"#), "{json}");
+        assert!(!json.contains("shift"), "{json}");
     }
     #[test]
     fn a_stale_since_resize_or_missing_baseline_gets_a_full_snapshot() {

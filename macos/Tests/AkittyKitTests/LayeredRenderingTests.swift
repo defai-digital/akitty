@@ -140,6 +140,8 @@ final class LayeredRenderingTests: XCTestCase {
         XCTAssertFalse(TerminalView.isImageOnlyUpdate(previous: nil, next: try snapshot(partial: [])), "no baseline to compare against")
         let cursorMoved = try snapshot(partial: [], cursor: ["row": 2, "col": 0, "visible": false])
         XCTAssertFalse(TerminalView.isImageOnlyUpdate(previous: previous, next: cursorMoved), "a moved cursor repaints its rows")
+        let scrolled = try snapshot(partial: [], shift: 1)
+        XCTAssertFalse(TerminalView.isImageOnlyUpdate(previous: previous, next: scrolled), "a scrolled partial moved text rows")
     }
 
     // MARK: Presenter image textures
@@ -188,7 +190,7 @@ final class LayeredRenderingTests: XCTestCase {
         return value
     }
 
-    private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], partial: [Int]? = nil,
+    private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], partial: [Int]? = nil, shift: Int? = nil,
                           cursor: [String: Any] = ["row": 4, "col": 2, "visible": false], grid: (cols: Int, rows: Int)? = nil) throws -> Snapshot {
         let (cols, rows) = grid ?? (self.cols, self.rows)
         var object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
@@ -204,6 +206,7 @@ final class LayeredRenderingTests: XCTestCase {
             "mouse_sgr": false, "mouse_drag": false, "mouse_motion": false, "focus_reporting": false, "alternate": false,
             "offset": 0, "history": 0, "clipboard": [] as [String], "exited": false]
         if let partial { object["partial"] = true; object["dirty"] = partial }
+        if let shift { object["shift"] = shift }
         return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
