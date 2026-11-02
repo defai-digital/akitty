@@ -4,10 +4,13 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $global:OutputEncoding = [Console]::OutputEncoding
 Import-Module PSReadLine -ErrorAction Stop
+# Delegate to the installed module's entry point so PSReadLine versions choose
+# their own ReadLine overload and host arguments.
+$global:AkittyOriginalReadLine = (Get-Command PSConsoleHostReadLine -CommandType Function).ScriptBlock
 $global:AkittyStarted = $false
 $global:AkittyEsc = [char]27
 function global:PSConsoleHostReadLine {
-    $line = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext)
+    $line = & $global:AkittyOriginalReadLine
     if ($null -ne $line) {
         $bytes = [Text.Encoding]::UTF8.GetBytes($line)
         if ($bytes.Length -le 4096 -and $line -notmatch '[\x00-\x1f\x7f-\x9f]') {

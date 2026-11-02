@@ -27,6 +27,7 @@ jobs:
           cp -R macos/Sources/AkittyKit/Resources/shell-integration linux/src-tauri/target/debug/
           cp linux/THIRD_PARTY_LICENSES.txt linux/src-tauri/target/debug/
           export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export HOME="$(mktemp -d)"
           export AKITTY_DESKTOP_BINARY="$PWD/linux/src-tauri/target/debug/akitty-linux-experimental"
           xvfb-run -a tauri-driver > build/linux-ui-driver.log 2>&1 &
           driver_pid=$!

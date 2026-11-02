@@ -79,8 +79,6 @@ impl Session {
                 Segment::Pass(data) => {
                     let mut reset = Reset(false); self.reset_parser.advance(&mut reset, &data);
                     if reset.0 { self.status.clear(); }
-                    #[cfg(all(test, windows))]
-                    eprintln!("native output: {:?}", String::from_utf8_lossy(&data));
                     self.shell.output(&data); self.output.extend(data);
                 }
                 Segment::Shell(body) => {

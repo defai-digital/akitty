@@ -510,7 +510,7 @@ fn write_front(
 /// A blocked reply flush waits only a bounded number of consecutive polls. Successful writes
 /// reset that budget, so every already queued reply can be delivered without a fixed count cap.
 const FLUSH_POLL_MS: libc::c_int = 5;
-const FLUSH_BLOCKED_PASSES: usize = 2;
+const FLUSH_BLOCKED_PASSES: usize = 20;
 
 /// How long the post-exit drain waits for a still-attached descendant, and how many windows it
 /// may wait. The short window catches a query written just after the shell exits; once a reply
@@ -557,9 +557,13 @@ fn flush_replies(
                 }
                 let mut poll = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
                 // SAFETY: poll references one valid pollfd for the owned master descriptor.
-                if unsafe { libc::poll(&mut poll, 1, FLUSH_POLL_MS) } <= 0 {
+                if unsafe { libc::poll(&mut poll, 1, FLUSH_POLL_MS) } < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
                     return delivered;
                 }
+                // A timeout spends one blocked pass, not the entire remaining budget.
+                // This lets a scheduled reader resume before the bounded flush gives up.
             }
             Err(_) => return delivered,
         }
