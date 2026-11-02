@@ -30,6 +30,9 @@ jobs:
           export HOME="$(mktemp -d)"
           # A fresh Ubuntu zsh otherwise opens its first-run wizard before the first prompt.
           touch "$HOME/.zshrc"
+          # Hosted-runner completion directories can trigger compinit's interactive security
+          # prompt. Completions are outside this approval/PTY test; leave normal app startup intact.
+          printf 'skip_global_compinit=1\n' > "$HOME/.zshenv"
           unset ZDOTDIR
           export AKITTY_DESKTOP_BINARY="$PWD/linux/src-tauri/target/debug/akitty-linux-experimental"
           xvfb-run -a tauri-driver > build/linux-ui-driver.log 2>&1 &
