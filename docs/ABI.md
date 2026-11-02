@@ -181,10 +181,28 @@ unchanged, the core may reply with `"partial": true` and `"dirty": [rows]`. Then
 `cells` holds only the dirty rows' cells and `lines` only their text, in `dirty`
 order; the client replaces those rows in the snapshot it holds and keeps the rest.
 Rows are compared by a 64-bit content hash (characters, colours, attributes,
-selection, links), so a hash collision at worst delays one row's repaint. Any other
-`since`, a resize, or a snapshot where every row changed gets a full snapshot, so a
-client that lost state can always recover by asking again without `since`. The `links`
-table is complete in every snapshot and keeps its indices across partial ones.
+selection, links), so a hash collision at worst delays one row's repaint.
+
+Streaming output scrolls the screen, and that changes every row's hash. A partial
+snapshot may therefore also carry `"shift": k`, an integer with `1 <= k < rows` that
+is present only when it applies. The client then moves the rows it holds up by `k`
+first: held row `r+k` becomes row `r`, the first `k` held rows are discarded, and the
+last `k` rows start blank (`cols` spaces). Only after that shift does it replace the
+`dirty` rows. `dirty` lists the rows that still differ after the shift, and every row
+with no source row (the last `k` rows, always) is listed there. The core sends `shift`
+only when it detects a scroll that reuses at least half the rows; otherwise it falls
+back to row diffs or a full snapshot. A client must reject a partial whose `k` is
+outside `1..<rows`, or whose `dirty` omits any of the last `k` rows, and must not
+apply the remaining rows first: it asks again without `since` for a full snapshot
+instead. A client that cannot apply `shift` at all must do the same.
+
+Without a scroll, `shift` is absent rather than null, so a partial that is not a
+scroll is byte-identical to a schema-1 partial from before the field existed. Any
+other `since`, a resize, or a snapshot where every row changed (short of one that
+scrolled) gets a full snapshot, so a client that lost state can always recover by
+asking again without `since`. The `links` table is complete in every snapshot and
+keeps its indices across partial ones, including shifted ones: a row that moved up
+keeps the `link` indices it already resolved.
 
 By default, every cell is a keyed object with `row`, `col`, `text`, `fg`, `bg`,
 `bold`, `italic`, `underline`, `selected`, and `wide`. Colours are three-byte RGB

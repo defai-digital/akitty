@@ -35,7 +35,8 @@ public enum CoreBridge {
 }
 
 public struct Cell: Codable, Sendable {
-    public let row: Int
+    /// A scrolled partial moves held cells up, so the row is the one field the client rewrites.
+    public internal(set) var row: Int
     public let col: Int
     public let text: String
     public let fg: [UInt8]
@@ -371,6 +372,8 @@ public struct Snapshot: Codable, Sendable {
     public internal(set) var lines: [String]
     public let partial: Bool?
     public let dirty: [Int]?
+    /// For a scrolled partial, the rows the client moves up before replacing `dirty`; absent otherwise.
+    public let shift: Int?
     public let links: [String]?
     public let images: [ImagePlacement]?
     /// True while a Kitty graphics animation still needs frames; absent on snapshots from older cores.
@@ -403,18 +406,34 @@ public struct Snapshot: Codable, Sendable {
         guard cells.contains(where: \.selected) else { return }
         cells = cells.map { $0.clearingSelection() }
     }
-    /// This snapshot with a partial one applied: dirty rows replaced, everything else kept.
+    /// This snapshot with a partial one applied: shift held rows up by `shift`, replace dirty rows, keep the rest.
     func applying(_ partial: Snapshot) -> Snapshot? {
         guard let dirty = partial.dirty, partial.cols == cols, partial.rows == rows, lines.count == rows,
               partial.lines.count == dirty.count, dirty.allSatisfy({ (0..<rows).contains($0) }) else { return nil }
+        // A shift that cannot be applied is never guessed at: the caller falls back to a full snapshot.
+        let shift = partial.shift ?? 0
+        guard partial.shift == nil || (1..<rows).contains(shift) else { return nil }
         var result = partial
-        var newLines = lines
-        for (slot, row) in dirty.enumerated() { newLines[row] = partial.lines[slot] }
+        var newLines = lines, held = cells
         let changed = Set(dirty)
+        if shift > 0 {
+            // A scrolled partial moved the held screen up, so its bottom `shift` rows have no source and
+            // must be replaced: anything less would paint the update onto the wrong rows.
+            guard (rows - shift..<rows).allSatisfy(changed.contains) else { return nil }
+            newLines.removeFirst(shift)
+            newLines.append(contentsOf: Array(repeating: String(repeating: " ", count: cols), count: shift))
+            held = held.compactMap { cell in
+                guard cell.row >= shift else { return nil }
+                var moved = cell
+                moved.row -= shift
+                return moved
+            }
+        }
+        for (slot, row) in dirty.enumerated() { newLines[row] = partial.lines[slot] }
         // Both sides are ordered by row, so merging keeps the order without a sort.
         var merged: [Cell] = []
-        merged.reserveCapacity(cells.count + partial.cells.count)
-        var kept = cells.lazy.filter { !changed.contains($0.row) }.makeIterator(), incoming = partial.cells.makeIterator()
+        merged.reserveCapacity(held.count + partial.cells.count)
+        var kept = held.lazy.filter { !changed.contains($0.row) }.makeIterator(), incoming = partial.cells.makeIterator()
         var nextKept = kept.next(), nextIncoming = incoming.next()
         while nextKept != nil || nextIncoming != nil {
             if let k = nextKept, nextIncoming == nil || k.row < nextIncoming!.row { merged.append(k); nextKept = kept.next() }

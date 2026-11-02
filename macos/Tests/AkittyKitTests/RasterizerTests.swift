@@ -65,11 +65,13 @@ final class RasterizerTests: XCTestCase {
         var rng = Lcg(state: 42)
         var held: Snapshot?
         var damage: Set<Int>? = nil
-        var rendered = 0, partialFrames = 0
+        var rendered = 0, partialFrames = 0, scrolled = 0
         for step in 0..<150 {
             _ = try session.call("feed", ["text": edit(&rng)])
             if let next = try session.snapshot(since: held?.revision, base: held) {
-                if next.partial == true, let dirty = next.dirty { damage?.formUnion(dirty) } else { damage = nil }
+                // Mirrors TerminalView.applySnapshot: a scrolled partial moved held rows, so it repaints fully.
+                if next.partial == true, next.shift == nil, let dirty = next.dirty { damage?.formUnion(dirty) } else { damage = nil }
+                if next.shift != nil { scrolled += 1 }
                 held = next
             }
             // Skip some frames, like a busy main thread coalescing redraws: damage must accumulate across them.
@@ -84,6 +86,7 @@ final class RasterizerTests: XCTestCase {
         }
         XCTAssertGreaterThan(rendered, 50)
         XCTAssertGreaterThan(partialFrames, 20, "most frames should have been incremental")
+        XCTAssertGreaterThan(scrolled, 0, "the run must scroll so the shifted-partial repaint path is covered")
     }
 
     func testDamageCoversTheChangedAndCursorRows() throws {

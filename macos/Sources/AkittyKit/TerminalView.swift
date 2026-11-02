@@ -298,7 +298,8 @@ import os
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
                 if next.bell == true { ringBell(); onBell?() }
-                if next.partial == true, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
+                // A scrolled partial moved every held row, so only a full repaint is correct.
+                if next.partial == true, next.shift == nil, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
                 redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
                 updateAccessibility(previous: previous, next: next)
             }
@@ -329,8 +330,9 @@ import os
     }
     /// A partial snapshot with no dirty rows and an identical cursor carries only image changes (a generation
     /// bump, placements moved, added or removed): the text layers are still valid, so no CPU raster is needed.
+    /// A scrolled partial always moved text rows, even with an empty `dirty` set.
     nonisolated static func isImageOnlyUpdate(previous: Snapshot?, next: Snapshot) -> Bool {
-        guard let previous, next.partial == true, let dirty = next.dirty, dirty.isEmpty,
+        guard let previous, next.partial == true, next.shift == nil, let dirty = next.dirty, dirty.isEmpty,
               previous.cursor.row == next.cursor.row, previous.cursor.col == next.cursor.col,
               previous.cursor.visible == next.cursor.visible else { return false }
         return true

@@ -126,6 +126,128 @@ fn scrolling_and_resize_preserve_content() {
     call(json!({"op":"resize","id":t.0,"cols":20,"rows":5}));
     assert_eq!(t.snapshot()["cols"], 20);
 }
+/// What the native client does with a partial snapshot: shift the held rows up by `shift`, then replace
+/// the `dirty` rows. Mirrors `Snapshot.applying` in Bridge.swift.
+fn merge(held: &mut Value, partial: &Value) {
+    if partial.get("partial") != Some(&json!(true)) {
+        *held = partial.clone();
+        return;
+    }
+    let dirty: Vec<usize> = partial["dirty"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_u64().unwrap() as usize)
+        .collect();
+    let shift = partial
+        .get("shift")
+        .map_or(0, |k| k.as_u64().unwrap() as usize);
+    let rows = held["rows"].as_u64().unwrap() as usize;
+    let cols = held["cols"].as_u64().unwrap() as usize;
+    let mut lines: Vec<String> = held["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().into())
+        .collect();
+    let mut cells: Vec<Value> = held["cells"].as_array().unwrap().clone();
+    if shift > 0 {
+        // Rows with no source stay blank until a dirty row covers them; every bottom row is dirty.
+        lines.drain(..shift).for_each(drop);
+        lines.resize(rows, " ".repeat(cols));
+        cells.retain_mut(|cell| {
+            let row = cell[0].as_u64().unwrap() as usize;
+            if row < shift {
+                return false;
+            }
+            cell[0] = json!(row - shift);
+            true
+        });
+    }
+    cells.retain(|cell| !dirty.contains(&(cell[0].as_u64().unwrap() as usize)));
+    cells.extend(partial["cells"].as_array().unwrap().iter().cloned());
+    for (slot, row) in dirty.iter().enumerate() {
+        lines[*row] = partial["lines"][slot].as_str().unwrap().into();
+    }
+    cells.sort_by_key(|cell| (cell[0].as_u64().unwrap(), cell[1].as_u64().unwrap()));
+    held["lines"] = json!(lines);
+    held["cells"] = json!(cells);
+    held["revision"] = partial["revision"].clone();
+    held["cursor"] = partial["cursor"].clone();
+}
+#[test]
+fn scrolled_output_sends_a_shifted_partial_that_merges_to_the_full_screen() {
+    let t = Terminal::new(16, 6);
+    t.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    let mut held = t.snapshot();
+    // One newline past the bottom scrolls the screen by exactly one row.
+    t.feed("\r\nseven");
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    assert_eq!(partial["partial"], true);
+    assert_eq!(partial["shift"], 1);
+    assert_eq!(partial["dirty"], json!([5]));
+    assert_eq!(
+        partial["lines"].as_array().unwrap().len(),
+        1,
+        "only the new bottom row is sent"
+    );
+    merge(&mut held, &partial);
+    let full = t.snapshot();
+    assert_eq!(held["lines"], full["lines"]);
+    assert_eq!(held["cells"], full["cells"]);
+    // Three more lines scroll by three: the three new rows are dirty and the rest is reused.
+    held = full;
+    t.feed("\r\neight\r\nnine\r\nten");
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    assert_eq!(partial["shift"], 3);
+    assert_eq!(partial["dirty"], json!([3, 4, 5]));
+    merge(&mut held, &partial);
+    let full = t.snapshot();
+    assert_eq!(held["lines"], full["lines"]);
+    assert_eq!(held["cells"], full["cells"]);
+}
+#[test]
+fn a_scrolled_back_viewport_partial_shifts_the_same_way() {
+    let t = Terminal::new(12, 4);
+    t.feed("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+    call(json!({"op":"scroll","id":t.0,"lines":2}));
+    let mut held = t.snapshot();
+    assert_eq!(held["offset"], 2);
+    call(json!({"op":"scroll","id":t.0,"lines":-1}));
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    assert_eq!(partial["partial"], true);
+    assert_eq!(partial["shift"], 1);
+    assert_eq!(partial["dirty"], json!([3]));
+    merge(&mut held, &partial);
+    let full = t.snapshot();
+    assert_eq!(held["lines"], full["lines"]);
+    assert_eq!(held["cells"], full["cells"]);
+}
+#[test]
+fn unrelated_output_gets_a_full_snapshot_without_a_shift() {
+    let t = Terminal::new(16, 6);
+    t.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    let held = t.snapshot();
+    t.feed("\x1b[2J\x1b[Hzzz");
+    let delta = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    assert!(delta.get("shift").is_none(), "{delta}");
+    assert!(
+        delta.get("partial").is_none(),
+        "every row changed: full snapshot"
+    );
+}
+#[test]
+fn typing_partials_stay_byte_identical_without_the_shift_key() {
+    let t = Terminal::new(20, 5);
+    t.feed("alpha\r\nbeta\r\ngamma\r\ndelta\r\nepsilon");
+    let held = t.snapshot();
+    t.feed("\x1b[1;1HZ");
+    let reply = response(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    assert_eq!(reply["data"]["partial"], true);
+    assert_eq!(reply["data"]["dirty"], json!([0]));
+    let wire = serde_json::to_string(&reply).unwrap();
+    assert!(!wire.contains("shift"), "{wire}");
+}
 #[test]
 fn clipboard_is_bounded_text_event_not_host_write() {
     let t = Terminal::new(20, 3);
