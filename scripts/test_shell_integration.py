@@ -23,6 +23,8 @@ SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'macos/Sources/AkittyKit/
 # runs only the first PROMPT_COMMAND element, so array hooks are only exercised by bash 5.1 or later.
 BASH = os.environ.get('AKITTY_TEST_BASH', '/bin/bash')
 ZSH = os.environ.get('AKITTY_TEST_ZSH', '/bin/zsh')
+ZSH_SAFE_OPEN = subprocess.run([ZSH, '-fc', 'zmodload zsh/system; sysopen -r -o nofollow,nonblock,cloexec -u descriptor /dev/null'],
+                               capture_output=True).returncode == 0
 BASH_VERSION = tuple(int(part) for part in subprocess.run([BASH, '-c', 'echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}'],
                                                           capture_output=True, text=True, check=True).stdout.split())
 
@@ -243,7 +245,8 @@ class ShellIntegrationTests(unittest.TestCase):
         if pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
             os.chdir(home / 'project')
-            os.execve(ZSH, [ZSH, '-i'], env)
+            # Exercise only this fixture's rc; runner-wide compinit may prompt about unrelated directories.
+            os.execve(ZSH, [ZSH, '-d', '-i'], env)
         output = bytearray()
         def send(text, wait=0.5):
             os.write(fd, text.encode())
@@ -280,6 +283,7 @@ class ShellIntegrationTests(unittest.TestCase):
         send('\r')
         return output.decode(errors='replace')
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_saves_only_lines_zsh_keeps(self):
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
             home = pathlib.Path(directory)
@@ -292,6 +296,7 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertEqual(saved, ['echo kept'], repr(bytes(output)))
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_tab_and_arrows_offer_this_folders_commands(self):
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
             home = pathlib.Path(directory)
@@ -336,6 +341,7 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertNotIn('Folder history:', output.decode(errors='replace'))
                 self.assertFalse((home / 'Library/Application Support/Akitty').exists(), 'nothing is written when off')
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_calls_named_hooks_once_and_respects_memory_only_lines(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
             home = pathlib.Path(directory)
@@ -354,6 +360,7 @@ class ShellIntegrationTests(unittest.TestCase):
         return subprocess.run([ZSH, '-fic', f'source {shlex.quote(str(SCRIPT.parent / "akitty.zsh"))}; {command}'],
                               env=env, capture_output=True, text=True, timeout=6)
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_does_not_write_without_its_lock(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-lock-') as directory:
             home = pathlib.Path(directory)
@@ -365,6 +372,7 @@ class ShellIntegrationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(history.read_text(), 'original\n')
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_refuses_symlink_locks_and_public_files(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-safety-') as directory:
             home = pathlib.Path(directory)
@@ -380,6 +388,7 @@ class ShellIntegrationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(history.read_text(), 'original\n')
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_compacts_during_the_session(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-trim-') as directory:
             home = pathlib.Path(directory)
@@ -388,12 +397,23 @@ class ShellIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertLessEqual((home / 'folder-history').stat().st_size, 524288)
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_bounds_unicode_commands_in_bytes(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-bytes-') as directory:
             home = pathlib.Path(directory)
             result = self.folder_call(home, '__akitty_folder_addhistory ' + shlex.quote('echo ' + '界' * 400 + '\n'))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((home / 'folder-history').exists(), 'the 1 KiB command bound counts UTF-8 bytes')
+
+    @unittest.skipIf(ZSH_SAFE_OPEN, 'this shell supports safe folder storage')
+    def test_zsh_without_safe_opens_keeps_native_hooks_and_does_not_create_storage(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-unsupported-') as directory:
+            home = pathlib.Path(directory)
+            result = self.folder_call(home, "(( ! $+functions[__akitty_folder_addhistory] )) && print NATIVE_HISTORY")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('safe nonblocking file opens are missing', result.stderr)
+            self.assertIn('NATIVE_HISTORY', result.stdout)
+            self.assertFalse((home / 'folder-history').exists())
 
 if __name__ == '__main__':
     unittest.main()

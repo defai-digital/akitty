@@ -39,6 +39,15 @@ if ! zmodload -F zsh/system b:zsystem b:sysopen 2>/dev/null || ! zmodload -F zsh
     print -u2 -r -- 'AkiTTY folder history unavailable: safe file locking modules are missing.'
     return
 fi
+# zsh 5.8 lacks nonblocking opens. Keep its normal history and keys rather than risk blocking on a replaced file.
+if ! () {
+    local descriptor
+    sysopen -r -o nofollow,nonblock,cloexec -u descriptor /dev/null 2>/dev/null || return 1
+    exec {descriptor}<&-
+}; then
+    print -u2 -r -- 'AkiTTY folder history unavailable: safe nonblocking file opens are missing.'
+    return
+fi
 typeset -g __akitty_folder_file=${AKITTY_FOLDER_HISTORY_FILE:-$HOME/Library/Application Support/Akitty/folder-history}
 typeset -ga __akitty_folder_hooks __akitty_folder_menu __akitty_folder_cycle
 typeset -g __akitty_folder_original __akitty_folder_keymap __akitty_folder_shown
