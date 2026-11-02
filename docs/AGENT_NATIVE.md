@@ -91,7 +91,10 @@ Each connection carries one length-prefixed UTF-8 JSON request and response: a
 a 3-second deadline. Keep both directions open until the reply; half-closed writes
 are deliberately treated as canceled requests. Pending approval expires after
 120 seconds and is canceled on disconnect, pane removal or disabling the service.
-Only one connection is processed at a time; extra connections are closed. A
+Only one connection is dispatched at a time. Extra connections get a busy rejection
+after their bounded frame is consumed, so closing cannot reset a client still writing.
+An extra connection that supplies an invalid frame or stalls beyond one second is
+closed without dispatch or a reply. A
 3-second cooldown after a prompt prevents repeated focus stealing. Failure is
 reported; no request is automatically retried.
 
