@@ -28,6 +28,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) { self.host.shutdown(); self.server.take(); let _ = std::fs::remove_dir_all(&self.root); }
 }
+#[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) {
     let end = Instant::now()+Duration::from_secs(25);
     while !condition() { assert!(Instant::now() < end, "timed out waiting for native Windows condition"); thread::sleep(Duration::from_millis(20)); }

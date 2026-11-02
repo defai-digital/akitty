@@ -96,6 +96,9 @@ try:
         driver.find_element(By.ID,'continue').click()
         wait.until(lambda d:not d.find_elements(By.CSS_SELECTOR,'#tabs button'))
     print('PASS: real Tauri desktop + native PTY + CLI denial/approval + exact once effect + reclaim + redacted timeline')
+except Exception:
+    print(driver.find_element(By.TAG_NAME, 'body').text)
+    raise
 finally:
     driver.quit()
     workspace.cleanup()
