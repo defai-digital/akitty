@@ -77,7 +77,7 @@ final class AgentRequestTests: XCTestCase {
         service.startRecording(); try service.setEnabled(true)
         defer { service.stop(); terminal.shutdown(); window.close() }
         let integration = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/AkittyKit/Resources/shell-integration/akitty.zsh").path
-        try terminal.session.input("source '\(integration)'\r", paste: false)
+        try terminal.session.input("AKITTY_FOLDER_HISTORY=0; source '\(integration)'\r", paste: false)
         try await waitUntil { try terminal.session.snapshot()?.shell?.ready == true }
         let listData = Data("{\"version\":1,\"op\":\"list\"}".utf8)
         let response = try await Task.detached { try LocalSocket.request(listData, path: path) }.value

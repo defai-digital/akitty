@@ -91,6 +91,12 @@ impl Drop for Wake {
 fn lock_model(model: &Mutex<Model>) -> std::sync::MutexGuard<'_, Model> {
     model.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+/// The bundled bash/zsh integration a session starts with.
+pub struct ShellIntegration {
+    pub directory: String,
+    /// False starts the shell with AKITTY_FOLDER_HISTORY=0.
+    pub folder_history: bool,
+}
 impl Session {
     pub fn new(
         cols: usize,
@@ -99,7 +105,7 @@ impl Session {
         cwd: Option<String>,
         headless: bool,
         scrollback: usize,
-        shell_integration_dir: Option<String>,
+        integration: Option<ShellIntegration>,
     ) -> Result<Self, String> {
         if scrollback > 20000 { return Err("scrollback exceeds 20000 lines".into()); }
         let size = Size::validate(cols, rows)?;
@@ -140,7 +146,7 @@ impl Session {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let mut cmd = CommandBuilder::new(&shell);
-        if let Some(directory) = shell_integration_dir {
+        if let Some(ShellIntegration { directory, folder_history }) = integration {
             if directory.len() > 4096 || !std::path::Path::new(&directory).is_absolute() {
                 return Err("shell integration directory must be an absolute path of at most 4096 bytes".into());
             }
@@ -149,6 +155,7 @@ impl Session {
             let resource = match name { "bash" => "bashrc", "zsh" => ".zshenv", _ => return Err("shell integration supports bash and zsh only".into()) };
             if !root.join(resource).is_file() { return Err("shell integration resources missing".into()); }
             cmd.env("AKITTY_INTEGRATION_DIR", &directory);
+            if !folder_history { cmd.env("AKITTY_FOLDER_HISTORY", "0"); }
             if name == "bash" { cmd.args(["--rcfile", &root.join("bashrc").to_string_lossy(), "-i"]); }
             else {
                 cmd.env("AKITTY_USER_ZDOTDIR", std::env::var("ZDOTDIR").or_else(|_|std::env::var("HOME")).unwrap_or_else(|_|"/".into()));

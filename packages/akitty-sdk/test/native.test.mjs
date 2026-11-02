@@ -106,7 +106,7 @@ test("trusted SDK host approves and executes once through real native PTY and re
   let id
   try {
     const resources = fileURLToPath(new URL("../../../macos/Sources/AkittyKit/Resources/shell-integration/", import.meta.url))
-    ;({ id } = await call({ op: "create", cols: 80, rows: 10, shell: "/bin/zsh", cwd: "/tmp", shell_integration_dir: resources }))
+    ;({ id } = await call({ op: "create", cols: 80, rows: 10, shell: "/bin/zsh", cwd: "/tmp", shell_integration_dir: resources, folder_history: false }))
     const deadline = Date.now() + 10000
     while (!(await call({ op: "snapshot", id })).shell.ready) {
       assert.ok(Date.now() < deadline, "integrated prompt did not arrive"); await delay(10)

@@ -89,6 +89,31 @@ command; `truncated` reports clipping and evicted ids return errors. History met
 and output explicitly report `untrusted:true`. The shell child's exit code in a
 snapshot remains distinct from each observed command's exit status.
 
+zsh integration also keeps a per-folder command history, so a long command used often
+can be recalled from a few typed letters. Pressing Tab at the end of a typed prefix lists
+the five best distinct commands run in the current folder that start with it, ranked by
+frequency and recency (each run scores 4 within an hour, 2 within a day, 1/2 within a week,
+1/4 after). Up/Down choose (the line previews the choice), Enter keeps it on the line without
+running it, Esc restores the prefix, Tab inside the list completes as usual, and any other
+key closes the list and is typed. Up/Down on a typed prefix step through the same matches.
+With no match, each key runs the widget it was bound to after the user's startup files
+(compinit, fzf-tab, history search). A folder reached through a symlink shares the history of
+its real path.
+
+A line is saved only when zsh itself keeps it in history: the user's `zshaddhistory`
+hooks run once and decide first; memory-only lines (hook status 2) are not persisted.
+Lines starting with a space, matching `HISTORY_IGNORE`, spanning
+several lines or over 1 KiB are skipped. Entries go to the owner-only file
+`~/Library/Application Support/Akitty/folder-history` (`AKITTY_FOLDER_HISTORY_FILE`
+overrides it with an absolute path) under a POSIX lock shared by shells and Settings.
+Appends compact oversized files to at most 512 KiB; queries inspect at most that many bytes
+and the newest 3000 rows. Symlinks, hard links and files without owner-only permissions
+are refused. A failed lock never permits an unlocked write and produces a warning.
+Settings turns the feature off for
+new terminals (the core's `create.folder_history`, which sets `AKITTY_FOLDER_HISTORY=0`) and
+clears the file under the same lock, reporting unsafe paths or a busy writer. bash has no folder history: `bind -x` cannot hand Tab back to Readline
+completion, and macOS bash 3.2 cannot edit the line from a key binding at all.
+
 Every program in the PTY can forge these notifications. They support navigation
 and result interpretation; they never prove command execution, create approvals,
 change ownership, or authorize host actions. SSH/tmux propagation is not configured

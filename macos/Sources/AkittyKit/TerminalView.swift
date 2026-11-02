@@ -115,7 +115,7 @@ import os
         // NSView must be initialized before a throwing operation can unwind it.
         let integrationDirectory = initial.shellIntegration && !headless
             ? Self.integrationDirectory(shell: initial.shell, resources: Bundle.main.resourceURL) : nil
-        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory)
+        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory, folderHistory: initial.folderHistory)
         preferences = initial; fontSize = initial.fontSize
         try syncProgramChrome()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)

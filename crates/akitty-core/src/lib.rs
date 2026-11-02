@@ -37,6 +37,7 @@ enum Request {
         headless: Option<bool>,
         scrollback: Option<usize>,
         shell_integration_dir: Option<String>,
+        folder_history: Option<bool>,
     },
     ControlAcquire { id: u64, actor: String },
     ControlRelease { id: u64, lease: u64 },
@@ -195,6 +196,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
             headless,
             scrollback,
             shell_integration_dir,
+            folder_history,
         } => {
             model::Size::validate(cols, rows)?;
             if registry.sessions.len() + registry.creating >= 64 {
@@ -217,7 +219,10 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 cwd,
                 headless.unwrap_or(false),
                 scrollback.unwrap_or(5000),
-                shell_integration_dir,
+                shell_integration_dir.map(|directory| session::ShellIntegration {
+                    directory,
+                    folder_history: folder_history.unwrap_or(true),
+                }),
             );
             let mut registry = lock_registry();
             std::mem::forget(reservation);
