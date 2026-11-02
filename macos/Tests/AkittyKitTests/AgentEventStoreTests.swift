@@ -171,8 +171,22 @@ final class AgentEventStoreTests: XCTestCase {
         XCTAssertEqual(try LocalSocket.withAddress(path) { Darwin.connect(fd, $0, $1) }, 0)
         try LocalSocket.writeFrame(Data("old".utf8), to: fd)
         XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
-        let busy = try await Task.detached { try LocalSocket.request(Data("busy".utf8), path: path) }.value
+        let busy = try await Task.detached {
+            let client = try LocalSocket.descriptor(); defer { Darwin.close(client) }
+            XCTAssertEqual(try LocalSocket.withAddress(path) { Darwin.connect(client, $0, $1) }, 0)
+            // Let the listener accept before the client writes. Closing a busy connection with
+            // unread request bytes can otherwise reset it before the framed rejection is received.
+            var readiness = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+            _ = Darwin.poll(&readiness, 1, 25)
+            try LocalSocket.writeFrame(Data("busy".utf8), to: client)
+            return try LocalSocket.readFrame(from: client, timeout: 3)
+        }.value
         XCTAssertTrue(String(decoding: busy, as: UTF8.self).contains("request not dispatched"))
+        let stalled = try LocalSocket.descriptor(); defer { Darwin.close(stalled) }
+        XCTAssertEqual(try LocalSocket.withAddress(path) { Darwin.connect(stalled, $0, $1) }, 0)
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try LocalSocket.readFrame(from: stalled, timeout: 3), "a busy client that never sends a frame is closed")
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2.5, "the busy frame deadline must bound listener delay")
         server.stop()
         try server.start { data, _ in data }
         do {

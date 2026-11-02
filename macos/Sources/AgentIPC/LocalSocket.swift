@@ -195,7 +195,12 @@ public final class LocalRequestServer: @unchecked Sendable {
                     self.lock.unlock()
                     if busy {
                         let reply = Data("{\"version\":1,\"ok\":false,\"error\":\"Local server busy; request not dispatched. Retry later.\"}".utf8)
-                        try? LocalSocket.writeFrame(reply, to: client, timeout: 0.1)
+                        // Closing with unread request bytes can reset AF_UNIX and discard the rejection,
+                        // or break the client's still-pending write. Consume one bounded frame first.
+                        // Malformed or stalled busy clients are closed without dispatch or a reply.
+                        if (try? LocalSocket.readFrame(from: client, timeout: 1)) != nil {
+                            try? LocalSocket.writeFrame(reply, to: client, timeout: 0.1)
+                        }
                         Darwin.close(client); continue
                     }
                     let task = Task { [weak self] in
