@@ -135,15 +135,18 @@ function __akitty_folder_addhistory() {
         "$hook" "$@"; status_=$?
         (( status_ != 0 && result == 0 )) && result=$status_
     done
-    (( result != 0 )) || {
-        emulate -L zsh
-        local command=${1%$'\n'} physical=${PWD:A}
-        [[ ${AKITTY_FOLDER_HISTORY-} != 0 && $command == [^[:space:]]* && $command != *[$'\n\r']* ]] || return
-        () { local LC_ALL=C; (( ${#command} <= 1024 )); } || return
-        [[ -z ${HISTORY_IGNORE-} || $command != ${~HISTORY_IGNORE} ]] || return
-        [[ $PWD$physical != *[$'\t\n\r']* ]] || return
-        __akitty_folder_locked __akitty_folder_append "${EPOCHSECONDS:-0}"$'\t'"$PWD"$'\t'"$physical"$'\t'"$command" 2>/dev/null
-    } always { return result }
+    # A storage skip/failure must not turn an otherwise accepted native history line into a rejection.
+    if (( result == 0 )); then __akitty_folder_store "$@" || true; fi
+    return $result
+}
+function __akitty_folder_store() {
+    emulate -L zsh
+    local command=${1%$'\n'} physical=${PWD:A}
+    [[ ${AKITTY_FOLDER_HISTORY-} != 0 && $command == [^[:space:]]* && $command != *[$'\n\r']* ]] || return 1
+    () { local LC_ALL=C; (( ${#command} <= 1024 )); } || return 1
+    [[ -z ${HISTORY_IGNORE-} || $command != ${~HISTORY_IGNORE} ]] || return 1
+    [[ $PWD$physical != *[$'\t\n\r']* ]] || return 1
+    __akitty_folder_locked __akitty_folder_append "${EPOCHSECONDS:-0}"$'\t'"$PWD"$'\t'"$physical"$'\t'"$command"
 }
 # Hooks the user adds after startup join those run in front of the saved line.
 function __akitty_folder_adopt_hooks() {
