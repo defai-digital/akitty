@@ -15,6 +15,8 @@ pub(crate) struct Session {
     pty: Pty,
     filter: Filter,
     reset_parser: vte::Parser,
+    #[cfg(all(test, windows))]
+    renderer: vte::Parser,
     chrome: Chrome,
     status: ProgramStatuses,
     pub shell: Shell,
@@ -40,6 +42,8 @@ impl Session {
     pub fn new(shell: &str, cwd: &Path, integration: &Path, event_id: String) -> Result<Self, String> {
         let pty = Pty::new(shell, cwd, integration, size(80, 24)?)?;
         Ok(Self { pty, filter: Filter::default(), reset_parser: vte::Parser::new(),
+            #[cfg(all(test, windows))]
+            renderer: vte::Parser::new(),
             chrome: Chrome::default(), status: ProgramStatuses::default(), shell: Shell::default(), control: Control::default(),
             exited: false, error: None, audit_after: 0, report_counts: json!(null), event_id,
             input: VecDeque::new(), output: VecDeque::new(), delivery: Vec::new(), sequence: 0, program_reports: true })
@@ -79,6 +83,14 @@ impl Session {
                 Segment::Pass(data) => {
                     let mut reset = Reset(false); self.reset_parser.advance(&mut reset, &data);
                     if reset.0 { self.status.clear(); }
+                    // Headless Windows tests must answer PSReadLine's cursor query, as the
+                    // real terminal renderer does. Keep this outside release builds.
+                    #[cfg(all(test, windows))]
+                    {
+                        let mut renderer = TestRenderer(Vec::new());
+                        self.renderer.advance(&mut renderer, &data);
+                        if !renderer.0.is_empty() { self.queue(&renderer.0)?; }
+                    }
                     self.shell.output(&data); self.output.extend(data);
                 }
                 Segment::Shell(body) => {
@@ -171,4 +183,15 @@ pub(crate) fn terminal_reply(text: &str) -> bool {
         bytes = &bytes[end + 1..];
     }
     true
+}
+
+#[cfg(all(test, windows))]
+struct TestRenderer(Vec<u8>);
+#[cfg(all(test, windows))]
+impl vte::Perform for TestRenderer {
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], ignore: bool, action: char) {
+        if !ignore && action == 'n' && params.iter().next() == Some(&[6][..]) {
+            self.0.extend_from_slice(if intermediates == b"?" { b"\x1b[?1;1R" } else { b"\x1b[1;1R" });
+        }
+    }
 }

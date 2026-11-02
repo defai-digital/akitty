@@ -1214,13 +1214,17 @@ mod reply_tests {
         let (master, program) = socket_pair();
         // Three bursts, each written after the drain has already seen an empty read. A shared
         // idle budget spends itself on the earlier gaps and the last burst is never answered.
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
         let writer = std::thread::spawn(move || {
-            for query in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"] {
+            for (index, query) in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"].into_iter().enumerate() {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 // SAFETY: writing a valid slice into a descriptor this test owns.
                 assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, query.len() as isize);
+                if index == 0 { started_tx.send(()).unwrap(); }
             }
         });
+        // Start the bounded drain only after the writer has actually been scheduled.
+        started_rx.recv().unwrap();
         let pending = AtomicUsize::new(0);
         let mut output = VecDeque::new();
         let mut response_pending = 0;
