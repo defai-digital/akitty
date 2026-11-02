@@ -22,7 +22,10 @@ PATTERNS = [
 
 # Audited upstream license text includes public author email attribution.
 # Only the exact notice bytes are exempt from the personal-email heuristic.
-PUBLIC_NOTICE_HASHES = {"third_party/sparkle/LICENSE": "816be66341dd11b22806862dffd8392b240babaced1cdf24da2ff413ef00c3fd"}
+PUBLIC_NOTICE_HASHES = {
+    "third_party/sparkle/LICENSE": "816be66341dd11b22806862dffd8392b240babaced1cdf24da2ff413ef00c3fd",
+    "linux/licenses/dlopen2-LICENSE": "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+}
 
 # Exact published upstream recordings contain historical developer paths. Only
 # the path heuristic is exempt; credentials remain prohibited, even in fixtures.

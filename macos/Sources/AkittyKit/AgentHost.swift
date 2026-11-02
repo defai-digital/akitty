@@ -46,11 +46,14 @@ extension TerminalSession {
 @MainActor public final class AgentCommandHost {
     private let session: TerminalSession
     private let dispatch: (UInt64, UInt64, String) throws -> AgentDispatch
+    private let release: (UInt64) throws -> Void
     public init(session: TerminalSession) {
         self.session = session; dispatch = { try session.executeCommand(lease: $0, authorization: $1, command: $2) }
+        release = { try session.releaseControl($0) }
     }
-    init(session: TerminalSession, dispatch: @escaping (UInt64, UInt64, String) throws -> AgentDispatch) {
+    init(session: TerminalSession, dispatch: @escaping (UInt64, UInt64, String) throws -> AgentDispatch, release: ((UInt64) throws -> Void)? = nil) {
         self.session = session; self.dispatch = dispatch
+        self.release = release ?? { try session.releaseControl($0) }
     }
     /// Control remains leased after dispatch. Release or reclaim explicitly after reviewing the result;
     /// an untrusted shell completion never authorizes another command or returns control automatically.
@@ -70,14 +73,19 @@ extension TerminalSession {
             dispatchAttempted = true
             return (lease, try dispatch(lease, authorization, command))
         } catch {
+            let failure = error
             if dispatchAttempted {
                 // Without a valid receipt we cannot assume no write happened. Preserve ownership for human review.
-                throw AkittyError.core("Dispatch outcome is unknown; inspect the terminal and reclaim control. Do not retry automatically. \(error.localizedDescription)")
+                throw AkittyError.core("Dispatch outcome is unknown; inspect the terminal and reclaim control. Do not retry automatically. \(failure.localizedDescription)")
             }
             // A concurrent human reclaim makes this lease stale; never reclaim a replacement controller.
-            do { try session.releaseControl(lease) }
-            catch { if !error.localizedDescription.contains("stale or invalid control lease") { throw error } }
-            throw error
+            do { try release(lease) }
+            catch let cleanupFailure {
+                guard cleanupFailure.localizedDescription.contains("stale or invalid control lease") else {
+                    throw AkittyError.core("\(failure.localizedDescription) Lease cleanup also failed: \(cleanupFailure.localizedDescription)")
+                }
+            }
+            throw failure
         }
     }
     public static func confirm(_ request: AgentCommandRequest, in window: NSWindow) async -> Bool {

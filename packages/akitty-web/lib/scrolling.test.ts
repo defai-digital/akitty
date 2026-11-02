@@ -490,6 +490,67 @@ describe('Scrolling Methods', () => {
     // Should be clamped to 0 (bottom)
     expect((term as any).viewportY).toBe(0);
   });
+
+  test('scrollLines() should reject non-finite amounts with RangeError', async () => {
+    // Build scrollback and park the viewport at a known spot
+    for (let i = 0; i < 50; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    term.scrollLines(-5);
+
+    for (const amount of [NaN, Infinity, -Infinity]) {
+      expect(() => term.scrollLines(amount)).toThrow(RangeError);
+    }
+
+    // Rejected calls must leave the viewport untouched
+    expect((term as any).viewportY).toBe(5);
+  });
+
+  test('scrollToLine() should reject non-finite lines with RangeError', async () => {
+    for (let i = 0; i < 50; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    term.scrollLines(-5);
+
+    for (const line of [NaN, Infinity, -Infinity]) {
+      expect(() => term.scrollToLine(line)).toThrow(RangeError);
+    }
+
+    expect((term as any).viewportY).toBe(5);
+  });
+
+  test('scrollPages() should reject non-finite amounts with RangeError', async () => {
+    for (let i = 0; i < 50; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    term.scrollLines(-5);
+
+    for (const amount of [NaN, Infinity, -Infinity]) {
+      expect(() => term.scrollPages(amount)).toThrow(RangeError);
+    }
+
+    expect((term as any).viewportY).toBe(5);
+  });
+
+  test('scrollLines() should accept fractional amounts', async () => {
+    for (let i = 0; i < 50; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+
+    term.scrollLines(-2.5);
+
+    expect((term as any).viewportY).toBe(2.5);
+  });
+
+  test('scrollToLine() should accept fractional lines', async () => {
+    for (let i = 0; i < 50; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+
+    term.scrollToLine(2.5);
+
+    expect((term as any).viewportY).toBe(2.5);
+  });
 });
 
 describe('Scroll Events', () => {

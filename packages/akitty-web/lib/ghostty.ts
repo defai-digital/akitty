@@ -282,12 +282,17 @@ export class GhosttyTerminal {
   private scrollbackBufferPtr: number = 0;
   private scrollbackBufferSize: number = 0;
 
+  /** Reusable wasm buffer for hyperlink URI reads (always HYPERLINK_URI_MAX bytes). */
+  private hyperlinkUriBufferPtr: number = 0;
+
   /** Reusable wasm buffer that write() encodes into, so a write does not allocate in wasm memory. */
   private writeBufferPtr: number = 0;
   private writeBufferSize: number = 0;
   private static readonly WRITE_BUFFER_MAX = 1 << 20;
   /** Most reply bytes forwarded per readResponse(); anything beyond is dropped. */
   static readonly RESPONSE_READ_MAX = 64 * 1024;
+  /** Maximum URI bytes getHyperlinkUri() reads; longer URIs read as null (fail closed). */
+  static readonly HYPERLINK_URI_MAX = 8192;
   private static readonly decoder = new TextDecoder();
   private static readonly encoder = new TextEncoder();
 
@@ -440,6 +445,10 @@ export class GhosttyTerminal {
     if (this.scrollbackBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.scrollbackBufferPtr, this.scrollbackBufferSize);
       this.scrollbackBufferPtr = 0;
+    }
+    if (this.hyperlinkUriBufferPtr) {
+      this.exports.ghostty_wasm_free_u8_array(this.hyperlinkUriBufferPtr, GhosttyTerminal.HYPERLINK_URI_MAX);
+      this.hyperlinkUriBufferPtr = 0;
     }
     if (this.graphemeBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.graphemeBufferPtr, 16 * 4);
@@ -719,9 +728,46 @@ export class GhosttyTerminal {
     return this.exports.ghostty_terminal_is_row_wrapped(this.handle, row) !== 0;
   }
 
-  /** Hyperlink URI not yet exposed in simplified API */
-  getHyperlinkUri(_id: number): string | null {
-    return null; // TODO: Add hyperlink support
+  /** Check if a scrollback row continues the previous row (0 = oldest). */
+  isScrollbackRowWrapped(offset: number): boolean {
+    if (!Number.isInteger(offset) || offset < 0) return false;
+    const read = this.exports.ghostty_terminal_is_scrollback_row_wrapped;
+    return typeof read === 'function' && read(this.handle, offset) !== 0;
+  }
+
+  /**
+   * Read the OSC 8 hyperlink URI for the cell at (row, col).
+   *
+   * @param row Viewport row, or scrollback offset (0 = oldest) when isScrollback is true
+   * @param col Column index
+   * @param isScrollback Address the scrollback buffer instead of the active viewport
+   * @param maxBytes Upper bound on the URI length accepted; longer URIs read as null
+   * @returns The URI, or null when the cell has no hyperlink, the coordinates are
+   *   invalid, the URI exceeds maxBytes, or the artifact lacks the read API
+   */
+  getHyperlinkUri(
+    row: number,
+    col: number,
+    isScrollback = false,
+    maxBytes: number = GhosttyTerminal.HYPERLINK_URI_MAX
+  ): string | null {
+    if (!this.handle) return null;
+    const read = this.exports.ghostty_terminal_get_hyperlink_uri;
+    // An artifact without the export reads as "no link" instead of throwing.
+    if (typeof read !== 'function') return null;
+    if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0) return null;
+    const limit = Math.min(Math.floor(maxBytes), GhosttyTerminal.HYPERLINK_URI_MAX);
+    if (!(limit > 0)) return null;
+    if (!this.hyperlinkUriBufferPtr) {
+      this.hyperlinkUriBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(GhosttyTerminal.HYPERLINK_URI_MAX);
+      // A zero pointer would make the read copy over address 0 of the heap every terminal shares.
+      if (this.hyperlinkUriBufferPtr === 0) return null;
+    }
+    const written = read(this.handle, isScrollback, row, col, this.hyperlinkUriBufferPtr, limit);
+    if (written <= 0 || written > limit) return null;
+    return GhosttyTerminal.decoder.decode(
+      new Uint8Array(this.memory.buffer, this.hyperlinkUriBufferPtr, written)
+    );
   }
 
   /**

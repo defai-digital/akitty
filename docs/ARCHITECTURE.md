@@ -4,6 +4,11 @@ Akitty's native macOS app uses an AkiTTY-maintained engine derived from `alacrit
 with Akitty's own Rust integration, Swift/AppKit interface, CoreText/Metal
 rendering, and a small TypeScript feature layer. Its own source is MIT licensed.
 Windows and Linux are reached through the separate AkiTTY Web browser terminal.
+The separate [experimental Linux desktop](LINUX_EXPERIMENTAL.md) hosts AkiTTY Web
+with Linux-native PTYs and shared Rust agent primitives. The [Windows amd64
+experiment](WINDOWS_EXPERIMENTAL.md) shares its UI/host and adds ConPTY, PowerShell,
+named pipes and Windows storage. Neither ports the Mac app or changes its C ABI;
+both remain Experimental.
 
 The product focus is visible, human-controlled AI agent workflows: program-reported
 identity, trusted-host execution approval, and observable terminal sessions.
@@ -22,6 +27,8 @@ process execution. See [native agent contracts and scope](AGENT_NATIVE.md).
 | --- | --- |
 | AkiTTY native Mac app | Alacritty terminal engine + Akitty-owned Rust/Swift code |
 | AkiTTY Web | Ghostty VT parser compiled to WebAssembly + Canvas rendering |
+| AkiTTY Experimental Linux | Tauri/TypeScript + AkiTTY Web + native Linux PTYs + shared Rust agent control |
+| AkiTTY Experimental Windows amd64 | Shared Tauri/TypeScript host + WebView2 + ConPTY + PowerShell |
 | Ghostty app (separate upstream project) | Ghostty's own Zig core and native platform interfaces |
 
 Ghostty is a design and source reference for the native app, not its runtime
@@ -172,8 +179,8 @@ macOS. It started from coder/ghostty-web v0.4.0 and is now maintained independen
 The package does not spawn a PTY. The host starts the shell on that operating system, writes output into the
 terminal, and receives keystrokes from the terminal. Browser keyboard events supply Ctrl, Alt, and Meta. Ctrl+C is
 the interrupt on every platform, and links open on Ctrl-click or Command-click. A Windows `file://` wasm path is
-normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There is no Windows or Linux installer in
-this repository. People on those systems use the host that embeds AkiTTY Web.
+normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There is no stable Windows or Linux installer.
+Experimental Tauri hosts in `linux/` and `windows/` add native Linux PTYs or Windows ConPTY and trusted agent control.
 
 - **Platforms:** Windows and Linux support is this browser terminal, including on macOS inside AX Code Desktop. The
   native app has no Windows or Linux build. CI type-checks the package and runs Vitest on macOS. Playwright exercises Chromium, Firefox and WebKit on macOS, with Windows/Linux browser jobs also configured.

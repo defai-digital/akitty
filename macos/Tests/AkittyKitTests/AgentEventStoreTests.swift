@@ -33,6 +33,25 @@ final class AgentEventStoreTests: XCTestCase {
         XCTAssertEqual(attributes[.posixPermissions] as? Int, 0o600)
     }
 
+    func testLargeAdmittedEventsRotateOnceAndRemainExportable() throws {
+        for largeSession in [false, true] {
+            let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = AgentEventStore(directory: root, segmentLimit: 4096)
+            try store.append(event: "before", session: "s", provenance: "host", fields: ["padding": String(repeating: "x", count: 2000)])
+            let session = largeSession ? String(repeating: "s", count: 3300) : "s"
+            let fields: [String: Any] = largeSession ? [:] : ["padding": String(repeating: "x", count: 3300)]
+            try store.append(event: "large", session: session, provenance: "host", fields: fields, synchronize: true)
+            let data = try store.export()
+            let events = try data.split(separator: 10).map { try JSONSerialization.jsonObject(with: Data($0)) as! [String: Any] }
+            XCTAssertLessThanOrEqual(data.count, 8192)
+            XCTAssertEqual(events.map { $0["event"] as? String }, ["before", "retention_rotated", "large"])
+            XCTAssertEqual(events.map { $0["sequence"] as? Int }, [1, 2, 3])
+            XCTAssertEqual(events.last?["session"] as? String, session)
+            XCTAssertEqual((events.last?["fields"] as? [String: String]) ?? [:], fields as! [String: String])
+        }
+    }
+
     @MainActor func testEventFilesRejectSymlinksAndUnsafePermissions() throws {
         let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -45,6 +64,28 @@ final class AgentEventStoreTests: XCTestCase {
         try FileManager.default.removeItem(at: file)
         try Data().write(to: file); try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
         XCTAssertThrowsError(try AgentEventStore(directory: root).export())
+    }
+
+    func testExportRejectsNamedPipesWithoutWaitingForAWriter() throws {
+        let root = URL(fileURLWithPath: "/tmp/akitty-events-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let pipe = root.appendingPathComponent("previous.jsonl")
+        XCTAssertEqual(mkfifo(pipe.path, 0o600), 0)
+        let store = AgentEventStore(directory: root), finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            do { _ = try store.export(); XCTFail("named pipes must be rejected") }
+            catch { /* Expected: event files must be regular files. */ }
+            finished.signal()
+        }
+        let result = finished.wait(timeout: .now() + 1)
+        if result == .timedOut {
+            // Release a regressed blocking reader so a failed assertion cannot hang the suite.
+            let writer = Darwin.open(pipe.path, O_WRONLY | O_NONBLOCK)
+            if writer >= 0 { Darwin.close(writer) }
+            XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+        }
+        XCTAssertEqual(result, .success, "non-regular event files must fail without waiting for a FIFO peer")
     }
 
     func testLocalSocketRefusesOccupiedFilesAndUnboundedFrames() throws {

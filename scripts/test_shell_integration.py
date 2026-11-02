@@ -18,6 +18,14 @@ ZSH = os.environ.get('AKITTY_TEST_ZSH', '/bin/zsh')
 BASH_VERSION = tuple(int(part) for part in subprocess.run([BASH, '-c', 'echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}'],
                                                           capture_output=True, text=True, check=True).stdout.split())
 
+def shell_environment(home, **extra):
+    # These pipe-driven checks inspect raw prompt bytes, not Readline redisplay. Inherited
+    # widths and prompts can make Readline horizontally scroll away the OSC input marker.
+    env = dict(os.environ, HOME=home, HISTFILE=os.path.join(home, 'history'), HISTCONTROL='ignorespace',
+               TERM='dumb', COLUMNS='160', LINES='40', INPUTRC=os.devnull, PS1='test> ')
+    env.update(extra)
+    return env
+
 def events(out):
     """Command text, start and end marks in the order the terminal receives them."""
     found = []
@@ -44,7 +52,7 @@ def as_core_records(found):
 class ShellIntegrationTests(unittest.TestCase):
     def bash(self, commands):
         with tempfile.TemporaryDirectory(prefix='akitty-shell-hooks-') as directory:
-            env = dict(os.environ, HOME=directory, HISTFILE=os.path.join(directory, 'history'), HISTCONTROL='ignorespace')
+            env = shell_environment(directory)
             script = commands.format(source=shlex.quote(str(SCRIPT)))
             # Prompts, PS0 included, go to stderr; one pipe keeps their marks in order with command output.
             result = subprocess.run([BASH, '--noprofile', '--norc', '-i'], input=script, text=True,
@@ -126,7 +134,7 @@ class ShellIntegrationTests(unittest.TestCase):
                          '.bash_profile': 'printf PROFILE; source "$HOME/.bashrc"\n', '.bashrc': 'printf RC\n'}
                 for name, value in files.items():
                     (home / name).write_text(value)
-                env = dict(os.environ, HOME=directory, HISTFILE=str(home / 'history'),
+                env = shell_environment(directory,
                            AKITTY_INTEGRATION_DIR=str(resources), AKITTY_USER_ZDOTDIR=directory)
                 if shell == 'zsh':
                     env['ZDOTDIR'] = str(resources)
@@ -156,7 +164,7 @@ class ShellIntegrationTests(unittest.TestCase):
         resources = SCRIPT.parent
         with tempfile.TemporaryDirectory(prefix='akitty-app-bash-') as directory:
             (pathlib.Path(directory) / '.bash_profile').write_text(profile)
-            env = dict(os.environ, HOME=directory, HISTFILE=os.path.join(directory, 'history'), AKITTY_INTEGRATION_DIR=str(resources))
+            env = shell_environment(directory, AKITTY_INTEGRATION_DIR=str(resources))
             result = subprocess.run([BASH, '--rcfile', str(resources / 'bashrc'), '-i'], input=commands + 'exit 0\n',
                                     text=True, capture_output=True, env=env, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -209,7 +217,7 @@ class ShellIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-title-') as directory:
             home = pathlib.Path(directory)
             (home / '.zshrc').write_text(f'source {shlex.quote(str(SCRIPT.parent / "akitty.zsh"))}\n')
-            env = dict(os.environ, HOME=directory, ZDOTDIR=directory, HISTFILE=str(home / 'history'))
+            env = shell_environment(directory, ZDOTDIR=directory)
             commands = 'cd /\nmkdir -p ~/a/b/c/d && cd ~/a/b/c/d\necho TITLED\nexit\n'
             result = subprocess.run([ZSH, '-i'], input=commands, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout)

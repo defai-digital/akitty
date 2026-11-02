@@ -863,10 +863,11 @@ export class Terminal implements ITerminalCore {
       this.scrollToBottom();
     }
 
-    // Call callback if provided
+    // Deliver the write callback on a later task. Timers fire in hidden pages, where
+    // requestAnimationFrame never runs, so hosts awaiting this callback (e.g. for
+    // backpressure) cannot stall; FIFO timer order preserves per-write callback order.
     if (callback) {
-      // Queue callback after next render
-      requestAnimationFrame(callback);
+      setTimeout(callback, 0);
     }
 
     // Render will happen on next animation frame
@@ -1064,12 +1065,17 @@ export class Terminal implements ITerminalCore {
     // Clear renderer
     this.renderer!.clear();
 
-    // Reset title
-    this.currentTitle = '';
+    // Clear the title through the shared path so onTitleChange subscribers see it;
+    // applyTitle skips the event when the title was already empty (no duplicates).
+    // It is the final reset step because EventEmitter.fire is synchronous: a listener
+    // that writes during the event must observe fully reset state (fresh scanner
+    // state, incremented revision, delivered buffer/scroll notifications), and its
+    // writes must not be discarded or misparsed by still-stale scanner state.
     this.titleBellScanner.reset();
     this.revision++;
     this.notifyBufferChangeIfSwitched(wasAlternate);
     this.scrollEmitter.fire(0);
+    this.applyTitle('');
   }
 
   /**
@@ -1231,6 +1237,10 @@ export class Terminal implements ITerminalCore {
    * @param amount Number of lines to scroll (positive = down, negative = up)
    */
   public scrollLines(amount: number): void {
+    // Reject non-finite arguments before any state change; NaN would poison viewportY.
+    if (!Number.isFinite(amount)) {
+      throw new RangeError('scrollLines amount must be a finite number');
+    }
     if (!this.wasmTerm) {
       throw new Error('Terminal not open');
     }
@@ -1262,7 +1272,13 @@ export class Terminal implements ITerminalCore {
    * @param amount Number of pages to scroll (positive = down, negative = up)
    */
   public scrollPages(amount: number): void {
-    this.scrollLines(amount * this.rows);
+    if (!Number.isFinite(amount)) {
+      throw new RangeError('scrollPages amount must be a finite number');
+    }
+    // A huge finite amount can overflow amount * rows to Infinity; saturate so every
+    // finite argument keeps the existing clamping behavior in scrollLines.
+    const lines = Math.max(-Number.MAX_VALUE, Math.min(Number.MAX_VALUE, amount * this.rows));
+    this.scrollLines(lines);
   }
 
   /**
@@ -1296,6 +1312,10 @@ export class Terminal implements ITerminalCore {
    * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
    */
   public scrollToLine(line: number): void {
+    // Reject non-finite arguments before any state change; NaN would poison viewportY.
+    if (!Number.isFinite(line)) {
+      throw new RangeError('scrollToLine line must be a finite number');
+    }
     const scrollbackLength = this.getScrollbackLength();
     const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
 

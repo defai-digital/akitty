@@ -411,6 +411,217 @@ fn queue_replies(output: &mut VecDeque<(Vec<u8>, usize, bool)>, response_pending
     true
 }
 
+/// Queue one parser batch and record a drop. The error has to become a new revision:
+/// a host polling with the revision it already holds would otherwise get `changed:false`
+/// and never learn that its program's queries went unanswered.
+fn queue_parser_replies(
+    state: &mut Model,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    replies: Vec<u8>,
+) {
+    if queue_replies(output, response_pending, replies)
+        || state.error.as_deref() == Some(REPLY_BACKLOG_ERROR)
+    {
+        return;
+    }
+    state.error = Some(REPLY_BACKLOG_ERROR.into());
+    state.revision = state.revision.saturating_add(1);
+}
+
+/// Expire the parser deadline and queue its replies under one model lock, so a concurrent
+/// feed cannot reset the backlog between the expiry and the drop decision.
+fn expire_and_queue(
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+) -> Result<(), String> {
+    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+    let replies = state.expire_sync();
+    queue_parser_replies(&mut state, output, response_pending, replies);
+    Ok(())
+}
+
+/// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
+/// drain both go through here, so the last answers a program asked for before exiting are
+/// not discarded with the parse result.
+fn feed_and_queue(
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+    let replies = state.feed(bytes);
+    queue_parser_replies(&mut state, output, response_pending, replies);
+    Ok(())
+}
+
+/// Record final worker state. A clean shutdown keeps an error the host was already shown;
+/// only a real IO failure replaces it.
+fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<&str>) -> Result<(), String> {
+    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+    state.shell.finish();
+    state.exited = true;
+    state.exit_code = exit_code;
+    if let Some(error) = io_error {
+        state.error = Some(error.into());
+    }
+    state.revision = state.revision.saturating_add(1);
+    Ok(())
+}
+
+/// Write the front queued buffer once. `Ok(true)` moved bytes (and popped the entry once it
+/// was complete), `Ok(false)` could not progress yet, `Err` means it can never be written.
+fn write_front(
+    fd: i32,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    pending: &AtomicUsize,
+) -> Result<bool, String> {
+    let Some((bytes, offset, counted)) = output.front_mut() else {
+        return Ok(false);
+    };
+    let slice = &bytes[*offset..];
+    // SAFETY: slice is valid for its length; fd is the owned master descriptor.
+    let written = unsafe { libc::write(fd, slice.as_ptr().cast(), slice.len()) };
+    if written > 0 {
+        *offset += written as usize;
+        if *counted {
+            pending.fetch_sub(written as usize, Ordering::SeqCst);
+        } else {
+            *response_pending -= written as usize;
+        }
+        if *offset == bytes.len() {
+            output.pop_front();
+        }
+        return Ok(true);
+    }
+    if written == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) {
+        return Ok(false);
+    }
+    Err(error.to_string())
+}
+
+/// A blocked reply flush waits only a bounded number of consecutive polls. Successful writes
+/// reset that budget, so every already queued reply can be delivered without a fixed count cap.
+const FLUSH_POLL_MS: libc::c_int = 5;
+const FLUSH_BLOCKED_PASSES: usize = 20;
+
+/// How long the post-exit drain waits for a still-attached descendant, and how many windows it
+/// may wait. The short window catches a query written just after the shell exits; once a reply
+/// has actually been delivered, the longer settle window keeps the master open while the
+/// descendant consumes it, which is what makes a post-exit reply observable at all.
+const DRAIN_IDLE_MS: libc::c_int = 20;
+const DRAIN_SETTLE_MS: libc::c_int = 100;
+const DRAIN_IDLE_WAITS: usize = 2;
+
+/// Best-effort bounded delivery of the parser replies still queued when the worker stops.
+/// User input queued before the child exited is stale and never reaches a process that has
+/// already exited; replies keep their original order. A reply that cannot be written because
+/// the reader is gone ends the flush without turning a clean exit into a session error.
+/// Returns whether any byte was actually written, so the drain only waits on a real delivery.
+fn flush_replies(
+    fd: i32,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    pending: &AtomicUsize,
+) -> bool {
+    let mut blocked = 0usize;
+    let mut delivered = false;
+    loop {
+        // Release the backpressure reservation of input the exited child can never read.
+        while let Some(stale) = output
+            .front()
+            .and_then(|(bytes, offset, counted)| (*counted).then(|| bytes.len() - *offset))
+        {
+            pending.fetch_sub(stale, Ordering::SeqCst);
+            output.pop_front();
+        }
+        if output.is_empty() {
+            return delivered;
+        }
+        match write_front(fd, output, response_pending, pending) {
+            Ok(true) => {
+                delivered = true;
+                blocked = 0;
+            }
+            Ok(false) => {
+                blocked += 1;
+                if blocked > FLUSH_BLOCKED_PASSES {
+                    return delivered;
+                }
+                let mut poll = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                // SAFETY: poll references one valid pollfd for the owned master descriptor.
+                if unsafe { libc::poll(&mut poll, 1, FLUSH_POLL_MS) } < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    return delivered;
+                }
+                // A timeout spends one blocked pass, not the entire remaining budget.
+                // This lets a scheduled reader resume before the bounded flush gives up.
+            }
+            Err(_) => return delivered,
+        }
+    }
+}
+
+/// Read the child's final output after it exits, or after the PTY reports a hangup that can
+/// arrive before the exit is observed, and answer the queries it still contains.
+/// `Some` is an IO failure to record. An explicit stop ends the drain without flushing, and a
+/// descendant that keeps the slave open can never make this run past its bounds.
+fn drain_after_exit(
+    fd: i32,
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    pending: &AtomicUsize,
+    stop: &AtomicBool,
+) -> Option<String> {
+    let mut buffer = [0u8; 8192];
+    let mut idle_waits = 0;
+    let mut delivered = false;
+    for _ in 0..32 {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        match read_pty(fd, &mut buffer, true) {
+            Ok(Some(0)) => break,
+            Ok(None) => {
+                // Nothing buffered. A descendant that only noticed the shell exit may still be
+                // writing its last query, so wait a short window instead of closing the master
+                // on the first empty read. Once a reply has been delivered the descendant needs
+                // a longer window to read it before the master disappears with the answer.
+                idle_waits += 1;
+                if idle_waits > DRAIN_IDLE_WAITS {
+                    break;
+                }
+                let wait = if delivered { DRAIN_SETTLE_MS } else { DRAIN_IDLE_MS };
+                let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                // SAFETY: poll references one valid pollfd for this owned master.
+                if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 {
+                    break;
+                }
+            }
+            Ok(Some(count)) => {
+                idle_waits = 0;
+                if let Err(error) = feed_and_queue(model, output, response_pending, &buffer[..count]) {
+                    return Some(error);
+                }
+                // The live loop will not run again, so a query answered here only reaches the
+                // program if the drain writes it before the master closes.
+                delivered |= flush_replies(fd, output, response_pending, pending);
+            }
+            Err(error) => return Some(error),
+        }
+    }
+    None
+}
+
 fn run(
     master: Box<dyn portable_pty::MasterPty + Send>,
     mut child: ChildGuard,
@@ -425,12 +636,7 @@ fn run(
     let mut buffer = [0u8; 8192];
     let mut io_error = None;
     while !stop.load(Ordering::SeqCst) {
-        let replies = model.lock().map_err(|_| "terminal state poisoned")?.expire_sync();
-        if !queue_replies(&mut output, &mut response_pending, replies)
-            && let Ok(mut state) = model.lock()
-        {
-            state.error = Some(REPLY_BACKLOG_ERROR.into());
-        }
+        expire_and_queue(&model, &mut output, &mut response_pending)?;
         for command in rx.try_iter().take(16) {
             match command {
                 Command::Input(bytes) => output.push_back((bytes, 0, true)),
@@ -464,41 +670,24 @@ fn run(
             break;
         }
         if poll.revents & libc::POLLOUT != 0
-            && let Some((bytes, offset, counted)) = output.front_mut()
+            && let Err(error) = write_front(fd, &mut output, &mut response_pending, &pending)
         {
-            let slice = &bytes[*offset..];
-            // SAFETY: byte slice is valid for its length, fd remains owned.
-            let written = unsafe { libc::write(fd, slice.as_ptr().cast(), slice.len()) };
-            if written > 0 {
-                *offset += written as usize;
-                if *counted {
-                    pending.fetch_sub(written as usize, Ordering::SeqCst);
-                } else {
-                    response_pending -= written as usize;
-                }
-                if *offset == bytes.len() {
-                    output.pop_front();
-                }
-            } else if written < 0 {
-                let error = std::io::Error::last_os_error();
-                if !matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) {
-                    io_error = Some(error.to_string());
-                    break;
-                }
-            }
+            io_error = Some(error);
+            break;
         }
         if poll.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             match read_pty(fd, &mut buffer, poll.revents & libc::POLLHUP != 0) {
-                Ok(Some(0)) => break,
-                Ok(Some(count)) => {
-                    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
-                    let replies = state.feed(&buffer[..count]);
-                    if !queue_replies(&mut output, &mut response_pending, replies) {
-                        state.error = Some(REPLY_BACKLOG_ERROR.into());
+                Ok(Some(0)) => {
+                    // A hangup can report EOF before try_wait sees the exit, so leaving here
+                    // without draining would drop a query the program sent as it died. The
+                    // post-loop flush still delivers whatever this drain queues.
+                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
+                        io_error = Some(error);
                     }
+                    break;
+                }
+                Ok(Some(count)) => {
+                    feed_and_queue(&model, &mut output, &mut response_pending, &buffer[..count])?;
                 }
                 Ok(None) => {},
                 Err(error) => { io_error = Some(error); break; },
@@ -514,17 +703,8 @@ fn run(
                 // Drain available final output without waiting for inherited slave FDs.
                 // A descendant can keep the slave writable after shell exit.
                 // Bound this drain so close never joins an endless reader.
-                for _ in 0..32 {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    match read_pty(fd, &mut buffer, true) {
-                        Ok(Some(0)) | Ok(None) => break,
-                        Ok(Some(count)) => {
-                            if let Ok(mut state) = model.lock() { state.feed(&buffer[..count]); }
-                        }
-                        Err(error) => { io_error = Some(error); break; },
-                    }
+                if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
+                    io_error = Some(error);
                 }
                 break;
             }
@@ -535,18 +715,18 @@ fn run(
             }
         }
     }
+    // Deliver what the drain queued before the master closes; this also covers an EOF break.
+    // An explicit stop/close tears the session down, so it does not flush. The delivery result
+    // only feeds the drain's settle decision, so it is discarded here.
+    if !stop.load(Ordering::SeqCst) {
+        let _ = flush_replies(fd, &mut output, &mut response_pending, &pending);
+    }
     if let Err(error) = child.finish()
         && io_error.is_none()
     {
         io_error = Some(error);
     }
-    if let Ok(mut state) = model.lock() {
-        state.shell.finish();
-        state.exited = true;
-        state.exit_code = child.exit_code();
-        state.error = io_error.clone();
-        state.revision += 1;
-    }
+    let _ = finalize(&model, child.exit_code(), io_error.as_deref());
     drop(master);
     if let Some(error) = io_error {
         Err(error)
@@ -812,5 +992,275 @@ mod reply_tests {
         assert_eq!(pending, output.iter().map(|(bytes, _, _)| bytes.len()).sum::<usize>());
         assert!(dropped > 0);
         assert!(queue_replies(&mut output, &mut pending, Vec::new()), "empty replies are never a drop");
+    }
+
+    #[test]
+    fn dropped_reply_backlog_advances_the_revision_so_a_since_poll_reports_it() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let mut output = VecDeque::new();
+        // Saturated, so the next answer must be dropped instead of queued.
+        let mut response_pending = MAX_REPLY_BACKLOG;
+        let mut state = session.model.lock().unwrap();
+        let replies = state.feed(b"\x1b[6n");
+        assert!(!replies.is_empty(), "the query must produce a reply to drop");
+        // The revision the host would hold after the feed that produced the reply.
+        let since = state.revision;
+        queue_parser_replies(&mut state, &mut output, &mut response_pending, replies);
+        let recorded = state.error.clone();
+        let revision = state.revision;
+        drop(state);
+        assert_eq!(recorded.as_deref(), Some(REPLY_BACKLOG_ERROR));
+        assert_ne!(revision, since, "recording a dropped reply must advance the revision");
+        // A poll at the held revision must both report a change and carry the error.
+        let polled: Value = serde_json::from_str(&session.snapshot(Some(since), true).unwrap()).unwrap();
+        assert_eq!(polled["changed"], true, "the drop must not be hidden: {polled}");
+        assert_eq!(polled["error"], REPLY_BACKLOG_ERROR, "{polled}");
+    }
+
+    #[test]
+    fn clean_finalization_keeps_the_error_the_host_was_already_shown() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.model.lock().unwrap().error = Some(REPLY_BACKLOG_ERROR.into());
+        // A clean shutdown has no IO failure, so it must not turn a reported error into success.
+        finalize(&session.model, Some(0), None).unwrap();
+        let model = session.model.lock().unwrap();
+        assert_eq!(model.error.as_deref(), Some(REPLY_BACKLOG_ERROR));
+        assert!(model.exited);
+        assert_eq!(model.exit_code, Some(0));
+        drop(model);
+        // A real IO failure still becomes the error the host reads.
+        finalize(&session.model, Some(1), Some("PTY read failed")).unwrap();
+        assert_eq!(session.model.lock().unwrap().error.as_deref(), Some("PTY read failed"));
+    }
+
+    #[test]
+    fn post_exit_drain_queues_the_replies_the_program_asked_for() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let mut output = VecDeque::new();
+        let mut response_pending = 0;
+        // The post-exit drain must share the live feed's reply queueing: answers parsed
+        // after the shell exits used to be dropped on the floor.
+        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n").unwrap();
+        let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
+        assert!(!queued.is_empty(), "post-exit replies must reach the PTY: {queued:?}");
+        assert_eq!(queued, b"\x1b[1;1R");
+        assert_eq!(response_pending, queued.len(), "queued bytes must count against the backlog");
+    }
+
+    /// A connected descriptor pair where `0` is the nonblocking "master" the worker owns and
+    /// `1` is the program's end. Lets the drain and flush be driven without a real PTY.
+    /// Both ends are nonblocking so a missing reply fails the assertion instead of hanging.
+    fn socket_pair() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid two-element array for socketpair(2).
+        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
+        for fd in fds {
+            // SAFETY: each fd is a descriptor this test owns, so changing its flags is sound.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+        }
+        (fds[0], fds[1])
+    }
+
+    #[test]
+    fn post_exit_drain_writes_the_reply_back_to_the_terminal() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (master, program) = socket_pair();
+        // The program's last act is to ask for a cursor position report.
+        let query = b"\x1b[6n";
+        // SAFETY: writing a valid slice into a descriptor this test owns.
+        assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, 4);
+        let pending = AtomicUsize::new(0);
+        let mut output = VecDeque::new();
+        let mut response_pending = 0;
+        let stop = AtomicBool::new(false);
+        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop);
+        assert!(failure.is_none(), "{failure:?}");
+        // The answer must be written back, not merely left queued for a reader that never runs.
+        let mut received = [0u8; 16];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
+        assert!(count > 0, "the drain wrote no reply back to the terminal");
+        assert_eq!(&received[..count.max(0) as usize], b"\x1b[1;1R");
+        assert!(output.is_empty(), "the drain must deliver what it queued: {output:?}");
+        assert_eq!(response_pending, 0);
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn final_flush_keeps_reply_order_and_never_sends_stale_input() {
+        let (master, program) = socket_pair();
+        let pending = AtomicUsize::new(12);
+        let mut response_pending = 15;
+        let mut output: VecDeque<(Vec<u8>, usize, bool)> = VecDeque::new();
+        // Queued in worker order: input the exited child can never read, then two replies.
+        output.push_back((b"stale input\r".to_vec(), 0, true));
+        output.push_back((b"\x1b[1;1R".to_vec(), 0, false));
+        output.push_back((b"\x1b[?62;22c".to_vec(), 0, false));
+        let delivered = flush_replies(master, &mut output, &mut response_pending, &pending);
+        assert!(delivered, "queued replies must actually be written");
+        assert!(output.is_empty(), "the flush must drain the queue: {output:?}");
+        assert_eq!(response_pending, 0, "delivered replies leave the backlog");
+        assert_eq!(pending.load(Ordering::SeqCst), 0, "stale input releases its reservation");
+        let mut received = [0u8; 32];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
+        assert_eq!(&received[..count.max(0) as usize], b"\x1b[1;1R\x1b[?62;22c");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn final_flush_delivers_every_queued_reply_in_order() {
+        let (master, program) = socket_pair();
+        let pending = AtomicUsize::new(0);
+        // One entry per reply, each already writable: a fixed per-call write budget would
+        // deliver only the first batch and leave the rest of a bounded backlog unanswered.
+        let replies: Vec<u8> = (0..20u8).map(|index| b'a' + index).collect();
+        let mut response_pending = replies.len();
+        let mut output: VecDeque<(Vec<u8>, usize, bool)> =
+            replies.iter().map(|byte| (vec![*byte], 0, false)).collect();
+        let delivered = flush_replies(master, &mut output, &mut response_pending, &pending);
+        assert!(delivered, "queued replies must actually be written");
+        assert!(output.is_empty(), "the flush must drain the whole queue: {output:?}");
+        assert_eq!(response_pending, 0, "every delivered reply leaves the backlog");
+        let mut received = [0u8; 32];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
+        assert_eq!(count, replies.len() as isize, "replies were truncated: {count} of {}", replies.len());
+        assert_eq!(&received[..replies.len()], &replies[..], "replies must keep their queue order");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn final_flush_resets_the_blocked_budget_after_every_written_reply() {
+        // A pipe behaves like the PTY output queue here: writing into a full queue blocks until
+        // the program end reads, so progress and blocking alternate.
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid two-element array for pipe(2).
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (program, master) = (fds[0], fds[1]);
+        // SAFETY: master is a descriptor this test owns, so changing its flags is sound.
+        let flags = unsafe { libc::fcntl(master, libc::F_GETFL) };
+        assert_eq!(unsafe { libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+        let flags = unsafe { libc::fcntl(program, libc::F_GETFL) };
+        assert_eq!(unsafe { libc::fcntl(program, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+        // Fill the queue: every reply write then starts out blocked.
+        let filler = vec![b'F'; 64 * 1024];
+        let mut filled = 0;
+        loop {
+            // SAFETY: writing a valid slice into a descriptor this test owns.
+            let written = unsafe { libc::write(master, filler.as_ptr().cast(), filler.len()) };
+            if written > 0 {
+                filled += written as usize;
+                continue;
+            }
+            let error = std::io::Error::last_os_error();
+            assert!(
+                matches!(error.kind(), std::io::ErrorKind::WouldBlock),
+                "unexpected fill failure: {error}"
+            );
+            break;
+        }
+        // The program end consumes the queue the way a live reader would, one reply at a time.
+        let stop = Arc::new(AtomicBool::new(false));
+        let pump_stop = Arc::clone(&stop);
+        let pump = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut chunk = [0u8; 1024];
+            // Let the flush run into the full queue before the first byte is consumed.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            loop {
+                // SAFETY: reading into a valid buffer from a descriptor this test owns.
+                let count = unsafe { libc::read(program, chunk.as_mut_ptr().cast(), chunk.len()) };
+                if count > 0 {
+                    seen.extend_from_slice(&chunk[..count as usize]);
+                }
+                if pump_stop.load(Ordering::SeqCst) {
+                    // Drain whatever the last write left so the assertion sees every byte.
+                    if count <= 0 {
+                        return seen;
+                    }
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(400));
+            }
+        });
+        let pending = AtomicUsize::new(0);
+        let expected: Vec<u8> = (0..6u8).flat_map(|index| std::iter::repeat_n(b'A' + index, 1024)).collect();
+        let mut response_pending = expected.len();
+        let mut output: VecDeque<(Vec<u8>, usize, bool)> = expected
+            .chunks(1024)
+            .map(|chunk| (chunk.to_vec(), 0, false))
+            .collect();
+        let delivered = flush_replies(master, &mut output, &mut response_pending, &pending);
+        stop.store(true, Ordering::SeqCst);
+        let seen = pump.join().unwrap();
+        assert!(delivered, "a live reader must not end the flush on the first blocked attempt");
+        assert!(output.is_empty(), "the flush must keep going after progress: {output:?}");
+        assert_eq!(response_pending, 0, "every delivered reply leaves the backlog");
+        assert!(
+            seen.len() >= filled + expected.len(),
+            "the reader saw {} of {} bytes",
+            seen.len(),
+            filled + expected.len()
+        );
+        assert_eq!(&seen[filled..], &expected[..], "progress must resume after each block");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn post_exit_drain_answers_every_burst_separated_by_an_idle_window() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (master, program) = socket_pair();
+        // Three bursts, each written after the drain has already seen an empty read. A shared
+        // idle budget spends itself on the earlier gaps and the last burst is never answered.
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            for (index, query) in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"].into_iter().enumerate() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                // SAFETY: writing a valid slice into a descriptor this test owns.
+                assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, query.len() as isize);
+                if index == 0 { started_tx.send(()).unwrap(); }
+            }
+        });
+        // Start the bounded drain only after the writer has actually been scheduled.
+        started_rx.recv().unwrap();
+        let pending = AtomicUsize::new(0);
+        let mut output = VecDeque::new();
+        let mut response_pending = 0;
+        let stop = AtomicBool::new(false);
+        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop);
+        assert!(failure.is_none(), "{failure:?}");
+        writer.join().unwrap();
+        let mut received = [0u8; 64];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
+        let answers = b"\x1b[?62;22c\x1b[1;1R\x1b[?62;22c";
+        assert!(count > 0, "the drain wrote no reply back to the terminal");
+        assert_eq!(&received[..count as usize], answers, "every separated burst must be answered in order");
+        assert_eq!(response_pending, 0, "every burst must leave the backlog");
+        assert!(output.is_empty(), "the drain must deliver what it queued: {output:?}");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn final_flush_with_a_vanished_program_is_not_an_error() {
+        let (master, program) = socket_pair();
+        // SAFETY: closing the peer this test owns stands in for the program exiting.
+        unsafe { libc::close(program) };
+        let pending = AtomicUsize::new(0);
+        let mut response_pending = 6;
+        let mut output = VecDeque::from([(b"\x1b[1;1R".to_vec(), 0, false)]);
+        // Best effort: a reply nobody can read must not turn a clean exit into a session error,
+        // and must not panic on the broken pipe.
+        let delivered = flush_replies(master, &mut output, &mut response_pending, &pending);
+        assert!(!delivered, "nothing can be delivered to a vanished program");
+        // SAFETY: closing the remaining descriptor this test owns.
+        unsafe { libc::close(master) };
     }
 }

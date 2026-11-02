@@ -22,14 +22,13 @@ Keep the Coder copyright and MIT notice for as long as any of that code remains.
 
 | Part                             | Source                                                                              |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
-| `ghostty-vt.wasm`                | the published `ghostty-web@0.4.0` npm tarball; sha256 `d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a` |
-| `patches/ghostty-wasm-api.patch` | from the same commit; sha256 `ae5b1b034143885e130e5b795209c5bb52ce5987a62240bab1ac5ff4f99f430a` |
+| `ghostty-vt.wasm`                | local build of the pinned Ghostty commit and patch below; sha256 `5f42e738fd2b490f0946de40cbbe63a34c4415b93aca3ef00d56fbea2f5f15ed` |
+| `patches/ghostty-wasm-api.patch` | AkiTTY's wasm API patch against the pinned commit; sha256 `9c84c814fd3d9e4fd24e4da34ed4e0b415bb3e4864c2334be0e133984345e433` |
 | Ghostty source of the wasm       | `ghostty-org/ghostty` commit `5714ed07a1012573261b7b7e3ed2add9c1504496`, Zig `0.15.2` |
 
-The committed wasm is the release artifact above, not a local rebuild. `scripts/build-wasm.sh` fetches that Ghostty
-commit, applies the patch and builds with Zig 0.15.2; a rebuilt file has not been compared byte for byte with the
-committed one. When the patch, the Ghostty pin or the wasm changes, update the pins and hashes in this table in the
-same commit.
+The committed wasm is built from the pinned commit and patch. `scripts/build-wasm.sh` fetches that commit,
+applies the patch and builds with Zig 0.15.2. When the patch, the Ghostty pin or the wasm changes, update the pins
+and hashes in this table in the same commit.
 
 ## Package layout notes
 

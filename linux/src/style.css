@@ -1,0 +1,37 @@
+:root { color-scheme: dark; font: 13px system-ui, sans-serif; color: #dce2ec; background: #080a0d }
+* { box-sizing: border-box }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden }
+header, .toolbar, nav, footer { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #141820; border-bottom: 1px solid #2a303b }
+header strong { font-size: 19px; letter-spacing: -.5px }
+.badge { color: #edc985; font-size: 10px; letter-spacing: 1px; border: 1px solid #665439; border-radius: 5px; padding: 4px 7px }
+.spacer, .directory { flex: 1 }
+.directory { display: flex; align-items: center; gap: 8px }
+input { width: 100% }
+button, input, select { font: inherit; color: inherit; background: #222936; border: 1px solid #394456; border-radius: 6px; padding: 7px 10px }
+button { cursor: pointer }
+button:hover { background: #303d51 }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #9ebfff; outline-offset: 2px }
+button:disabled { opacity: .5; cursor: default }
+nav { gap: 6px; min-height: 42px; overflow-x: auto; padding-block: 6px }
+nav button[aria-selected="true"] { background: #35435a; border-color: #819ac0 }
+main { display: flex; min-height: 0; flex: 1 }
+#terminals { position: relative; flex: 1; min-width: 0; padding: 8px }
+.terminal { width: 100%; height: 100% }
+.terminal[hidden] { display: none }
+aside { width: 265px; overflow: auto; background: #10141b; border-left: 1px solid #2a303b; padding: 16px }
+aside button { display: block; width: 100%; margin: 9px 0 }
+h2 { font-size: 15px; margin-top: 0 }
+p, details { color: #aeb8c9; line-height: 1.5 }
+#overview { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6 }
+code { overflow-wrap: anywhere; font-size: 11px }
+footer { min-height: 36px; font-size: 12px; color: #b5bfd0; border-top: 1px solid #2a303b }
+dialog { width: min(720px, 90vw); max-height: 85vh; color: #e4e9f2; background: #171e29; border: 1px solid #6b7b94; border-radius: 12px; padding: 24px }
+dialog::backdrop { background: #000a }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow: auto; background: #090c11; padding: 16px; border-radius: 6px; user-select: text }
+.actions { display: flex; justify-content: flex-end; gap: 12px }
+#allow { background: #3a4f75 }
+#approval-context { white-space: pre-line; overflow-wrap: anywhere }
+#agent-sprite { width: 32px; height: 32px; image-rendering: pixelated; margin-bottom: 8px }
+#agent-progress { width: 100%; margin-bottom: 10px }
+.agent-entry { text-align: left; white-space: pre-line; font-size: 11px }
+.agent-entry[aria-current="true"] { border-color: #819ac0 }
