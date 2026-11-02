@@ -2,8 +2,8 @@
  * Link detection and caching system
  *
  * The LinkDetector coordinates between multiple link providers and caches
- * results for performance. It uses hyperlink_id for intelligent caching
- * since the same hyperlink_id always represents the same link.
+ * results for performance. Cached links are keyed by their exact buffer range:
+ * hyperlink ids are page-local and cannot identify a link across pages.
  */
 
 import type { IBufferCellPosition, ILink, ILinkProvider } from './types';
@@ -35,9 +35,8 @@ export class LinkDetector {
   private providers: ILinkProvider[] = [];
   private isDisposed = false;
 
-  // Cache links by hyperlink_id for fast lookups
-  // Key format: `h${hyperlinkId}` for OSC 8 links
-  // Key format: `r${row}:${startX}-${endX}` for regex links (future)
+  // Cache links by exact buffer range for fast, collision-free lookups.
+  // Key format: `r${startY}:${startX}-${endY}:${endX}`
   private linkCache = new Map<string, ILink>();
 
   // Rows whose provider scan completed for the current generation only.
@@ -76,27 +75,12 @@ export class LinkDetector {
    */
   async getLinkAt(col: number, row: number): Promise<ILink | undefined> {
     if (this.isDisposed) return undefined;
-    // First, check if this cell has a hyperlink_id (fast path for OSC 8)
     const line = this.terminal.buffer.active.getLine(row);
     if (!line || col < 0 || col >= line.length) {
       return undefined;
     }
 
-    const cell = line.getCell(col);
-    if (!cell) {
-      return undefined;
-    }
-    const hyperlinkId = cell.getHyperlinkId();
-
-    if (hyperlinkId > 0) {
-      // Fast path: check cache by hyperlink_id
-      const cacheKey = `h${hyperlinkId}`;
-      if (this.linkCache.has(cacheKey)) {
-        return this.linkCache.get(cacheKey);
-      }
-    }
-
-    // Slow path: scan this row once. Concurrent callers share the same
+    // Scan this row once. Concurrent callers share the same
     // in-flight scan, so everyone awaits the same provider work.
     if (!this.scannedRows.has(row)) {
       const generation = this.generation;
@@ -114,14 +98,8 @@ export class LinkDetector {
       }
     }
 
-    // Check cache again (hyperlinkId or position-based)
-    if (hyperlinkId > 0) {
-      const cacheKey = `h${hyperlinkId}`;
-      const link = this.linkCache.get(cacheKey);
-      if (link) return link;
-    }
-
-    // Check if any cached link contains this position
+    // Cached links are keyed by their exact range, so containment is the
+    // lookup: hyperlink ids are page-local and cannot key a cache.
     for (const link of this.linkCache.values()) {
       if (this.isPositionInLink(col, row, link)) {
         return link;
@@ -244,31 +222,11 @@ export class LinkDetector {
    * Cache a link for fast lookup
    */
   private cacheLink(link: ILink): void {
-    // Try to get hyperlink_id for this link
-    const { start } = link.range;
-    const line = this.terminal.buffer.active.getLine(start.y);
-    if (line) {
-      const cell = line.getCell(start.x);
-      if (!cell) {
-        // Fallback: cache by position range
-        const { start: s, end: e } = link.range;
-        const cacheKey = `r${s.y}:${s.x}-${e.x}`;
-        this.linkCache.set(cacheKey, link);
-        return;
-      }
-      const hyperlinkId = cell.getHyperlinkId();
-
-      if (hyperlinkId > 0) {
-        // Cache by hyperlink_id (best case - stable across rows)
-        this.linkCache.set(`h${hyperlinkId}`, link);
-        return;
-      }
-    }
-
-    // Fallback: cache by position range
-    // Format: r${row}:${startX}-${endX}
+    // Key by the exact range: hyperlink ids are page-local and two links on
+    // different pages can share one, so ids cannot identify a cached link.
+    // Format: r${startY}:${startX}-${endY}:${endX}
     const { start: s, end: e } = link.range;
-    const cacheKey = `r${s.y}:${s.x}-${e.x}`;
+    const cacheKey = `r${s.y}:${s.x}-${e.y}:${e.x}`;
     this.linkCache.set(cacheKey, link);
   }
 

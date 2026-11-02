@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AkiTTY Experimental",
+  "version": "0.1.0",
+  "identifier": "com.defai.akitty.experimental",
+  "build": {
+    "beforeDevCommand": "python3 scripts/licenses.py && npm run dev",
+    "beforeBuildCommand": "npm run build && python3 scripts/licenses.py",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "AkiTTY — Experimental Linux", "width": 1180, "height": 780, "minWidth": 720, "minHeight": 480 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'",
+      "capabilities": ["main"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["../../assets/icon-source.png"],
+    "targets": ["deb"],
+    "category": "DeveloperTool",
+    "shortDescription": "Experimental Linux terminal with human-controlled agent workflows",
+    "resources": {
+      "../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt",
+      "../../macos/Sources/AkittyKit/Resources/shell-integration/bashrc": "shell-integration/bashrc",
+      "../../macos/Sources/AkittyKit/Resources/shell-integration/akitty.bash": "shell-integration/akitty.bash",
+      "../../macos/Sources/AkittyKit/Resources/shell-integration/.zshenv": "shell-integration/.zshenv",
+      "../../macos/Sources/AkittyKit/Resources/shell-integration/akitty.zsh": "shell-integration/akitty.zsh"
+    },
+    "linux": { "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "bash"], "files": { "/usr/bin/akitty-agent": "binaries/akitty-agent" } } }
+  }
+}

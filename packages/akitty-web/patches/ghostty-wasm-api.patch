@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index e451b171a..89c623d8b 100644
+index e451b17..89c623d 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -23,3 +23,4 @@ glad.zip
@@ -8,7 +8,7 @@ index e451b171a..89c623d8b 100644
  vgcore.*
 +node_modules/
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
-index 4f8fef88e..ca9fb1d4d 100644
+index 4f8fef8..ca9fb1d 100644
 --- a/include/ghostty/vt.h
 +++ b/include/ghostty/vt.h
 @@ -28,6 +28,7 @@
@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..298ad36c1
+index 0000000..884b606
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,278 @@
 +/**
 + * @file terminal.h
 + *
@@ -255,6 +255,35 @@ index 000000000..298ad36c1
 +/** Check if a row is a continuation from previous row (soft-wrapped) */
 +bool ghostty_terminal_is_row_wrapped(GhosttyTerminal term, int y);
 +
++/** Check if a scrollback row is a continuation from the previous row (0 = oldest) */
++bool ghostty_terminal_is_scrollback_row_wrapped(GhosttyTerminal term, int offset);
++
++/* ============================================================================
++ * Hyperlink URI read
++ * ========================================================================= */
++
++/**
++ * Read the OSC 8 hyperlink URI for a cell.
++ *
++ * @param row Row index (0-based): active viewport row, or scrollback offset
++ *   (0 = oldest) when is_scrollback is true
++ * @param col Column index (0-based)
++ * @param is_scrollback Address the scrollback buffer instead of the active screen
++ * @param out_buffer Buffer to receive the URI bytes (UTF-8, not NUL-terminated)
++ * @param buffer_size Size of out_buffer in bytes
++ * @return Number of URI bytes written when the cell carries a hyperlink, 0 when
++ *   it does not, or -1 on error (invalid coordinates, missing cell, or buffer
++ *   too small for the full URI; the URI is never truncated)
++ */
++int ghostty_terminal_get_hyperlink_uri(
++    GhosttyTerminal term,
++    bool is_scrollback,
++    int row,
++    int col,
++    uint8_t* out_buffer,
++    size_t buffer_size
++);
++
 +/* ============================================================================
 + * Response API - for DSR and other terminal queries
 + * ========================================================================= */
@@ -283,10 +312,10 @@ index 000000000..298ad36c1
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 03a883e20..f07bbd759 100644
+index 03a883e..d24161e 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -140,6 +140,41 @@ comptime {
+@@ -140,6 +140,45 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -321,6 +350,10 @@ index 03a883e20..f07bbd759 100644
 +        @export(&c.terminal_get_scrollback_line, .{ .name = "ghostty_terminal_get_scrollback_line" });
 +        @export(&c.terminal_get_scrollback_grapheme, .{ .name = "ghostty_terminal_get_scrollback_grapheme" });
 +        @export(&c.terminal_is_row_wrapped, .{ .name = "ghostty_terminal_is_row_wrapped" });
++        @export(&c.terminal_is_scrollback_row_wrapped, .{ .name = "ghostty_terminal_is_scrollback_row_wrapped" });
++
++        // Hyperlink URI read
++        @export(&c.terminal_get_hyperlink_uri, .{ .name = "ghostty_terminal_get_hyperlink_uri" });
 +
 +        // Response API (for DSR and other queries)
 +        @export(&c.terminal_has_response, .{ .name = "ghostty_terminal_has_response" });
@@ -329,7 +362,7 @@ index 03a883e20..f07bbd759 100644
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..18503933f 100644
+index bc92597..a958263 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -340,7 +373,7 @@ index bc92597f5..18503933f 100644
  
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,42 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,46 @@ pub const key_encoder_encode = key_encode.encode;
  
  pub const paste_is_safe = paste.is_safe;
  
@@ -375,6 +408,10 @@ index bc92597f5..18503933f 100644
 +pub const terminal_get_scrollback_line = terminal.getScrollbackLine;
 +pub const terminal_get_scrollback_grapheme = terminal.getScrollbackGrapheme;
 +pub const terminal_is_row_wrapped = terminal.isRowWrapped;
++pub const terminal_is_scrollback_row_wrapped = terminal.isScrollbackRowWrapped;
++
++// Hyperlink URI read
++pub const terminal_get_hyperlink_uri = terminal.getHyperlinkUri;
 +
 +// Response API (for DSR and other queries)
 +pub const terminal_has_response = terminal.hasResponse;
@@ -383,7 +420,7 @@ index bc92597f5..18503933f 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +96,7 @@ test {
+@@ -59,6 +100,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -393,10 +430,10 @@ index bc92597f5..18503933f 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..d57b4e405
+index 0000000..159eb7d
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1004 @@
+@@ -0,0 +1,1070 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -870,26 +907,26 @@ index 000000000..d57b4e405
 +/// Returns dirty state: 0=none, 1=partial, 2=full
 +pub fn renderStateUpdate(ptr: ?*anyopaque) callconv(.c) GhosttyDirty {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .full));
-+    
++
 +    // Detect screen buffer switch (normal <-> alternate)
 +    const current_is_alternate = wrapper.terminal.screens.active_key == .alternate;
 +    const screen_switched = current_is_alternate != wrapper.last_screen_is_alternate;
 +    wrapper.last_screen_is_alternate = current_is_alternate;
-+    
++
 +    // When screen switches, we must fully reset the render state to avoid
 +    // stale cached cell data from the previous screen buffer.
 +    if (screen_switched) {
 +        wrapper.render_state.deinit(wrapper.alloc);
 +        wrapper.render_state = RenderState.empty;
 +    }
-+    
++
 +    wrapper.render_state.update(wrapper.alloc, &wrapper.terminal) catch return .full;
-+    
++
 +    // If screen switched, always return full dirty to force complete redraw
 +    if (screen_switched) {
 +        return .full;
 +    }
-+    
++
 +    return switch (wrapper.render_state.dirty) {
 +        .false => .none,
 +        .partial => .partial,
@@ -914,7 +951,7 @@ index 000000000..d57b4e405
 +    return @intCast(wrapper.render_state.cursor.active.x);
 +}
 +
-+/// Get cursor Y position  
++/// Get cursor Y position
 +pub fn renderStateGetCursorY(ptr: ?*anyopaque) callconv(.c) c_int {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
 +    return @intCast(wrapper.render_state.cursor.active.y);
@@ -1070,7 +1107,7 @@ index 000000000..d57b4e405
 +                    .wide => 2,
 +                    .spacer_tail, .spacer_head => 0,
 +                },
-+                .hyperlink_id = if (cell.hyperlink) 1 else 0,
++                .hyperlink_id = if (page.lookupHyperlink(cell)) |id| id else 0,
 +                .grapheme_len = grapheme_len,
 +            };
 +            idx += 1;
@@ -1180,22 +1217,22 @@ index 000000000..d57b4e405
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
 +    const rs = &wrapper.render_state;
 +    const cols = rs.cols;
-+    
++
 +    if (buf_size < cols) return -1;
 +    if (offset < 0) return -1;
-+    
++
 +    const scrollback_len = getScrollbackLength(ptr);
 +    if (offset >= scrollback_len) return -1;
-+    
++
 +    // Get the pin for this scrollback row
 +    // history point: y=0 is oldest, y=scrollback_len-1 is newest
 +    const pages = &wrapper.terminal.screens.active.pages;
 +    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return -1;
-+    
++
 +    // Get cells for this row
 +    const cells = pin.cells(.all);
 +    const page = pin.node.data;
-+    
++
 +    // Fill output buffer
 +    for (0..cols) |x| {
 +        if (x >= cells.len) {
@@ -1214,15 +1251,15 @@ index 000000000..d57b4e405
 +            };
 +            continue;
 +        }
-+        
++
 +        const cell = &cells[x];
-+        
++
 +        // Get style from page styles (cell has style_id)
 +        const sty: Style = if (cell.style_id > 0)
 +            page.styles.get(page.memory, cell.style_id).*
 +        else
 +            .{};
-+        
++
 +        // Resolve colors
 +        const fg: color.RGB = switch (sty.fg_color) {
 +            .none => rs.colors.foreground,
@@ -1230,7 +1267,7 @@ index 000000000..d57b4e405
 +            .rgb => |rgb| rgb,
 +        };
 +        const bg: color.RGB = if (sty.bg(cell, &rs.colors.palette)) |rgb| rgb else rs.colors.background;
-+        
++
 +        // Build flags
 +        var flags: u8 = 0;
 +        if (sty.flags.bold) flags |= 1 << 0;
@@ -1326,13 +1363,79 @@ index 000000000..d57b4e405
 +pub fn isRowWrapped(ptr: ?*anyopaque, y: c_int) callconv(.c) bool {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    const pages = &wrapper.terminal.screens.active.pages;
-+    
++
 +    // Get pin for this row in active area
 +    const pin = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
 +    const rac = pin.rowAndCell();
-+    
++
 +    // wrap_continuation means this row continues from the previous row
 +    return rac.row.wrap_continuation;
++}
++
++/// Check if a scrollback row continues the previous row (0 = oldest).
++pub fn isScrollbackRowWrapped(ptr: ?*anyopaque, offset: c_int) callconv(.c) bool {
++    if (offset < 0) return false;
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    const pages = &wrapper.terminal.screens.active.pages;
++    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return false;
++    const rac = pin.rowAndCell();
++    return rac.row.wrap_continuation;
++}
++
++// ============================================================================
++// Hyperlink URI read
++// ============================================================================
++
++/// Read the OSC 8 hyperlink URI for the cell at (row, col).
++///
++/// `is_scrollback` selects history coordinates (offset 0 = oldest) instead of
++/// active viewport rows. The URI is copied in full into out or not at all: a
++/// buffer too small for the URI is an error and nothing is truncated.
++///
++/// Returns the number of URI bytes written when the cell is part of a
++/// hyperlink, 0 when it is not, and -1 on any error (null terminal, invalid
++/// coordinates, missing cell, or buffer too small).
++pub fn getHyperlinkUri(
++    ptr: ?*anyopaque,
++    is_scrollback: bool,
++    row: c_int,
++    col: c_int,
++    out: [*]u8,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const t = &wrapper.terminal;
++
++    if (row < 0 or col < 0) return -1;
++    const y: usize = @intCast(row);
++    const x: usize = @intCast(col);
++    const cols: usize = @intCast(t.cols);
++    const rows: usize = @intCast(t.rows);
++    if (x >= cols) return -1;
++
++    const pages = &t.screens.active.pages;
++    const pin = if (is_scrollback) blk: {
++        const scrollback_len: usize = @intCast(getScrollbackLength(ptr));
++        if (y >= scrollback_len) return -1;
++        break :blk pages.pin(.{ .history = .{ .y = @intCast(y) } }) orelse return -1;
++    } else blk: {
++        if (y >= rows) return -1;
++        break :blk pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return -1;
++    };
++
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    if (x >= cells.len) return -1;
++
++    // The cell's hyperlink id is page-local (0 is reserved for "no link"), so
++    // the URI is resolved from this page's set by coordinate, never from a
++    // caller-supplied id.
++    const id = page.lookupHyperlink(&cells[x]) orelse return 0;
++    const uri = page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
++    if (uri.len == 0) return 0;
++    if (uri.len > buf_size) return -1;
++    @memcpy(out[0..uri.len], uri);
++    return @intCast(uri.len);
 +}
 +
 +// ============================================================================
@@ -1352,9 +1455,9 @@ index 000000000..d57b4e405
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
 +    const len = @min(wrapper.response_buffer.items.len, buf_size);
 +    if (len == 0) return 0;
-+    
++
 +    @memcpy(out[0..len], wrapper.response_buffer.items[0..len]);
-+    
++
 +    // Remove consumed bytes from buffer
 +    if (len == wrapper.response_buffer.items.len) {
 +        wrapper.response_buffer.clearRetainingCapacity();
@@ -1367,7 +1470,7 @@ index 000000000..d57b4e405
 +        );
 +        wrapper.response_buffer.shrinkRetainingCapacity(wrapper.response_buffer.items.len - len);
 +    }
-+    
++
 +    return @intCast(len);
 +}
 +
@@ -1402,7 +1505,7 @@ index 000000000..d57b4e405
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index b6430ea34..10e0ef79d 100644
+index b6430ea..10e0ef7 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
 @@ -322,13 +322,14 @@ pub const RenderState = struct {

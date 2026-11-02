@@ -32,6 +32,40 @@ final class AgentWorkflowTests: XCTestCase {
         XCTAssertFalse(events.contains { $0["event"] as? String == "dispatched" })
     }
 
+    @MainActor func testDeniedCommandReportsBothFailureAndLeaseCleanupFailure() async throws {
+        let session = try TerminalSession(headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
+        let host = AgentCommandHost(session: session, dispatch: { _, _, _ in
+            throw AkittyError.core("dispatch must not run before approval")
+        }, release: { _ in throw AkittyError.core("cleanup transport unavailable") })
+        do {
+            _ = try await host.execute(actor: "test-agent", command: "echo hello") { _ in false }
+            XCTFail("denial must fail")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("denied"), message)
+            XCTAssertTrue(message.contains("cleanup transport unavailable"), message)
+        }
+    }
+
+    @MainActor func testStaleLeaseCleanupFailureStillReportsOriginalFailure() async throws {
+        let session = try TerminalSession(headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
+        let host = AgentCommandHost(session: session, dispatch: { _, _, _ in
+            throw AkittyError.core("dispatch must not run before approval")
+        }, release: { _ in throw AkittyError.core("stale or invalid control lease") })
+        do {
+            _ = try await host.execute(actor: "test-agent", command: "echo hello") { _ in false }
+            XCTFail("denial must fail")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("denied"), message)
+            XCTAssertFalse(message.contains("stale or invalid control lease"), message)
+        }
+    }
+
     @MainActor func testDirectoryChangeDuringApprovalDoesNotAuthorizeNewContext() async throws {
         let session = try TerminalSession(headless: true)
         defer { try? session.close() }

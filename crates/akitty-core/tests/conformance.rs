@@ -1,6 +1,6 @@
 use akitty_core::request;
 use base64::Engine;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 fn call(value: Value) -> Value {
     let response = request(&serde_json::to_vec(&value).unwrap());
@@ -37,15 +37,22 @@ fn program_status_is_additive_untrusted_and_never_creates_control_authority() {
     let initial = t.snapshot();
     t.feed("\x1b]771;{\"mark\":\"busy\"}\x07");
     t.feed("\x1b]7501;state=blocked:kind=permission:app=agent:msg=QXBwcm92ZT8=\x1b\\");
-    let delta = call(json!({"op":"snapshot", "id":t.0, "since":initial["revision"], "compact":true}));
+    let delta =
+        call(json!({"op":"snapshot", "id":t.0, "since":initial["revision"], "compact":true}));
     assert_eq!(delta["program_status"]["untrusted"], true);
     assert_eq!(delta["program_status"]["records"][0]["state"], "blocked");
     assert_eq!(delta["chrome"]["mark"], "busy");
     assert_eq!(delta["control"]["owner"], "human");
-    assert_eq!(call(json!({"op":"control_audit", "id":t.0}))["events"], json!([]));
+    assert_eq!(
+        call(json!({"op":"control_audit", "id":t.0}))["events"],
+        json!([])
+    );
     t.feed("\x1b]7501;state=done\x07");
     assert_eq!(t.snapshot()["control"]["owner"], "human");
-    assert_eq!(call(json!({"op":"command_history", "id":t.0}))["commands"], json!([]));
+    assert_eq!(
+        call(json!({"op":"command_history", "id":t.0}))["commands"],
+        json!([])
+    );
 }
 
 #[test]
@@ -54,12 +61,17 @@ fn schema_one_snapshots_keep_keyed_cells_unless_compact_is_requested() {
     t.feed("\x1b[1;3;4:3;9;38;2;1;2;3;58;2;4;5;6mA\x1b[0m");
     let old = call(json!({"op":"snapshot","id":t.0}));
     let cell = &old["cells"][0];
-    assert!(cell.is_object(), "schema 1 defaults to the published keyed cell shape");
+    assert!(
+        cell.is_object(),
+        "schema 1 defaults to the published keyed cell shape"
+    );
     assert_eq!(cell["text"], "A");
     assert_eq!(cell["fg"], json!([1, 2, 3]));
     assert_eq!(cell["ucolor"], json!([4, 5, 6]));
     assert_eq!(cell["ustyle"], 3);
-    for flag in ["bold", "italic", "underline", "strike"] { assert_eq!(cell[flag], true); }
+    for flag in ["bold", "italic", "underline", "strike"] {
+        assert_eq!(cell[flag], true);
+    }
     assert_eq!(old["links"], json!([]));
     let compact = call(json!({"op":"snapshot","id":t.0,"compact":true}));
     assert!(compact["cells"][0].is_array());
@@ -107,12 +119,10 @@ fn scrolling_and_resize_preserve_content() {
     t.feed("one\r\ntwo\r\nthree\r\nfour");
     assert!(t.snapshot()["history"].as_u64().unwrap() > 0);
     call(json!({"op":"scroll","id":t.0,"lines":2}));
-    assert!(
-        t.snapshot()["lines"][0]
-            .as_str()
-            .unwrap()
-            .starts_with("one")
-    );
+    assert!(t.snapshot()["lines"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("one"));
     call(json!({"op":"resize","id":t.0,"cols":20,"rows":5}));
     assert_eq!(t.snapshot()["cols"], 20);
 }
@@ -134,13 +144,20 @@ fn shell_state_reads_summaries_without_consuming_snapshot_events() {
     assert_eq!(snapshot["bell"], true, "{snapshot}");
     assert_eq!(snapshot["clipboard"], json!(["hello"]));
     assert_eq!(snapshot["shell"], state["shell"]);
-    assert_eq!(response(json!({"op":"shell_state","id":999_999}))["ok"], false);
+    assert_eq!(
+        response(json!({"op":"shell_state","id":999_999}))["ok"],
+        false
+    );
 }
 #[test]
 fn bell_is_reported_once_and_osc_terminators_do_not_ring() {
     let t = Terminal::new(20, 3);
     t.feed("\x1b]0;title\x07\x1b]52;c;aGVsbG8=\x07");
-    assert_eq!(t.snapshot()["bell"], false, "BEL ending an OSC string is a terminator");
+    assert_eq!(
+        t.snapshot()["bell"],
+        false,
+        "BEL ending an OSC string is a terminator"
+    );
     t.feed("\x07");
     assert_eq!(t.snapshot()["bell"], true);
     assert_eq!(t.snapshot()["bell"], false);
@@ -185,7 +202,8 @@ fn selection_and_find() {
     let t = Terminal::new(20, 3);
     t.feed("hello world");
     assert_eq!(
-        call(json!({"op":"select","id":t.0,"start_row":0,"start_col":0,"end_row":0,"end_col":4}))["text"],
+        call(json!({"op":"select","id":t.0,"start_row":0,"start_col":0,"end_row":0,"end_col":4}))
+            ["text"],
         "hello"
     );
     assert_eq!(
@@ -206,12 +224,31 @@ fn find_moves_between_literal_matches_and_highlights_the_current_one() {
     assert_eq!(latest["end_col"], 11);
     assert_eq!(latest["wrapped"], false);
     let marked = |row: i64, col: i64| {
-        t.snapshot()["cells"].as_array().unwrap().iter().find(|cell| cell[0] == row && cell[1] == col).unwrap()[5].as_u64().unwrap()
+        t.snapshot()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cell| cell[0] == row && cell[1] == col)
+            .unwrap()[5]
+            .as_u64()
+            .unwrap()
     };
     let row = latest["row"].as_i64().unwrap();
-    assert_eq!(marked(row, 8) & 192, 192, "the current hit is the active highlight");
-    assert_eq!(marked(row, 0) & 192, 64, "an earlier hit on the same row is highlighted, not active");
-    assert_eq!(marked(row, 4) & 64, 0, "text that is not the query stays unmarked");
+    assert_eq!(
+        marked(row, 8) & 192,
+        192,
+        "the current hit is the active highlight"
+    );
+    assert_eq!(
+        marked(row, 0) & 192,
+        64,
+        "an earlier hit on the same row is highlighted, not active"
+    );
+    assert_eq!(
+        marked(row, 4) & 64,
+        0,
+        "text that is not the query stays unmarked"
+    );
     let previous = call(json!({"op":"find","id":t.0,"text":"one","direction":"previous"}));
     assert_eq!(previous["col"], 0);
     assert_eq!(previous["wrapped"], false);
@@ -221,27 +258,57 @@ fn find_moves_between_literal_matches_and_highlights_the_current_one() {
     let next = call(json!({"op":"find","id":t.0,"text":"one","direction":"next"}));
     assert_eq!(next["col"], 0);
     assert_eq!(next["wrapped"], true);
-    assert_eq!(call(json!({"op":"find","id":t.0,"text":"One"}))["found"], false, "matching stays case sensitive");
+    assert_eq!(
+        call(json!({"op":"find","id":t.0,"text":"One"}))["found"],
+        false,
+        "matching stays case sensitive"
+    );
     let wide = call(json!({"op":"find","id":t.0,"text":"界"}));
     assert_eq!(wide["found"], true);
-    assert_eq!(wide["end_col"].as_u64().unwrap() - wide["col"].as_u64().unwrap(), 2, "a wide hit covers both columns");
+    assert_eq!(
+        wide["end_col"].as_u64().unwrap() - wide["col"].as_u64().unwrap(),
+        2,
+        "a wide hit covers both columns"
+    );
     let wide_row = wide["row"].as_i64().unwrap();
     let wide_col = wide["col"].as_i64().unwrap();
     assert_eq!(marked(wide_row, wide_col) & 192, 192);
-    assert_eq!(marked(wide_row, wide_col + 1) & 64, 64, "the wide spacer is highlighted too");
+    assert_eq!(
+        marked(wide_row, wide_col + 1) & 64,
+        64,
+        "the wide spacer is highlighted too"
+    );
     t.feed("\r\n");
-    for _ in 0..6 { t.feed("pad\r\n"); }
+    for _ in 0..6 {
+        t.feed("pad\r\n");
+    }
     let buried = call(json!({"op":"find","id":t.0,"text":"needle-absent"}));
     assert_eq!(buried["found"], false);
     let brought = call(json!({"op":"find","id":t.0,"text":"wide"}));
     assert_eq!(brought["found"], true);
     let shown = brought["row"].as_i64().unwrap();
-    assert!((0..4).contains(&shown), "a hit in scrollback is scrolled into view");
-    assert_eq!(call(json!({"op":"find","id":t.0,"clear":true}))["found"], false);
+    assert!(
+        (0..4).contains(&shown),
+        "a hit in scrollback is scrolled into view"
+    );
+    assert_eq!(
+        call(json!({"op":"find","id":t.0,"clear":true}))["found"],
+        false
+    );
     let cleared = t.snapshot();
-    assert!(cleared["cells"].as_array().unwrap().iter().all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
-    assert_eq!(response(json!({"op":"find","id":t.0,"text":"one","direction":"sideways"}))["ok"], false);
-    assert_eq!(response(json!({"op":"find","id":t.0,"text":""}))["ok"], false);
+    assert!(cleared["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+    assert_eq!(
+        response(json!({"op":"find","id":t.0,"text":"one","direction":"sideways"}))["ok"],
+        false
+    );
+    assert_eq!(
+        response(json!({"op":"find","id":t.0,"text":""}))["ok"],
+        false
+    );
 }
 #[test]
 fn find_active_mark_does_not_stick_to_scrolled_in_text() {
@@ -253,13 +320,21 @@ fn find_active_mark_does_not_stick_to_scrolled_in_text() {
     let scrolled = t.snapshot();
     let cells = scrolled["cells"].as_array().unwrap();
     assert!(
-        cells.iter().all(|cell| cell[5].as_u64().unwrap() & 128 == 0),
+        cells
+            .iter()
+            .all(|cell| cell[5].as_u64().unwrap() & 128 == 0),
         "the active highlight must not stay on the line that scrolled in"
     );
-    assert!(cells.iter().filter(|cell| cell[2] == "z").all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+    assert!(cells
+        .iter()
+        .filter(|cell| cell[2] == "z")
+        .all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
     let again = call(json!({"op":"find","id":t.0,"text":"one","direction":"next"}));
     assert_eq!(again["found"], true);
-    assert!((0..4).contains(&again["row"].as_i64().unwrap()), "next starts over and brings the match back");
+    assert!(
+        (0..4).contains(&again["row"].as_i64().unwrap()),
+        "next starts over and brings the match back"
+    );
     let shown = t.snapshot();
     let active: Vec<_> = shown["cells"]
         .as_array()
@@ -268,7 +343,10 @@ fn find_active_mark_does_not_stick_to_scrolled_in_text() {
         .filter(|cell| cell[5].as_u64().unwrap() & 128 != 0)
         .map(|cell| cell[2].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(active, vec!["o".to_string(), "n".to_string(), "e".to_string()]);
+    assert_eq!(
+        active,
+        vec!["o".to_string(), "n".to_string(), "e".to_string()]
+    );
 }
 #[test]
 fn actual_pty_roundtrip_resize_and_bounded_shutdown() {
@@ -328,23 +406,40 @@ fn ffi_validates_buffers_and_schema() {
 
 #[test]
 fn configured_scrollback_is_enforced_and_invalid_limit_rejected() {
-    let id = call(json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":3}))["id"].as_u64().unwrap();
+    let id = call(json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":3}))["id"]
+        .as_u64()
+        .unwrap();
     let t = Terminal(id);
     t.feed(&"line\r\n".repeat(30));
     assert!(t.snapshot()["history"].as_u64().unwrap() <= 3);
-    assert_eq!(request(&serde_json::to_vec(&json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":20001})).unwrap())["ok"], false);
+    assert_eq!(
+        request(
+            &serde_json::to_vec(
+                &json!({"op":"create","cols":10,"rows":2,"headless":true,"scrollback":20001})
+            )
+            .unwrap()
+        )["ok"],
+        false
+    );
 }
 
 #[test]
 fn normal_shell_exit_preserves_success_status_for_native_pane_cleanup() {
-    let id = call(json!({"op":"create","cols":30,"rows":3,"shell":"/bin/sh","cwd":"/tmp"}))["id"].as_u64().unwrap();
+    let id = call(json!({"op":"create","cols":30,"rows":3,"shell":"/bin/sh","cwd":"/tmp"}))["id"]
+        .as_u64()
+        .unwrap();
     let t = Terminal(id);
     call(json!({"op":"input","id":id,"text":"exit 0\r"}));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let snapshot = t.snapshot();
-        if snapshot["exited"] == true && snapshot["exit_code"] == 0 { break; }
-        assert!(Instant::now() < deadline, "exit status not propagated: {snapshot}");
+        if snapshot["exited"] == true && snapshot["exit_code"] == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exit status not propagated: {snapshot}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -361,7 +456,8 @@ fn rejected_input_does_not_move_the_viewport() {
     t.feed(&"line\r\n".repeat(20));
     call(json!({"op":"scroll","id":t.0,"lines":5}));
     let before = t.snapshot();
-    let response = request(&serde_json::to_vec(&json!({"op":"input","id":t.0,"text":"x"})).unwrap());
+    let response =
+        request(&serde_json::to_vec(&json!({"op":"input","id":t.0,"text":"x"})).unwrap());
     assert_eq!(response["ok"], false);
     let after = t.snapshot();
     assert_eq!(before["offset"], after["offset"]);
@@ -379,7 +475,11 @@ fn ax_code_style_kitty_graphics_frames_are_placed_and_readable() {
         .encode(miniz_oxide::deflate::compress_to_vec_zlib(&raw, 1));
     for frame in 0..3 {
         let mut sequence = String::from("\x1b7\x1b[H");
-        let chunks: Vec<&str> = packed.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        let chunks: Vec<&str> = packed
+            .as_bytes()
+            .chunks(4096)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
         for (index, chunk) in chunks.iter().enumerate() {
             let more = u8::from(index + 1 < chunks.len());
             let header = if index == 0 {
@@ -393,41 +493,94 @@ fn ax_code_style_kitty_graphics_frames_are_placed_and_readable() {
         t.feed(&sequence);
         let s = t.snapshot();
         let images = s["images"].as_array().unwrap();
-        assert_eq!(images.len(), 1, "frame {frame}: placements must not accumulate");
+        assert_eq!(
+            images.len(),
+            1,
+            "frame {frame}: placements must not accumulate"
+        );
         assert_eq!(images[0]["id"], 7);
-        assert_eq!((images[0]["row"].as_i64(), images[0]["col"].as_i64()), (Some(0), Some(0)));
-        assert_eq!((images[0]["cols"].as_u64(), images[0]["rows"].as_u64(), images[0]["z"].as_i64()), (Some(8), Some(2), Some(1)));
-        assert_eq!(s["cursor"]["row"], 2, "ESC 8 and C=1 leave the cursor alone");
+        assert_eq!(
+            (images[0]["row"].as_i64(), images[0]["col"].as_i64()),
+            (Some(0), Some(0))
+        );
+        assert_eq!(
+            (
+                images[0]["cols"].as_u64(),
+                images[0]["rows"].as_u64(),
+                images[0]["z"].as_i64()
+            ),
+            (Some(8), Some(2), Some(1))
+        );
+        assert_eq!(
+            s["cursor"]["row"], 2,
+            "ESC 8 and C=1 leave the cursor alone"
+        );
         assert_eq!(s["cursor"]["col"], 4);
     }
     let mut out = vec![0u8; w * h * 4];
     let copied = unsafe { akitty_core::akitty_image_read_v1(t.0, 7, out.as_mut_ptr(), out.len()) };
     assert_eq!(copied, w * h * 4);
-    assert_eq!(&out[..8], &[raw[0], raw[1], raw[2], 255, raw[3], raw[4], raw[5], 255]);
+    assert_eq!(
+        &out[..8],
+        &[raw[0], raw[1], raw[2], 255, raw[3], raw[4], raw[5], 255]
+    );
     // Too-small buffers, unknown images and unknown sessions copy nothing.
-    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(t.0, 7, out.as_mut_ptr(), 16) }, 0);
-    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(t.0, 99, out.as_mut_ptr(), out.len()) }, 0);
-    assert_eq!(unsafe { akitty_core::akitty_image_read_v1(u64::MAX, 7, out.as_mut_ptr(), out.len()) }, 0);
+    assert_eq!(
+        unsafe { akitty_core::akitty_image_read_v1(t.0, 7, out.as_mut_ptr(), 16) },
+        0
+    );
+    assert_eq!(
+        unsafe { akitty_core::akitty_image_read_v1(t.0, 99, out.as_mut_ptr(), out.len()) },
+        0
+    );
+    assert_eq!(
+        unsafe { akitty_core::akitty_image_read_v1(u64::MAX, 7, out.as_mut_ptr(), out.len()) },
+        0
+    );
     t.feed("\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
     assert_eq!(t.snapshot()["images"].as_array().unwrap().len(), 0);
 }
 #[test]
 fn fully_decorated_maximum_grid_stays_inside_the_response_cap() {
     let t = Terminal::new(512, 64);
-    let uri = "https://example.com/a/fairly/long/path/to/make/the/link/table/entry/realistic?query=1";
-    t.feed(&format!("\x1b[4:3;58;2;1;2;3;9;1;3m\x1b]8;;{uri}\x07{}", "x".repeat(512 * 64)));
+    let uri =
+        "https://example.com/a/fairly/long/path/to/make/the/link/table/entry/realistic?query=1";
+    t.feed(&format!(
+        "\x1b[4:3;58;2;1;2;3;9;1;3m\x1b]8;;{uri}\x07{}",
+        "x".repeat(512 * 64)
+    ));
     let request = serde_json::to_vec(&json!({"op":"snapshot","id":t.0,"compact":true})).unwrap();
     let buffer = unsafe { akitty_core::akitty_request_v1(request.as_ptr(), request.len()) };
     assert!(!buffer.data.is_null());
     let bytes = unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) }.to_vec();
     unsafe { akitty_core::akitty_buffer_free_v1(buffer) };
     let response: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(response["ok"], true, "{}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]));
+    assert_eq!(
+        response["ok"],
+        true,
+        "{}",
+        String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
+    );
     assert!(bytes.len() < 8 * 1024 * 1024);
     // The ABI splices pre-serialized snapshot JSON into the envelope; it must match the value path exactly.
-    assert_eq!(response, self::response(json!({"op":"snapshot","id":t.0,"compact":true})));
+    assert_eq!(
+        response,
+        self::response(json!({"op":"snapshot","id":t.0,"compact":true}))
+    );
     // Bold, italic, underline, strike and underline style 3 in attrs, then the underline colour and link index.
-    assert_eq!(response["data"]["cells"][0], json!([0, 0, "x", 0xdae2ef, 0x080a0d, 1 | 2 | 4 | 32 | 3 << 8, 0x010203, 0]));
+    assert_eq!(
+        response["data"]["cells"][0],
+        json!([
+            0,
+            0,
+            "x",
+            0xdae2ef,
+            0x080a0d,
+            1 | 2 | 4 | 32 | 3 << 8,
+            0x010203,
+            0
+        ])
+    );
     eprintln!("worst-case snapshot: {} bytes", bytes.len());
 }
 #[test]
@@ -436,9 +589,14 @@ fn graphics_without_c1_moves_cursor_below_the_image() {
     let t = Terminal::new(40, 10);
     call(json!({"op":"cell_size","id":t.0,"width":8,"height":16}));
     let pixel = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
-    t.feed(&format!("ab\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,q=2;{pixel}\x1b\\"));
+    t.feed(&format!(
+        "ab\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,q=2;{pixel}\x1b\\"
+    ));
     let s = t.snapshot();
-    assert_eq!((s["cursor"]["row"].as_i64(), s["cursor"]["col"].as_i64()), (Some(1), Some(5)));
+    assert_eq!(
+        (s["cursor"]["row"].as_i64(), s["cursor"]["col"].as_i64()),
+        (Some(1), Some(5))
+    );
     assert_eq!(s["images"][0]["col"], 2);
 }
 
@@ -569,7 +727,13 @@ fn placeholder_fragments_above_the_cap_fail_closed() {
     let over = response(json!({"op":"snapshot","id":t.0,"compact":true}));
     let summary = format!("ok={} error={:?}", over["ok"], over["error"]);
     assert_eq!(over["ok"], false, "{summary}");
-    assert!(over["error"].as_str().unwrap_or_default().contains("fragment"), "{summary}");
+    assert!(
+        over["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("fragment"),
+        "{summary}"
+    );
 }
 
 fn rgba(bytes: &[u8]) -> String {
@@ -593,7 +757,11 @@ fn chrome_sequence_and_abi_replace_clear_and_expire_without_changing_title() {
     t.feed(&seq[8..]);
     let snap = t.snapshot();
     assert_eq!(snap["title"], "vim");
-    assert!(snap["lines"][0].as_str().unwrap().starts_with("OK"), "{}", snap["lines"][0]);
+    assert!(
+        snap["lines"][0].as_str().unwrap().starts_with("OK"),
+        "{}",
+        snap["lines"][0]
+    );
     assert!(!snap["lines"][0].as_str().unwrap().contains("771"));
     assert_eq!(snap["chrome"]["status"]["text"], "hello");
     assert_eq!(snap["chrome"]["status"]["tone"], "info");
@@ -608,7 +776,10 @@ fn chrome_sequence_and_abi_replace_clear_and_expire_without_changing_title() {
     let pixel = rgba(&[9, 8, 7, 255]);
     let other = rgba(&[1, 2, 3, 255]);
     assert_eq!(
-        chrome(t.0, json!({"sprite": {"w": 1, "h": 1, "frames": [pixel, other]}, "mark": 1, "status": {"text": &"x".repeat(140), "tone": "warn", "expires": 4_102_444_800_000u64}, "progress": "indeterminate"}))["ok"],
+        chrome(
+            t.0,
+            json!({"sprite": {"w": 1, "h": 1, "frames": [pixel, other]}, "mark": 1, "status": {"text": &"x".repeat(140), "tone": "warn", "expires": 4_102_444_800_000u64}, "progress": "indeterminate"})
+        )["ok"],
         true
     );
     let snap = t.snapshot();
@@ -620,7 +791,13 @@ fn chrome_sequence_and_abi_replace_clear_and_expire_without_changing_title() {
     assert_eq!(snap["chrome"]["sprite"]["frames"][0], json!(pixel));
     assert_eq!(snap["title"], "vim");
     // Already-past expiry removes the status and the progress, and keeps the mark.
-    assert_eq!(chrome(t.0, json!({"status": {"text": "gone", "tone": "error", "expires": 0}, "progress": 1.0, "mark": "idle"}))["ok"], true);
+    assert_eq!(
+        chrome(
+            t.0,
+            json!({"status": {"text": "gone", "tone": "error", "expires": 0}, "progress": 1.0, "mark": "idle"})
+        )["ok"],
+        true
+    );
     let snap = t.snapshot();
     assert!(snap["chrome"].get("status").is_none(), "{snap}");
     assert!(snap["chrome"].get("progress").is_none(), "{snap}");
@@ -637,7 +814,13 @@ fn chrome_sequence_and_abi_replace_clear_and_expire_without_changing_title() {
 #[test]
 fn chrome_rejects_sprite_limits_and_external_sources_without_replacing() {
     let t = Terminal::new(20, 3);
-    assert_eq!(chrome(t.0, json!({"status": {"text": "kept", "tone": "info"}, "sprite": {"w": 1, "h": 1, "frames": [rgba(&[4, 5, 6, 7])]}}))["ok"], true);
+    assert_eq!(
+        chrome(
+            t.0,
+            json!({"status": {"text": "kept", "tone": "info"}, "sprite": {"w": 1, "h": 1, "frames": [rgba(&[4, 5, 6, 7])]}})
+        )["ok"],
+        true
+    );
     let too_wide = rgba(&[0u8; 33 * 4]);
     let five = vec![rgba(&[1, 1, 1, 1]); 5];
     for document in [
@@ -663,8 +846,15 @@ fn chrome_rejects_sprite_limits_and_external_sources_without_replacing() {
     let snap = t.snapshot();
     assert_eq!(snap["title"], "shell");
     assert_eq!(snap["chrome"]["status"]["text"], "kept");
-    assert_eq!(snap["chrome"]["sprite"]["frames"][0], json!(rgba(&[4, 5, 6, 7])));
-    assert!(snap["lines"][0].as_str().unwrap().starts_with("NO"), "{}", snap["lines"][0]);
+    assert_eq!(
+        snap["chrome"]["sprite"]["frames"][0],
+        json!(rgba(&[4, 5, 6, 7]))
+    );
+    assert!(
+        snap["lines"][0].as_str().unwrap().starts_with("NO"),
+        "{}",
+        snap["lines"][0]
+    );
 }
 
 #[test]
@@ -673,7 +863,13 @@ fn program_chrome_off_ignores_the_terminal_sequence_but_not_the_abi() {
     call(json!({"op": "program_chrome", "id": t.0, "enabled": false}));
     t.feed("\x1b]771;{\"status\":{\"text\":\"from-program\",\"tone\":\"info\"}}\x07");
     assert!(t.snapshot().get("chrome").is_none());
-    assert_eq!(chrome(t.0, json!({"status": {"text": "from-host", "tone": "error"}, "progress": 0}))["ok"], true);
+    assert_eq!(
+        chrome(
+            t.0,
+            json!({"status": {"text": "from-host", "tone": "error"}, "progress": 0})
+        )["ok"],
+        true
+    );
     let snap = t.snapshot();
     assert_eq!(snap["chrome"]["status"]["text"], "from-host");
     assert_eq!(snap["chrome"]["progress"], json!(0.0));
@@ -697,7 +893,11 @@ fn long_osc_52_sets_the_clipboard() {
     let snap = t.snapshot();
     assert_eq!(snap["clipboard"], json!([text]));
     assert_eq!(snap["title"], "vim");
-    assert!(snap["lines"][0].as_str().unwrap().starts_with("OK"), "{}", snap["lines"][0]);
+    assert!(
+        snap["lines"][0].as_str().unwrap().starts_with("OK"),
+        "{}",
+        snap["lines"][0]
+    );
     assert!(!snap["lines"][0].as_str().unwrap().contains('A'));
 }
 
@@ -706,14 +906,25 @@ fn synchronized_output_expires_without_an_end_sequence_and_invalidates_cached_sn
     let t = Terminal::new(20, 4);
     t.feed("before\r\n\x1b[?2026hafter\x1b]2;recovered\x07");
     let first = t.snapshot();
-    assert!(!first["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().contains("after")));
+    assert!(!first["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("after")));
     std::thread::sleep(Duration::from_millis(200));
     let next = call(json!({"op":"snapshot","id":t.0,"since":first["revision"],"compact":true}));
     assert_eq!(next["changed"], true);
-    assert!(next["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().contains("after")));
+    assert!(next["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("after")));
     assert_eq!(next["title"], "recovered");
     t.feed(" continues");
-    assert!(t.snapshot()["lines"][1].as_str().unwrap().starts_with("after continues"));
+    assert!(t.snapshot()["lines"][1]
+        .as_str()
+        .unwrap()
+        .starts_with("after continues"));
 }
 
 #[test]
@@ -724,12 +935,19 @@ fn synchronized_expiry_preserves_clipboard_bell_and_screen_transition() {
     std::thread::sleep(Duration::from_millis(200));
     let next = t.snapshot();
     assert_eq!(next["alternate"], true);
-    assert!(next["lines"][0].as_str().unwrap().trim_start().starts_with("alt"));
+    assert!(next["lines"][0]
+        .as_str()
+        .unwrap()
+        .trim_start()
+        .starts_with("alt"));
     assert_eq!(next["bell"], true);
     assert_eq!(next["clipboard"], json!(["hello"]));
     assert_eq!(t.snapshot()["clipboard"], json!([]));
     t.feed("\x1b[?1049l");
-    assert!(t.snapshot()["lines"][0].as_str().unwrap().starts_with("main"));
+    assert!(t.snapshot()["lines"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("main"));
 }
 
 #[test]
@@ -737,7 +955,8 @@ fn shell_notifications_survive_every_split_and_keep_output_separate() {
     let stream = "\x1b]7;file://localhost/tmp/a%20b\x07\x1b]133;A\x07prompt> \x1b]133;B\x07\x1b]772;ZWNobyBoaQ==\x07\x1b]133;C\x07\x1b[31mhi\x1b[0m\r\n\x1b]133;D;7\x1b\\\x1b]133;A\x07";
     for split in 0..=stream.len() {
         let t = Terminal::new(40, 4);
-        t.feed(&stream[..split]); t.feed(&stream[split..]);
+        t.feed(&stream[..split]);
+        t.feed(&stream[split..]);
         let history = call(json!({"op":"command_history","id":t.0}));
         let command = &history["commands"][0];
         assert_eq!(command["command"], "echo hi", "split {split}");
@@ -745,7 +964,12 @@ fn shell_notifications_survive_every_split_and_keep_output_separate() {
         assert_eq!(command["cwd"], "/tmp/a b");
         assert_eq!(command["interrupted"], false);
         let output = call(json!({"op":"command_output","id":t.0,"command_id":1}));
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(output["output_base64"].as_str().unwrap()).unwrap(), b"\x1b[31mhi\x1b[0m\r\n");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(output["output_base64"].as_str().unwrap())
+                .unwrap(),
+            b"\x1b[31mhi\x1b[0m\r\n"
+        );
         assert_eq!(t.snapshot()["shell"]["ready"], true);
     }
 }
@@ -754,32 +978,66 @@ fn shell_notifications_survive_every_split_and_keep_output_separate() {
 fn shell_history_is_bounded_and_invalid_notifications_cannot_replace_cwd() {
     let t = Terminal::new(20, 3);
     t.feed("\x1b]7;file:///tmp\x07\x1b]7;file:///bad%00\x07");
-    for _ in 0..70 { t.feed("\x1b]133;C\x07output\x1b]133;D;0\x07"); }
+    for _ in 0..70 {
+        t.feed("\x1b]133;C\x07output\x1b]133;D;0\x07");
+    }
     let h = call(json!({"op":"command_history","id":t.0}));
     assert_eq!(h["commands"].as_array().unwrap().len(), 64);
     assert_eq!(h["oldest_id"], 7);
     assert_eq!(t.snapshot()["shell"]["cwd"], "/tmp");
-    assert_eq!(response(json!({"op":"command_output","id":t.0,"command_id":1}))["ok"],false);
+    assert_eq!(
+        response(json!({"op":"command_output","id":t.0,"command_id":1}))["ok"],
+        false
+    );
 }
 
 #[test]
 fn actual_bash_and_zsh_integration_tracks_cwd_exit_and_output() {
     for shell in ["/bin/bash", "/bin/zsh"] {
-        let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+        let directory = format!(
+            "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
-        let deadline = Instant::now()+Duration::from_secs(10);
-        while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline,"initial prompt missing in {shell}: {}",t.snapshot()); std::thread::sleep(Duration::from_millis(10)); }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true {
+            assert!(
+                Instant::now() < deadline,
+                "initial prompt missing in {shell}: {}",
+                t.snapshot()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         call(json!({"op":"input","id":t.0,"text":"printf 'AKITTY-RESULT\\n'; (exit 7)\r"}));
         loop {
             let h = call(json!({"op":"command_history","id":t.0}));
-            if h["commands"].as_array().unwrap().iter().any(|c| c["exit_code"] == 7) {
-                let cmd = h["commands"].as_array().unwrap().iter().find(|c|c["exit_code"]==7).unwrap();
+            if h["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["exit_code"] == 7)
+            {
+                let cmd = h["commands"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|c| c["exit_code"] == 7)
+                    .unwrap();
                 let out = call(json!({"op":"command_output","id":t.0,"command_id":cmd["id"]}));
-                let bytes = base64::engine::general_purpose::STANDARD.decode(out["output_base64"].as_str().unwrap()).unwrap();
-                assert!(String::from_utf8_lossy(&bytes).contains("AKITTY-RESULT"),"{shell}: {out}");
-                assert_eq!(cmd["cwd"],"/private/tmp"); break;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(out["output_base64"].as_str().unwrap())
+                    .unwrap();
+                assert!(
+                    String::from_utf8_lossy(&bytes).contains("AKITTY-RESULT"),
+                    "{shell}: {out}"
+                );
+                assert_eq!(cmd["cwd"], "/private/tmp");
+                break;
             }
-            assert!(Instant::now()<deadline,"missing completion in {shell}: {h}");
+            assert!(
+                Instant::now() < deadline,
+                "missing completion in {shell}: {h}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -788,27 +1046,53 @@ fn actual_bash_and_zsh_integration_tracks_cwd_exit_and_output() {
 #[test]
 fn actual_shells_record_subshell_only_lines_once_with_output_and_status() {
     for shell in ["/bin/bash", "/bin/zsh"] {
-        let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+        let directory = format!(
+            "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
-        let deadline = Instant::now()+Duration::from_secs(10);
-        while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline,"initial prompt missing in {shell}: {}",t.snapshot()); std::thread::sleep(Duration::from_millis(10)); }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true {
+            assert!(
+                Instant::now() < deadline,
+                "initial prompt missing in {shell}: {}",
+                t.snapshot()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // macOS bash 3.2 has no PS0: the subshell itself reports the line, and the pipeline's shell restates it.
-        call(json!({"op":"input","id":t.0,"text":"( printf 'PIPE-OUT\\n' ) | cat\r(cd / && printf 'SUB-OUT\\n'; exit 4)\r"}));
+        call(
+            json!({"op":"input","id":t.0,"text":"( printf 'PIPE-OUT\\n' ) | cat\r(cd / && printf 'SUB-OUT\\n'; exit 4)\r"}),
+        );
         loop {
             let h = call(json!({"op":"command_history","id":t.0}));
             let commands = h["commands"].as_array().unwrap();
             if let Some(sub) = commands.iter().find(|c| c["exit_code"] == 4) {
-                assert_eq!(sub["command"], "(cd / && printf 'SUB-OUT\\n'; exit 4)", "{shell}: {h}");
+                assert_eq!(
+                    sub["command"], "(cd / && printf 'SUB-OUT\\n'; exit 4)",
+                    "{shell}: {h}"
+                );
                 let out = call(json!({"op":"command_output","id":t.0,"command_id":sub["id"]}));
-                let bytes = base64::engine::general_purpose::STANDARD.decode(out["output_base64"].as_str().unwrap()).unwrap();
-                assert!(String::from_utf8_lossy(&bytes).contains("SUB-OUT"),"{shell}: {out}");
-                let pipes: Vec<_> = commands.iter().filter(|c| c["command"] == "( printf 'PIPE-OUT\\n' ) | cat").collect();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(out["output_base64"].as_str().unwrap())
+                    .unwrap();
+                assert!(
+                    String::from_utf8_lossy(&bytes).contains("SUB-OUT"),
+                    "{shell}: {out}"
+                );
+                let pipes: Vec<_> = commands
+                    .iter()
+                    .filter(|c| c["command"] == "( printf 'PIPE-OUT\\n' ) | cat")
+                    .collect();
                 assert_eq!(pipes.len(), 1, "{shell}: {h}");
                 assert_eq!(pipes[0]["exit_code"], 0, "{shell}: {h}");
                 assert_eq!(pipes[0]["interrupted"], false, "{shell}: {h}");
                 break;
             }
-            assert!(Instant::now()<deadline,"missing subshell record in {shell}: {h}");
+            assert!(
+                Instant::now() < deadline,
+                "missing subshell record in {shell}: {h}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -816,52 +1100,114 @@ fn actual_shells_record_subshell_only_lines_once_with_output_and_status() {
 
 #[test]
 fn agent_control_requires_exact_host_approval_and_human_can_reclaim() {
-    let t = Terminal::new(30,4);
+    let t = Terminal::new(30, 4);
     t.feed("\x1b]7;file:///tmp\x07\x1b]133;A\x07");
     let lease = call(json!({"op":"control_acquire","id":t.0,"actor":"agent"}))["lease"].clone();
-    assert_eq!(response(json!({"op":"input_bytes","id":t.0,"bytes":[65]}))["ok"],false);
-    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":1,"command":"echo hi"}))["ok"],false);
-    assert_eq!(response(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/elsewhere"}))["ok"],false);
+    assert_eq!(
+        response(json!({"op":"input_bytes","id":t.0,"bytes":[65]}))["ok"],
+        false
+    );
+    assert_eq!(
+        response(
+            json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":1,"command":"echo hi"})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        response(
+            json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/elsewhere"})
+        )["ok"],
+        false
+    );
     let authorization = call(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/tmp"}))["authorization"].clone();
-    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo changed"}))["ok"],false);
-    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"}))["ok"],false);
+    assert_eq!(
+        response(
+            json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo changed"})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        response(
+            json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"})
+        )["ok"],
+        false
+    );
     // An arbitrary program printing prompt/completion notifications cannot mint authority.
     t.feed("\x1b]133;D;0\x07\x1b]133;A\x07");
-    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"}))["ok"],false);
+    assert_eq!(
+        response(
+            json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":authorization,"command":"echo hi"})
+        )["ok"],
+        false
+    );
     call(json!({"op":"control_reclaim","id":t.0}));
-    assert_eq!(response(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/tmp"}))["ok"],false);
+    assert_eq!(
+        response(
+            json!({"op":"command_authorize","id":t.0,"lease":lease,"command":"echo hi","expected_cwd":"/tmp"})
+        )["ok"],
+        false
+    );
     let audit = call(json!({"op":"control_audit","id":t.0}));
-    assert!(audit["events"].as_array().unwrap().iter().any(|e|e["event"]=="human_reclaimed"));
-    assert_eq!(t.snapshot()["control"]["agent"],false);
+    assert!(audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["event"] == "human_reclaimed"));
+    assert_eq!(t.snapshot()["control"]["agent"], false);
 }
 
 #[test]
 fn actual_agent_dispatch_is_once_only_and_retains_control_until_released() {
-    let directory = format!("{}/../../macos/Sources/AkittyKit/Resources/shell-integration", env!("CARGO_MANIFEST_DIR"));
+    let directory = format!(
+        "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":"/bin/zsh","cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
-    let deadline = Instant::now()+Duration::from_secs(10);
-    while t.snapshot()["shell"]["ready"] != true { assert!(Instant::now()<deadline); std::thread::sleep(Duration::from_millis(10)); }
-    let lease = call(json!({"op":"control_acquire","id":t.0,"actor":"test-agent"}))["lease"].clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while t.snapshot()["shell"]["ready"] != true {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let lease =
+        call(json!({"op":"control_acquire","id":t.0,"actor":"test-agent"}))["lease"].clone();
     let command = "printf 'AGENT-ONCE\\n'; (exit 9)";
     let grant = call(json!({"op":"command_authorize","id":t.0,"lease":lease,"command":command,"expected_cwd":"/private/tmp"}))["authorization"].clone();
-    call(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command}));
-    assert_eq!(response(json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command}))["ok"],false);
+    call(
+        json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command}),
+    );
+    assert_eq!(
+        response(
+            json!({"op":"command_execute","id":t.0,"lease":lease,"authorization":grant,"command":command})
+        )["ok"],
+        false
+    );
     loop {
         let h = call(json!({"op":"command_history","id":t.0}));
-        if h["commands"].as_array().unwrap().iter().any(|c|c["exit_code"]==9) { break; }
-        assert!(Instant::now()<deadline,"{h}"); std::thread::sleep(Duration::from_millis(10));
+        if h["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["exit_code"] == 9)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{h}");
+        std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(t.snapshot()["control"]["agent"],true);
-    assert_eq!(response(json!({"op":"input","id":t.0,"text":"echo BAD\r"}))["ok"],false);
+    assert_eq!(t.snapshot()["control"]["agent"], true);
+    assert_eq!(
+        response(json!({"op":"input","id":t.0,"text":"echo BAD\r"}))["ok"],
+        false
+    );
     call(json!({"op":"control_release","id":t.0,"lease":lease}));
     call(json!({"op":"input","id":t.0,"text":"echo HUMAN\r"}));
 }
 
 #[test]
 fn shell_metadata_overflow_is_rejected_without_leaking_into_grid() {
-    let t = Terminal::new(20,3);
+    let t = Terminal::new(20, 3);
     t.feed(&format!("\x1b]772;{}\x07SAFE", "x".repeat(70_000)));
     let snapshot = t.snapshot();
-    assert_eq!(snapshot["shell"]["rejected"],1);
+    assert_eq!(snapshot["shell"]["rejected"], 1);
     assert!(snapshot["lines"][0].as_str().unwrap().starts_with("SAFE"));
 }

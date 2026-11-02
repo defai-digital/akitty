@@ -20,7 +20,7 @@ function makeLink(row: number, startX: number, endX: number, text: string): ILin
   };
 }
 
-function makeTerminal(rows = 100, cols = 200): ITerminalForLinkDetector {
+function makeTerminal(rows = 100, cols = 200, hyperlinkId = 0): ITerminalForLinkDetector {
   return {
     buffer: {
       active: {
@@ -29,7 +29,7 @@ function makeTerminal(rows = 100, cols = 200): ITerminalForLinkDetector {
           return {
             length: cols,
             getCell: (x: number) =>
-              x >= 0 && x < cols ? { getHyperlinkId: () => 0 } : undefined,
+              x >= 0 && x < cols ? { getHyperlinkId: () => hyperlinkId } : undefined,
           };
         },
       },
@@ -297,5 +297,31 @@ describe('LinkDetector async scan cache', () => {
     provider.resolveNext([makeLink(9, 0, 3, 'late')]);
     await flush();
     await expect(detector.getLinkAt(0, 9)).resolves.toBeUndefined();
+  });
+
+  test('links sharing a page-local hyperlink id stay distinct in the cache', async () => {
+    // Cells all report hyperlink id 7, as they can when two links on different
+    // pages share an id. Cache identity must be positional, not id-based.
+    const provider = new DeferredProvider();
+    const detector = new LinkDetector(makeTerminal(100, 200, 7));
+    detector.registerProvider(provider);
+
+    const row2 = makeLink(2, 0, 4, 'row2');
+    const first2 = detector.getLinkAt(0, 2);
+    provider.resolveNext([row2]);
+    await expect(first2).resolves.toBe(row2);
+
+    const row8 = makeLink(8, 0, 4, 'row8');
+    const first8 = detector.getLinkAt(0, 8);
+    provider.resolveNext([row8]);
+    await expect(first8).resolves.toBe(row8);
+
+    // Both links must survive in the cache: a lookup on row 2 must not return
+    // row 8's link just because their cells report the same id.
+    await expect(detector.getLinkAt(0, 2)).resolves.toBe(row2);
+    await expect(detector.getLinkAt(0, 8)).resolves.toBe(row8);
+    expect(provider.calls).toEqual([2, 8]);
+
+    detector.dispose();
   });
 });
