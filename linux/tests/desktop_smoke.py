@@ -98,6 +98,7 @@ try:
     print('PASS: real Tauri desktop + native PTY + CLI denial/approval + exact once effect + reclaim + redacted timeline')
 except Exception:
     print(driver.find_element(By.TAG_NAME, 'body').text)
+    print('FAILURE_SCREENSHOT=' + driver.get_screenshot_as_base64())
     raise
 finally:
     driver.quit()
