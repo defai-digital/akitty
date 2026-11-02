@@ -109,6 +109,8 @@ overrides it with an absolute path) under a POSIX lock shared by shells and Sett
 Appends compact oversized files to at most 512 KiB; queries inspect at most that many bytes
 and the newest 3000 rows. Symlinks, hard links and files without owner-only permissions
 are refused. A failed lock never permits an unlocked write and produces a warning.
+Safe nonblocking opens are required (available in macOS's zsh 5.9); older shells keep
+native history and keys with an explicit warning rather than using unsafe storage.
 Settings turns the feature off for
 new terminals (the core's `create.folder_history`, which sets `AKITTY_FOLDER_HISTORY=0`) and
 clears the file under the same lock, reporting unsafe paths or a busy writer. bash has no folder history: `bind -x` cannot hand Tab back to Readline
