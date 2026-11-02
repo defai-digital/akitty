@@ -30,6 +30,8 @@ jobs:
           export HOME="$(mktemp -d)"
           # A fresh Ubuntu zsh otherwise opens its first-run wizard before the first prompt.
           touch "$HOME/.zshrc"
+          # The runner's writable global completions trigger compinit's interactive audit.
+          printf 'skip_global_compinit=1\n' > "$HOME/.zshenv"
           unset ZDOTDIR
           export AKITTY_DESKTOP_BINARY="$PWD/linux/src-tauri/target/debug/akitty-linux-experimental"
           xvfb-run -a tauri-driver > build/linux-ui-driver.log 2>&1 &
