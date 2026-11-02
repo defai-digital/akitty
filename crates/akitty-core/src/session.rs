@@ -1357,31 +1357,32 @@ mod tests {
     #[test]
     fn keystrokes_echo_without_waiting_for_the_idle_poll() {
         // The tty line discipline echoes printable input back through the master without any
-        // program involvement, so this measures the worker loop itself.
-        let session = Session::new(20, 6, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
-        // Let the shell install its line editing first: a byte it reads while starting up is
-        // consumed before the line is drawn and never echoed.
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        session.input_bytes(b"\r".to_vec()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        let echoed = |marker: char| session.snapshot(None, true, false).unwrap().matches(marker).count();
-        let wait_for = |marker: char, before: usize| {
+        // program involvement. An interactive login shell can redraw or scroll away matching
+        // characters, so counting letters in its JSON snapshot is not an echo acknowledgement.
+        let shell = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/echo.sh");
+        let session = Session::new(80, 6, Some(shell.into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        let wait_for = |row: usize, text: &str| {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             while Instant::now() < deadline {
-                if echoed(marker) > before { return true; }
+                let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+                if snapshot["lines"][row].as_str().is_some_and(|line| line.trim_end() == text) { return true; }
+                assert_ne!(snapshot["exited"], true, "echo fixture exited: {snapshot}");
                 std::thread::yield_now();
             }
             false
         };
-        // One distinct marker per iteration, counted against its own baseline so a login banner
-        // cannot satisfy the wait. Twenty columns by six rows leaves room for every echo.
+        // Readiness follows stty, so startup timing cannot swallow the first measured byte.
+        assert!(wait_for(0, "ECHO_READY"), "echo fixture never became ready");
+        // The whole line fits without wrapping. Match its exact contents, excluding metadata,
+        // banners and prompts, so a coincidental character cannot satisfy or mask an echo.
         let markers: Vec<char> = ('A'..='Z').chain('a'..='j').collect();
         let mut samples = Vec::with_capacity(markers.len());
+        let mut typed = String::new();
         for marker in markers {
-            let before = echoed(marker);
+            typed.push(marker);
             let start = Instant::now();
             session.input_bytes(marker.to_string().into_bytes()).unwrap();
-            assert!(wait_for(marker, before), "no echo for {marker:?}");
+            assert!(wait_for(1, &typed), "no echo for {typed:?}");
             samples.push(start.elapsed());
         }
         samples.sort();
