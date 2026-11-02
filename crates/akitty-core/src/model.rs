@@ -637,7 +637,7 @@ impl Model {
 
     #[cfg(test)]
     fn snapshot_json_within(&mut self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
-        let Some((value, commit)) = self.build_snapshot(since, compact)? else {
+        let Some((value, commit)) = self.build_snapshot(since, compact, true)? else {
             return Ok(UNCHANGED_SNAPSHOT.into());
         };
         let json = serde_json::to_string(&value).expect("snapshot fields serialize");
@@ -651,7 +651,7 @@ impl Model {
         Ok(json)
     }
 
-    pub(crate) fn build_snapshot(&mut self, since: Option<u64>, compact: bool) -> Result<BuiltSnapshot, String> {
+    pub(crate) fn build_snapshot(&mut self, since: Option<u64>, compact: bool, allow_shift: bool) -> Result<BuiltSnapshot, String> {
         if self.exited { self.program_status.finish_work(); }
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
@@ -736,7 +736,8 @@ impl Model {
         // the new bottom rows (and any genuinely changed row) are dirty.
         let changed = dirty.iter().filter(|changed| **changed).count();
         let mut shift = None;
-        if partial && changed > rows / 2
+        // Shifts change the meaning of dirty rows; older schema-1 clients must explicitly opt in.
+        if allow_shift && partial && changed > rows / 2
             && let Some(sent) = self.sent.as_ref()
             && let Some(k) = scroll_shift(&hashes, &sent.hashes)
         {

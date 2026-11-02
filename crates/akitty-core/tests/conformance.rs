@@ -176,13 +176,27 @@ fn merge(held: &mut Value, partial: &Value) {
     held["cursor"] = partial["cursor"].clone();
 }
 #[test]
+fn schema_one_scroll_snapshots_preserve_legacy_row_replacement_semantics() {
+    for compact in [false, true] {
+        let t = Terminal::new(16, 6);
+        t.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        let held = call(json!({"op":"snapshot","id":t.0,"compact":compact}));
+        t.feed("\r\nseven");
+        let delta = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":compact}));
+        assert!(delta.get("shift").is_none(), "unnegotiated shifts corrupt older clients: {delta}");
+        let full = call(json!({"op":"snapshot","id":t.0,"compact":compact}));
+        assert_eq!(delta["lines"], full["lines"], "every row changed in the legacy coordinate system");
+        assert_eq!(delta["cells"], full["cells"]);
+    }
+}
+#[test]
 fn scrolled_output_sends_a_shifted_partial_that_merges_to_the_full_screen() {
     let t = Terminal::new(16, 6);
     t.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
     let mut held = t.snapshot();
     // One newline past the bottom scrolls the screen by exactly one row.
     t.feed("\r\nseven");
-    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true,"allow_shift":true}));
     assert_eq!(partial["partial"], true);
     assert_eq!(partial["shift"], 1);
     assert_eq!(partial["dirty"], json!([5]));
@@ -198,13 +212,31 @@ fn scrolled_output_sends_a_shifted_partial_that_merges_to_the_full_screen() {
     // Three more lines scroll by three: the three new rows are dirty and the rest is reused.
     held = full;
     t.feed("\r\neight\r\nnine\r\nten");
-    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true,"allow_shift":true}));
     assert_eq!(partial["shift"], 3);
     assert_eq!(partial["dirty"], json!([3, 4, 5]));
     merge(&mut held, &partial);
     let full = t.snapshot();
     assert_eq!(held["lines"], full["lines"]);
     assert_eq!(held["cells"], full["cells"]);
+}
+#[test]
+fn shifted_snapshots_require_opt_in_on_each_request() {
+    let t = Terminal::new(16, 6);
+    t.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    let held = t.snapshot();
+    t.feed("\r\nseven");
+    let shifted = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"allow_shift":true}));
+    assert_eq!(shifted["shift"], 1);
+    let mut since = shifted["revision"].clone();
+    for allow_shift in [Some(false), None] {
+        t.feed("\r\neight");
+        let mut request = json!({"op":"snapshot","id":t.0,"since":since});
+        if let Some(value) = allow_shift { request["allow_shift"] = json!(value); }
+        let legacy = call(request);
+        assert!(legacy.get("shift").is_none(), "a prior opt-in cannot change later legacy responses");
+        since = legacy["revision"].clone();
+    }
 }
 #[test]
 fn a_scrolled_back_viewport_partial_shifts_the_same_way() {
@@ -214,7 +246,7 @@ fn a_scrolled_back_viewport_partial_shifts_the_same_way() {
     let mut held = t.snapshot();
     assert_eq!(held["offset"], 2);
     call(json!({"op":"scroll","id":t.0,"lines":-1}));
-    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true}));
+    let partial = call(json!({"op":"snapshot","id":t.0,"since":held["revision"],"compact":true,"allow_shift":true}));
     assert_eq!(partial["partial"], true);
     assert_eq!(partial["shift"], 1);
     assert_eq!(partial["dirty"], json!([3]));
