@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 struct TerminalPreferences: Codable, Equatable {
@@ -14,6 +15,8 @@ struct TerminalPreferences: Codable, Equatable {
     var programChrome = true
     /// On by default; terminals whose shell is not bash or zsh start as ordinary login shells.
     var shellIntegration = true
+    /// zsh integration also saves commands per folder for Tab and Up/Down; off starts it with AKITTY_FOLDER_HISTORY=0.
+    var folderHistory = true
     var quickTerminal = false
     var quickShortcut = 0
     /// The system monospace face, then every installed fixed-pitch family, so CJK-optimised monospace fonts are selectable.
@@ -28,6 +31,52 @@ struct TerminalPreferences: Codable, Equatable {
     /// CJK candidates for the picker; only the faces actually installed on this Mac.
     @MainActor static func availableCJKFonts() -> [String] {
         ["PingFang SC", "PingFang TC", "PingFang HK", "Hiragino Sans", "Apple SD Gothic Neo", "Songti SC", "STHeiti", "Sarasa Mono SC", "Noto Sans Mono CJK SC"].filter { NSFont(name: $0, size: 12) != nil }
+    }
+    /// The file the zsh integration keeps; it defaults to the same place under the home directory.
+    static var folderHistoryFile: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Akitty/folder-history")
+    }
+    static func clearFolderHistory(file supplied: URL? = nil) throws {
+        let file: URL
+        if let supplied { file = supplied }
+        else if let configured = ProcessInfo.processInfo.environment["AKITTY_FOLDER_HISTORY_FILE"], !configured.isEmpty {
+            guard configured.hasPrefix("/"), configured.utf8.count <= 4096 else { throw AkittyError.core("Folder history must use a bounded absolute path.") }
+            file = URL(fileURLWithPath: configured)
+        } else { file = folderHistoryFile }
+        let directory = Darwin.open(file.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if directory < 0, errno == ENOENT { return }
+        guard directory >= 0 else { throw AkittyError.core("Cannot safely open the folder history directory.") }
+        defer { Darwin.close(directory) }
+        var parent = stat(), existing = stat()
+        guard fstat(directory, &parent) == 0, parent.st_uid == getuid(), parent.st_mode & 0o022 == 0 else {
+            throw AkittyError.core("Folder history directory must be owned by you and not writable by others.")
+        }
+        let name = file.lastPathComponent
+        if fstatat(directory, name, &existing, AT_SYMLINK_NOFOLLOW) < 0 {
+            if errno == ENOENT { return }
+            throw AkittyError.core("Cannot inspect folder history.")
+        }
+        func safe(_ info: stat) -> Bool {
+            info.st_mode & S_IFMT == S_IFREG && info.st_uid == getuid()
+                && info.st_mode & 0o777 == 0o600 && info.st_nlink == 1
+        }
+        guard safe(existing) else { throw AkittyError.core("Folder history must be a private regular file without links.") }
+        let lock = openat(directory, name + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw AkittyError.core("Cannot safely open the folder history lock.") }
+        defer { Darwin.close(lock) }
+        var info = stat(), range = Darwin.flock()
+        guard fstat(lock, &info) == 0, safe(info) else { throw AkittyError.core("Folder history lock must be a private regular file without links.") }
+        // zsystem flock uses POSIX fcntl locks, not BSD flock. Never block the Settings UI.
+        range.l_type = Int16(F_WRLCK); range.l_whence = Int16(SEEK_SET)
+        guard fcntl(lock, F_SETLK, &range) == 0 else { throw AkittyError.core("Folder history is busy. Try clearing it again.") }
+        let descriptor = openat(directory, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw AkittyError.core("Cannot safely open folder history.") }
+        defer { Darwin.close(descriptor) }
+        guard fstat(descriptor, &info) == 0, safe(info),
+              fstatat(directory, name, &existing, AT_SYMLINK_NOFOLLOW) == 0,
+              existing.st_dev == info.st_dev, existing.st_ino == info.st_ino else { throw AkittyError.core("Folder history changed while clearing it.") }
+        // Open after locking so a shell's compaction cannot leave us truncating an old inode.
+        guard ftruncate(descriptor, 0) == 0 else { throw AkittyError.core("Cannot clear folder history.") }
     }
     private static func installed(_ name: String) -> Bool { name == "System Monospaced" || NSFont(name: name, size: 12) != nil }
     private static func validShell(_ path: String) -> Bool {
@@ -72,7 +121,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome, shellIntegration, quickTerminal, quickShortcut
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
         /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
         case shellIntegrationDefaultOn
     }
@@ -93,6 +142,7 @@ extension TerminalPreferences {
             shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? shellIntegration
         }
         programChrome = try container.decodeIfPresent(Bool.self, forKey: .programChrome) ?? true
+        folderHistory = try container.decodeIfPresent(Bool.self, forKey: .folderHistory) ?? true
     }
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -105,6 +155,7 @@ extension TerminalPreferences {
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
         try container.encode(programChrome, forKey: .programChrome)
         try container.encode(shellIntegration, forKey: .shellIntegration)
+        try container.encode(folderHistory, forKey: .folderHistory)
         try container.encode(true, forKey: .shellIntegrationDefaultOn)
         try container.encode(quickTerminal, forKey: .quickTerminal)
         try container.encode(quickShortcut, forKey: .quickShortcut)
@@ -171,6 +222,18 @@ struct PreferencesDraft {
                     Section("New Terminals") {
                         Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
                         Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files. Other shells start normally.").font(.caption).foregroundStyle(.secondary)
+                        Toggle("Folder history on Tab and Up/Down (zsh)", isOn: $state.draft.folderHistory)
+                            .disabled(!draft.shellIntegration)
+                        HStack {
+                            Text("Type the start of a command used in this folder, then Tab lists the most used matches. Commands starting with a space are not saved.").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Clear History") {
+                                do { try TerminalPreferences.clearFolderHistory(); error = "" }
+                                catch { self.error = error.localizedDescription }
+                            }
+                                .help("Delete the saved folder history")
+                                .accessibilityIdentifier("clear-folder-history")
+                        }
                         TextField("Shell", text: $state.draft.shell, prompt: Text("Default login shell"))
                         HStack {
                             TextField("Starting directory", text: $state.draft.directory, prompt: Text("Home directory"))

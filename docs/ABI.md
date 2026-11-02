@@ -51,7 +51,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | Operation | Additional fields | Behavior |
 | --- | --- | --- |
 | version | none | Version/platform information |
-| create | cols, rows; optional shell, cwd, headless, scrollback, shell_integration_dir | Create session; absolute shell path; default login shell |
+| create | cols, rows; optional shell, cwd, headless, scrollback, shell_integration_dir, folder_history | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
 | snapshot | id; optional since, compact, allow_shift | Current snapshot, changed=false, or a partial snapshot (below) |
 | input | id, text; optional paste | UTF-8 input with optional bracketed-paste protection |
@@ -266,6 +266,8 @@ It is a trusted absolute resource directory of at most 4096 bytes; other shells
 or missing resources fail visibly. Omitting it preserves ordinary login startup.
 The macOS app passes it by default only when the launched shell is bash or zsh.
 See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinction.
+`create.folder_history` (default true) set to false starts that integration with
+`AKITTY_FOLDER_HISTORY=0`, turning off zsh folder history; it has no other effect.
 
 Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
 untrusted=true) and `control` (owner, agent, audit_seq). OSC 7 file URIs are decoded

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Exercise real interactive startup hooks without reading/writing the user's rc/history."""
 import base64
+import contextlib
+import fcntl
 import os
 import pathlib
+import pty
 import re
+import select
+import signal
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'macos/Sources/AkittyKit/Resources/shell-integration/akitty.bash'
@@ -224,6 +230,163 @@ class ShellIntegrationTests(unittest.TestCase):
             titles = re.findall(r'\x1b\]2;([^\x07]*)\x07', result.stdout)
             self.assertEqual(titles[1:3], ['cd /', '/'])
             self.assertEqual(titles[4:], ['…/b/c/d', 'echo TITLED', '…/b/c/d', 'exit'], 'a deep path keeps its last three directories')
+
+    @contextlib.contextmanager
+    def zsh_pty(self, home, rc='', **extra):
+        """An interactive zsh on a real terminal in ~/project, with the hooks sourced after `rc`; returns send()."""
+        (home / 'project').mkdir(exist_ok=True)
+        (home / '.zshrc').write_text(f"PS1='P> '\n{rc}\nsource {shlex.quote(str(SCRIPT.parent / 'akitty.zsh'))}\n")
+        env = shell_environment(str(home), ZDOTDIR=str(home), TERM='xterm-256color', **extra)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(home / 'project')
+            os.execve(ZSH, [ZSH, '-i'], env)
+        output = bytearray()
+        def send(text, wait=0.5):
+            os.write(fd, text.encode())
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                if select.select([fd], [], [], 0.05)[0]:
+                    try: output.extend(os.read(fd, 65536))
+                    except OSError: return
+        try:
+            send('', 1.5)
+            yield send, output
+        finally:
+            # Close before TemporaryDirectory removes HOME; otherwise the exit hook recreates it.
+            os.close(fd)
+            for termination, seconds in [(signal.SIGHUP, 2), (signal.SIGKILL, 2)]:
+                try: os.kill(pid, termination)
+                except ProcessLookupError: pass
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if os.waitpid(pid, os.WNOHANG)[0]: break
+                    time.sleep(0.01)
+                else: continue
+                break
+            else: self.fail('test zsh did not exit after bounded cleanup')
+
+    def ran(self, send, output, keys):
+        """Types `keys`, then Enter, and returns what the command printed."""
+        send(keys)
+        output.clear()
+        send('\r')
+        return output.decode(errors='replace')
+
+    def test_zsh_folder_history_saves_only_lines_zsh_keeps(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
+            home = pathlib.Path(directory)
+            rc = "HISTORY_IGNORE='(echo ignored*)'\nfunction reject() { [[ $1 != 'echo rejected'* ]] }\nzshaddhistory_functions+=(reject)"
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo kept', ' echo spaced', 'echo ignored', 'echo rejected', 'echo "two\nlines"']:
+                    send(line + '\r')
+                file = home / 'Library/Application Support/Akitty/folder-history'
+                saved = [line.split('\t')[3] for line in file.read_text().splitlines()]
+                self.assertEqual(saved, ['echo kept'], 'space-prefixed, HISTORY_IGNORE, hook-rejected and multi-line lines are not saved')
+                self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+
+    def test_zsh_tab_and_arrows_offer_this_folders_commands(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
+            home = pathlib.Path(directory)
+            (home / 'link').symlink_to(home / 'project')
+            with self.zsh_pty(home) as (send, output):
+                for line in ['echo code-often', 'echo code-often', 'echo code-recent', 'echo "code-$(touch pwned)"',
+                             'echo build-often', 'echo build-often', 'echo build-recent',
+                             'cd ..', 'echo code-elsewhere', 'cd project']:
+                    send(line + '\r')
+                (home / 'project/pwned').unlink()
+                output.clear(); send('echo cod\t')
+                menu = output.decode(errors='replace')
+                self.assertIn('Folder history:', menu)
+                self.assertLess(menu.index('echo code-often'), menu.index('echo code-recent'), 'used more often ranks first')
+                self.assertEqual(menu.count('echo code-often'), 1, 'each command once')
+                self.assertNotIn('code-elsewhere', menu, 'only commands run in this folder')
+                self.assertFalse((home / 'project/pwned').exists(), 'matching never evaluates saved command text')
+                send('\x1b[B'); send('\x1b[B'); send('\r')
+                self.assertIn('code-recent', self.ran(send, output, ''), 'Down twice then Enter keeps the second match')
+                send('echo cod\t'); send('\x1b', 0.8)
+                self.assertIn('codX', self.ran(send, output, 'X'), 'Esc restores the typed prefix')
+                send('echo cod\t')
+                self.assertIn('codY', self.ran(send, output, 'Y'), 'another key closes the list and is typed')
+                send('echo cod\t'); send('\x03', 0.8)
+                self.assertIn('after-break', self.ran(send, output, 'echo after-break'), 'Ctrl-C leaves keys working')
+                self.assertIn('build-often', self.ran(send, output, 'echo bui\x1b[A'), 'Up on a prefix takes the best match')
+                self.assertIn('build-recent', self.ran(send, output, 'echo bui\x1b[A\x1b[A'), 'Up again takes the next')
+                self.assertIn('buiZ', self.ran(send, output, 'echo bui\x1b[A\x1b[BZ'), 'Down past the first restores the prefix')
+                output.clear(); send('zzz\t')
+                self.assertNotIn('Folder history:', output.decode(errors='replace'), 'Tab without a match completes as before')
+                send('\x15cd ../link\r')
+                output.clear(); send('echo cod\t')
+                self.assertIn('echo code-often', output.decode(errors='replace'), 'a symlinked path shares the folder history')
+                send('\x1b', 0.8)
+
+    def test_zsh_folder_history_switch_turns_it_off(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
+            home = pathlib.Path(directory)
+            with self.zsh_pty(home, AKITTY_FOLDER_HISTORY='0') as (send, output):
+                send('echo code-one\r')
+                output.clear(); send('echo cod\t')
+                self.assertNotIn('Folder history:', output.decode(errors='replace'))
+                self.assertFalse((home / 'Library/Application Support/Akitty').exists(), 'nothing is written when off')
+
+    def test_zsh_folder_history_calls_named_hooks_once_and_respects_memory_only_lines(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
+            home = pathlib.Path(directory)
+            rc = "function zshaddhistory() { print -r -- ${1%$'\\n'} >> \"$HOME/hook-calls\"; [[ $1 != *private* ]] || return 2; }"
+            with self.zsh_pty(home, rc) as (send, output):
+                send('echo visible\r'); send('echo private\r')
+                calls = (home / 'hook-calls').read_text().splitlines()
+                self.assertEqual(calls.count('echo visible'), 1)
+                self.assertEqual(calls.count('echo private'), 1)
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
+                self.assertIn('echo visible', saved)
+                self.assertNotIn('echo private', saved, 'status 2 permits memory history, not persistence')
+
+    def folder_call(self, home, command):
+        env = shell_environment(str(home), ZDOTDIR=str(home), AKITTY_FOLDER_HISTORY_FILE=str(home / 'folder-history'))
+        return subprocess.run([ZSH, '-fic', f'source {shlex.quote(str(SCRIPT.parent / "akitty.zsh"))}; {command}'],
+                              env=env, capture_output=True, text=True, timeout=6)
+
+    def test_zsh_folder_history_does_not_write_without_its_lock(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-lock-') as directory:
+            home = pathlib.Path(directory)
+            history = home / 'folder-history'; history.write_text('original\n'); history.chmod(0o600)
+            lock = home / 'folder-history.lock'; lock.touch(mode=0o600)
+            with lock.open('r+') as held:
+                fcntl.lockf(held, fcntl.LOCK_EX)
+                result = self.folder_call(home, '__akitty_folder_locked __akitty_folder_append blocked')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(history.read_text(), 'original\n')
+
+    def test_zsh_folder_history_refuses_symlink_locks_and_public_files(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-safety-') as directory:
+            home = pathlib.Path(directory)
+            history = home / 'folder-history'; history.write_text('original\n'); history.chmod(0o600)
+            target = home / 'target'; target.write_text('keep\n'); target.chmod(0o600)
+            lock = home / 'folder-history.lock'; lock.symlink_to(target)
+            result = self.folder_call(home, '__akitty_folder_locked __akitty_folder_append blocked')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(history.read_text(), 'original\n')
+            self.assertEqual(target.read_text(), 'keep\n')
+            lock.unlink(); history.chmod(0o644)
+            result = self.folder_call(home, '__akitty_folder_locked __akitty_folder_append blocked')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(history.read_text(), 'original\n')
+
+    def test_zsh_folder_history_compacts_during_the_session(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-trim-') as directory:
+            home = pathlib.Path(directory)
+            result = self.folder_call(home, "__akitty_folder_locked __akitty_folder_append first; "
+                "for n in {1..700}; do print -r -- \"${(l:1000::x:)n}\" >> $__akitty_folder_file; done; __akitty_folder_locked __akitty_folder_append last")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertLessEqual((home / 'folder-history').stat().st_size, 524288)
+
+    def test_zsh_folder_history_bounds_unicode_commands_in_bytes(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-bytes-') as directory:
+            home = pathlib.Path(directory)
+            result = self.folder_call(home, '__akitty_folder_addhistory ' + shlex.quote('echo ' + '界' * 400 + '\n'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((home / 'folder-history').exists(), 'the 1 KiB command bound counts UTF-8 bytes')
 
 if __name__ == '__main__':
     unittest.main()

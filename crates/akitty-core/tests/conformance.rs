@@ -1152,7 +1152,7 @@ fn actual_bash_and_zsh_integration_tracks_cwd_exit_and_output() {
             "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
             env!("CARGO_MANIFEST_DIR")
         );
-        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory,"folder_history":false}))["id"].as_u64().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         while t.snapshot()["shell"]["ready"] != true {
             assert!(
@@ -1204,7 +1204,7 @@ fn actual_shells_record_subshell_only_lines_once_with_output_and_status() {
             "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
             env!("CARGO_MANIFEST_DIR")
         );
-        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory,"folder_history":false}))["id"].as_u64().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         while t.snapshot()["shell"]["ready"] != true {
             assert!(
@@ -1311,12 +1311,46 @@ fn agent_control_requires_exact_host_approval_and_human_can_reclaim() {
 }
 
 #[test]
+fn folder_history_switch_reaches_the_integrated_shell() {
+    let directory = format!(
+        "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    // bash has no folder store, so checking the default never reads or compacts the user's real zsh history.
+    let inherited = std::env::var("AKITTY_FOLDER_HISTORY").unwrap_or_else(|_| "unset".into());
+    for (shell, setting, expected) in [("/bin/zsh", json!(false), "FOLDER-HISTORY=0".to_owned()),
+        ("/bin/bash", json!(null), format!("FOLDER-HISTORY={inherited}"))] {
+        let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory,"folder_history":setting}))["id"].as_u64().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true {
+            assert!(Instant::now() < deadline, "initial prompt missing: {}", t.snapshot());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The leading space keeps the line out of the folder history in the real home.
+        call(json!({"op":"input","id":t.0,"text":" printf 'FOLDER-HISTORY=%s\\n' \"${AKITTY_FOLDER_HISTORY-unset}\"\r"}));
+        loop {
+            let h = call(json!({"op":"command_history","id":t.0}));
+            if let Some(cmd) = h["commands"].as_array().unwrap().iter().find(|c| c["exit_code"] == 0) {
+                let out = call(json!({"op":"command_output","id":t.0,"command_id":cmd["id"]}));
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(out["output_base64"].as_str().unwrap())
+                    .unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains(&expected), "{setting}: {out}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "missing completion: {h}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
 fn actual_agent_dispatch_is_once_only_and_retains_control_until_released() {
     let directory = format!(
         "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
         env!("CARGO_MANIFEST_DIR")
     );
-    let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":"/bin/zsh","cwd":"/tmp","shell_integration_dir":directory}))["id"].as_u64().unwrap());
+    let t = Terminal(call(json!({"op":"create","cols":100,"rows":20,"shell":"/bin/zsh","cwd":"/tmp","shell_integration_dir":directory,"folder_history":false}))["id"].as_u64().unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     while t.snapshot()["shell"]["ready"] != true {
         assert!(Instant::now() < deadline);

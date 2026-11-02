@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Darwin
 @testable import AkittyKit
 
 final class PreferencesTests: XCTestCase {
@@ -65,6 +66,52 @@ final class PreferencesTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         try off.save(to: defaults)
         XCTAssertFalse(TerminalPreferences.load(from: defaults).shellIntegration)
+    }
+
+    func testFolderHistoryIsOnByDefaultKeepsAChoiceAndClears() throws {
+        XCTAssertTrue(TerminalPreferences().folderHistory)
+        let older = #"{"fontName":"Menlo","fontSize":14,"shell":"","directory":"","scrollback":5000,"optionAsAlt":false}"#
+        XCTAssertTrue(try JSONDecoder().decode(TerminalPreferences.self, from: Data(older.utf8)).folderHistory, "a missing key takes the default")
+        var off = TerminalPreferences(); off.folderHistory = false
+        XCTAssertFalse(try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(off)).folderHistory)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-folder-history-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("1\t/tmp\t/private/tmp\tmake release\n".utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        defer { try? FileManager.default.removeItem(atPath: file.path + ".lock") }
+        try TerminalPreferences.clearFolderHistory(file: file)
+        XCTAssertEqual(try Data(contentsOf: file).count, 0, "clearing empties the file in place")
+        try TerminalPreferences.clearFolderHistory(file: file.appendingPathExtension("missing"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.appendingPathExtension("missing").path), "clearing never creates the file")
+    }
+
+    func testClearFolderHistoryRefusesSymlinksAndPreservesTheirTargets() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-folder-safe-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target"), link = root.appendingPathComponent("history")
+        try Data("keep this".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        XCTAssertThrowsError(try TerminalPreferences.clearFolderHistory(file: link))
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep this")
+    }
+
+    func testClearFolderHistoryHonorsTheShellsPOSIXLock() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-folder-lock-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history"), lock = root.appendingPathComponent("history.lock")
+        try Data("keep".utf8).write(to: file); try Data().write(to: lock)
+        for path in [file, lock] { try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path) }
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-fc", "zmodload zsh/system; zsystem flock -f held \"$1\" || exit 1; print READY; read -r done", "--", lock.path]
+        process.standardInput = input; process.standardOutput = output
+        try process.run()
+        defer { try? input.fileHandleForWriting.close(); process.waitUntilExit() }
+        XCTAssertEqual(output.fileHandleForReading.readData(ofLength: 6), Data("READY\n".utf8))
+        XCTAssertThrowsError(try TerminalPreferences.clearFolderHistory(file: file))
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "keep")
     }
 
     func testIntegrationDirectoryOnlyForBundledBashAndZsh() throws {
