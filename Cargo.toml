@@ -1,7 +1,6 @@
 [workspace]
 members = ["crates/akitty-agent-core", "crates/akitty-core", "third_party/alacritty_terminal", "third_party/vte"]
 default-members = ["crates/akitty-core"]
-exclude = ["linux/src-tauri", "windows/src-tauri"]
 resolver = "2"
 
 [workspace.package]

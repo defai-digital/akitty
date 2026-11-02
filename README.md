@@ -6,8 +6,8 @@
 
 **See agent activity. Approve command requests. Stay in charge.**
 
-AkiTTY is a terminal for developers working with AI coding agents, with a native
-macOS app and **Experimental Linux and Windows amd64 desktop versions**.
+AkiTTY is a terminal for developers working with AI coding agents, built as a
+native macOS app.
 See what participating agents report across your terminals, review commands they
 ask AkiTTY to dispatch, and take back terminal input when you need it.
 
@@ -19,18 +19,12 @@ provider, cloud account or AX product is required.
 | Platform | Status | Get started |
 | --- | --- | --- |
 | macOS 14+ · Apple Silicon | Stable | [Download and install](#quick-start) |
-| Linux · x86_64 / ARM64 | **Experimental** | [Build, run and package](linux/README.md) |
-| Windows 11 · amd64 | **Experimental** | [Build and install](windows/README.md) |
-
-Linux and Windows use native shells with AkiTTY's command approval, input control
-and event timeline. Their experimental builds are available from source; public
-installers are not yet published, and full macOS feature parity is not claimed.
 
 [Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
 [Release notes](docs/releases/1.3.5.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
 
-See [Windows and Linux](#windows-and-linux) for the experimental desktops and the
-separate AkiTTY Web terminal library. The tour and shortcuts below describe macOS.
+See [Windows and Linux](#windows-and-linux) for the separate AkiTTY Web terminal
+library used on other platforms.
 
 > Only commands submitted through the opt-in request interface use the native
 > human approval workflow. Ordinary agent subprocesses are not intercepted.
@@ -279,24 +273,10 @@ host-supplied output queue; native embedding continues to use the C ABI.
 
 ## Windows and Linux
 
-You can build and use AkiTTY desktop on **Linux and Windows amd64 as Experimental
-versions**. Both use a shared Tauri/TypeScript UI with native shells and AkiTTY's
-agent request approval, input ownership, reclaim and event timeline.
-
-- **[Linux Experimental](linux/README.md):** native Linux PTYs and installed
-  bash/zsh; local Debian packages for x86_64 and ARM64.
-- **[Windows amd64 Experimental](windows/README.md):** native ConPTY and
-  PowerShell; an unsigned, per-user NSIS installer for Windows 11.
-
-Build and usage instructions are linked above. Public Linux/Windows installers
-are not yet published. These versions remain experimental; physical desktop,
-IME, accessibility and long-running reliability checks are still pending. See
-the [Linux](docs/LINUX_EXPERIMENTAL.md) and [Windows](docs/WINDOWS_EXPERIMENTAL.md)
-qualification records for tested behavior and limitations.
-
-The desktop versions render their terminals with **AkiTTY Web**
-(`packages/akitty-web`), also embedded in
-[AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
+AkiTTY has no Linux or Windows desktop app. The Experimental Linux and Windows
+desktops shipped as source in 1.3.5 have been discontinued so effort stays on the
+macOS app. On those platforms, use **AkiTTY Web** (`packages/akitty-web`), the
+terminal embedded in [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
 
 AkiTTY Web is a separate implementation from the Mac app. It draws on an HTML canvas
 and parses terminal output with Ghostty's VT parser compiled to WebAssembly. The

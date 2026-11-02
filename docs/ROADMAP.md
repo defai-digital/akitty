@@ -183,17 +183,10 @@ contract, then define optional command policy/evidence adapters. Existing ax-tru
 LLM policies do not automatically authorize shell commands. Complete orchestration,
 cloud execution, remote multiplexing and verifiable result attestation are deferred.
 
-## 6. Experimental Linux desktop
-
-The separate [Experimental Linux desktop](LINUX_EXPERIMENTAL.md) evaluates native
-Linux PTYs with shared agent control and a Tauri/AkiTTY Web interface. Its local
-qualification and remaining gates are recorded separately from the Mac release.
-A separate [Windows amd64 experiment](WINDOWS_EXPERIMENTAL.md) now shares the UI
-and host while adapting ConPTY, PowerShell, named pipes and storage. Windows
-qualification is independent of the Linux results.
-
 ## Outside the current roadmap
 
+- Native Linux or Windows desktop apps (the 1.3.5 experiments are discontinued;
+  AkiTTY Web covers those platforms).
 - Ghostty configuration compatibility or importing Ghostty's native Zig core/renderer.
 - Third-party plugins, arbitrary script loading, or a public extension ecosystem.
 - Full external esctest qualification. The curated conformance suite remains a

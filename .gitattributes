@@ -5,5 +5,3 @@ packages/akitty-web/patches/ghostty-wasm-api.patch whitespace=-blank-at-eol
 third_party/alacritty_terminal/tests/ref/**/alacritty.recording -text -diff
 third_party/vte/tests/demo.vte -text -diff
 
-# Audited fallback licenses are hashed as upstream bytes on every platform.
-linux/licenses/*-LICENSE* -text
