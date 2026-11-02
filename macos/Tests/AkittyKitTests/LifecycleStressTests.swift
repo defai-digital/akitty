@@ -15,7 +15,9 @@ final class LifecycleStressTests: XCTestCase {
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             var preferences = TerminalPreferences()
-            preferences.shell = "/bin/sh"; preferences.directory = "/tmp"; preferences.scrollback = 100
+            preferences.shell = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Fixtures/lifecycle-shell.sh").path
+            preferences.directory = "/tmp"; preferences.scrollback = 100
             var panes = try (0..<4).map { index in
                 let pane = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
                 pane.frame = NSRect(x: (index % 2) * 400, y: (index / 2) * 250, width: 400, height: 250)
@@ -25,7 +27,6 @@ final class LifecycleStressTests: XCTestCase {
             let weakPanes = panes.map(WeakTerminal.init)
             let sessions = panes.map(\.session)
             defer { panes.forEach { $0.shutdown(); $0.removeFromSuperview() }; window.close() }
-            for pane in panes { pane.send("stty -echo; printf '\\033[2J\\033[HPANE_READY\\n'\r") }
             for step in 0..<8 {
                 for pane in panes {
                     pane.setFrameSize(NSSize(width: 360 + step * 4, height: 220 + step * 2))
@@ -41,8 +42,14 @@ final class LifecycleStressTests: XCTestCase {
             XCTAssertTrue(panes.allSatisfy { $0.snapshot?.text.contains("PANE_READY") == true }, "round \(round)")
             let closed = expectation(description: "all repeated shutdown callbacks")
             closed.expectedFulfillmentCount = panes.count * 2
+            for pane in panes { pane.send("while :; do printf 'busy\\n'; done\r") }
+            let outputDeadline = Date().addingTimeInterval(5)
+            while !panes.allSatisfy({ $0.snapshot?.text.contains("busy") == true }) && Date() < outputDeadline {
+                panes.forEach { $0.poll() }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertTrue(panes.allSatisfy { $0.snapshot?.text.contains("busy") == true }, "busy output never started in round \(round)")
             for pane in panes {
-                pane.send("while :; do printf 'busy\\n'; done\r")
                 pane.shutdown { closed.fulfill() }
                 pane.shutdown { closed.fulfill() }
             }
