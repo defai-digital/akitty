@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { vi } from 'vitest';
 import { Ghostty } from './ghostty';
 import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
@@ -1431,6 +1432,95 @@ describe('onTitleChange event', () => {
       term.write('\x1b]2;Title with ST\x1b\\');
 
       expect(receivedTitle).toBe('Title with ST');
+      term.dispose();
+    });
+  });
+
+  describe('reset()', () => {
+    test('notifies subscribers when reset clears a previously reported title', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      if (!container) return;
+      term.open(container!);
+
+      const titles: string[] = [];
+      term.onTitleChange((title) => {
+        titles.push(title);
+      });
+
+      term.write('\x1b]2;Reported Title\x07');
+      expect(titles).toEqual(['Reported Title']);
+
+      term.reset();
+
+      expect(term.title).toBe('');
+      expect(titles).toEqual(['Reported Title', '']);
+      term.dispose();
+    });
+
+    test('does not emit a duplicate title event when reset runs with an empty title', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      if (!container) return;
+      term.open(container!);
+
+      const titles: string[] = [];
+      term.onTitleChange((title) => {
+        titles.push(title);
+      });
+
+      term.write('\x1b]2;Reported Title\x07');
+      term.reset();
+      term.reset();
+
+      expect(titles).toEqual(['Reported Title', '']);
+      term.dispose();
+    });
+
+    test('rings a BEL written during the title event instead of resurrecting a stale OSC', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      if (!container) return;
+      term.open(container!);
+
+      const titles: string[] = [];
+      let bells = 0;
+      term.onBell(() => bells++);
+      term.onTitleChange((title) => {
+        titles.push(title);
+        // Re-enter the terminal while the synchronous reset title event is firing.
+        if (title === '') term.write('\x07');
+      });
+
+      term.write('\x1b]2;Reported Title\x07');
+      // Unterminated OSC: it would surface "Stale" if its parse state survived the reset.
+      term.write('\x1b]2;Stale');
+      term.reset();
+
+      expect(term.title).toBe('');
+      expect(bells).toBe(1);
+      expect(titles).toEqual(['Reported Title', '']);
+      term.dispose();
+    });
+
+    test('keeps a title continuation written during the reset title event', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      if (!container) return;
+      term.open(container!);
+
+      const titles: string[] = [];
+      let bells = 0;
+      term.onBell(() => bells++);
+      term.onTitleChange((title) => {
+        titles.push(title);
+        // Start a fresh OSC during the reset title event; it is finished after reset.
+        if (title === '') term.write('\x1b]2;Par');
+      });
+
+      term.write('\x1b]2;Reported Title\x07');
+      term.reset();
+      term.write('tial\x07');
+
+      expect(term.title).toBe('Partial');
+      expect(bells).toBe(0);
+      expect(titles).toEqual(['Reported Title', '', 'Partial']);
       term.dispose();
     });
   });
@@ -3440,10 +3530,81 @@ describe('Write Behavior', () => {
     term.write('Second', () => callbackOrder.push(2));
     term.write('Third', () => callbackOrder.push(3));
 
-    // Give callbacks time to fire (they use requestAnimationFrame)
+    // Give callbacks time to fire (they are delivered asynchronously)
     await new Promise((r) => setTimeout(r, 50));
 
     expect(callbackOrder).toEqual([1, 2, 3]);
+
+    term.dispose();
+  });
+
+  test('write callbacks are delivered when animation frames never run', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+
+    let called = 0;
+    // A hidden page never services animation frames; a host awaiting this callback must not stall.
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    try {
+      term.write('Hidden', () => called++);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(called).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+      term.dispose();
+    }
+  });
+
+  test('write callbacks stay asynchronous and ordered when animation frames never run', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+
+    const callbackOrder: number[] = [];
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    try {
+      term.write('First', () => callbackOrder.push(1));
+      term.write('Second', () => callbackOrder.push(2));
+      term.write('Third', () => callbackOrder.push(3));
+
+      // Nothing may fire inside the write stack.
+      expect(callbackOrder).toEqual([]);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(callbackOrder).toEqual([1, 2, 3]);
+    } finally {
+      vi.unstubAllGlobals();
+      term.dispose();
+    }
+  });
+
+  test('write callback runs asynchronously after its write is parsed', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+
+    let called = false;
+    let parsedLine = '';
+    term.write('Parsed', () => {
+      called = true;
+      parsedLine = term.buffer.active.getLine(0)?.translateToString(true) ?? '';
+    });
+
+    // The callback must not run inside write().
+    expect(called).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(called).toBe(true);
+    // ...and by the time it runs, the write has been parsed into the buffer.
+    expect(parsedLine).toBe('Parsed');
 
     term.dispose();
   });
