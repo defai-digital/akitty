@@ -1423,16 +1423,10 @@ fn png_bytes(command: &Command, raw: &[u8]) -> Result<Vec<u8>, String> {
     match command.compression {
         0 => Ok(raw.to_vec()),
         b'z' => {
-<<<<<<< Updated upstream
             let limit = if command.medium == b'd' && command.read_size != 0 {
                 command.read_size.min(PNG_ZLIB_LIMIT_MAX as u64) as usize
             } else {
                 PNG_ZLIB_LIMIT
-=======
-            let limit = match command.read_size {
-                0 => PNG_ZLIB_LIMIT,
-                hint => usize::try_from(hint).unwrap_or(usize::MAX).min(PNG_ZLIB_LIMIT_MAX),
->>>>>>> Stashed changes
             };
             miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(raw, limit)
                 .map_err(|_| "EINVAL:invalid or oversized zlib data".to_string())

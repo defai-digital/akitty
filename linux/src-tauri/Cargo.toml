@@ -15,7 +15,7 @@ desktop = ["dep:tauri", "dep:tauri-build"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
-akitty-agent-core = { path = "../../crates/akitty-agent-core", version = "=1.3.3" }
+akitty-agent-core = { path = "../../crates/akitty-agent-core", version = "=1.3.5" }
 base64 = "=0.22.1"
 libc = "=0.2.177"
 portable-pty = "=0.9.0"
