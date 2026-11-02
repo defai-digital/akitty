@@ -195,11 +195,11 @@ impl Session {
     }
     /// Snapshot JSON, already serialized. The model lock covers the build and the commit only: serialization
     /// (1–19 ms on a dense screen) runs after it is released, so the PTY worker keeps feeding.
-    pub fn snapshot(&self, since: Option<u64>, compact: bool) -> Result<String, String> {
-        self.snapshot_within(since, compact, crate::model::MAX_SNAPSHOT_BYTES)
+    pub fn snapshot(&self, since: Option<u64>, compact: bool, allow_shift: bool) -> Result<String, String> {
+        self.snapshot_within(since, compact, allow_shift, crate::model::MAX_SNAPSHOT_BYTES)
     }
     /// `snapshot` with the size bound passed in, so a test can drive the oversize branch without an 8 MiB screen.
-    fn snapshot_within(&self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
+    fn snapshot_within(&self, since: Option<u64>, compact: bool, allow_shift: bool, max_bytes: usize) -> Result<String, String> {
         // Two concurrent snapshots must not interleave build and commit, or one would consume events the
         // other never delivered. This lock, not the model lock, spans the serialization.
         let _serialize = self.snapshot_lock.lock().map_err(|_| "terminal unavailable")?;
@@ -207,7 +207,7 @@ impl Session {
             let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
             // Real PTY sessions expire in the worker, which owns delivery of replies.
             if self.commands.is_none() { model.expire_sync(); }
-            model.build_snapshot(since, compact)?
+            model.build_snapshot(since, compact, allow_shift)?
         };
         let Some((value, commit)) = built else { return Ok(crate::model::UNCHANGED_SNAPSHOT.into()) };
         let json = serde_json::to_string(&value).expect("snapshot fields serialize");
@@ -1072,10 +1072,10 @@ mod tests {
     #[test]
     fn set_cell_size_invalidates_the_snapshot_revision() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         session.set_cell_size(10, 20).unwrap();
-        let second: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let second: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         // The new pixel size feeds placeholder geometry, so a same-revision poll must
         // still report a change instead of serving the stale placeholder layout.
         assert_eq!(second["changed"], true, "{second}");
@@ -1086,14 +1086,14 @@ mod tests {
     fn oversized_snapshot_keeps_events_and_forces_a_full_retry() {
         let session = Session::new(20, 4, None, None, true, 5000, None).unwrap();
         session.feed(b"hello").unwrap();
-        let since = serde_json::from_str::<Value>(&session.snapshot(None, true).unwrap()).unwrap()["revision"].as_u64();
+        let since = serde_json::from_str::<Value>(&session.snapshot(None, true, false).unwrap()).unwrap()["revision"].as_u64();
         // One changed row plus queued events: against the retained base this poll would be a partial diff.
         session.feed(b"world\x07\x1b]52;c;aGk=\x07").unwrap();
         // The bound is injected, so the fixed production message is what the branch returns.
-        let error = session.snapshot_within(since, true, 16).unwrap_err();
+        let error = session.snapshot_within(since, true, false, 16).unwrap_err();
         assert_eq!(error, "snapshot exceeds 8 MiB", "{error}");
         // Nothing was committed, so the one-shot events ride the next successful poll.
-        let next: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let next: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(next["bell"], true, "{next}");
         assert_eq!(next["clipboard"], json!(["hi"]), "{next}");
         assert!(next["lines"][0].as_str().unwrap().starts_with("helloworld"), "{next}");
@@ -1102,7 +1102,7 @@ mod tests {
         // Control: the full commit restored a base, so a one-row change diffs again.
         let revision = next["revision"].as_u64();
         session.feed(b"z").unwrap();
-        let partial: Value = serde_json::from_str(&session.snapshot(revision, true).unwrap()).unwrap();
+        let partial: Value = serde_json::from_str(&session.snapshot(revision, true, false).unwrap()).unwrap();
         assert_eq!(partial["partial"], true, "{partial}");
     }
 
@@ -1164,10 +1164,10 @@ mod tests {
     fn rejected_control_operations_leave_the_snapshot_revision_unchanged() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         let unchanged = |session: &Session| {
-            let snapshot: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+            let snapshot: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
             assert_eq!(snapshot["changed"], false, "{snapshot}");
         };
         assert!(session.control_acquire("second".into()).is_err());
@@ -1178,10 +1178,10 @@ mod tests {
         unchanged(&session);
         // Successful operations still invalidate the revision a client polls with.
         session.command_deny(lease).unwrap();
-        let denied: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let denied: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(denied["changed"], true, "{denied}");
         session.control_release(Some(lease)).unwrap();
-        let released: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let released: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(released["changed"], true, "{released}");
     }
 
@@ -1190,15 +1190,15 @@ mod tests {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.feed(b"\x1b]133;A\x07").unwrap();
         let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         // A stale lease fails before any audit append, so the snapshot must stay unchanged.
         assert!(session.command_authorize(lease + 1, "echo hi".into(), None).is_err());
-        let stale: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let stale: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(stale["changed"], false, "{stale}");
         // A failure that does append audit must still reach the host through a new revision.
         assert!(session.command_authorize(lease, "\u{1}".into(), None).is_err());
-        let rejected: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let rejected: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(rejected["changed"], true, "{rejected}");
     }
 
@@ -1207,11 +1207,11 @@ mod tests {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.feed(b"\x1b]133;A\x07").unwrap();
         let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         // A stale lease fails before consume, so the snapshot must stay unchanged.
         assert!(session.command_execute(lease + 1, 1, "echo hi".into()).is_err());
-        let stale: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let stale: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(stale["changed"], false, "{stale}");
         // A rejected dispatch would append dispatch_failed; a stale lease never reaches it.
         let audit = session.control_audit(0).unwrap();
@@ -1219,10 +1219,10 @@ mod tests {
         assert!(!events.contains(&"dispatch_failed"), "{audit}");
         // A grant mismatch does append audit, so it must still invalidate the snapshot.
         let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
-        let baseline: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let baseline: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let baseline = baseline["revision"].as_u64();
         assert!(session.command_execute(lease, authorization, "echo nope".into()).is_err());
-        let mismatch: Value = serde_json::from_str(&session.snapshot(baseline, true).unwrap()).unwrap();
+        let mismatch: Value = serde_json::from_str(&session.snapshot(baseline, true, false).unwrap()).unwrap();
         assert_eq!(mismatch["changed"], true, "{mismatch}");
     }
 
@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(state.exit_code, Some(0));
         drop(state);
         // Later host polls must work again, so the exit is actually observable.
-        assert!(session.snapshot(None, true).is_ok());
+        assert!(session.snapshot(None, true, false).is_ok());
     }
 
     #[test]
@@ -1364,7 +1364,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(400));
         session.input_bytes(b"\r".to_vec()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let echoed = |marker: char| session.snapshot(None, true).unwrap().matches(marker).count();
+        let echoed = |marker: char| session.snapshot(None, true, false).unwrap().matches(marker).count();
         let wait_for = |marker: char, before: usize| {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             while Instant::now() < deadline {
@@ -1415,13 +1415,13 @@ mod tests {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.feed(b"\x07\x1b]52;c;aGk=\x07").unwrap();
         // A first snapshot delivers the events rung before it, so only the late ones are under test.
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         assert_eq!(first["bell"], true, "{first}");
         assert_eq!(first["clipboard"], json!(["hi"]), "{first}");
         // Build, then let the worker feed a bell and an OSC 52 while the snapshot is being serialized.
         let (value, commit) = {
             let mut model = lock_model(&session.model);
-            model.build_snapshot(None, true).unwrap().expect("the feed made a snapshot change")
+            model.build_snapshot(None, true, false).unwrap().expect("the feed made a snapshot change")
         };
         session.feed(b"\x07\x1b]52;c;b3RoZXI=\x07").unwrap();
         let sent = serde_json::to_string(&value).unwrap();
@@ -1430,10 +1430,10 @@ mod tests {
         assert_eq!(delivered["bell"], false, "the snapshot carries only what its build saw: {delivered}");
         assert_eq!(delivered["clipboard"], json!([]), "{delivered}");
         // The late events survive the commit and reach the next poll exactly once.
-        let next: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let next: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         assert_eq!(next["bell"], true, "{next}");
         assert_eq!(next["clipboard"], json!(["other"]), "{next}");
-        let after: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let after: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         assert_eq!(after["bell"], false, "a delivered event is not repeated: {after}");
         assert_eq!(after["clipboard"], json!([]), "{after}");
     }
@@ -1445,10 +1445,10 @@ mod tests {
         // The oversize path builds, never commits, and drops the diff base; nothing may be consumed.
         let _ = {
             let mut model = lock_model(&session.model);
-            model.build_snapshot(None, true).unwrap().expect("the feed made a snapshot change")
+            model.build_snapshot(None, true, false).unwrap().expect("the feed made a snapshot change")
         };
         lock_model(&session.model).forget_sent();
-        let next: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let next: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         assert_eq!(next["bell"], true, "{next}");
         assert_eq!(next["clipboard"], json!(["hi"]), "{next}");
     }
@@ -1457,17 +1457,17 @@ mod tests {
     fn a_dropped_diff_base_forces_a_full_snapshot() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.feed(b"hello").unwrap();
-        let first: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         let since = first["revision"].as_u64();
         // One changed row against a held base is a partial snapshot.
         session.feed(b"x").unwrap();
-        let partial: Value = serde_json::from_str(&session.snapshot(since, true).unwrap()).unwrap();
+        let partial: Value = serde_json::from_str(&session.snapshot(since, true, false).unwrap()).unwrap();
         assert_eq!(partial["partial"], true, "{partial}");
         // Without the base the next poll must carry every row, which is what the oversize path leaves behind.
         let revision = partial["revision"].as_u64();
         lock_model(&session.model).forget_sent();
         session.feed(b"y").unwrap();
-        let full: Value = serde_json::from_str(&session.snapshot(revision, true).unwrap()).unwrap();
+        let full: Value = serde_json::from_str(&session.snapshot(revision, true, false).unwrap()).unwrap();
         assert_eq!(full["changed"], true, "{full}");
         assert!(full.get("partial").is_none() && full.get("dirty").is_none(), "a full snapshot has no row delta: {full}");
     }
@@ -1488,7 +1488,7 @@ mod tests {
                         while !stop.load(Ordering::SeqCst) {
                             // Serializing outside the model lock is what keeps this loop from stalling the
                             // worker; a panic here would poison the session and fail the join.
-                            let json = session.snapshot(None, true).expect("a live session snapshots");
+                            let json = session.snapshot(None, true, false).expect("a live session snapshots");
                             let snapshot: Value = serde_json::from_str(&json).expect("snapshot is JSON");
                             if snapshot["bell"].as_bool().unwrap_or(false) { bells += 1; }
                             // Yield the model lock so the PTY worker keeps feeding between polls.
@@ -1513,7 +1513,7 @@ mod tests {
         });
         assert!(reported > 0, "every rung bell is reported at least once");
         // A final poll sees no outstanding bell, and the counters agree that everything was delivered.
-        let last: Value = serde_json::from_str(&session.snapshot(None, true).unwrap()).unwrap();
+        let last: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
         assert_eq!(last["bell"], false, "{last}");
         let (rung, sent) = lock_model(&session.model).bell_counts();
         assert_eq!((rung, sent), (rung, rung), "every bell rung was delivered exactly once");
@@ -1559,7 +1559,7 @@ mod reply_tests {
         assert_eq!(recorded.as_deref(), Some(REPLY_BACKLOG_ERROR));
         assert_ne!(revision, since, "recording a dropped reply must advance the revision");
         // A poll at the held revision must both report a change and carry the error.
-        let polled: Value = serde_json::from_str(&session.snapshot(Some(since), true).unwrap()).unwrap();
+        let polled: Value = serde_json::from_str(&session.snapshot(Some(since), true, false).unwrap()).unwrap();
         assert_eq!(polled["changed"], true, "the drop must not be hidden: {polled}");
         assert_eq!(polled["error"], REPLY_BACKLOG_ERROR, "{polled}");
     }

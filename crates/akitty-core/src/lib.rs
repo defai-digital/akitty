@@ -55,6 +55,7 @@ enum Request {
         id: u64,
         since: Option<u64>,
         compact: Option<bool>,
+        allow_shift: Option<bool>,
     },
     Input {
         id: u64,
@@ -275,7 +276,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 Request::CommandHistory { after, .. } => session.command_history(after.unwrap_or(0)),
                 Request::ShellState { .. } => session.shell_state(),
                 Request::CommandOutput { command_id, .. } => session.command_output(command_id),
-                Request::Snapshot { since, compact, .. } => return session.snapshot(since, compact.unwrap_or(false)).map(Reply::Json),
+                Request::Snapshot { since, compact, allow_shift, .. } => return session.snapshot(since, compact.unwrap_or(false), allow_shift.unwrap_or(false)).map(Reply::Json),
                 Request::Input { text, paste, .. } => {
                     session.input(text, paste.unwrap_or(false))?;
                     Ok(json!({}))

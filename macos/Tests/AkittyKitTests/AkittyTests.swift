@@ -557,7 +557,7 @@ final class AkittyTests: XCTestCase {
         let held = try XCTUnwrap(try session.snapshot())
         // One newline past the bottom scrolls the screen by exactly one row.
         _ = try session.call("feed", ["text": "\r\nseven"])
-        let wire = try session.call("snapshot", ["since": held.revision])
+        let wire = try session.call("snapshot", ["since": held.revision, "allow_shift": true])
         let partial = try JSONDecoder().decode(Snapshot.self, from: wire)
         XCTAssertEqual(partial.partial, true)
         XCTAssertEqual(partial.shift, 1)

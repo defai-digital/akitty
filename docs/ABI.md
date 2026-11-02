@@ -53,7 +53,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | version | none | Version/platform information |
 | create | cols, rows; optional shell, cwd, headless, scrollback, shell_integration_dir | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
-| snapshot | id; optional since, compact | Current snapshot, changed=false, or a partial snapshot (below) |
+| snapshot | id; optional since, compact, allow_shift | Current snapshot, changed=false, or a partial snapshot (below) |
 | input | id, text; optional paste | UTF-8 input with optional bracketed-paste protection |
 | input_bytes | id, bytes | Raw byte input for terminal protocols, bounded to 64 KiB + delimiters |
 | resize | id, cols, rows | Resize kernel PTY and terminal state in worker order |
@@ -183,8 +183,12 @@ order; the client replaces those rows in the snapshot it holds and keeps the res
 Rows are compared by a 64-bit content hash (characters, colours, attributes,
 selection, links), so a hash collision at worst delays one row's repaint.
 
-Streaming output scrolls the screen, and that changes every row's hash. A partial
-snapshot may therefore also carry `"shift": k`, an integer with `1 <= k < rows` that
+Streaming output scrolls the screen, and that changes every row's hash. A client
+may request `"allow_shift": true` on each snapshot call to opt into shifted row updates.
+Omitting it or setting it to false preserves schema-1 row replacement semantics,
+even with `compact: true`; a response never contains `shift` without this opt-in.
+The native Mac app opts in. An opted-in partial snapshot may carry
+`"shift": k`, an integer with `1 <= k < rows` that
 is present only when it applies. The client then moves the rows it holds up by `k`
 first: held row `r+k` becomes row `r`, the first `k` held rows are discarded, and the
 last `k` rows start blank (`cols` spaces). Only after that shift does it replace the

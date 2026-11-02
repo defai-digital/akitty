@@ -531,7 +531,7 @@ public final class TerminalSession: @unchecked Sendable {
         // input, resize and mouse reports wait behind a large background snapshot. Session IDs are never
         // reused, so a close that lands meanwhile just makes the core answer with an error.
         guard !isClosed else { throw AkittyError.core("Session is closed") }
-        var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true]
+        var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true, "allow_shift": true]
         if let since { request["since"] = since }
         let data = try CoreBridge.raw(request)
         // The cells are most of a busy snapshot; they are read by hand and the rest by JSONDecoder.
