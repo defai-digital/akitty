@@ -121,7 +121,19 @@ impl ApcFilter {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
         let mut pass = Vec::new();
-        for &byte in bytes {
+        let mut at = 0;
+        while at < bytes.len() {
+            // Ground runs are copied whole; only escapes, CSI lookalikes and APC bodies are handled byte by byte.
+            if self.state == ApcState::Ground {
+                let end = bytes[at..].iter().position(|&byte| byte == 0x1b).map_or(bytes.len(), |esc| at + esc);
+                pass.extend_from_slice(&bytes[at..end]);
+                at = end;
+                if at == bytes.len() { break; }
+                self.state = ApcState::Esc;
+                at += 1;
+                continue;
+            }
+            let byte = bytes[at];
             // A byte may be handled twice: an aborted string re-reads its ESC's follower.
             loop {
                 match self.state {
@@ -197,6 +209,7 @@ impl ApcFilter {
                 }
                 break;
             }
+            at += 1;
         }
         if !pass.is_empty() {
             out.push(Segment::Pass(pass));
@@ -1005,12 +1018,14 @@ impl Graphics {
     pub fn tick(&mut self, now: std::time::Instant) -> bool {
         let mut changes = Vec::new();
         for (id, image) in &mut self.images {
-            let count = image.frames.len();
-            let total: u64 = (0..count).map(|index| u64::from(image.gap(index))).sum();
+            // Cheap rejections first: most images are neither animated nor placed.
             let Some(animation) = image.animation.as_ref() else { continue };
-            if animation.state <= 1 || count == 0 || total == 0 { continue; }
+            let count = image.frames.len();
+            if animation.state <= 1 || count == 0 { continue; }
             if animation.max_loops > 0 && animation.loops_done >= animation.max_loops { continue; }
             if !self.placements.iter().any(|p| p.image == *id) { continue; }
+            // Every gap zero would spin the loop below without ever advancing.
+            if !(0..count).any(|index| image.gap(index) != 0) { continue; }
             let shown = animation.shown.filter(|at| *at <= now).unwrap_or(now);
             let due = shown + std::time::Duration::from_millis(u64::from(image.gap(animation.current)));
             let (mut index, mut loops, state, max) = (animation.current, animation.loops_done, animation.state, animation.max_loops);
@@ -1552,6 +1567,61 @@ mod tests {
         assert_eq!(whole.2, 1, "exactly CSI 16 t is consumed");
         for split in 0..=stream.len() {
             assert_eq!(collect(&[&stream[..split], &stream[split..]]), whole, "split {split}");
+        }
+    }
+
+    /// Segment kinds and bytes in order, with adjacent pass segments merged so a run
+    /// split across feeds compares equal to the same run fed whole.
+    fn joined(feeds: impl IntoIterator<Item = Vec<Segment>>) -> Vec<(u8, Vec<u8>)> {
+        let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+        for segment in feeds.into_iter().flatten() {
+            let (kind, bytes) = match segment {
+                Segment::Pass(bytes) => (0, bytes),
+                Segment::Apc(bytes) => (1, bytes),
+                Segment::CellSizeQuery => (2, Vec::new()),
+            };
+            if kind == 0
+                && let Some((0, last)) = out.last_mut()
+            {
+                last.extend(bytes);
+                continue;
+            }
+            out.push((kind, bytes));
+        }
+        out
+    }
+
+    #[test]
+    fn ground_runs_keep_escape_bytes_out_of_the_pass_buffer() {
+        let mut filter = ApcFilter::default();
+        assert_eq!(joined([filter.feed(b"plain")]), vec![(0, b"plain".to_vec())]);
+        // An ESC ending a chunk leaves the sequence pending for the next feed.
+        assert!(joined([filter.feed(b"\x1b")]).is_empty());
+        assert_eq!(
+            joined([filter.feed(b"_Gi=1;QQ==\x1b\\!")]),
+            vec![(1, b"i=1;QQ==".to_vec()), (0, b"!".to_vec())]
+        );
+    }
+
+    #[test]
+    fn ground_runs_stay_split_invariant_on_escape_heavy_input() {
+        // Deterministic pseudo-random stream over the bytes the filter cares about.
+        let alphabet = [
+            b'a', b' ', 0x1b, b'_', b'[', b'1', b'6', b't', b'G', b'\\', 0x07, 0x18, 0x1a, b';', b'X',
+        ];
+        let mut seed = 0x1234_5678_u32;
+        let stream: Vec<u8> = (0..512)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                alphabet[(seed >> 16) as usize % alphabet.len()]
+            })
+            .collect();
+        let mut whole = ApcFilter::default();
+        let expected = joined([whole.feed(&stream)]);
+        for split in 0..=stream.len() {
+            let mut filter = ApcFilter::default();
+            let got = joined([filter.feed(&stream[..split]), filter.feed(&stream[split..])]);
+            assert_eq!(got, expected, "split {split}");
         }
     }
 

@@ -68,6 +68,21 @@ export interface FontMetrics {
   baseline: number; // Distance from top to text baseline
 }
 
+/**
+ * What the canvas was last sized for. render() compares these inputs rather than the fractional device-pixel
+ * product, so a fractional devicePixelRatio cannot make every frame look like a resize; pixelWidth/pixelHeight are
+ * the integral sizes the backing store actually holds, so an outside write to canvas.width is still noticed.
+ */
+interface SizedFor {
+  cols: number;
+  rows: number;
+  cellWidth: number;
+  cellHeight: number;
+  dpr: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
+
 // ============================================================================
 // Default Theme
 // ============================================================================
@@ -113,8 +128,12 @@ export class CanvasRenderer {
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
   private devicePixelRatio: number;
+  /** True when the ratio came from the options; those hosts manage DPI themselves, so window changes are ignored. */
+  private readonly dprPinned: boolean;
   private metrics: FontMetrics;
   private palette: string[];
+  /** Inputs and backing-store size of the last resize(), or null before the first one. */
+  private sizedFor: SizedFor | null = null;
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -184,6 +203,7 @@ export class CanvasRenderer {
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.dprPinned = options.devicePixelRatio !== undefined;
 
     // Build color palette (16 ANSI colors)
     this.palette = [
@@ -275,9 +295,10 @@ export class CanvasRenderer {
     this.canvas.style.width = `${cssWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
-    // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    // Set actual canvas size (scaled for DPI). The backing store holds whole device pixels, so the size is rounded
+    // here: assigning a fractional value stores its truncation, which would never equal the product at DPR 1.25/1.5.
+    this.canvas.width = Math.round(cssWidth * this.devicePixelRatio);
+    this.canvas.height = Math.round(cssHeight * this.devicePixelRatio);
 
     this.drawnRows = [];
 
@@ -291,6 +312,17 @@ export class CanvasRenderer {
     // Fill background after resize
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+    // Read the sizes back: a browser may coerce what it was given, and render() compares against what the canvas holds.
+    this.sizedFor = {
+      cols,
+      rows,
+      cellWidth: this.metrics.width,
+      cellHeight: this.metrics.height,
+      dpr: this.devicePixelRatio,
+      pixelWidth: this.canvas.width,
+      pixelHeight: this.canvas.height,
+    };
   }
 
   // ==========================================================================
@@ -331,10 +363,25 @@ export class CanvasRenderer {
     // means every row is dirty, since isRowDirty() then reports them all; without it, repaint everything.
     const allDirty = anyDirty && buffer.needsFullRedraw?.() === true;
 
-    // Resize canvas if dimensions changed
+    // Follow the window when the ratio was not pinned by the options: moving the window to a monitor with a
+    // different DPR otherwise leaves the canvas at the old scale, i.e. blurry text. Reading it is cheap and the
+    // resize below picks the change up.
+    if (!this.dprPinned) {
+      const dpr = window.devicePixelRatio || 1;
+      if (dpr !== this.devicePixelRatio) this.devicePixelRatio = dpr;
+    }
+
+    // Resize canvas if the inputs changed or the backing store no longer holds what resize() gave it.
+    const sized = this.sizedFor;
     const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
+      !sized ||
+      sized.cols !== dims.cols ||
+      sized.rows !== dims.rows ||
+      sized.cellWidth !== this.metrics.width ||
+      sized.cellHeight !== this.metrics.height ||
+      sized.dpr !== this.devicePixelRatio ||
+      sized.pixelWidth !== this.canvas.width ||
+      sized.pixelHeight !== this.canvas.height;
 
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
@@ -379,22 +426,26 @@ export class CanvasRenderer {
       if (forceAll || this.drawnRows.length !== dims.rows) {
         this.drawnRows = new Array<number | undefined>(dims.rows).fill(undefined);
       }
-      const drawn = this.drawnRows;
-      hashes = new Array<number | undefined>(dims.rows);
-      for (let y = 0; y < dims.rows; y++) {
-        hashes[y] = forceAll || isRowDirty(y) ? this.rowHash(buffer, y) : drawn[y];
-      }
-      const shift = forceAll || !anyDirty ? 0 : this.scrollShift(hashes, drawn);
-      if (shift > 0) {
-        this.copyRowsUp(shift, dims.rows);
-        shifted = true;
-        // The canvas now shows each drawn row k rows higher, the old cursor included.
-        drawn.copyWithin(0, shift);
-        drawn.fill(undefined, dims.rows - shift);
-        // Row 0's band may hold overflow copied from the row above it, which scrolled away.
-        drawn[0] = undefined;
-        this.lastCursorPosition = { x: this.lastCursorPosition.x, y: this.lastCursorPosition.y - shift };
-        for (let y = 0; y < dims.rows; y++) if (hashes[y] === undefined) hashes[y] = this.rowHash(buffer, y);
+      // With nothing dirty and no full redraw pending, every row already shows its content: rowChanged() below is
+      // false throughout, so the per-frame hash array would only be allocated to be discarded.
+      if (anyDirty || forceAll) {
+        const drawn = this.drawnRows;
+        hashes = new Array<number | undefined>(dims.rows);
+        for (let y = 0; y < dims.rows; y++) {
+          hashes[y] = forceAll || isRowDirty(y) ? this.rowHash(buffer, y) : drawn[y];
+        }
+        const shift = forceAll || !anyDirty ? 0 : this.scrollShift(hashes, drawn);
+        if (shift > 0) {
+          this.copyRowsUp(shift, dims.rows);
+          shifted = true;
+          // The canvas now shows each drawn row k rows higher, the old cursor included.
+          drawn.copyWithin(0, shift);
+          drawn.fill(undefined, dims.rows - shift);
+          // Row 0's band may hold overflow copied from the row above it, which scrolled away.
+          drawn[0] = undefined;
+          this.lastCursorPosition = { x: this.lastCursorPosition.x, y: this.lastCursorPosition.y - shift };
+          for (let y = 0; y < dims.rows; y++) if (hashes[y] === undefined) hashes[y] = this.rowHash(buffer, y);
+        }
       }
     }
     // A row needs drawing when its content differs from what the canvas shows there. Without reuse that is the

@@ -11,6 +11,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, Processor, Rgb};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy)]
@@ -40,7 +41,21 @@ impl Dimensions for Size {
 }
 
 #[derive(Clone, Default)]
-pub struct Events(pub Arc<Mutex<VecDeque<Event>>>);
+pub struct Events {
+    queue: Arc<Mutex<VecDeque<Event>>>,
+    /// Set when `queue` may hold an entry, so byte-heavy parsing can skip the drain lock.
+    queued: Arc<AtomicBool>,
+}
+impl Events {
+    fn pending(&self) -> bool {
+        self.queued.load(Ordering::Acquire)
+    }
+    /// Drains every queued event and clears the pending hint.
+    fn drain(&self) -> Vec<Event> {
+        self.queued.store(false, Ordering::Release);
+        self.queue.lock().map(|mut queue| queue.drain(..).collect()).unwrap_or_default()
+    }
+}
 impl EventListener for Events {
     fn send_event(&self, event: Event) {
         if matches!(
@@ -49,10 +64,11 @@ impl EventListener for Events {
         ) {
             return;
         }
-        if let Ok(mut events) = self.0.lock()
+        if let Ok(mut events) = self.queue.lock()
             && events.len() < 128
         {
             events.push_back(event);
+            self.queued.store(true, Ordering::Release);
         }
     }
 }
@@ -133,16 +149,17 @@ struct CursorOut {
     visible: bool,
 }
 
+/// The typed snapshot payload; serializing it produces schema-1 JSON byte for byte.
 #[derive(Serialize)]
-struct SnapshotOut<'a> {
+struct SnapshotOut {
     changed: bool,
     revision: u64,
     cols: usize,
     rows: usize,
-    title: &'a str,
+    title: String,
     cells: Vec<CellOut>,
-    lines: Vec<&'a str>,
-    links: &'a [String],
+    lines: Vec<String>,
+    links: Vec<String>,
     images: Vec<Value>,
     animating: bool,
     cursor: CursorOut,
@@ -159,7 +176,7 @@ struct SnapshotOut<'a> {
     history: usize,
     clipboard: Vec<String>,
     bell: bool,
-    error: &'a Option<String>,
+    error: Option<String>,
     exited: bool,
     exit_code: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,6 +196,21 @@ struct SentRows {
     cols: usize,
     hashes: Vec<u64>,
 }
+
+/// The unchanged answer to a `since` poll with nothing new.
+const UNCHANGED_SNAPSHOT: &str = r#"{"changed":false}"#;
+
+/// The model state a sent snapshot owns: reported flags, one-shot events and row hashes.
+struct SnapshotCommit {
+    transient: bool,
+    reported_animating: bool,
+    revision: u64,
+    cols: usize,
+    hashes: Vec<u64>,
+    crowded: bool,
+}
+/// Snapshot fields plus the commit that grants them delivery; `None` is the unchanged answer.
+type BuiltSnapshot = Option<(SnapshotOut, SnapshotCommit)>;
 /// The window and tab name before a program sets one, and after it clears or resets the title.
 pub const DEFAULT_TITLE: &str = "Akitty";
 
@@ -389,7 +421,7 @@ impl Model {
         let mut handler = Tracker::new(term, graphics, tracking);
         handler.sync();
         parser.stop_sync(&mut handler);
-        let events = self.events.0.lock().map(|mut queue| queue.drain(..).collect()).unwrap_or_default();
+        let events = self.events.drain();
         let mut replies = Vec::new();
         self.handle_events(events, &mut replies);
         self.track_screen();
@@ -424,17 +456,15 @@ impl Model {
     }
     fn advance(&mut self, data: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
         // The event queue holds 128 entries and every event needs at least one input byte,
-        // so draining after each 64-byte slice guarantees none are dropped mid-chunk.
+        // so draining after each 64-byte slice guarantees none are dropped mid-chunk. The
+        // queued hint keeps plain byte runs off the drain lock.
         for slice in data.chunks(64) {
             self.parse(slice);
-            let events: Vec<_> = self
-                .events
-                .0
-                .lock()
-                .map(|mut q| q.drain(..).collect())
-                .unwrap_or_default();
-            if !*overflowed {
-                *overflowed = self.handle_events(events, replies);
+            if self.events.pending() {
+                let events = self.events.drain();
+                if !*overflowed {
+                    *overflowed = self.handle_events(events, replies);
+                }
             }
             self.track_screen();
         }
@@ -559,7 +589,39 @@ impl Model {
         self.snapshot_json_within(since, compact, MAX_SNAPSHOT_BYTES)
     }
 
+    /// Advances the reported flags, clears one-shot events and records the row hashes a
+    /// snapshot just delivered. Only call with the commit of a serialized snapshot: a
+    /// build that was never sent consumes nothing. Build, serialize and commit all run under
+    /// one model lock; a commit applied later would clear a bell or clipboard request that
+    /// arrived after the build.
+    fn commit_snapshot(&mut self, commit: SnapshotCommit) {
+        self.reported_transient = commit.transient;
+        self.reported_animating = commit.reported_animating;
+        self.clipboard.clear();
+        self.bell = false;
+        self.sent = (!commit.crowded).then_some(SentRows {
+            revision: commit.revision,
+            cols: commit.cols,
+            hashes: commit.hashes,
+        });
+    }
+
     fn snapshot_json_within(&mut self, since: Option<u64>, compact: bool, max_bytes: usize) -> Result<String, String> {
+        let Some((value, commit)) = self.build_snapshot(since, compact)? else {
+            return Ok(UNCHANGED_SNAPSHOT.into());
+        };
+        let json = serde_json::to_string(&value).expect("snapshot fields serialize");
+        if json.len() > max_bytes {
+            // Fail before committing anything the client would never receive. `sent` is
+            // dropped so the next poll sends a full snapshot rather than a diff against it.
+            self.sent = None;
+            return Err("snapshot exceeds 8 MiB".into());
+        }
+        self.commit_snapshot(commit);
+        Ok(json)
+    }
+
+    fn build_snapshot(&mut self, since: Option<u64>, compact: bool) -> Result<BuiltSnapshot, String> {
         if self.exited { self.program_status.finish_work(); }
         // Animations and chrome expiry can change without any new terminal input.
         if self.graphics.tick(std::time::Instant::now()) {
@@ -577,7 +639,7 @@ impl Model {
             && transient == self.reported_transient
             && animating == self.reported_animating
         {
-            return Ok(r#"{"changed":false}"#.into());
+            return Ok(None);
         }
         self.sync_graphics();
         // The tracker sync above may drop a placement, so record the value this snapshot
@@ -666,20 +728,6 @@ impl Model {
                 && placeholders[row as usize]
                     .binary_search_by_key(&indexed.point.column.0, |entry| entry.col)
                     .is_ok();
-            let mut value = if spacer || slot {
-                String::new()
-            } else if hidden {
-                " ".into()
-            } else {
-                cell.c.to_string()
-            };
-            if !hidden
-                && !spacer
-                && !slot
-                && let Some(extra) = cell.zerowidth()
-            {
-                value.extend(extra);
-            }
             let mut fg = resolve(cell.fg, content.colors);
             let mut bg = resolve(cell.bg, content.colors);
             if cell.flags.contains(Flags::INVERSE) {
@@ -693,7 +741,18 @@ impl Model {
                 .as_ref()
                 .is_some_and(|s| s.contains(indexed.point));
             let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.point.column.0, indexed.point.line.0);
-            text[row as usize].push_str(&value);
+            // Row text carries every column. Appending the glyph directly avoids allocating a
+            // cell string for the blank cells omitted below; emitted cells copy just their own bytes.
+            let start = text[row as usize].len();
+            if spacer || slot {
+                // A wide-character spacer and an image slot draw no glyph of their own.
+            } else if hidden {
+                text[row as usize].push(' ');
+            } else {
+                let row_text = &mut text[row as usize];
+                row_text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() { row_text.extend(extra); }
+            }
             // Blank cells that draw as the clear colour carry no information beyond `lines`;
             // skipping them shrinks a quiet screen's snapshot by more than 90%.
             if cell.flags.is_empty()
@@ -723,7 +782,7 @@ impl Model {
                 compact,
                 row,
                 col: indexed.point.column.0,
-                text: value,
+                text: text[row as usize][start..].to_string(),
                 fg,
                 bg,
                 attrs,
@@ -795,18 +854,21 @@ impl Model {
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor_visible =
             content.cursor.shape != CursorShape::Hidden && content.display_offset == 0;
-        self.links = links;
         let dirty_rows: Vec<usize> = (0..rows).filter(|r| dirty[*r]).collect();
-        let lines: Vec<&str> = dirty_rows.iter().map(|r| text[*r].as_str()).collect();
-        let snapshot = SnapshotOut {
+        // Rows move out of the scratch buffer; a partial snapshot only carries its dirty ones.
+        let lines: Vec<String> = dirty_rows.iter().map(|r| std::mem::take(&mut text[*r])).collect();
+        // A crowded link table is rebuilt by the next full snapshot instead of growing without
+        // bound. The table is cloned, not borrowed, so the caller can serialize after the lock.
+        let crowded = partial && links.len() > MAX_LINKS / 2;
+        let value = SnapshotOut {
             changed: true,
             revision: self.revision,
             cols: self.size.cols,
             rows: self.size.rows,
-            title: &self.title,
+            title: self.title.clone(),
             cells,
             lines,
-            links: &self.links,
+            links: links.clone(),
             images,
             animating: reported_animating,
             cursor: CursorOut { row: cursor_row, col: content.cursor.point.column.0, visible: cursor_visible },
@@ -825,7 +887,7 @@ impl Model {
             // events must survive for the next poll instead of vanishing with it.
             clipboard: self.clipboard.clone(),
             bell: self.bell,
-            error: &self.error,
+            error: self.error.clone(),
             exited: self.exited,
             exit_code: self.exit_code,
             chrome: self.chrome.to_json(now),
@@ -835,27 +897,18 @@ impl Model {
             partial: partial.then_some(true),
             dirty: partial.then_some(dirty_rows),
         };
-        let json = serde_json::to_string(&snapshot).expect("snapshot fields serialize");
-        if json.len() > max_bytes {
-            // Fail before committing anything the client would never receive. `sent` is
-            // dropped so the next poll sends a full snapshot rather than a diff against it.
-            self.sent = None;
-            return Err("snapshot exceeds 8 MiB".into());
-        }
-        // The snapshot will be returned: this is the point at which the reported flags and
-        // one-shot events may advance to match what the client is about to receive.
-        self.reported_transient = transient;
-        self.reported_animating = reported_animating;
-        self.clipboard.clear();
-        self.bell = false;
-        // A crowded link table is rebuilt by the next full snapshot instead of growing without bound.
-        let crowded = partial && self.links.len() > MAX_LINKS / 2;
-        self.sent = (!crowded).then_some(SentRows {
-            revision: self.revision,
-            cols: self.size.cols,
-            hashes,
-        });
-        Ok(json)
+        self.links = links;
+        Ok(Some((
+            value,
+            SnapshotCommit {
+                transient,
+                reported_animating,
+                revision: self.revision,
+                cols: self.size.cols,
+                hashes,
+                crowded,
+            },
+        )))
     }
 }
 
@@ -1444,6 +1497,23 @@ mod tests {
         let after: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
         assert_eq!(after["bell"], false, "delivered events are cleared: {after}");
         assert_eq!(after["clipboard"], json!([]), "{after}");
+    }
+
+    #[test]
+    fn row_text_keeps_wide_combining_and_blank_columns() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed(b"ab\xe4\xb8\xad e\xcc\x81");
+        let snapshot = model.snapshot(None);
+        // Glyph columns: wide 中 occupies two, the blank columns still pad `lines`.
+        assert_eq!(snapshot["lines"][0], "ab\u{4e2d} e\u{301}    ");
+        assert_eq!(snapshot["lines"][1], "          ");
+        let cells = snapshot["cells"].as_array().unwrap();
+        let at = |col: i64| cells.iter().find(|cell| cell["col"] == col).unwrap();
+        assert_eq!(at(2)["text"], "\u{4e2d}");
+        assert_eq!(at(2)["wide"], true);
+        assert_eq!(at(5)["text"], "e\u{301}", "combining marks stay on their cell");
+        assert_eq!(at(3)["text"], "", "the wide spacer carries no glyph");
+        assert!(cells.iter().all(|cell| cell["col"] != 4), "a blank cell stays omitted");
     }
 
     #[test]

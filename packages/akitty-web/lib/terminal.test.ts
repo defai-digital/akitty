@@ -3905,6 +3905,29 @@ describe('Title and bell streaming scanner', () => {
     expect(term.title).toBe('caf\u00e9');
   });
 
+  test('a title delivered one byte per write decodes across every possible split', () => {
+    if (!term) return;
+
+    // One byte per write puts the write boundary inside the introducer, the UTF-8 sequences and the terminator.
+    const bytes = new TextEncoder().encode('\x1b]2;h\u00e9llo \u{1f600}\x07');
+    for (const byte of bytes) term.write(new Uint8Array([byte]));
+
+    expect(term.title).toBe('h\u00e9llo \u{1f600}');
+    expect(titles).toEqual(['h\u00e9llo \u{1f600}']);
+    expect(bells).toBe(0);
+  });
+
+  test('a title split across a string and a byte write keeps the pending sequence', () => {
+    if (!term) return;
+
+    term.write('\x1b]2;caf');
+    const rest = new TextEncoder().encode('\u00e9 \u{1f600}\x07');
+    term.write(rest.slice(0, 1));
+    term.write(rest.slice(1));
+
+    expect(term.title).toBe('caf\u00e9 \u{1f600}');
+  });
+
   test('OSC 1 (icon name) never becomes the title and its BEL does not ring', () => {
     if (!term) return;
 
