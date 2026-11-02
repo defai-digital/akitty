@@ -42,7 +42,7 @@ import type { ILink, ILinkProvider } from './types';
 // Title/Bell Scanner
 // ============================================================================
 
-/** Hard cap on the pending OSC payload retained while waiting for a terminator. */
+/** Hard cap on the pending OSC payload bytes retained while waiting for a terminator. */
 const MAX_OSC_PAYLOAD_LENGTH = 4096;
 
 /** ECMA-48 CAN and SUB: either one cancels whatever sequence is pending. */
@@ -63,8 +63,11 @@ type ScannerState =
  * title (OSC 0/2) and the bell (BEL).
  *
  * Both arrive interleaved with ordinary output and may be split across writes at any byte, so the
- * scanner keeps its parse state between writes. Bytes are decoded with a streaming TextDecoder, so
- * a UTF-8 sequence split across writes is not corrupted. BEL rings in the ground state and, as an
+ * scanner keeps its parse state between writes. The parse runs on raw bytes: BEL, ESC and the other
+ * introducers are ASCII, which never appears inside a multi-byte UTF-8 sequence, so scanning bytes
+ * sees exactly what scanning decoded text would — but only a title payload is ever decoded, once,
+ * when its sequence ends. That still reassembles a UTF-8 sequence split anywhere across writes.
+ * BEL rings in the ground state and, as an
  * executable C0 control, in the escape and CSI states without ending them; every other executable
  * C0 control also leaves the pending escape alive, and DEL is ignored (ECMA-48). Inside an OSC
  * payload the only C0 control that matters is the BEL terminator (and CAN/SUB); every other C0
@@ -78,8 +81,10 @@ type ScannerState =
 class TitleBellScanner {
   private state: ScannerState = 'ground';
   private readonly encoder = new TextEncoder();
-  private decoder = new TextDecoder();
-  private pending = '';
+  private readonly decoder = new TextDecoder();
+  /** Raw OSC payload bytes; decoded only when the sequence ends. */
+  private readonly payload = new Uint8Array(MAX_OSC_PAYLOAD_LENGTH);
+  private payloadLength = 0;
   private overflowed = false;
 
   constructor(
@@ -90,8 +95,7 @@ class TitleBellScanner {
   /** Drop any partially parsed sequence, e.g. after Terminal.reset(). */
   reset(): void {
     this.state = 'ground';
-    this.decoder = new TextDecoder();
-    this.pending = '';
+    this.payloadLength = 0;
     this.overflowed = false;
   }
 
@@ -101,75 +105,73 @@ class TitleBellScanner {
     // Encode strings too so all input flows through one byte stream: a Uint8Array write that ended
     // mid-codepoint must be completed by whatever bytes arrive next, even if that is a string write.
     const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
-    const text = this.decoder.decode(bytes, { stream: true });
-    if (text.length === 0) return;
 
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
+    for (let i = 0; i < bytes.length; i++) {
+      const byte = bytes[i];
 
       switch (this.state) {
         case 'ground':
-          if (code === 0x1b) this.state = 'escape';
-          else if (code === 0x07) this.onBell();
+          if (byte === 0x1b) this.state = 'escape';
+          else if (byte === 0x07) this.onBell();
           break;
 
         case 'escape':
-          if (code === CAN || code === SUB) this.cancelSequence();
-          else this.enterEscape(code);
+          if (byte === CAN || byte === SUB) this.cancelSequence();
+          else this.enterEscape(byte);
           break;
 
         case 'csi':
-          if (code === 0x1b) this.state = 'escape';
-          else if (code === CAN || code === SUB) this.cancelSequence();
-          else if (code === 0x07) this.onBell(); // C0 executes without ending the CSI
-          else if (code >= 0x40 && code <= 0x7e) this.state = 'ground'; // final byte
+          if (byte === 0x1b) this.state = 'escape';
+          else if (byte === CAN || byte === SUB) this.cancelSequence();
+          else if (byte === 0x07) this.onBell(); // C0 executes without ending the CSI
+          else if (byte >= 0x40 && byte <= 0x7e) this.state = 'ground'; // final byte
           break;
 
         case 'osc':
-          if (code === 0x07) this.finishOsc(); // BEL terminator
-          else if (code === CAN || code === SUB) this.cancelSequence();
-          else if (code === 0x1b) this.state = 'oscEscape';
+          if (byte === 0x07) this.finishOsc(); // BEL terminator
+          else if (byte === CAN || byte === SUB) this.cancelSequence();
+          else if (byte === 0x1b) this.state = 'oscEscape';
           // ECMA-48: C0 controls other than the BEL terminator and CAN/SUB are ignored inside an
           // OSC, as is DEL, so they are never collected into the title payload.
-          else if (code >= 0x20 && code !== 0x7f) this.appendOsc(code);
+          else if (byte >= 0x20 && byte !== 0x7f) this.appendOsc(byte);
           break;
 
         case 'oscEscape':
-          if (code === 0x5c) this.finishOsc(); // ST
-          else if (code === 0x1b) this.state = 'oscEscape';
-          else if (code === CAN || code === SUB) this.cancelSequence();
+          if (byte === 0x5c) this.finishOsc(); // ST
+          else if (byte === 0x1b) this.state = 'oscEscape';
+          else if (byte === CAN || byte === SUB) this.cancelSequence();
           // ECMA-48: a C0 control (including a raw BEL, which is data inside a control string) or
           // DEL after the ESC is ignored and the pending ST survives, so `ESC DEL \` still ends the
           // OSC. Only a printable byte proves the ESC was not ST; it cancels and redispatches.
-          else if (code >= 0x20 && code !== 0x7f) {
+          else if (byte >= 0x20 && byte !== 0x7f) {
             // An ESC that is not ST cancels the control string; the byte after it starts a new
             // escape sequence, so `ESC ] 2 ; a ESC ] 2 ; b BEL` titles "b" rather than
             // "a ESC ] 2 ; b". Dispatching through the escape state keeps every split of that
             // boundary identical, including when the ESC ends one write and `]` starts the next.
             this.cancelSequence();
             this.state = 'escape';
-            this.enterEscape(code);
+            this.enterEscape(byte);
           }
           break;
 
         case 'string':
-          if (code === 0x1b) this.state = 'stringEscape';
-          else if (code === CAN || code === SUB) this.cancelSequence();
+          if (byte === 0x1b) this.state = 'stringEscape';
+          else if (byte === CAN || byte === SUB) this.cancelSequence();
           break;
 
         case 'stringEscape':
-          if (code === 0x5c) this.state = 'ground'; // ST
-          else if (code === 0x1b) this.state = 'stringEscape';
-          else if (code === CAN || code === SUB) this.cancelSequence();
+          if (byte === 0x5c) this.state = 'ground'; // ST
+          else if (byte === 0x1b) this.state = 'stringEscape';
+          else if (byte === CAN || byte === SUB) this.cancelSequence();
           // As for OSC: C0 controls (a raw BEL is data here) and DEL after the ESC are ignored and
           // keep the ST pending; only a printable byte cancels the string and redispatches.
-          else if (code >= 0x20 && code !== 0x7f) {
+          else if (byte >= 0x20 && byte !== 0x7f) {
             // DCS/APC/PM/SOS end at ST only. Any other ESC cancels the string, exactly like an
             // OSC, and the byte after it is redispatched: `ESC P ... ESC ] 2;Title BEL` titles
             // instead of swallowing the OSC as DCS payload.
             this.cancelSequence();
             this.state = 'escape';
-            this.enterEscape(code);
+            this.enterEscape(byte);
           }
           break;
       }
@@ -178,7 +180,7 @@ class TitleBellScanner {
 
   private beginOsc(): void {
     this.state = 'osc';
-    this.pending = '';
+    this.payloadLength = 0;
     this.overflowed = false;
   }
 
@@ -188,46 +190,48 @@ class TitleBellScanner {
    */
   private cancelSequence(): void {
     this.state = 'ground';
-    this.pending = '';
+    this.payloadLength = 0;
     this.overflowed = false;
   }
 
   /** Consume the byte that follows an ESC, i.e. the body of the `escape` state. */
-  private enterEscape(code: number): void {
-    if (code === 0x1b) this.state = 'escape';
-    else if (code === 0x5b) this.state = 'csi'; // '['
-    else if (code === 0x5d) this.beginOsc(); // ']'
-    else if (code === 0x50 || code === 0x58 || code === 0x5e || code === 0x5f)
+  private enterEscape(byte: number): void {
+    if (byte === 0x1b) this.state = 'escape';
+    else if (byte === 0x5b) this.state = 'csi'; // '['
+    else if (byte === 0x5d) this.beginOsc(); // ']'
+    else if (byte === 0x50 || byte === 0x58 || byte === 0x5e || byte === 0x5f)
       this.state = 'string'; // DCS 'P', SOS 'X', PM '^', APC '_'
     // ECMA-48: an executable C0 control (BEL rings) does not abandon the pending escape, and DEL is
     // ignored in every state. CAN and SUB never reach here; the caller cancels those first.
-    else if (code < 0x20 || code === 0x7f) {
-      if (code === 0x07) this.onBell();
+    else if (byte < 0x20 || byte === 0x7f) {
+      if (byte === 0x07) this.onBell();
     } else this.state = 'ground';
   }
 
-  private appendOsc(code: number): void {
+  /**
+   * Retain one payload byte. The cap is in bytes, so a runaway payload cannot exceed it however it
+   * is encoded; past the cap the rest of the sequence is consumed but not retained.
+   */
+  private appendOsc(byte: number): void {
     if (this.overflowed) return;
-    if (this.pending.length >= MAX_OSC_PAYLOAD_LENGTH) {
-      // Keep consuming until the terminator, but stop retaining data.
+    if (this.payloadLength >= MAX_OSC_PAYLOAD_LENGTH) {
       this.overflowed = true;
-      this.pending = '';
+      this.payloadLength = 0;
       return;
     }
-    this.pending += String.fromCharCode(code);
+    this.payload[this.payloadLength++] = byte;
   }
 
   private finishOsc(): void {
     this.state = 'ground';
 
-    if (this.overflowed) {
-      this.overflowed = false;
-      this.pending = '';
-      return;
-    }
+    const length = this.payloadLength;
+    const overflowed = this.overflowed;
+    this.payloadLength = 0;
+    this.overflowed = false;
+    if (overflowed) return;
 
-    const payload = this.pending;
-    this.pending = '';
+    const payload = this.decoder.decode(this.payload.subarray(0, length));
 
     const separator = payload.indexOf(';');
     if (separator < 0) return;
@@ -539,15 +543,9 @@ export class Terminal implements ITerminalCore {
       this.selectionManager.clearSelection();
     }
 
-    // Resize canvas to match new font metrics
+    // Resize canvas to match new font metrics. renderer.resize sets the CSS size too, scaled for the device pixel
+    // ratio; sizing the backing store here as well would overwrite that with an unscaled size and blur the text.
     this.renderer.resize(this.cols, this.rows);
-
-    // Update canvas element dimensions to match renderer
-    const metrics = this.renderer.getMetrics();
-    this.canvas.width = metrics.width * this.cols;
-    this.canvas.height = metrics.height * this.rows;
-    this.canvas.style.width = `${metrics.width * this.cols}px`;
-    this.canvas.style.height = `${metrics.height * this.rows}px`;
 
     // Force full re-render with new font
     this.renderer.render(this.wasmTerm, true, this.viewportY, this);

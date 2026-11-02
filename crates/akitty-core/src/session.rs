@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 const MAX_PENDING: usize = 1_048_576;
 enum Command {
@@ -21,7 +22,71 @@ pub struct Session {
     commands: Option<mpsc::SyncSender<Command>>,
     stop: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
+    /// Self-pipe the worker polls next to the PTY: a queued command or a stop must not wait
+    /// for the idle timeout. Absent on headless sessions, which have no worker.
+    wake: Option<Arc<Wake>>,
     worker: Mutex<Option<JoinHandle<Result<(), String>>>>,
+}
+/// Nonblocking, close-on-exec self-pipe. Only the readiness matters, never the bytes, so a full
+/// pipe is already a pending wake and signals may drop their byte.
+struct Wake {
+    read: i32,
+    write: i32,
+}
+impl Wake {
+    fn new() -> Result<Self, String> {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid two-element array for pipe(2).
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(format!("terminal wake pipe unavailable: {}", std::io::Error::last_os_error()));
+        }
+        // Both ends are owned by this Wake, so a failure here closes them through Drop.
+        let wake = Self { read: fds[0], write: fds[1] };
+        for fd in [wake.read, wake.write] {
+            // SAFETY: fd is one of the descriptors this Wake just created.
+            let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if status < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, status | libc::O_NONBLOCK) } < 0 {
+                return Err(format!("terminal wake pipe unavailable: {}", std::io::Error::last_os_error()));
+            }
+            // Close on exec, so the shell and its descendants never inherit a wake end.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+                return Err(format!("terminal wake pipe unavailable: {}", std::io::Error::last_os_error()));
+            }
+        }
+        Ok(wake)
+    }
+    /// Ask the worker to leave `poll` now. EAGAIN means a wake is already pending.
+    fn signal(&self) {
+        let byte = 1u8;
+        // SAFETY: writes one byte from a live local into the owned wake descriptor.
+        unsafe { libc::write(self.write, (&byte as *const u8).cast(), 1) };
+    }
+    /// Consume every pending wake byte; the poll flags already delivered the wake itself.
+    fn drain(&self) {
+        let mut buffer = [0u8; 64];
+        loop {
+            // SAFETY: buffer is writable for its length; read reports invalid descriptors as EBADF.
+            let count = unsafe { libc::read(self.read, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if count > 0 {
+                continue;
+            }
+            if count == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return;
+            }
+        }
+    }
+}
+impl Drop for Wake {
+    fn drop(&mut self) {
+        // SAFETY: both descriptors are owned by this Wake and closed exactly once here.
+        unsafe { libc::close(self.read); libc::close(self.write) };
+    }
+}
+/// Worker-side access to the terminal state. A host panic may poison the mutex, but the exit path
+/// still has to publish `exited`, so the worker reuses whatever state the panic left behind.
+fn lock_model(model: &Mutex<Model>) -> std::sync::MutexGuard<'_, Model> {
+    model.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 impl Session {
     pub fn new(
@@ -44,6 +109,7 @@ impl Session {
                 commands: None,
                 stop,
                 pending,
+                wake: None,
                 worker: Mutex::new(None),
             });
         }
@@ -93,10 +159,12 @@ impl Session {
         let child = pty.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pty.slave);
         let child = ChildGuard::new(child, fd, slot);
+        let wake = Arc::new(Wake::new()?);
         let (tx, rx) = mpsc::sync_channel(4096);
         let model_worker = model.clone();
         let stop_worker = stop.clone();
         let pending_worker = pending.clone();
+        let wake_worker = wake.clone();
         let worker = thread::Builder::new()
             .name("akitty-pty".into())
             .spawn(move || {
@@ -107,6 +175,7 @@ impl Session {
                     model_worker,
                     stop_worker,
                     pending_worker,
+                    wake_worker,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -115,6 +184,7 @@ impl Session {
             commands: Some(tx),
             stop,
             pending,
+            wake: Some(wake),
             worker: Mutex::new(Some(worker)),
         })
     }
@@ -169,7 +239,7 @@ impl Session {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
         let previous_dirty = model.control.dirty;
-        let checked = model.control.human_input(); model.revision += 1; checked?;
+        model.control.human_input()?;
         // Zero bytes never reach the PTY, so the prompt was not edited: keep it authorizable
         // instead of leaving the dirty flag set by human_input behind.
         if bytes.is_empty() { model.control.dirty = previous_dirty; return self.enqueue_input(bytes); }
@@ -195,7 +265,12 @@ impl Session {
             self.pending.fetch_sub(len, Ordering::SeqCst);
             return Err(format!("PTY command rejected: {error}"));
         }
+        self.wake();
         Ok(())
+    }
+    /// Leave the worker's poll early; a full pipe already holds the wake.
+    fn wake(&self) {
+        if let Some(wake) = &self.wake { wake.signal(); }
     }
     pub fn control_acquire(&self, actor: String) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
@@ -253,6 +328,7 @@ impl Session {
                 model.requested_size = previous;
                 return Err(format!("resize rejected: {error}"));
             }
+            self.wake();
         } else {
             model.term.resize(size);
             model.size = size;
@@ -273,13 +349,14 @@ impl Session {
         model.cell_px = (width, height);
         // Push a PTY resize so TIOCGWINSZ reports the new pixel size even
         // though the grid itself did not change. Headless sessions just store it.
-        if let Some(sender) = &self.commands
-            && let Err(error) = sender.try_send(Command::Resize(size))
-        {
-            // The PTY did not accept the resize, so keep the grid's geometry
-            // consistent: restore the old pixel size and leave the revision alone.
-            model.cell_px = previous;
-            return Err(format!("resize rejected: {error}"));
+        if let Some(sender) = &self.commands {
+            if let Err(error) = sender.try_send(Command::Resize(size)) {
+                // The PTY did not accept the resize, so keep the grid's geometry
+                // consistent: restore the old pixel size and leave the revision alone.
+                model.cell_px = previous;
+                return Err(format!("resize rejected: {error}"));
+            }
+            self.wake();
         }
         // Placeholder geometry is derived from cell_px, so a successful change must
         // invalidate snapshots a client could otherwise serve from its cached revision.
@@ -353,6 +430,8 @@ impl Session {
     }
     fn shutdown(&self) -> Result<(), String> {
         self.stop.store(true, Ordering::SeqCst);
+        // Wake the worker out of its idle poll so close never waits for the timeout.
+        self.wake();
         if let Some(worker) = self
             .worker
             .lock()
@@ -393,6 +472,10 @@ fn read_pty(fd: i32, buffer: &mut [u8], hung_up: bool) -> Result<Option<usize>, 
     Err(format!("PTY read failed: {error}"))
 }
 
+/// One syscall's read size, and the most a single pass pulls before servicing writes again.
+const READ_BUFFER: usize = 64 * 1024;
+const MAX_READ_PER_PASS: usize = 256 * 1024;
+
 const MAX_REPLY_BACKLOG: usize = 65_536;
 const REPLY_BACKLOG_ERROR: &str = "terminal replies dropped: the program is not reading them";
 
@@ -430,16 +513,18 @@ fn queue_parser_replies(
 }
 
 /// Expire the parser deadline and queue its replies under one model lock, so a concurrent
-/// feed cannot reset the backlog between the expiry and the drop decision.
+/// feed cannot reset the backlog between the expiry and the drop decision. Returns the next
+/// deadline the worker must poll for, so a synchronized update expires on time instead of at
+/// the idle timeout.
 fn expire_and_queue(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
-) -> Result<(), String> {
-    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+) -> Option<Instant> {
+    let mut state = lock_model(model);
     let replies = state.expire_sync();
     queue_parser_replies(&mut state, output, response_pending, replies);
-    Ok(())
+    state.parser.sync_timeout().sync_timeout()
 }
 
 /// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
@@ -450,17 +535,42 @@ fn feed_and_queue(
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
     bytes: &[u8],
-) -> Result<(), String> {
-    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+) {
+    let mut state = lock_model(model);
     let replies = state.feed(bytes);
     queue_parser_replies(&mut state, output, response_pending, replies);
-    Ok(())
+}
+
+/// Read one poll-ready batch, draining until the PTY reports no more bytes or the per-pass budget
+/// is spent. Each read is fed under its own model lock, so a snapshot or keystroke waits for at
+/// most one buffer's parse rather than the whole batch, and the lock is never held across a read.
+fn feed_batch(
+    fd: i32,
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    hung_up: bool,
+) -> Result<Option<usize>, String> {
+    let mut buffer = [0u8; READ_BUFFER];
+    let mut total = 0usize;
+    loop {
+        match read_pty(fd, &mut buffer, hung_up) {
+            Ok(Some(0)) => return Ok(None),
+            Ok(None) => return Ok(Some(total)),
+            Ok(Some(count)) => {
+                feed_and_queue(model, output, response_pending, &buffer[..count]);
+                total += count;
+                if total >= MAX_READ_PER_PASS { return Ok(Some(total)); }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Record final worker state. A clean shutdown keeps an error the host was already shown;
 /// only a real IO failure replaces it.
-fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<&str>) -> Result<(), String> {
-    let mut state = model.lock().map_err(|_| "terminal state poisoned")?;
+fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<&str>) {
+    let mut state = lock_model(model);
     state.shell.finish();
     state.exited = true;
     state.exit_code = exit_code;
@@ -468,7 +578,10 @@ fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<
         state.error = Some(error.into());
     }
     state.revision = state.revision.saturating_add(1);
-    Ok(())
+    drop(state);
+    // A host panic cannot be allowed to leave the session permanently "unavailable": the
+    // worker is done, so publish the exit the process actually reached to later polls.
+    model.clear_poison();
 }
 
 /// Write the front queued buffer once. `Ok(true)` moved bytes (and popped the entry once it
@@ -519,6 +632,14 @@ const FLUSH_BLOCKED_PASSES: usize = 20;
 const DRAIN_IDLE_MS: libc::c_int = 20;
 const DRAIN_SETTLE_MS: libc::c_int = 100;
 const DRAIN_IDLE_WAITS: usize = 2;
+
+/// A closing host stops reading while the shell is usually still rendering its last prompt, and
+/// a write that nobody drains can keep it from ever finishing its exit (the hangup then leaves an
+/// unkillable child). A close therefore drains to quiescence first: this many consecutive quiet
+/// polls, under this hard cap for a descendant that keeps writing.
+const CLOSE_QUIET_MS: libc::c_int = 5;
+const CLOSE_QUIET_POLLS: usize = 2;
+const CLOSE_DRAIN_MS: u128 = 100;
 
 /// Best-effort bounded delivery of the parser replies still queued when the worker stops.
 /// User input queued before the child exited is stale and never reaches a process that has
@@ -582,7 +703,7 @@ fn drain_after_exit(
     pending: &AtomicUsize,
     stop: &AtomicBool,
 ) -> Option<String> {
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; READ_BUFFER];
     let mut idle_waits = 0;
     let mut delivered = false;
     for _ in 0..32 {
@@ -609,9 +730,7 @@ fn drain_after_exit(
             }
             Ok(Some(count)) => {
                 idle_waits = 0;
-                if let Err(error) = feed_and_queue(model, output, response_pending, &buffer[..count]) {
-                    return Some(error);
-                }
+                feed_and_queue(model, output, response_pending, &buffer[..count]);
                 // The live loop will not run again, so a query answered here only reaches the
                 // program if the drain writes it before the master closes.
                 delivered |= flush_replies(fd, output, response_pending, pending);
@@ -622,6 +741,69 @@ fn drain_after_exit(
     None
 }
 
+/// Drain the terminal to quiescence before a close hangs the child up, so a prompt the shell was
+/// still writing lands instead of leaving that write stuck and the exit unreachable. Bounded:
+/// the quiet window ends the drain, and a descendant that keeps writing cannot hold the close
+/// open past [`CLOSE_DRAIN_MS`]. Bytes read here are fed to the model like any other output.
+fn drain_to_quiet(
+    fd: i32,
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+) {
+    let started = Instant::now();
+    let mut quiet = 0usize;
+    while started.elapsed().as_millis() < CLOSE_DRAIN_MS {
+        let mut probe = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll references one valid pollfd for this owned master.
+        if unsafe { libc::poll(&mut probe, 1, CLOSE_QUIET_MS) } <= 0 {
+            quiet += 1;
+            if quiet >= CLOSE_QUIET_POLLS { return; }
+            continue;
+        }
+        quiet = 0;
+        let hung_up = probe.revents & libc::POLLHUP != 0;
+        if !matches!(feed_batch(fd, model, output, response_pending, hung_up), Ok(Some(_))) {
+            return;
+        }
+    }
+}
+
+/// Longest the worker may sleep with nothing pending. Input and shutdown wake it through the
+/// self-pipe, so this only bounds silent child-exit detection.
+const IDLE_POLL_MS: libc::c_int = 250;
+/// A blocked write still retries at the old cadence, so a reply is not held for a whole idle poll.
+const BLOCKED_WRITE_POLL_MS: libc::c_int = 10;
+/// Longest a busy loop goes without checking whether the child exited.
+const WAIT_INTERVAL_MS: u128 = 100;
+/// Commands drained per pass; finishing a full batch signals another pass so nothing waits.
+const MAX_COMMANDS_PER_PASS: usize = 256;
+
+/// Poll timeout: the next parser deadline, clamped to the idle bound, rounded up so a
+/// sub-millisecond remainder is not dropped.
+fn poll_timeout(deadline: Option<Instant>) -> libc::c_int {
+    let Some(deadline) = deadline else { return IDLE_POLL_MS };
+    let now = Instant::now();
+    if deadline <= now { return 0; }
+    let millis = deadline.saturating_duration_since(now).as_millis().saturating_add(1);
+    millis.min(IDLE_POLL_MS as u128) as libc::c_int
+}
+
+/// Split one drained batch into the input to queue and the single resize to apply. Every resize
+/// but the last would reflow the grid for a geometry nobody can observe, so only the final one
+/// survives; inputs keep their relative order.
+fn coalesce(batch: Vec<Command>) -> (Vec<Vec<u8>>, Option<Size>) {
+    let mut inputs = Vec::with_capacity(batch.len());
+    let mut resize = None;
+    for command in batch {
+        match command {
+            Command::Input(bytes) => inputs.push(bytes),
+            Command::Resize(size) => resize = Some(size),
+        }
+    }
+    (inputs, resize)
+}
+
 fn run(
     master: Box<dyn portable_pty::MasterPty + Send>,
     mut child: ChildGuard,
@@ -629,55 +811,70 @@ fn run(
     model: Arc<Mutex<Model>>,
     stop: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
+    wake: Arc<Wake>,
 ) -> Result<(), String> {
     let fd = master.as_raw_fd().ok_or("PTY descriptor missing")?;
     let mut output: VecDeque<(Vec<u8>, usize, bool)> = VecDeque::new();
     let mut response_pending = 0usize;
-    let mut buffer = [0u8; 8192];
     let mut io_error = None;
+    let mut last_wait = Instant::now();
     while !stop.load(Ordering::SeqCst) {
-        expire_and_queue(&model, &mut output, &mut response_pending)?;
-        for command in rx.try_iter().take(16) {
-            match command {
-                Command::Input(bytes) => output.push_back((bytes, 0, true)),
-                Command::Resize(size) => {
-                    // The cell size is read before the ioctl so TIOCGWINSZ sees it.
-                    let cell = model.lock().map(|state| state.cell_px).unwrap_or((0, 0));
-                    if let Err(error) = master.resize(pty_size(size, cell)) {
-                        io_error = Some(error.to_string());
-                        break;
-                    }
-                    if let Ok(mut state) = model.lock() {
-                        state.term.resize(size);
-                        state.size = size;
-                        state.revision += 1;
-                    }
-                }
+        let deadline = expire_and_queue(&model, &mut output, &mut response_pending);
+        let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
+        if batch.len() == MAX_COMMANDS_PER_PASS {
+            // More commands wait in the channel, so keep the next poll from sleeping on them.
+            wake.signal();
+        }
+        let (inputs, resize) = coalesce(batch);
+        for bytes in inputs {
+            output.push_back((bytes, 0, true));
+        }
+        if let Some(size) = resize {
+            // The cell size is read before the ioctl so TIOCGWINSZ sees it.
+            let cell = lock_model(&model).cell_px;
+            if let Err(error) = master.resize(pty_size(size, cell)) {
+                io_error = Some(error.to_string());
+                break;
             }
+            let mut state = lock_model(&model);
+            state.term.resize(size);
+            state.size = size;
+            state.revision += 1;
         }
-        if io_error.is_some() {
-            break;
-        }
-        let mut poll = libc::pollfd {
-            fd,
-            events: libc::POLLIN | if output.is_empty() { 0 } else { libc::POLLOUT },
-            revents: 0,
+        let mut poll = [
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN | if output.is_empty() { 0 } else { libc::POLLOUT },
+                revents: 0,
+            },
+            libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 },
+        ];
+        let timeout = if output.is_empty() {
+            poll_timeout(deadline)
+        } else {
+            poll_timeout(deadline).min(BLOCKED_WRITE_POLL_MS)
         };
-        // SAFETY: poll references one valid pollfd for this owned master.
-        let ready = unsafe { libc::poll(&mut poll, 1, 10) };
-        if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            io_error = Some(std::io::Error::last_os_error().to_string());
-            break;
+        // SAFETY: poll references two valid pollfds owned by this loop.
+        let ready = unsafe { libc::poll(poll.as_mut_ptr(), 2, timeout) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                io_error = Some(std::io::Error::last_os_error().to_string());
+                break;
+            }
+            continue;
         }
-        if poll.revents & libc::POLLOUT != 0
+        if poll[1].revents != 0 { wake.drain(); }
+        if poll[0].revents & libc::POLLOUT != 0
             && let Err(error) = write_front(fd, &mut output, &mut response_pending, &pending)
         {
             io_error = Some(error);
             break;
         }
-        if poll.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-            match read_pty(fd, &mut buffer, poll.revents & libc::POLLHUP != 0) {
-                Ok(Some(0)) => {
+        let timed_out = ready == 0;
+        if poll[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            match feed_batch(fd, &model, &mut output, &mut response_pending, poll[0].revents & libc::POLLHUP != 0) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
                     // A hangup can report EOF before try_wait sees the exit, so leaving here
                     // without draining would drop a query the program sent as it died. The
                     // post-loop flush still delivers whatever this drain queues.
@@ -686,32 +883,34 @@ fn run(
                     }
                     break;
                 }
-                Ok(Some(count)) => {
-                    feed_and_queue(&model, &mut output, &mut response_pending, &buffer[..count])?;
-                }
-                Ok(None) => {},
                 Err(error) => { io_error = Some(error); break; },
             }
         }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if let Ok(mut state) = model.lock() {
+        // waitpid does not run on every pass: a hangup or an idle poll checks at once, and a pass
+        // kept busy by output (a background job still writing after the shell exited) checks at
+        // most every WAIT_INTERVAL_MS.
+        if timed_out || poll[0].revents & libc::POLLHUP != 0 || last_wait.elapsed().as_millis() >= WAIT_INTERVAL_MS {
+            last_wait = Instant::now();
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut state = lock_model(&model);
                     state.exited = true;
                     state.exit_code = Some(status.exit_code());
                     state.revision += 1;
+                    drop(state);
+                    // Drain available final output without waiting for inherited slave FDs.
+                    // A descendant can keep the slave writable after shell exit.
+                    // Bound this drain so close never joins an endless reader.
+                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
+                        io_error = Some(error);
+                    }
+                    break;
                 }
-                // Drain available final output without waiting for inherited slave FDs.
-                // A descendant can keep the slave writable after shell exit.
-                // Bound this drain so close never joins an endless reader.
-                if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
-                    io_error = Some(error);
+                Ok(None) => {}
+                Err(error) => {
+                    io_error = Some(error.to_string());
+                    break;
                 }
-                break;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                io_error = Some(error.to_string());
-                break;
             }
         }
     }
@@ -720,13 +919,16 @@ fn run(
     // only feeds the drain's settle decision, so it is discarded here.
     if !stop.load(Ordering::SeqCst) {
         let _ = flush_replies(fd, &mut output, &mut response_pending, &pending);
+    } else {
+        // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
+        drain_to_quiet(fd, &model, &mut output, &mut response_pending);
     }
     if let Err(error) = child.finish()
         && io_error.is_none()
     {
         io_error = Some(error);
     }
-    let _ = finalize(&model, child.exit_code(), io_error.as_deref());
+    finalize(&model, child.exit_code(), io_error.as_deref());
     drop(master);
     if let Some(error) = io_error {
         Err(error)
@@ -971,6 +1173,171 @@ mod tests {
         let mismatch: Value = serde_json::from_str(&session.snapshot(baseline, true).unwrap()).unwrap();
         assert_eq!(mismatch["changed"], true, "{mismatch}");
     }
+
+    #[test]
+    fn wake_pipe_is_nonblocking_close_on_exec_and_drains_after_a_signal() {
+        let wake = Wake::new().unwrap();
+        for fd in [wake.read, wake.write] {
+            // SAFETY: fd is a descriptor this Wake owns, so reading its flags is sound.
+            let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert!(status & libc::O_NONBLOCK != 0, "{fd} must never block");
+            // SAFETY: same descriptor; F_GETFD reports the close-on-exec flag.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags & libc::FD_CLOEXEC != 0, "{fd} must not leak into the shell");
+        }
+        let mut poll = libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll references one valid pollfd this test owns.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0);
+        wake.signal();
+        wake.signal();
+        // SAFETY: same pollfd, now with two pending bytes on the pipe.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 1);
+        wake.drain();
+        // SAFETY: same pollfd after the drain.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0, "drain must consume every wake");
+    }
+
+    #[test]
+    fn queued_input_signals_the_wake_pipe_and_a_rejected_send_does_not() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let wake = Arc::new(Wake::new().unwrap());
+        session.commands = Some(tx);
+        session.wake = Some(wake.clone());
+        let mut poll = libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 };
+        session.input_bytes(b"x".to_vec()).unwrap();
+        // SAFETY: poll references one valid pollfd this test owns.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 1, "input must wake the worker");
+        wake.drain();
+        // Fill the bounded queue without waking, then require the rejection to stay silent.
+        assert!(matches!(rx.try_recv(), Ok(Command::Input(bytes)) if bytes == b"x"));
+        session.commands.as_ref().unwrap().try_send(Command::Input(vec![0])).unwrap();
+        assert!(session.input_bytes(b"y".to_vec()).is_err());
+        // SAFETY: same valid pollfd after the rejected send.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0, "a rejected send must not wake");
+    }
+
+    #[test]
+    fn input_bumps_the_revision_once_on_success_and_never_on_rejection() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        session.commands = Some(tx);
+        let before = lock_model(&session.model).revision;
+        session.input_bytes(b"x".to_vec()).unwrap();
+        assert_eq!(lock_model(&session.model).revision, before + 1, "one accepted input is one revision");
+        // An agent lease blocks human typing; the failed attempt must not invalidate snapshots.
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let before = lock_model(&session.model).revision;
+        assert!(session.input_bytes(b"y".to_vec()).is_err());
+        assert_eq!(lock_model(&session.model).revision, before);
+        session.control_release(Some(lease)).unwrap();
+        // Empty input never reaches the PTY and changes nothing, so it earns no revision either.
+        let before = lock_model(&session.model).revision;
+        session.input_bytes(Vec::new()).unwrap();
+        assert_eq!(lock_model(&session.model).revision, before);
+    }
+
+    #[test]
+    fn a_command_batch_keeps_only_the_last_resize_and_every_input() {
+        let first = Size::validate(30, 5).unwrap();
+        let last = Size::validate(40, 6).unwrap();
+        let (inputs, resize) = coalesce(vec![
+            Command::Input(b"a".to_vec()),
+            Command::Resize(first),
+            Command::Input(b"b".to_vec()),
+            Command::Resize(last),
+            Command::Input(b"c".to_vec()),
+        ]);
+        assert_eq!(inputs, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(resize.map(|size| (size.cols, size.rows)), Some((40, 6)));
+        assert!(coalesce(vec![Command::Input(b"a".to_vec())]).1.is_none());
+    }
+
+    #[test]
+    fn poll_timeout_uses_the_deadline_but_never_exceeds_the_idle_bound() {
+        assert_eq!(poll_timeout(None), IDLE_POLL_MS);
+        // A deadline already past must not sleep at all.
+        assert_eq!(poll_timeout(Some(Instant::now() - std::time::Duration::from_millis(1))), 0);
+        // A far deadline is clamped so a silent child exit is still observed.
+        assert_eq!(poll_timeout(Some(Instant::now() + std::time::Duration::from_secs(60))), IDLE_POLL_MS);
+        // A close deadline is honoured, rounded up to whole milliseconds.
+        let timeout = poll_timeout(Some(Instant::now() + std::time::Duration::from_millis(20)));
+        assert!((1..=21).contains(&timeout), "{timeout}");
+    }
+
+    #[test]
+    fn a_poisoned_model_still_reports_the_exit() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let poisoned = session.model.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("host panic while holding the terminal state");
+        })
+        .join();
+        assert!(session.model.lock().is_err(), "the panic must poison the lock");
+        // The worker's exit path recovers the state instead of stranding the session.
+        finalize(&session.model, Some(0), None);
+        let state = lock_model(&session.model);
+        assert!(state.exited);
+        assert_eq!(state.exit_code, Some(0));
+        drop(state);
+        // Later host polls must work again, so the exit is actually observable.
+        assert!(session.snapshot(None, true).is_ok());
+    }
+
+    #[test]
+    fn a_resize_storm_applies_the_final_grid() {
+        let session = Session::new(20, 3, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        let sizes = [(41, 7), (42, 8), (43, 9), (60, 12)];
+        for (cols, rows) in sizes {
+            session.resize(cols, rows).unwrap();
+        }
+        let last = *sizes.last().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let applied = { let state = lock_model(&session.model); (state.size.cols, state.size.rows) };
+            if applied == last { break; }
+            assert!(Instant::now() < deadline, "the worker never applied the final grid: {applied:?}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn keystrokes_echo_without_waiting_for_the_idle_poll() {
+        // The tty line discipline echoes printable input back through the master without any
+        // program involvement, so this measures the worker loop itself.
+        let session = Session::new(20, 6, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        // Let the shell install its line editing first: a byte it reads while starting up is
+        // consumed before the line is drawn and never echoed.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        session.input_bytes(b"\r".to_vec()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let echoed = |marker: char| session.snapshot(None, true).unwrap().matches(marker).count();
+        let wait_for = |marker: char, before: usize| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if echoed(marker) > before { return true; }
+                std::thread::yield_now();
+            }
+            false
+        };
+        // One distinct marker per iteration, counted against its own baseline so a login banner
+        // cannot satisfy the wait. Twenty columns by six rows leaves room for every echo.
+        let markers: Vec<char> = ('A'..='Z').chain('a'..='j').collect();
+        let mut samples = Vec::with_capacity(markers.len());
+        for marker in markers {
+            let before = echoed(marker);
+            let start = Instant::now();
+            session.input_bytes(marker.to_string().into_bytes()).unwrap();
+            assert!(wait_for(marker, before), "no echo for {marker:?}");
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        // The wake pipe delivers the echo on the next poll (about 1 ms here). Without it input waits
+        // for the 250 ms idle poll; the bound sits far from both so a loaded CI host cannot flake it.
+        assert!(median < std::time::Duration::from_millis(50), "median echo latency {median:?}");
+    }
 }
 
 #[cfg(test)]
@@ -1022,14 +1389,14 @@ mod reply_tests {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.model.lock().unwrap().error = Some(REPLY_BACKLOG_ERROR.into());
         // A clean shutdown has no IO failure, so it must not turn a reported error into success.
-        finalize(&session.model, Some(0), None).unwrap();
+        finalize(&session.model, Some(0), None);
         let model = session.model.lock().unwrap();
         assert_eq!(model.error.as_deref(), Some(REPLY_BACKLOG_ERROR));
         assert!(model.exited);
         assert_eq!(model.exit_code, Some(0));
         drop(model);
         // A real IO failure still becomes the error the host reads.
-        finalize(&session.model, Some(1), Some("PTY read failed")).unwrap();
+        finalize(&session.model, Some(1), Some("PTY read failed"));
         assert_eq!(session.model.lock().unwrap().error.as_deref(), Some("PTY read failed"));
     }
 
@@ -1040,7 +1407,7 @@ mod reply_tests {
         let mut response_pending = 0;
         // The post-exit drain must share the live feed's reply queueing: answers parsed
         // after the shell exits used to be dropped on the floor.
-        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n").unwrap();
+        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n");
         let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
         assert!(!queued.is_empty(), "post-exit replies must reach the PTY: {queued:?}");
         assert_eq!(queued, b"\x1b[1;1R");

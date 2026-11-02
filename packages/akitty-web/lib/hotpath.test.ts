@@ -263,6 +263,97 @@ describe('CanvasRenderer work skipping', () => {
     renderer.dispose?.();
   });
 
+  test.each([1.25, 1.5])('an idle frame after a fractional DPR frame (%s) does not resize', (dpr) => {
+    const { renderer, counts, reset } = makeRenderer({ devicePixelRatio: dpr });
+    const r = renderer as any;
+    // 81 columns at 9px is 729 CSS px: a fractional device-pixel width at both ratios.
+    r.metrics = { width: 9, height: 17, baseline: 13 };
+    const resize = vi.spyOn(r, 'resize');
+    const { renderable } = makeRenderable(81, 4, ['abc']);
+
+    renderer.render(renderable, true, 0);
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(r.canvas.width).toBe(Math.round(81 * 9 * dpr));
+
+    resize.mockClear();
+    reset();
+    renderer.render(renderable, false, 0);
+    expect(resize).not.toHaveBeenCalled();
+    expect(counts.fillText).toBe(0);
+    expect(counts.fillRect).toBe(1); // the cursor only
+    renderer.dispose?.();
+  });
+
+  test('an idle frame allocates no per-row hashes and reads no rows', () => {
+    const { renderer } = makeRenderer();
+    const { renderable, viewLines } = makeRenderable(20, 4, ['abc']);
+    const dirty = new Set<number>();
+    renderable.isDirty = () => dirty.size > 0;
+    renderer.render(renderable, true, 0);
+    const reads = viewLines();
+
+    renderer.render(renderable, false, 0);
+    expect(viewLines()).toBe(reads);
+    renderer.dispose?.();
+  });
+
+  test('a monitor change rescales the canvas', () => {
+    const original = window.devicePixelRatio;
+    try {
+      window.devicePixelRatio = 1;
+      const { renderer } = makeRenderer();
+      const r = renderer as any;
+      r.metrics = { width: 9, height: 17, baseline: 13 };
+      const { renderable } = makeRenderable(20, 4, ['abc']);
+
+      renderer.render(renderable, true, 0);
+      expect([r.canvas.width, r.canvas.height]).toEqual([180, 68]);
+
+      window.devicePixelRatio = 2;
+      renderer.render(renderable, false, 0);
+      expect(r.devicePixelRatio).toBe(2);
+      expect([r.canvas.width, r.canvas.height]).toEqual([360, 136]);
+      renderer.dispose?.();
+    } finally {
+      window.devicePixelRatio = original;
+    }
+  });
+
+  test('an explicit devicePixelRatio is not overridden by the window', () => {
+    const original = window.devicePixelRatio;
+    try {
+      const { renderer } = makeRenderer({ devicePixelRatio: 1.5 });
+      const r = renderer as any;
+      r.metrics = { width: 9, height: 17, baseline: 13 };
+      const resize = vi.spyOn(r, 'resize');
+      const { renderable } = makeRenderable(20, 4, ['abc']);
+      renderer.render(renderable, true, 0);
+
+      window.devicePixelRatio = 2;
+      resize.mockClear();
+      renderer.render(renderable, false, 0);
+      expect(r.devicePixelRatio).toBe(1.5);
+      expect(resize).not.toHaveBeenCalled();
+      renderer.dispose?.();
+    } finally {
+      window.devicePixelRatio = original;
+    }
+  });
+
+  test('an outside change to the backing store is repaired', () => {
+    const { renderer } = makeRenderer();
+    const r = renderer as any;
+    r.metrics = { width: 9, height: 17, baseline: 13 };
+    const { renderable } = makeRenderable(20, 4, ['abc']);
+    renderer.render(renderable, true, 0);
+
+    // handleFontChange() in terminal.ts sizes the canvas itself, without the DPR scale.
+    r.canvas.width = 10;
+    renderer.render(renderable, false, 0);
+    expect(r.canvas.width).toBe(180);
+    renderer.dispose?.();
+  });
+
   test('a frame with no dirty rows does not poll them', async () => {
     const { renderer } = makeRenderer();
     const { renderable, dirty } = makeRenderable(20, 4, ['abc']);
@@ -492,6 +583,30 @@ describe('Terminal render loop', () => {
     error.mockRestore();
     term.dispose();
     container.remove();
+  });
+
+  test('a font change resizes the canvas once and keeps the device-pixel scale', async () => {
+    const original = window.devicePixelRatio;
+    try {
+      window.devicePixelRatio = 2;
+      const term = await createIsolatedTerminal({ cols: 20, rows: 4 });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      term.open(container);
+
+      const renderer = term.renderer!;
+      const resize = vi.spyOn(renderer as any, 'resize');
+      term.options.fontSize = 18;
+
+      expect(resize).toHaveBeenCalledTimes(1);
+      const { width } = renderer.getMetrics();
+      expect((renderer as any).canvas.width).toBe(Math.round(20 * width * 2));
+
+      term.dispose();
+      container.remove();
+    } finally {
+      window.devicePixelRatio = original;
+    }
   });
 });
 

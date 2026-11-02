@@ -5,7 +5,8 @@ import Darwin
 /// Private, bounded local metadata. Hashes redact command text; they are not attestations or tamper protection.
 /// Every file operation runs on one serial queue: `append` waits for its write (callers that need the record on disk
 /// before continuing), `appendLater` does not (the periodic recorder, which must not do file I/O on the main thread),
-/// and `export` waits behind any queued writes, so readers always see everything recorded before them.
+/// `appendDurably` is the asynchronous form of `append`, and `export` waits behind any queued writes, so readers
+/// always see everything recorded before them.
 final class AgentEventStore: @unchecked Sendable {
     let directory: URL
     let segmentLimit: Int
@@ -36,6 +37,19 @@ final class AgentEventStore: @unchecked Sendable {
     }
     func append(event: String, session: String, provenance: String, fields: [String: Any] = [:], synchronize: Bool = false) throws {
         try queue.sync { try write(event: event, session: session, provenance: provenance, fields: fields, synchronize: synchronize) }
+    }
+    /// `append(synchronize: true)` without blocking the caller's thread on the fsync: the record is on disk
+    /// before the call returns, its queue position is kept, and a failure is thrown to the awaiting caller.
+    func appendDurably(event: String, session: String, provenance: String, fields: [String: Any] = [:]) async throws {
+        let fields = UncheckedFields(value: fields)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                do {
+                    try self.write(event: event, session: session, provenance: provenance, fields: fields.value, synchronize: true)
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
     }
     /// Queues an unsynchronized append and returns at once; a failure is reported to `failed` on the main queue.
     func appendLater(event: String, session: String, provenance: String, fields: [String: Any] = [:], failed: @escaping @MainActor (String) -> Void) {

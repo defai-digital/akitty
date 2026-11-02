@@ -121,9 +121,10 @@ import AgentIPC
                 guard ProcessInfo.processInfo.systemUptime >= nextPromptTime else { throw AkittyError.core("Local requests are rate limited. Wait before requesting again.") }
                 guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
                 let actor = "local process \(peer.pid)"
-                // Persist intent before acquiring authority. Failure here prevents execution.
-                try store.append(event: "execution_requested", session: sessions[terminal.session.id] ?? "unknown", provenance: "host",
-                    fields: ["pane_session_id": terminal.session.id, "peer_uid": peer.uid, "peer_pid": peer.pid, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count], synchronize: true)
+                // Persist intent before acquiring authority. Failure here prevents execution. The fsync runs off
+                // the main thread; awaiting it keeps both the ordering and the fail-closed contract.
+                try await store.appendDurably(event: "execution_requested", session: sessions[terminal.session.id] ?? "unknown", provenance: "host",
+                    fields: ["pane_session_id": terminal.session.id, "peer_uid": peer.uid, "peer_pid": peer.pid, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count])
                 let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: actor, command: command) { [weak self] request in
                     guard let self, self.enabled, peer.connected, window.attachedSheet == nil else { return false }
                     self.nextPromptTime = ProcessInfo.processInfo.systemUptime + self.cooldownInterval
@@ -147,7 +148,7 @@ import AgentIPC
         } catch {
             collectAll()
             if error.localizedDescription.contains("Dispatch outcome is unknown") {
-                do { try store.append(event: "dispatch_outcome_unknown", session: activeSession ?? "host", provenance: "host", synchronize: true) }
+                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: activeSession ?? "host", provenance: "host") }
                 catch { failure = error.localizedDescription }
             }
             return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])) ?? Data()

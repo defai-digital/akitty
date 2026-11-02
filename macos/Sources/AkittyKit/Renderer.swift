@@ -128,7 +128,23 @@ struct Quad {
     /// window-sized textures per frame.
     private var retired: [(texture: MTLTexture, frame: UInt64)] = []
     private static let maxRetired = 4
+    /// Window bitmap size of the last upload; a change makes every retired texture of the old size useless.
+    private var layerSize: (width: Int, height: Int)?
+    /// Frees retired textures whose size no longer matches the current drawable once no frame can sample them.
+    private func pruneRetired() {
+        guard let layerSize else { return }
+        let completed = pending.completed
+        retired.removeAll { $0.frame <= completed && ($0.texture.width != layerSize.width || $0.texture.height != layerSize.height) }
+    }
+    /// Remembers the drawable size: a live resize would otherwise keep `maxRetired` full-window textures alive.
+    /// Pruned on every update, not only on a size change: a texture retired by a frame still on the GPU becomes
+    /// freeable later, when steady output no longer resizes or retires anything.
+    private func noteLayerSize(_ bitmap: CGContext) {
+        if layerSize?.width != bitmap.width || layerSize?.height != bitmap.height { layerSize = (bitmap.width, bitmap.height) }
+        pruneRetired()
+    }
     private func retire(_ texture: MTLTexture) {
+        pruneRetired()
         retired.append((texture, pending.submitted))
         if retired.count > Self.maxRetired { retired.removeFirst(retired.count - Self.maxRetired) }
     }
@@ -146,12 +162,14 @@ struct Quad {
     func update(bitmap: CGContext, damage: Range<Int>? = nil) throws {
         // Leaving the layered path frees its layer and image textures.
         if layered { layered = false; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = [] }
+        noteLayerSize(bitmap)
         texture = try upload(into: texture, bitmap: bitmap, damage: damage)
         view.needsDisplay = true
     }
     /// The layered Metal frame: both text layers with their shared damage, images re-synced by generation.
     func updateLayers(background: CGContext, foreground: CGContext, damage: Range<Int>?, grid: GridGeometry, placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry]) throws {
-        try syncImages(placements: placements, pixels: pixels)
+        syncImages(placements: placements, pixels: pixels)
+        noteLayerSize(background)
         self.grid = grid; self.placements = Self.ordered(placements)
         backgroundLayer = try upload(into: backgroundLayer, bitmap: background, damage: damage)
         foregroundLayer = try upload(into: foregroundLayer, bitmap: foreground, damage: damage)
@@ -160,7 +178,7 @@ struct Quad {
     }
     /// An image-only frame: the text layers are still valid, so only image textures and geometry move.
     func updateImages(placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry], grid: GridGeometry) throws {
-        try syncImages(placements: placements, pixels: pixels)
+        syncImages(placements: placements, pixels: pixels)
         self.grid = grid; self.placements = Self.ordered(placements)
         view.needsDisplay = true
     }
@@ -195,15 +213,26 @@ struct Quad {
         }
         return MTLClearColor(red: Double(pixel[2]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[0]) / 255, alpha: 1)
     }()
+    /// Largest 2D texture side Metal supports on every Mac AkiTTY runs on; a bigger image cannot be uploaded.
+    static let maxTextureSide = 16384
+    /// Kitty accepts images up to 8 Mi pixels, so one may be wider or taller than the texture side. Such an image
+    /// is skipped; throwing here would fail the frame and drop the whole pane to software rendering.
+    nonisolated static func imageFits(width: Int, height: Int, limit: Int) -> Bool {
+        width > 0 && height > 0 && width <= limit && height <= limit
+    }
     /// Uploads image textures whose generation changed and drops the ones no longer placed.
-    private func syncImages(placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry]) throws {
+    private func syncImages(placements: [ImagePlacement], pixels: [UInt32: ImageStore.Entry]) {
+        let limit = Self.maxTextureSide
         var wanted: Set<UInt32> = []
         for placement in placements {
             wanted.insert(placement.id)
             if let binding = imageTextures[placement.id], binding.generation == placement.gen { continue }
             // Pixels not yet fetched for this generation leave the previous texture up rather than a gap.
-            guard let entry = pixels[placement.id], entry.generation == placement.gen,
-                  let bgra = entry.device ?? ImageStore.devicePixels(entry.rgba, width: entry.width, height: entry.height) else { continue }
+            guard let entry = pixels[placement.id], entry.generation == placement.gen else { continue }
+            // One image that cannot be textured is skipped, never a reason to fail the whole pane. It is checked
+            // before the pixel conversion, which would otherwise rerun for the skipped image on every frame.
+            guard Self.imageFits(width: entry.width, height: entry.height, limit: limit) else { imageTextures[placement.id] = nil; continue }
+            guard let bgra = entry.device ?? ImageStore.devicePixels(entry.rgba, width: entry.width, height: entry.height) else { continue }
             let region = MTLRegionMake2D(0, 0, entry.width, entry.height)
             // Rewrite in place only while no submitted frame can still be sampling the texture.
             if let binding = imageTextures[placement.id], binding.texture.width == entry.width, binding.texture.height == entry.height, pending.count == 0 {
@@ -211,7 +240,7 @@ struct Quad {
                 imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: binding.texture)
                 continue
             }
-            let texture = try makeTexture(width: entry.width, height: entry.height)
+            guard let texture = try? makeTexture(width: entry.width, height: entry.height) else { imageTextures[placement.id] = nil; continue }
             if let old = imageTextures[placement.id]?.texture { retire(old) }
             bgra.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
             imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: texture)

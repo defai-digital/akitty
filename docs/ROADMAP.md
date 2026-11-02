@@ -22,13 +22,13 @@ Establish repeatable baselines before changing hot paths. Priorities are:
 
 - Measure input throughput, full/partial snapshot cost, typing latency, idle
   wakeups, and memory with several panes and graphics workloads.
-- Evaluate reducing full-grid snapshot hashing, filter-buffer copies, and event
-  processing overhead while preserving protocol ordering and queue bounds.
-- Evaluate waking the PTY worker for input/resize/close instead of its fixed
-  10 ms idle polling, with prompt shutdown and no lost wakeups.
-- Reduce hidden/minimized-pane rasterization and polling while keeping PTY output
-  consumption, exit detection, and bounded state updates active. Refresh the
-  visible state when the pane is shown again.
+- Evaluate reducing full-grid snapshot hashing (scroll-aware partial snapshots)
+  while preserving protocol ordering and queue bounds. Filter-buffer copies and
+  per-slice event draining were reduced after 1.3.5 (about 20% more feed throughput).
+- The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
+  up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
+- Hidden panes (background tabs, occluded windows, a hidden app) poll at 4 Hz; the
+  view polls again when shown. Minimized-window rasterization remains to measure.
 - Extend malformed-input and stream-chunking coverage, including graphics/chrome
   sequences, Unicode, resets, resize, and partial/full snapshot equivalence.
 - Stress repeated open/close, shell exit during output, resize/input bursts,

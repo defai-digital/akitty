@@ -21,6 +21,8 @@ import os
     private var bitmap: CGContext?
     private let snapshotQueue = DispatchQueue(label: "com.defai.akitty.snapshot", qos: .userInteractive)
     private let rasterQueue = DispatchQueue(label: "com.defai.akitty.raster", qos: .userInteractive)
+    /// Serial PTY writes: keystrokes and pastes keep their order without waiting on the main thread for the lock.
+    private let inputQueue = DispatchQueue(label: "com.defai.akitty.input", qos: .userInteractive)
     /// Keeps the bitmap between frames; only touched on `rasterQueue`.
     private let rasterizer = GridRasterizer()
     /// Whether the last frame went through the layered Metal path.
@@ -30,6 +32,14 @@ import os
     private var pollInFlight = false
     private var rasterInFlight = false
     private var rasterPending = false
+    /// A poll arrived while the raster was drawing; it runs as soon as the frame is handed to the GPU.
+    private var pollDeferred = false
+    /// Uptime of the last low-rate poll of a hidden pane (see `pollDue`).
+    private var lastHiddenPoll: Double = 0
+    /// Trackpad points accumulated towards the next scroll line.
+    private var scrollRemainder: CGFloat = 0
+    /// Last string published through `onStatus`, so repeated frames do not rewrite the status line.
+    private var lastStatus: String?
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
     private var timer: Timer?
@@ -119,7 +129,7 @@ import os
             renderer.view.frame = bounds
             addSubview(renderer.view)
         } catch { renderFailed(error.localizedDescription) }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.timerTick() } }
         RunLoop.main.add(timer!, forMode: .common)
         // The 30 Hz timer stays the idle fallback; the display link only adds polls while frames move.
         setAccessibilityIdentifier("akitty-terminal")
@@ -161,6 +171,9 @@ import os
         resizeTerminal(); poll(); showClipboardRequest()
     }
     public override func layout() { super.layout(); presenter?.view.frame = bounds; resizeTerminal(); redraw() }
+    // NSTabView hides the views of unselected tabs, so these fire on tab switches without a window move.
+    public override func viewDidHide() { super.viewDidHide(); updatePolling() }
+    public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll() }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
     private func resizeTerminal() {
@@ -183,9 +196,9 @@ import os
     private func updatePolling() {
         setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastChange, now: ProcessInfo.processInfo.systemUptime))
     }
-    /// The link is only created inside a window; without one the idle timer keeps polling.
+    /// The link is only created for a pane that is actually on screen; the idle timer keeps polling otherwise.
     private func setFastPolling(_ fast: Bool) {
-        guard fast, !stopped, window != nil else { refreshLink?.isPaused = true; return }
+        guard fast, !stopped, paneVisible else { refreshLink?.isPaused = true; return }
         if refreshLink == nil {
             // The link retains its target, so it targets a weak proxy rather than the view itself.
             let link = displayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick(_:)))
@@ -197,8 +210,26 @@ import os
     /// Whether the display link is polling now, rather than only the 30 Hz idle timer.
     var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
+    /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
+    /// updates; it just does not need a snapshot per display refresh.
+    private var paneVisible: Bool {
+        guard let window, !isHiddenOrHasHiddenAncestor, NSApp?.isHidden != true else { return false }
+        // A window that was never ordered front reports no occlusion state; only a shown window the display
+        // system says is covered counts as hidden, so an unshown host keeps its display link.
+        return !window.isVisible || window.occlusionState.contains(.visible)
+    }
+    /// Hidden panes poll four times a second instead of at the display rate.
+    nonisolated static func pollDue(hidden: Bool, sinceLast: Double) -> Bool { !hidden || sinceLast >= 0.25 }
+    private func timerTick() {
+        let now = ProcessInfo.processInfo.systemUptime, hidden = !paneVisible
+        // An occluded window paused the display link; resume it as soon as the pane is back in view.
+        if !hidden, refreshLink?.isPaused == true { updatePolling() }
+        guard Self.pollDue(hidden: hidden, sinceLast: now - lastHiddenPoll) else { return }
+        if hidden { lastHiddenPoll = now }
+        poll()
+    }
     fileprivate func displayTick(_ link: CADisplayLink) {
-        guard !stopped, window != nil else { link.isPaused = true; return }
+        guard !stopped, paneVisible else { link.isPaused = true; return }
         poll()
     }
     public func runAgentCommand(actor: String, command: String) async throws -> (lease: UInt64, dispatch: AgentDispatch) {
@@ -211,6 +242,9 @@ import os
     }
     public func poll() {
         guard !stopped, !pollInFlight else { return }
+        // Under heavy output every vsync would build a snapshot a newer raster immediately drops. Defer it
+        // until the raster is handed off, then poll once: the newest frame is never lost.
+        if rasterInFlight { pollDeferred = true; return }
         pollInFlight = true
         let session = self.session, base = snapshot, since = snapshot?.revision, store = imageStore
         snapshotQueue.async { [weak self] in
@@ -236,7 +270,7 @@ import os
     private func syncProgramChrome() throws {
         _ = try session.call("program_chrome", ["enabled": preferences.programChrome])
     }
-    private func applySnapshot(_ result: Result<Snapshot?, Error>) {
+    func applySnapshot(_ result: Result<Snapshot?, Error>) {
         do {
             if let next = try result.get() {
                 let previous = snapshot
@@ -250,14 +284,16 @@ import os
                     exitHandled = true
                     DispatchQueue.main.async { [weak self] in self?.onExit?() }
                 }
-                if let error = next.error { onStatus?(error) }
-                else if let failure = health.failure { onStatus?("Software rendering: \(failure)") }
-                else if next.exited { onStatus?("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
-                else if next.control?.agent == true { onStatus?("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
-                else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { onStatus?(presentation) }
-                else { onStatus?("\(next.cols) cols × \(next.rows) rows") }
-                onTitle?(next.title)
-                onChrome?(next.chrome)
+                if let error = next.error { publishStatus(error) }
+                else if let failure = health.failure { publishStatus("Software rendering: \(failure)") }
+                else if next.exited { publishStatus("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
+                else if next.control?.agent == true { publishStatus("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
+                else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { publishStatus(presentation) }
+                else { publishStatus("\(next.cols) cols × \(next.rows) rows") }
+                // A busy frame arrives at up to 60 Hz and usually repeats the same title and chrome; only
+                // changes reach the tab strip, which rebuilds chips and the window title on every call.
+                if previous?.title != next.title { onTitle?(next.title) }
+                if previous?.chrome != next.chrome { onChrome?(next.chrome) }
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
@@ -270,11 +306,26 @@ import os
         } catch { show(error) }
     }
     private func renderFailed(_ message: String) {
+        let replacingPresenter = presenter != nil
         health.fail(message)
         presenter?.view.removeFromSuperview(); presenter = nil
-        onStatus?("Software rendering: \(message)")
+        // The raster queue may still be drawing into this bitmap while draw(_:) runs on main; drop the
+        // shared reference so no image is made of a context another queue is mutating.
+        bitmap = nil
+        pendingDamage = nil
+        publishStatus("Software rendering: \(message)", force: true)
         Logger(subsystem: "com.defai.akitty", category: "renderer").error("Metal disabled: \(message, privacy: .public)")
         needsDisplay = true
+        // Ask for one full, non-reused software frame. A failure already on the software path must not
+        // re-enter here, or a size the rasterizer rejects would redraw forever.
+        if replacingPresenter { redraw() }
+    }
+    /// Publishing is skipped when the text repeats: the status line is part of the per-frame hot path.
+    private func publishStatus(_ text: String, force: Bool = false) {
+        // Nothing was delivered before the host installed its callback, so a later identical message must still go out.
+        guard let onStatus, force || text != lastStatus else { return }
+        lastStatus = text
+        onStatus(text)
     }
     /// A partial snapshot with no dirty rows and an identical cursor carries only image changes (a generation
     /// bump, placements moved, added or removed): the text layers are still valid, so no CPU raster is needed.
@@ -328,6 +379,7 @@ import os
                         } else { self.pendingDamage = nil }
                     } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
                     if self.rasterPending { self.redraw() }
+                    self.flushDeferredPoll()
                 }
                 return
             }
@@ -345,8 +397,14 @@ import os
                     } else { self.pendingDamage = nil }
                 } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
                 if self.rasterPending { self.redraw() }
+                self.flushDeferredPoll()
             }
         }
+    }
+    /// Runs the poll that arrived mid-raster, after the frame was handed off: no frame is dropped.
+    private func flushDeferredPoll() {
+        guard pollDeferred else { return }
+        pollDeferred = false; poll()
     }
     public override func draw(_ dirtyRect: NSRect) {
         guard presenter == nil else { return }
@@ -364,19 +422,30 @@ import os
     /// Reports a failure. The beep is rate-limited like the bell: a snapshot that keeps failing (an oversized
     /// screen, too many image fragments) fails on every 30-60 Hz poll and must not beep continuously.
     private func show(_ error: Error) {
-        onStatus?(error.localizedDescription)
+        publishStatus(error.localizedDescription, force: true)
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastErrorBeep >= 1 else { return }
         lastErrorBeep = now; NSSound.beep()
     }
     public func send(_ text: String, paste: Bool = false) {
         guard !stopped else { return }
-        do {
-            try session.input(text, paste: paste)
-            // The echo arrives within milliseconds; poll at the display rate to show it on the next frame.
-            lastChange = ProcessInfo.processInfo.systemUptime
-            updatePolling()
-        } catch { show(error) }
+        // One serial queue keeps keystrokes and pastes in order without blocking main on the model lock.
+        let session = self.session
+        write { try session.input(text, paste: paste) }
+        // The echo arrives within milliseconds; poll at the display rate to show it on the next frame.
+        lastChange = ProcessInfo.processInfo.systemUptime
+        updatePolling()
+    }
+    /// Runs one PTY write off the main thread; a failure comes back on main unless the view already stopped.
+    private func write(_ body: @escaping @Sendable () throws -> Void) {
+        inputQueue.async { [weak self] in
+            do { try body() }
+            catch { DispatchQueue.main.async { self?.reportWriteFailure(error) } }
+        }
+    }
+    private func reportWriteFailure(_ error: Error) {
+        guard !stopped else { return }
+        show(error)
     }
     /// Kitty keyboard protocol: bytes for this event when the running program asked for them.
     private func kittyKey(_ event: NSEvent, type: KittyEventType) -> KittyKeyResult {
@@ -552,7 +621,9 @@ import os
         let cell = position(convert(event.locationInWindow, from: nil))
         let modifiers = (event.modifierFlags.contains(.shift) ? 4 : 0) + (event.modifierFlags.contains(.control) ? 16 : 0)
         if let bytes = MouseEncoding.encode(button: button, row: cell.0, col: cell.1, release: release, sgr: snapshot.mouse_sgr, modifiers: modifiers) {
-            do { _ = try session.call("input_bytes", ["bytes": bytes]) } catch { show(error) }
+            // Same serial queue as the keyboard, so press, motion and release reach the program in order.
+            let session = self.session
+            write { _ = try session.call("input_bytes", ["bytes": bytes]) }
         }
         return true
     }
@@ -596,13 +667,30 @@ import os
     public override func scrollWheel(with event: NSEvent) {
         guard !stopped else { return }
         let delta = event.scrollingDeltaY
-        guard delta != 0 else { return }
+        // A trackpad may report a non-finite delta; Int() would trap on it.
+        guard delta.isFinite, delta != 0 else { return }
         if reportMouse(event, button: delta > 0 ? 64 : 65) { return }
         if snapshot?.alternate == true && !event.modifierFlags.contains(.option) {
             let arrow = delta > 0 ? "A" : "B"
             send("\u{1b}\(snapshot?.app_cursor == true ? "O" : "[")\(arrow)"); return
         }
-        do { _ = try session.call("scroll", ["lines": delta > 0 ? max(1,Int(delta)) : min(-1,Int(delta))]); poll() } catch { show(error) }
+        // A line wheel already counts lines; a precision trackpad reports points, so whole lines accumulate and
+        // the fraction carries to the next event instead of turning a 3-point nudge into three lines.
+        let lines = event.hasPreciseScrollingDeltas
+            ? Self.scrollLines(delta: delta, cellHeight: cellSize.height, remainder: &scrollRemainder)
+            : (delta > 0 ? max(1, Int(min(delta, 1000))) : min(-1, Int(max(delta, -1000))))
+        guard lines != 0 else { return }
+        do { _ = try session.call("scroll", ["lines": lines]); poll() } catch { show(error) }
+    }
+    /// Points to whole lines of one cell height; the remainder stays for the next event.
+    nonisolated static func scrollLines(delta: CGFloat, cellHeight: CGFloat, remainder: inout CGFloat) -> Int {
+        guard delta.isFinite, cellHeight.isFinite, cellHeight > 0 else { return 0 }
+        remainder += delta
+        let whole = (remainder / cellHeight).rounded(.towardZero)
+        guard whole.isFinite else { remainder = 0; return 0 }
+        let lines = Int(min(1000, max(-1000, whole)))
+        remainder = (remainder - CGFloat(lines) * cellHeight).truncatingRemainder(dividingBy: cellHeight)
+        return lines
     }
     public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard !stopped, snapshot?.control?.agent != true, sender.draggingSourceOperationMask.contains(.copy),

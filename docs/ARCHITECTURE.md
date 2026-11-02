@@ -141,7 +141,8 @@ full. Swift fetches pixels off the main thread. With Metal, frames without image
 the single CPU bitmap; frames with images render the text as two transparent layers
 (cell fills, then glyphs and cursor) with the same rasterizer code and draw every image
 as its own texture in Kitty's three z bands around them, re-uploading a texture only when
-its generation changes; an image-only update skips the CPU raster entirely. A display
+its generation changes (an image wider or taller than Metal's 16384-pixel texture side is skipped, not a
+renderer failure); an image-only update skips the CPU raster entirely. A display
 link polls while `animating` is set or images changed in the last second. The software
 fallback still composites images in the CPU bitmap.
 

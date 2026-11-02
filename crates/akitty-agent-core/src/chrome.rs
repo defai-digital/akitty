@@ -309,7 +309,19 @@ impl Filter {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
         let mut pass = Vec::new();
-        for &byte in bytes {
+        let mut at = 0;
+        while at < bytes.len() {
+            // Ground runs are copied whole; only escapes and string bodies are handled byte by byte.
+            if self.state == State::Ground {
+                let end = bytes[at..].iter().position(|&byte| byte == 0x1b).map_or(bytes.len(), |esc| at + esc);
+                pass.extend_from_slice(&bytes[at..end]);
+                at = end;
+                if at == bytes.len() { break; }
+                self.state = State::Esc;
+                at += 1;
+                continue;
+            }
+            let byte = bytes[at];
             loop {
                 match self.state {
                     State::Ground => {
@@ -417,6 +429,7 @@ impl Filter {
                 }
                 break;
             }
+            at += 1;
         }
         if !pass.is_empty() {
             out.push(Segment::Pass(pass));
@@ -472,6 +485,66 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect()
+    }
+
+    /// Segment kinds and bytes in order, with adjacent pass segments merged so a run
+    /// split across feeds compares equal to the same run fed whole.
+    fn joined(feeds: impl IntoIterator<Item = Vec<Segment>>) -> Vec<(u8, Vec<u8>)> {
+        let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+        for segment in feeds.into_iter().flatten() {
+            let (kind, bytes) = match segment {
+                Segment::Pass(bytes) => (0, bytes),
+                Segment::Document(bytes) => (1, bytes),
+                Segment::Shell(bytes) => (2, bytes),
+                Segment::ProgramStatus(bytes) => (3, bytes),
+            };
+            if kind == 0
+                && let Some((0, last)) = out.last_mut()
+            {
+                last.extend(bytes);
+                continue;
+            }
+            out.push((kind, bytes));
+        }
+        out
+    }
+
+    #[test]
+    fn ground_runs_keep_escape_bytes_out_of_the_pass_buffer() {
+        let mut filter = Filter::default();
+        assert_eq!(joined([filter.feed(b"plain text")]), vec![(0, b"plain text".to_vec())]);
+        // An ESC ending a chunk leaves the sequence pending for the next feed.
+        assert!(joined([filter.feed(b"\x1b")]).is_empty());
+        // OSC 0 is not intercepted: the whole forwarded sequence stays one pass run.
+        assert_eq!(joined([filter.feed(b"]0;t\x07x")]), vec![(0, b"\x1b]0;t\x07x".to_vec())]);
+        // Shell metadata leaves the pass run and resumes after it.
+        assert_eq!(joined([filter.feed(b"\x1b]133;A\x07x")]), vec![(2, b"133;A".to_vec()), (0, b"x".to_vec())]);
+        // An aborted chrome string is dropped and its ESC starts the next sequence.
+        let mut filter = Filter::default();
+        assert_eq!(joined([filter.feed(b"\x1b]771;{\x1b[31mred")]), vec![(0, b"\x1b[31mred".to_vec())]);
+    }
+
+    #[test]
+    fn whole_and_split_feeds_yield_the_same_segments() {
+        let stream = b"plain text\x1b]771;{}\x07more\x1b]0;title\x07\x1b]52;c;QQ==\x1b\\tail\x1b]7;file://x\x07end";
+        let mut whole = Filter::default();
+        let expected = joined([whole.feed(stream)]);
+        assert_eq!(
+            expected,
+            vec![
+                (0, b"plain text".to_vec()),
+                (1, b"{}".to_vec()),
+                // OSC 0 and OSC 52 are forwarded whole, so they stay in the pass run.
+                (0, b"more\x1b]0;title\x07\x1b]52;c;QQ==\x1b\\tail".to_vec()),
+                (2, b"7;file://x".to_vec()),
+                (0, b"end".to_vec()),
+            ]
+        );
+        for split in 0..=stream.len() {
+            let mut filter = Filter::default();
+            let got = joined([filter.feed(&stream[..split]), filter.feed(&stream[split..])]);
+            assert_eq!(got, expected, "split {split}");
+        }
     }
 
     #[test]
