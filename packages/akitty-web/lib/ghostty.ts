@@ -73,17 +73,8 @@ export class Ghostty {
     // Build paths to try, prioritizing file system paths for Node/Bun
     const defaultPaths: string[] = [];
 
-    // For Node/Bun: try absolute file path first (strip file:// protocol)
-    if (moduleUrl.protocol === 'file:') {
-      let filePath = moduleUrl.pathname;
-      // Remove leading slash on Windows paths (e.g., /C:/ -> C:/)
-      if (filePath.match(/^\/[A-Za-z]:\//)) {
-        filePath = filePath.slice(1);
-      }
-      defaultPaths.push(filePath);
-    }
-
-    // Also try other common paths
+    // Preserve file URLs so the filesystem API decodes escaped path characters
+    // and handles drive letters itself; pathname is still URL-encoded.
     defaultPaths.push(moduleUrl.href, './ghostty-vt.wasm', '/ghostty-vt.wasm');
 
     let lastError: Error | null = null;
@@ -116,7 +107,7 @@ export class Ghostty {
     if (!wasmBytes) {
       try {
         const fs = await import('fs/promises');
-        const buffer = await fs.readFile(path);
+        const buffer = await fs.readFile(path.startsWith('file:') ? new URL(path) : path);
         wasmBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
       } catch {
         // fs failed, try fetch

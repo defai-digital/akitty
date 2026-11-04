@@ -1638,6 +1638,20 @@ describe('Terminal Options', () => {
   });
 
   describe('convertEol and disableStdin', () => {
+    test('convertEol handles byte writes without changing UTF-8 or the input buffer', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24, convertEol: true });
+      term.open(container!);
+      try {
+        const bytes = new TextEncoder().encode('first\n中\nlast');
+        const original = bytes.slice();
+        term.write(bytes);
+        expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('first');
+        expect(term.buffer.active.getLine(1)?.translateToString(true)).toBe('中');
+        expect(term.buffer.active.getLine(2)?.translateToString(true)).toBe('last');
+        expect(bytes).toEqual(original);
+      } finally { term.dispose(); }
+    });
+
     test('convertEol option should convert newlines', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24, convertEol: true });
       // Using shared container from beforeEach

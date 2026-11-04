@@ -824,8 +824,22 @@ export class Terminal implements ITerminalCore {
     this.assertOpen();
 
     // Handle convertEol option
-    if (this.options.convertEol && typeof data === 'string') {
-      data = data.replace(/\n/g, '\r\n');
+    if (this.options.convertEol) {
+      if (typeof data === 'string') {
+        data = data.replace(/\n/g, '\r\n');
+      } else {
+        let newlines = 0;
+        for (const byte of data) if (byte === 0x0a) newlines++;
+        if (newlines > 0) {
+          const converted = new Uint8Array(data.length + newlines);
+          let offset = 0;
+          for (const byte of data) {
+            if (byte === 0x0a) converted[offset++] = 0x0d;
+            converted[offset++] = byte;
+          }
+          data = converted;
+        }
+      }
     }
 
     this.writeInternal(data, callback);
