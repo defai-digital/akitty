@@ -294,8 +294,8 @@ export class InputHandler {
     if (event.altKey && !event.ctrlKey) return false;
     if (event.metaKey) return false; // Cmd key on Mac
 
-    // If key produces a single printable character
-    return event.key.length === 1;
+    // KeyboardEvent.key is UTF-16; one Unicode scalar can occupy two code units.
+    return Array.from(event.key).length === 1;
   }
 
   /**
@@ -379,13 +379,7 @@ export class InputHandler {
           simpleOutput = '\x1B'; // ESC
           break;
         // Arrow keys are handled by the encoder (respects application cursor mode)
-        // Navigation keys
-        case Key.HOME:
-          simpleOutput = '\x1B[H';
-          break;
-        case Key.END:
-          simpleOutput = '\x1B[F';
-          break;
+        // Home and End, like arrows, go through the encoder for application cursor mode.
         case Key.INSERT:
           simpleOutput = '\x1B[2~';
           break;
@@ -455,14 +449,12 @@ export class InputHandler {
         const appCursorMode = this.getModeCallback(1);
         this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
       }
+      this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, this.getModeCallback?.(1036) ?? true);
 
-      // For letter/number keys, even with modifiers, pass the base character
-      // This helps the encoder produce correct control sequences (e.g., Ctrl+A = 0x01)
-      // For special keys (Enter, Arrow keys, etc.), don't pass utf8
-      const utf8 =
-        event.key.length === 1 && event.key.charCodeAt(0) < 128
-          ? event.key.toLowerCase() // Use lowercase for consistency
-          : undefined;
+      // Pass produced text unchanged: lowercasing loses shifted Alt shortcuts,
+      // and dropping non-ASCII text loses characters composed with Option.
+      // Named special keys (Enter, arrows, etc.) carry no text.
+      const utf8 = Array.from(event.key).length === 1 ? event.key : undefined;
 
       const encoded = this.encoder.encode({
         action,
