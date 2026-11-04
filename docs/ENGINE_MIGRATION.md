@@ -164,3 +164,9 @@ WASM/native Clippy, SDK/ABI, shell, publication, release and installer checks al
 pass. Firefox retains the reported local startup exception; CI still requires it.
 Runtime-theme screenshots from both tested browsers were inspected. Physical
 keyboard-layout and IME hardware coverage is not implied by synthetic event tests.
+
+CI preparation also exposed a toolchain-selection gap: selecting the pinned
+`rustc` did not select Cargo when rustup's default differed. Build scripts now set
+`RUSTUP_TOOLCHAIN` for the process, preserving global defaults. Four isolated
+shell-toolchain tests cover a differing default, the exact distribution fallback
+and rejection of incorrect compiler/Cargo versions. They run in the required gate.

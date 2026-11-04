@@ -3,6 +3,7 @@
 export PATH="$HOME/.cargo/bin:$PATH"
 export AKITTY_RUST_DISTRIBUTION=false
 if command -v rustup >/dev/null 2>&1; then
+    export RUSTUP_TOOLCHAIN=1.99.1
     export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
     export RUSTDOC="$(rustup which --toolchain 1.99.1 rustdoc)"
 else
