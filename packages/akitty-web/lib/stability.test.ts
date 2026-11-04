@@ -3,14 +3,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { Ghostty } from './ghostty';
+import { AkittyEngine } from './engine';
 import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
 describe('terminal replies', () => {
   test('every queued reply is drained in one write', async () => {
-    const ghostty = await Ghostty.load();
-    const wasm = ghostty.createTerminal(80, 24);
+    const engine = await AkittyEngine.load();
+    const wasm = engine.createTerminal(80, 24);
     // 200 cursor-position reports exceed the old single 256-byte read.
     wasm.write('\x1b[6n'.repeat(200));
     const reply = wasm.readResponse();
@@ -20,8 +20,8 @@ describe('terminal replies', () => {
   });
 
   test('a reply flood is capped instead of queued for later', async () => {
-    const ghostty = await Ghostty.load();
-    const wasm = ghostty.createTerminal(80, 24);
+    const engine = await AkittyEngine.load();
+    const wasm = engine.createTerminal(80, 24);
     wasm.write('\x1b[6n'.repeat(50_000));
     const reply = wasm.readResponse(1024);
     expect(reply!.length).toBe(1024);
@@ -34,8 +34,8 @@ describe('terminal replies', () => {
 
 describe('wasm handle lifetime', () => {
   test('free is idempotent and later calls are inert', async () => {
-    const ghostty = await Ghostty.load();
-    const wasm = ghostty.createTerminal(80, 24);
+    const engine = await AkittyEngine.load();
+    const wasm = engine.createTerminal(80, 24);
     wasm.write('é hello');
     wasm.update();
     expect(wasm.getGrapheme(0, 0)).not.toBeNull();
@@ -48,8 +48,8 @@ describe('wasm handle lifetime', () => {
   });
 
   test('large writes are fed in chunks and still parse across chunk boundaries', async () => {
-    const ghostty = await Ghostty.load();
-    const wasm = ghostty.createTerminal(80, 24);
+    const engine = await AkittyEngine.load();
+    const wasm = engine.createTerminal(80, 24);
     const big = new Uint8Array((1 << 20) + 3).fill(0x61);
     // An escape sequence straddling the 1 MiB chunk boundary must still be recognised.
     big.set(new TextEncoder().encode('\x1b[6n'), (1 << 20) - 2);

@@ -1,39 +1,50 @@
-# @ax-code/akitty-web provenance
+# AkiTTY Web provenance
 
-AkiTTY Web is the in-app canvas terminal emulator for AX Code Desktop, part of the AkiTTY project (ADR-023). It
-started as a copy of [coder/ghostty-web](https://github.com/coder/ghostty-web) v0.4.0, was developed in
-`defai-digital/ax-code-desktop` (`desktop/packages/akitty-web`) and was migrated into this repository.
+Version 0.6 uses the AkiTTY-owned Rust engine in `../../crates/akitty-vt`, compiled
+into `akitty-vt.wasm`. No Ghostty, Alacritty or VTE implementation is built or
+bundled. `wasm-provenance.json` records the exact artifact SHA-256, pinned compiler
+and source/build input hashes. `scripts/build-wasm.sh` builds those local sources;
+it does not fetch a terminal project or apply an upstream patch.
 
-**It is no longer a tracked fork.** There is no upstream sync process, no byte-identical-to-upstream constraint on
-`lib/`, and local changes are not logged here; use git history. This file only records where the starting point and the
-binary artifacts came from, so the licenses stay correct and the wasm can be reproduced.
+## Current implementation
 
-## Origin
+- Parser, grid/history, terminal state, queries and key encoding: independently
+  authored `akitty-vt`, shared with native AkiTTY, MIT.
+- Production `lib/` terminal/engine bindings, input/mouse, rendering, selection,
+  buffer views, links/providers, fit, events, types and public entry points:
+  independently reauthored AkiTTY implementations, MIT.
+- `lib/agent`: existing AkiTTY read-only host integration, MIT.
+- `lib/*.test.ts`, addon/agent tests and `lib/test-helpers.ts`: retained regression
+  contracts, including Coder-derived tests/helpers. Original Coder MIT notice is
+  retained in `LICENSE`. AkiTTY additions and changes are covered by its MIT notice.
+- Ordinary Rust dependencies: locked Unicode width/segmentation and base64
+  libraries, retaining their respective licenses. See the engine ownership ledger
+  at `../../third_party/TERMINAL_ENGINE.md` for versions and protocol data.
 
-| Part                             | Source                                                                              |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| `lib/` (starting point)          | `coder/ghostty-web` tag `v0.4.0`, commit `9e4e126d89ac3537d2b2ebec075849851566de9f` |
-| `LICENSE`                        | ghostty-web MIT license, Copyright (c) 2025 Coder                                   |
-| `LICENSE-GHOSTTY`                | Ghostty MIT license at the commit below                                             |
+## Historical origin
 
-Keep the Coder copyright and MIT notice for as long as any of that code remains.
+Before 0.6 this package started from `coder/ghostty-web` tag `v0.4.0`, commit
+`9e4e126d89ac3537d2b2ebec075849851566de9f`, and was developed in
+`defai-digital/ax-code-desktop` before moving here. The former Ghostty binary was
+built from commit `5714ed07a1012573261b7b7e3ed2add9c1504496` plus an AkiTTY patch.
+The binary, patch and inherited production implementation have been removed.
+Git history preserves their original provenance. `LICENSE-GHOSTTY` is retained
+as a historical notice, not as attribution for the new engine. Nothing syncs from
+these projects. AX Code Desktop's separate copy is not updated by this repository.
 
-## Wasm artifact
+## Build verification
 
-| Part                             | Source                                                                              |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| `ghostty-vt.wasm`                | local build of the pinned Ghostty commit and patch below; sha256 `5f42e738fd2b490f0946de40cbbe63a34c4415b93aca3ef00d56fbea2f5f15ed` |
-| `patches/ghostty-wasm-api.patch` | AkiTTY's wasm API patch against the pinned commit; sha256 `9c84c814fd3d9e4fd24e4da34ed4e0b415bb3e4864c2334be0e133984345e433` |
-| Ghostty source of the wasm       | `ghostty-org/ghostty` commit `5714ed07a1012573261b7b7e3ed2add9c1504496`, Zig `0.15.2` |
+From the repository root, run:
 
-The committed wasm is built from the pinned commit and patch. `scripts/build-wasm.sh` fetches that commit,
-applies the patch and builds with Zig 0.15.2. When the patch, the Ghostty pin or the wasm changes, update the pins
-and hashes in this table in the same commit.
+```sh
+bash packages/akitty-web/scripts/build-wasm.sh
+python3 scripts/vt-provenance.py --write
+python3 scripts/check-engine-source.py
+node scripts/test-vt-wasm.mjs packages/akitty-web/akitty-vt.wasm
+```
 
-## Package layout notes
-
-- `package.json` exports the TypeScript source (`lib/index.ts`) and `ghostty-vt.wasm`; there is no prebuilt bundle and
-  the wasm is not inlined as a `data:` URL.
-- `happy-dom` is pinned to 21.0.4 to resolve GHSA-834v-8h66-3h79 in the test environment.
-- Tests run under Vitest with Happy DOM. Older test files still import `bun:test`, which `test/bun-test-shim.ts` maps
-  onto Vitest.
+Rust 1.99.1 is pinned. Use its `wasm32-unknown-unknown` target, or matching Rust
+sources plus `wasm-ld` for the distribution-toolchain fallback. Build output can
+differ between standard-library/linker distributions; the manifest identifies
+one exact committed artifact. The required gate verifies that artifact and tests
+a fresh build separately, rather than asserting cross-toolchain byte identity.

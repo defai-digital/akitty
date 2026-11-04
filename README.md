@@ -193,14 +193,14 @@ See the [protocol and ABI contract](docs/ABI.md),
 
 | Component | Technology |
 | --- | --- |
-| AkiTTY native Mac app | AkiTTY-maintained Alacritty terminal engine, Rust PTYs, Swift/AppKit UI, CoreText/Metal rendering and a bundled TypeScript command palette |
-| AkiTTY Web (separate package) | Ghostty VT parser compiled to WebAssembly + Canvas rendering; the embedding host owns the PTY |
+| AkiTTY native Mac app | AkiTTY-owned Rust VT engine, Rust PTYs, Swift/AppKit UI, CoreText/Metal rendering and a bundled TypeScript command palette |
+| AkiTTY Web (separate package) | The same AkiTTY Rust VT engine compiled to WebAssembly + Canvas rendering; the embedding host owns the PTY |
 
-Ghostty informed the native app's design and served as a source reference. The
-Mac app does not use Ghostty's Zig core or renderer, and does not inherit their
-performance characteristics. The native app needs no Zig compiler or runtime;
-Zig is only needed to rebuild the Web package's prebuilt wasm. Native and Web
-features require separate integration and qualification.
+Native and Web use the independent `akitty-vt` parser, terminal state and key
+encoder, with separate platform rendering and host integration. Neither build
+links or bundles Ghostty, Alacritty or VTE. Rust 1.99.1 builds both; no Zig toolchain
+is needed. See [engine ownership](third_party/TERMINAL_ENGINE.md) and
+[the migration record](docs/ENGINE_MIGRATION.md).
 
 - **Approval has a defined scope.** Each local request needs human approval bound
   to the exact command, session lease and reported directory. Commands use the
@@ -278,8 +278,8 @@ desktops shipped as source in 1.3.5 have been discontinued so effort stays on th
 macOS app. On those platforms, use **AkiTTY Web** (`packages/akitty-web`), the
 terminal embedded in [AX Code Desktop](https://github.com/defai-digital/ax-code-desktop).
 
-AkiTTY Web is a separate implementation from the Mac app. It draws on an HTML canvas
-and parses terminal output with Ghostty's VT parser compiled to WebAssembly. The
+AkiTTY Web draws on an HTML canvas and uses the same owned Rust VT engine as
+the Mac app, compiled to WebAssembly. The
 same library runs in a browser on Windows, Linux, and macOS. It has no shell of its
 own. AX Code Desktop starts the process on that operating system, writes the
 output with `term.write()`, and takes keystrokes from `term.onData()`.
@@ -294,7 +294,7 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 ## Limitations and roadmap
 
-**Source version: 1.3.5.** AkiTTY is not a drop-in Ghostty replacement.
+**Source version: 1.3.9.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current
@@ -335,14 +335,17 @@ These are remaining qualification goals for the implemented features. See the
 
 ## Build and run
 
-Requires macOS 14+, Xcode/Command Line Tools with Swift 6, rustup and Node 22+. Zig is not needed; it is only used
-to rebuild AkiTTY Web's prebuilt wasm file.
-Rust 1.99.1 and dependency lockfiles are pinned. Build scripts select the rustup
-compiler explicitly to avoid mixing in a different Homebrew Rust standard library.
-Builds target the current Mac architecture.
+Requires macOS 14+, Xcode/Command Line Tools with Swift 6, Rust 1.99.1 and Node 22+.
+Dependency lockfiles are pinned. Build scripts select the pinned rustup toolchain,
+or accept an installed distribution toolchain with that exact compiler version.
+To rebuild the Web WASM, install `wasm32-unknown-unknown` or matching Rust sources
+and `wasm-ld`; no Zig compiler or upstream terminal checkout is needed.
+Distribution toolchains also need matching Rust sources: app packaging rebuilds
+the standard library for macOS 14 instead of linking a newer Homebrew deployment
+baseline. Builds target the current Mac architecture.
 
 ```sh
-rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
 scripts/build-app.sh release
 open build/Akitty.app
 ```
@@ -396,17 +399,11 @@ never committed. This command does not publish a GitHub release.
 
 ## Acknowledgments and MIT license
 
-We acknowledge **Mitchell Hashimoto and the [Ghostty](https://github.com/ghostty-org/ghostty)
-contributors** for the terminal design and source reference that informed AkiTTY,
-and for the VT parser used by AkiTTY Web. AkiTTY is an independent project, not an
-official Ghostty release or a port of Ghostty's native terminal core.
-
-The macOS app's terminal engine is **[Alacritty](https://github.com/alacritty/alacritty)**.
-We thank **the Alacritty contributors** for `alacritty_terminal`, which provides
-terminal escape-sequence parsing, the cell grid, and terminal state. AkiTTY uses
-version 0.26.0 under Apache-2.0, maintained locally together with VTE, with its own Swift/AppKit interface and rendering. See [engine ownership](third_party/TERMINAL_ENGINE.md).
-Alacritty is also credited in the app's **About Akitty** panel and the bundled
-[third-party notices](THIRD_PARTY_NOTICES.md).
+AkiTTY's native and browser terminals now use the independently authored
+**akitty-vt** engine. We thank **Mitchell Hashimoto and the Ghostty contributors**,
+**the Alacritty contributors** and **the VTE contributors** for earlier engines
+and design references. Their implementations are preserved in git history rather
+than the current production build. See [engine ownership](third_party/TERMINAL_ENGINE.md).
 
 We also read **[iTerm2](https://github.com/gnachman/iterm2)** and
 **[Kitty](https://github.com/kovidgoyal/kitty)** to understand how those terminals
@@ -418,8 +415,8 @@ speaks follow Kovid Goyal's published specifications, in AkiTTY's own code.
 
 AkiTTY's own code is **MIT licensed**; see [LICENSE](LICENSE). Original notices are
 preserved for adapted code. Third-party dependencies retain their own licenses;
-MIT does not relicense them. The Rust terminal engine is
-[alacritty_terminal](https://github.com/alacritty/alacritty) (Apache-2.0).
+MIT does not relicense them. Historical notices are retained with their scope
+documented in the provenance ledger.
 The command-ranking adaptation comes from [AX TUI](https://github.com/defai-digital/ax-tui)
 (MIT); see [provenance](third_party/ax-tui/NOTICE.md) and
 [third-party notices](THIRD_PARTY_NOTICES.md).

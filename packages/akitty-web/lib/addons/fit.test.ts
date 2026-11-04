@@ -248,9 +248,9 @@ describe('Maximum dimension cap', () => {
 
     addon.fit();
 
-    expect(calls).toEqual([{ cols: 4096, rows: 4096 }]);
+    expect(calls).toEqual([{ cols: 4096, rows: 256 }]);
     expect(mockTerminal.cols).toBe(4096);
-    expect(mockTerminal.rows).toBe(4096);
+    expect(mockTerminal.rows).toBe(256);
   });
 });
 

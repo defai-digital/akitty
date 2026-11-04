@@ -1,11 +1,9 @@
 # AkiTTY Web
 
-`@ax-code/akitty-web` is the in-app canvas terminal for AX Code Desktop. It is part of the AkiTTY project but is a
-separate implementation from the macOS Rust/Swift terminal: it renders to an HTML canvas and parses terminal output
-with Ghostty's VT parser compiled to WebAssembly.
-
-It started from [coder/ghostty-web](https://github.com/coder/ghostty-web) v0.4.0 and is now maintained independently
-of it. It exposes an xterm.js-style API. Origin, licenses and the wasm pins are recorded in
+`@ax-code/akitty-web` is AX Code Desktop's Canvas terminal. Native and Web share
+the independently authored AkiTTY Rust VT engine. The browser frontend is an
+AkiTTY implementation with an xterm.js-style API. No Ghostty, Alacritty or VTE
+engine is linked or bundled. Historical test origins remain documented in
 [PROVENANCE.md](PROVENANCE.md).
 
 ## Platforms
@@ -19,7 +17,7 @@ What that covers:
 
 - Rendering, VT parsing, selection, and keyboard input in the page. Ctrl, Alt, and Meta come from the browser.
   Ctrl+C is the interrupt on every platform. Command-click and Ctrl-click both open links.
-- Loading `ghostty-vt.wasm` from a Windows `file://` URL (`/C:/…` is normalized to `C:/…`) as well as from
+- Loading `akitty-vt.wasm` from a Windows `file://` URL (`/C:/…` is normalized to `C:/…`) as well as from
   `fetch` in the browser.
 
 What stays with the host:
@@ -39,21 +37,38 @@ behavior, physical IME or every OS/font combination.
 
 - The package is **private** (`"private": true`) and is **not published** to npm or GitHub Packages. Consume it from
   source, for example through a workspace or Git dependency.
-- It exports TypeScript source (`lib/index.ts`) and `ghostty-vt.wasm`; there is no prebuilt bundle. The consuming
+- It exports TypeScript source (`lib/index.ts`) and `akitty-vt.wasm`; there is no prebuilt bundle. The consuming
   application's build compiles it.
 - It was first developed in `defai-digital/ax-code-desktop` (`desktop/packages/akitty-web`) and migrated here.
   Desktop's copy is not updated automatically, so the two can diverge until Desktop switches to this one.
-- The wasm file is the ghostty-web 0.4.0 release artifact, not a local rebuild. A rebuild has not been compared byte
-  for byte.
-- Some comments inside `lib/` may still mention `@cmux/ghostty-terminal`; the package name to import is
-  `@ax-code/akitty-web`.
+- `akitty-vt.wasm` is built from this repository's Rust source with Rust 1.99.1.
+  `wasm-provenance.json` binds the binary hash to its source/build inputs.
+
+## Migrating to 0.6
+
+Ordinary `Terminal`, events, buffers, addons, selection and read-only agent APIs
+remain supported. Engine-specific exports intentionally change:
+
+- Use `AkittyEngine`, `AkittyTerminal`, `TerminalCell`, `getEngine()` and the
+  `engine` constructor option instead of the former Ghostty names/option.
+- Serve `@ax-code/akitty-web/akitty-vt.wasm`; the former WASM path and ABI are removed.
+- `Key` identities follow Unicode/Kitty protocol numbers; consumers using the
+  encoder should import the named constants rather than persisting old numbers.
+- Dimensions are integers in 1..4096 with at most 1,048,576 cells in total.
+  Scrollback is limited to 100,000 rows and a 64 MiB history budget per screen.
+  Old requests for 4096 × 4096 grids now fail validation.
+- `unicode.activeVersion` reports the width tables (18.0); grapheme boundaries
+  use Unicode 17.0. Web enables streaming grapheme mode 2027 by default. Native
+  keeps its existing scalar-width profile; shared fixtures qualify both profiles.
+- Title/BEL events come from the common Rust parser. Theme colors survive RIS
+  and OSC palette reset, and synchronized output deadlines flush even while hidden.
 
 ## Usage
 
 ```ts
 import { init, Terminal } from "@ax-code/akitty-web"
 
-await init() // loads ghostty-vt.wasm once
+await init() // loads akitty-vt.wasm once
 const term = new Terminal({ fontSize: 14, lineHeight: 1.15 })
 term.open(document.getElementById("terminal")!)
 term.write("Hello\r\n")
@@ -62,7 +77,7 @@ term.onData((data) => {
 })
 ```
 
-`@ax-code/akitty-web/ghostty-vt.wasm` is also exported for hosts that need to serve the wasm file themselves.
+`@ax-code/akitty-web/akitty-vt.wasm` is also exported for hosts that need to serve the wasm file themselves.
 Addons (such as `lib/addons/fit.ts`) follow the xterm.js addon interface.
 
 Notable behavior:
@@ -116,10 +131,18 @@ npm test          # Vitest with Happy DOM; older bun:test files run through test
 
 From the repository root, `scripts/verify.sh` runs the same install, type-check and tests.
 
-`npm run build:wasm` rebuilds `ghostty-vt.wasm` from the pinned Ghostty commit and `patches/ghostty-wasm-api.patch`. It
-needs Zig 0.15.2 and network access. Zig is needed **only** for this step; building and running AkiTTY and this
-package does not require it. If the patch, pin or wasm changes, update the hashes in `PROVENANCE.md`.
+`npm run build:wasm` rebuilds `akitty-vt.wasm` from `crates/akitty-vt` using Rust
+1.99.1. Install its `wasm32-unknown-unknown` target, or matching Rust sources and
+`wasm-ld` for the distribution-toolchain fallback. No Zig compiler or upstream
+source checkout is needed. After an intentional rebuild, run
+`python3 scripts/vt-provenance.py --write` from the repository root and commit
+both the artifact and manifest. The required gate checks the committed artifact
+and runs the same fixtures against a fresh build. Cross-distribution binary
+identity is not assumed.
 
 ## Licenses
 
-MIT. See [LICENSE](LICENSE) (ghostty-web, Copyright (c) 2025 Coder) and [LICENSE-GHOSTTY](LICENSE-GHOSTTY).
+MIT for AkiTTY production code and retained Coder-derived tests/helpers; see
+[LICENSE](LICENSE). Ordinary engine dependency licenses are in
+[ENGINE_LICENSES.txt](ENGINE_LICENSES.txt). [LICENSE-GHOSTTY](LICENSE-GHOSTTY) is
+retained as a historical notice; the former engine implementation is removed.

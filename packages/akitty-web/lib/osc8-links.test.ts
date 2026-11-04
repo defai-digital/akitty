@@ -1,5 +1,5 @@
 /**
- * OSC 8 hyperlink regression tests against the real Ghostty wasm artifact.
+ * OSC 8 hyperlink regression tests against the real AkittyEngine wasm artifact.
  *
  * These cover the wasm URI read (active screen and scrollback), the provider's
  * link identity rules (distinct adjacent URIs stay separate, wrapped links stay
@@ -9,14 +9,14 @@
 
 import { describe, expect, test } from 'vitest';
 import { Buffer } from './buffer';
-import { Ghostty, type GhosttyTerminal } from './ghostty';
+import { AkittyEngine, type AkittyTerminal } from './engine';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import type { ILink } from './types';
 
-async function makeWasm(cols = 40, rows = 8): Promise<GhosttyTerminal> {
-  const ghostty = await Ghostty.load();
-  return ghostty.createTerminal(cols, rows);
+async function makeWasm(cols = 40, rows = 8): Promise<AkittyTerminal> {
+  const engine = await AkittyEngine.load();
+  return engine.createTerminal(cols, rows);
 }
 
 /** OSC 8 with a URI, closed by the empty-URI terminator. */
@@ -28,7 +28,7 @@ function link(uri: string, text: string): string {
  * A provider-facing terminal backed by the real wasm terminal and the real
  * Buffer row mapping (scrollback rows first, then the viewport).
  */
-function makeProvider(wasm: GhosttyTerminal): {
+function makeProvider(wasm: AkittyTerminal): {
   provider: OSC8LinkProvider;
   buffer: Buffer;
   terminal: ITerminalForOSC8;
@@ -55,14 +55,14 @@ interface ITerminalForOSC8 {
       getLine(y: number): ReturnType<Buffer['getLine']>;
     };
   };
-  wasmTerm: GhosttyTerminal;
+  wasmTerm: AkittyTerminal;
 }
 
 function provide(provider: OSC8LinkProvider, y: number): Promise<ILink[] | undefined> {
   return new Promise((resolve) => provider.provideLinks(y, resolve));
 }
 
-describe('GhosttyTerminal hyperlink URI reads', () => {
+describe('AkittyTerminal hyperlink URI reads', () => {
   test('active-screen cells report their OSC 8 URI by coordinate', async () => {
     const wasm = await makeWasm();
     const uri = 'https://a.example/x';

@@ -91,7 +91,7 @@ pub enum Segment {
     Pass(Vec<u8>),
     /// Payload of an `ESC _ G ... ESC \` string, without the `G`.
     Apc(Vec<u8>),
-    /// A consumed `CSI 16 t` cell size request; vte never sees these bytes.
+    /// A consumed `CSI 16 t` cell size request; the terminal parser never sees these bytes.
     CellSizeQuery,
 }
 

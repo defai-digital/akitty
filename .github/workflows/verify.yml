@@ -16,7 +16,7 @@ jobs:
           node-version: '22'
           cache: npm
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
       - name: Verify Rust, TypeScript, Swift, C ABI and public files
         run: scripts/verify.sh
       - name: Shell hooks with current bash (macOS ships 3.2)

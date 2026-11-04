@@ -13,7 +13,6 @@ mod placeholder;
 mod program_status;
 mod session;
 mod shell;
-mod tracker;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -186,7 +185,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let value = match request {
         Request::Version {} => Ok(
-            json!({"abi": ABI_VERSION, "schema": 1, "platform": "macos", "engine": "alacritty_terminal 0.26.0"}),
+            json!({"abi": ABI_VERSION, "schema": 1, "platform": "macos", "engine": "akitty-vt"}),
         ),
         Request::Create {
             cols,

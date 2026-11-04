@@ -1,210 +1,59 @@
-/**
- * OSC 8 Hyperlink Provider
- *
- * Detects hyperlinks created with OSC 8 escape sequences and resolves each
- * link's URI by cell coordinate from the wasm engine.
- *
- * OSC 8 format: \x1b]8;;URL\x07TEXT\x1b]8;;\x07
- *
- * Cell hyperlink ids are page-local. Same-row identity uses both id and URI,
- * while multi-row ranges continue only through soft-wrap boundaries, with URI
- * matching across pages. Distinct sequences and hard newlines stay separate.
- */
-
-import type { IBufferRange, ILink, ILinkProvider } from '../types';
-
-/** Cell shape the provider needs from a buffer line. */
-interface IHyperlinkCell {
-  getHyperlinkId(): number;
+/** Resolve explicit hyperlinks by sequence identity within a row and URI across soft wraps. */
+import type { ILink, ILinkProvider } from '../types';
+interface LinkCell { getHyperlinkId(): number }
+interface Line { readonly length: number; readonly isWrapped: boolean; getCell(column: number): LinkCell | undefined }
+export interface ITerminalForOSC8Provider {
+  buffer: { active: { length: number; getLine(row: number): Line | undefined } };
+  wasmTerm?: { getHyperlinkUri(row: number, col: number, history?: boolean): string | null;
+    getScrollbackLength(): number; isAlternateScreen(): boolean };
 }
 
 export class OSC8LinkProvider implements ILinkProvider {
-  constructor(private terminal: ITerminalForOSC8Provider) {}
-
-  /**
-   * Provide all OSC 8 links on the given row
-   * Note: This may return links that span multiple rows
-   */
-  provideLinks(y: number, callback: (links: ILink[] | undefined) => void): void {
+  constructor(private readonly host: ITerminalForOSC8Provider) {}
+  private uri(row: number, column: number): string | null {
+    const engine = this.host.wasmTerm;
+    if (!engine) return null;
+    const history = engine.isAlternateScreen() ? 0 : engine.getScrollbackLength();
+    return engine.getHyperlinkUri(row < history ? row : row - history, column, row < history);
+  }
+  provideLinks(row: number, callback: (links: ILink[] | undefined) => void): void {
+    const buffer = this.host.buffer.active, line = buffer.getLine(row);
+    if (!line) { callback(undefined); return; }
     const links: ILink[] = [];
-
-    const line = this.terminal.buffer.active.getLine(y);
-    if (!line) {
-      callback(undefined);
-      return;
-    }
-
-    // Walk the row left to right. Each resolved link consumes its whole span
-    // on this row, so a run cannot be re-entered and no visited set is needed.
-    let x = 0;
-    while (x < line.length) {
-      const cell = line.getCell(x);
-      if (!cell || cell.getHyperlinkId() === 0) {
-        x++;
-        continue;
+    let column = 0;
+    while (column < line.length) {
+      const id = line.getCell(column)?.getHyperlinkId();
+      const uri = id ? this.uri(row, column) : null;
+      if (!id || !uri) { column++; continue; }
+      const matches = (y: number, x: number, identity?: number): boolean => {
+        const cell = buffer.getLine(y)?.getCell(x), value = cell?.getHyperlinkId();
+        return !!value && (identity === undefined || identity === value) && this.uri(y, x) === uri;
+      };
+      let first = column, last = column;
+      while (first > 0 && matches(row, first - 1, id)) first--;
+      while (last + 1 < line.length && matches(row, last + 1, id)) last++;
+      const start = { x: first, y: row }, end = { x: last, y: row };
+      while (start.x === 0 && start.y > 0 && buffer.getLine(start.y)?.isWrapped) {
+        const previous = buffer.getLine(start.y - 1);
+        if (!previous?.length || !matches(start.y - 1, previous.length - 1)) break;
+        start.y--; start.x = previous.length - 1;
+        while (start.x > 0 && matches(start.y, start.x - 1)) start.x--;
       }
-
-      const uri = this.uriAt(y, x);
-      if (!uri) {
-        // A linked cell whose URI cannot be read yields no link (fail closed).
-        x++;
-        continue;
+      let current = line;
+      while (end.x === current.length - 1 && end.y + 1 < buffer.length) {
+        const next = buffer.getLine(end.y + 1);
+        if (!next?.isWrapped || !next.length || !matches(end.y + 1, 0)) break;
+        end.y++; end.x = 0; current = next;
+        while (end.x + 1 < current.length && matches(end.y, end.x + 1)) end.x++;
       }
-
-      const range = this.findLinkRange(y, x, uri, cell.getHyperlinkId());
-      const rowEndX = range.end.y === y ? range.end.x : line.length - 1;
-      links.push({
-        text: uri,
-        range,
-        activate: (event) => {
-          // Open link if Ctrl/Cmd is pressed
-          if (event.ctrlKey || event.metaKey) {
-            window.open(uri, '_blank', 'noopener,noreferrer');
-          }
-        },
-      });
-      x = rowEndX + 1;
-    }
-
-    callback(links.length > 0 ? links : undefined);
-  }
-
-  /**
-   * Find the full extent of a link. The starting row uses both hyperlink id and
-   * URI so separate same-URI sequences stay distinct. Other rows join only at
-   * genuine soft-wrap boundaries; ids may differ between pages.
-   */
-  private findLinkRange(startY: number, startX: number, uri: string, hyperlinkId: number): IBufferRange {
-    const buffer = this.terminal.buffer.active;
-
-    let minY = startY;
-    let minX = startX;
-    while (minX > 0) {
-      const line = buffer.getLine(minY);
-      if (!line) break;
-      if (!this.cellMatches(line.getCell(minX - 1), minY, minX - 1, uri, hyperlinkId)) break;
-      minX--;
-    }
-
-    if (minX === 0 && minY > 0 && buffer.getLine(minY)?.isWrapped) {
-      let prevY = minY - 1;
-      while (prevY >= 0) {
-        const prevLine = buffer.getLine(prevY);
-        if (!prevLine || prevLine.length === 0) break;
-
-        const lastX = prevLine.length - 1;
-        if (!this.cellMatches(prevLine.getCell(lastX), prevY, lastX, uri)) break;
-
-        minY = prevY;
-        minX = lastX;
-        while (minX > 0) {
-          if (!this.cellMatches(prevLine.getCell(minX - 1), prevY, minX - 1, uri)) break;
-          minX--;
+      links.push({ text: uri, range: { start, end }, activate: event => {
+        if ((event.ctrlKey || event.metaKey) && !/^(?:javascript|vbscript|data):/i.test(uri.trim())) {
+          window.open(uri, '_blank', 'noopener,noreferrer');
         }
-
-        if (minX === 0) {
-          if (!buffer.getLine(minY)?.isWrapped) break;
-          prevY--;
-        } else {
-          break;
-        }
-      }
+      } });
+      column = last + 1;
     }
-
-    let maxY = startY;
-    let maxX = startX;
-    const currentLine = buffer.getLine(maxY);
-    if (currentLine) {
-      while (maxX < currentLine.length - 1) {
-        if (!this.cellMatches(currentLine.getCell(maxX + 1), maxY, maxX + 1, uri, hyperlinkId)) break;
-        maxX++;
-      }
-
-      if (maxX === currentLine.length - 1) {
-        let nextY = maxY + 1;
-        const maxBuffer = buffer.length;
-        while (nextY < maxBuffer) {
-          const nextLine = buffer.getLine(nextY);
-          if (!nextLine || nextLine.length === 0 || !nextLine.isWrapped) break;
-          if (!this.cellMatches(nextLine.getCell(0), nextY, 0, uri)) break;
-
-          maxY = nextY;
-          maxX = 0;
-          while (maxX < nextLine.length - 1) {
-            if (!this.cellMatches(nextLine.getCell(maxX + 1), nextY, maxX + 1, uri)) break;
-            maxX++;
-          }
-
-          if (maxX === nextLine.length - 1) {
-            nextY++;
-          } else {
-            break;
-          }
-        }
-      }
-    }
-
-    return {
-      start: { x: minX, y: minY },
-      end: { x: maxX, y: maxY },
-    };
+    callback(links.length ? links : undefined);
   }
-
-  /** True when a cell matches the URI and, on the starting row, the sequence id. */
-  private cellMatches(
-    cell: IHyperlinkCell | undefined,
-    bufferY: number,
-    x: number,
-    uri: string,
-    hyperlinkId?: number
-  ): boolean {
-    if (!cell || cell.getHyperlinkId() === 0) return false;
-    if (hyperlinkId !== undefined && cell.getHyperlinkId() !== hyperlinkId) return false;
-    return this.uriAt(bufferY, x) === uri;
-  }
-
-  /**
-   * Read the URI of the cell at buffer coordinates (bufferY, x): absolute
-   * buffer rows (scrollback first), matching buffer.active.
-   */
-  private uriAt(bufferY: number, x: number): string | null {
-    const wasm = this.terminal.wasmTerm;
-    if (!wasm) return null;
-    const scrollback = wasm.isAlternateScreen() ? 0 : wasm.getScrollbackLength();
-    return bufferY < scrollback
-      ? wasm.getHyperlinkUri(bufferY, x, true)
-      : wasm.getHyperlinkUri(bufferY - scrollback, x, false);
-  }
-
-  dispose(): void {
-    // No resources to clean up
-  }
-}
-
-/**
- * Minimal terminal interface required by OSC8LinkProvider
- */
-export interface ITerminalForOSC8Provider {
-  buffer: {
-    active: {
-      length: number;
-      getLine(y: number):
-        | {
-            readonly length: number;
-            readonly isWrapped: boolean;
-            getCell(x: number): IHyperlinkCell | undefined;
-          }
-        | undefined;
-    };
-  };
-  wasmTerm?: {
-    /**
-     * URI of the cell at (row, col): viewport row, or scrollback offset
-     * (0 = oldest) when isScrollback is true. Null when the cell has no
-     * hyperlink or the URI cannot be read.
-     */
-    getHyperlinkUri(row: number, col: number, isScrollback?: boolean): string | null;
-    getScrollbackLength(): number;
-    isAlternateScreen(): boolean;
-  };
+  dispose(): void {}
 }

@@ -2,17 +2,13 @@
 
 Akitty's own code is MIT licensed. Dependencies are not relicensed by Akitty.
 
-- **Ghostty** — https://github.com/ghostty-org/ghostty — MIT, copyright 2024
-  Mitchell Hashimoto and Ghostty contributors. Ghostty informed Akitty's native
-  terminal design and served as a source reference. The native app uses Alacritty,
-  not Ghostty's Zig core or renderer; AkiTTY Web uses Ghostty's VT parser compiled
-  to WebAssembly. The original MIT notice is preserved in LICENSE.
-- **Alacritty terminal engine 0.26.0** — https://github.com/alacritty/alacritty —
-  Apache-2.0. Thank you to the Alacritty contributors for the terminal engine.
-  See third_party/alacritty/LICENSE-APACHE and third_party/alacritty_terminal/LICENSE-APACHE. The local maintained source and provenance are documented in third_party/TERMINAL_ENGINE.md. The macOS app links `alacritty_terminal`
-  into its Rust library for escape-sequence parsing, the cell grid, and terminal
-  state; Akitty supplies its own Swift/AppKit interface and rendering. No engine
-  ABI is exposed by Akitty.
+The native and Web terminal engine is the independently authored **akitty-vt**
+(MIT). No Ghostty, Alacritty or VTE implementation is linked or bundled. See
+[engine ownership and provenance](third_party/TERMINAL_ENGINE.md).
+
+- **Unicode data** — https://www.unicode.org — Unicode License V3. The Kitty
+  placeholder alphabet is generated from Unicode 6.0.0 protocol data. Notice:
+  `third_party/unicode/LICENSE`; bundled as `UNICODE_LICENSE` in the Mac app.
 - **portable-pty 0.9.0 / WezTerm** — https://github.com/wezterm/wezterm — MIT.
 - **AX TUI** — https://github.com/defai-digital/ax-tui — MIT, copyright 2025
   opentui and 2026 DEFAI Digital. Adapted fuzzy command ranking only; see
@@ -24,10 +20,12 @@ locally resolved Cargo sources and their license/notice files. TypeScript and
 esbuild are build tools, not runtime components of the Mac app.
 
 - Sparkle 2.10.1: MIT and bundled third-party notices; see `third_party/sparkle/LICENSE`. The app embeds its framework and update helpers.
-- **AkiTTY Web** (`packages/akitty-web`) — originated from coder/ghostty-web v0.4.0 (MIT, copyright 2025 Coder) and
-  includes its prebuilt `ghostty-vt.wasm`, built from Ghostty (MIT). Licenses are in `packages/akitty-web/LICENSE` and
-  `LICENSE-GHOSTTY`; provenance and artifact hashes are in `packages/akitty-web/PROVENANCE.md`. Rebuilding the wasm needs
-  Zig 0.15.2, which is not required to build or run Akitty itself.
-
-- **VTE 0.15.0 derived parser** — maintained locally in `third_party/vte`; original Apache-2.0 OR MIT licensing and authorship retained in its license files.
-
+- **AkiTTY Web** (`packages/akitty-web`) — production terminal code was reauthored
+  around the owned Rust engine. Historical regression tests and helpers originated
+  from coder/ghostty-web v0.4.0 (MIT, copyright 2025 Coder); their MIT notice remains
+  in `packages/akitty-web/LICENSE`. The previous Ghostty engine has been removed.
+  `PROVENANCE.md` distinguishes current authorship from historical origins.
+- **Historical acknowledgments:** Ghostty (Mitchell Hashimoto and contributors),
+  Alacritty and VTE informed earlier versions. Historical MIT notices remain in
+  root/package licenses and `packages/akitty-web/LICENSE-GHOSTTY`; they do not
+  describe the current engine or imply an upstream affiliation.

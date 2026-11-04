@@ -3,7 +3,7 @@
  */
 
 import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { Ghostty } from './ghostty';
+import { AkittyEngine } from './engine';
 import { InputHandler } from './input-handler';
 import { Key, KeyAction, Mods } from './types';
 
@@ -156,14 +156,14 @@ function simulateKey(
 }
 
 describe('InputHandler', () => {
-  let ghostty: Ghostty;
+  let engine: AkittyEngine;
   let container: ReturnType<typeof createMockContainer>;
   let dataReceived: string[];
   let bellCalled: boolean;
 
   beforeEach(async () => {
-    // Create a fresh Ghostty WASM instance for complete test isolation
-    ghostty = await Ghostty.load();
+    // Create a fresh AkittyEngine WASM instance for complete test isolation
+    engine = await AkittyEngine.load();
 
     // Create mock container for each test
     container = createMockContainer();
@@ -176,7 +176,7 @@ describe('InputHandler', () => {
   describe('Constructor and Lifecycle', () => {
     test('creates handler and attaches listeners', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -191,7 +191,7 @@ describe('InputHandler', () => {
 
     test('dispose removes listeners and marks inactive', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -207,7 +207,7 @@ describe('InputHandler', () => {
 
     test('dispose is idempotent', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -223,7 +223,7 @@ describe('InputHandler', () => {
 
     test('dispose releases the owned KeyEncoder exactly once', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -233,22 +233,22 @@ describe('InputHandler', () => {
 
       const encoder = (handler as any).encoder;
       expect(typeof encoder.dispose).toBe('function');
-      expect(encoder.encoder).not.toBe(0); // live WASM handle before dispose
+      expect(encoder.encode({ action: 1, key: 97, mods: 0, utf8: 'a' })).toEqual(new Uint8Array([97]));
 
       const disposeSpy = spyOn(encoder, 'dispose');
       handler.dispose();
       expect(disposeSpy).toHaveBeenCalledTimes(1);
-      expect(encoder.encoder).toBe(0); // WASM key encoder actually released
+      expect(encoder.encode({ action: 1, key: 97, mods: 0, utf8: 'a' })).toHaveLength(0); // disposed encoders are inert
 
       handler.dispose(); // second call must not release again
       expect(disposeSpy).toHaveBeenCalledTimes(1);
-      expect(encoder.encoder).toBe(0);
+      expect(encoder.encode({ action: 1, key: 97, mods: 0, utf8: 'a' })).toHaveLength(0);
     });
   });
 
   describe('Printable Characters', () => {
     test('sends printable characters outside the BMP without replacing them with the physical key', () => {
-      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {});
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
       try {
         simulateKey(container, createKeyEvent('KeyA', '𐐀'));
         expect(dataReceived).toEqual(['𐐀']);
@@ -256,7 +256,7 @@ describe('InputHandler', () => {
     });
 
     test('Alt preserves uppercase and composed non-ASCII text', () => {
-      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {});
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
       try {
         simulateKey(container, createKeyEvent('KeyA', 'A', { alt: true, shift: true }));
         simulateKey(container, createKeyEvent('KeyE', 'é', { alt: true }));
@@ -266,7 +266,7 @@ describe('InputHandler', () => {
 
     test('Alt escape prefix follows DEC mode 1036 as it changes', () => {
       let altEscape = true;
-      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {},
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
         undefined, undefined, mode => mode === 1036 && altEscape);
       try {
         simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
@@ -277,7 +277,7 @@ describe('InputHandler', () => {
     });
 
     test('Home and End honor application cursor mode', () => {
-      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {},
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
         undefined, undefined, mode => mode === 1);
       try {
         simulateKey(container, createKeyEvent('Home', 'Home'));
@@ -288,7 +288,7 @@ describe('InputHandler', () => {
 
     test('encodes lowercase letters', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -305,7 +305,7 @@ describe('InputHandler', () => {
 
     test('encodes uppercase letters (with shift)', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -319,7 +319,7 @@ describe('InputHandler', () => {
 
     test('encodes digits', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -336,7 +336,7 @@ describe('InputHandler', () => {
 
     test('encodes punctuation', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -353,7 +353,7 @@ describe('InputHandler', () => {
 
     test('encodes space', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -369,7 +369,7 @@ describe('InputHandler', () => {
   describe('IME Composition', () => {
     test('handles composition sequence', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -404,7 +404,7 @@ describe('InputHandler', () => {
 
     test('ignores keydown during composition', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -435,7 +435,7 @@ describe('InputHandler', () => {
 
     test('cleans up text nodes in container after composition', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -467,7 +467,7 @@ describe('InputHandler', () => {
   describe('Control Characters', () => {
     test('encodes Ctrl+A', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -484,7 +484,7 @@ describe('InputHandler', () => {
 
     test('encodes Ctrl+C', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -501,7 +501,7 @@ describe('InputHandler', () => {
 
     test('encodes Ctrl+D', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -518,7 +518,7 @@ describe('InputHandler', () => {
 
     test('encodes Ctrl+Z', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -535,7 +535,7 @@ describe('InputHandler', () => {
 
     test('Cmd+C allows copy (no data sent)', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -554,7 +554,7 @@ describe('InputHandler', () => {
   describe('Special Keys', () => {
     test('encodes Enter', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -571,7 +571,7 @@ describe('InputHandler', () => {
 
     test('encodes Tab', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -588,7 +588,7 @@ describe('InputHandler', () => {
 
     test('encodes Escape', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -605,7 +605,7 @@ describe('InputHandler', () => {
 
     test('encodes Backspace', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -625,7 +625,7 @@ describe('InputHandler', () => {
   describe('Shifted Special Keys', () => {
     test('Shift+Tab encodes back-tab as ESC[Z instead of a plain tab', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -637,7 +637,7 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Tab', 'Tab'));
       expect(dataReceived[0]).toBe('\t');
 
-      // Shift+Tab must be encoded by Ghostty with the Shift modifier (ESC[Z)
+      // Shift+Tab must be encoded by AkittyEngine with the Shift modifier (ESC[Z)
       simulateKey(container, createKeyEvent('Tab', 'Tab', { shift: true }));
       expect(dataReceived.length).toBe(2);
       expect(dataReceived[1]).toBe('\x1b[Z');
@@ -645,7 +645,7 @@ describe('InputHandler', () => {
 
     test('Shift+Delete encodes a shifted delete sequence distinct from Delete', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -668,7 +668,7 @@ describe('InputHandler', () => {
 
     test('Shift+F1 encodes a shifted function-key sequence distinct from F1', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -690,7 +690,7 @@ describe('InputHandler', () => {
   describe('Arrow Keys', () => {
     test('encodes Up arrow', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -707,7 +707,7 @@ describe('InputHandler', () => {
 
     test('encodes Down arrow', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -723,7 +723,7 @@ describe('InputHandler', () => {
 
     test('encodes Left arrow', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -739,7 +739,7 @@ describe('InputHandler', () => {
 
     test('encodes Right arrow', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -756,7 +756,7 @@ describe('InputHandler', () => {
     test('sends CSI sequences in normal cursor mode (mode 1 off)', () => {
       // Create handler with getMode callback that returns false (normal mode)
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -783,7 +783,7 @@ describe('InputHandler', () => {
     test('sends SS3 sequences in application cursor mode (mode 1 on)', () => {
       // Create handler with getMode callback that returns true for mode 1
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -811,7 +811,7 @@ describe('InputHandler', () => {
   describe('Function Keys', () => {
     test('encodes F1', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -828,7 +828,7 @@ describe('InputHandler', () => {
 
     test('encodes F12', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -847,7 +847,7 @@ describe('InputHandler', () => {
   describe('Navigation Keys', () => {
     test('encodes Home', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -863,7 +863,7 @@ describe('InputHandler', () => {
 
     test('encodes End', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -879,7 +879,7 @@ describe('InputHandler', () => {
 
     test('encodes PageUp', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -895,7 +895,7 @@ describe('InputHandler', () => {
 
     test('encodes PageDown', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -911,7 +911,7 @@ describe('InputHandler', () => {
 
     test('encodes Delete', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -927,7 +927,7 @@ describe('InputHandler', () => {
 
     test('encodes Insert', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -945,7 +945,7 @@ describe('InputHandler', () => {
   describe('Event Prevention', () => {
     test('prevents default on printable characters', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -961,7 +961,7 @@ describe('InputHandler', () => {
 
     test('prevents default on special keys', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -977,7 +977,7 @@ describe('InputHandler', () => {
 
     test('prevents default on Ctrl+keys', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -995,7 +995,7 @@ describe('InputHandler', () => {
   describe('Unknown Keys', () => {
     test('ignores unmapped keys', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1014,7 +1014,7 @@ describe('InputHandler', () => {
   describe('Modifier Combinations', () => {
     test('handles Ctrl+Shift combinations', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1031,7 +1031,7 @@ describe('InputHandler', () => {
 
     test('handles Alt combinations', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1050,7 +1050,7 @@ describe('InputHandler', () => {
   describe('Clipboard Operations', () => {
     test('handles paste event', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1069,7 +1069,7 @@ describe('InputHandler', () => {
 
     test('handles multi-line paste', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1088,7 +1088,7 @@ describe('InputHandler', () => {
 
     test('ignores paste with no clipboard data', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1105,7 +1105,7 @@ describe('InputHandler', () => {
 
     test('ignores paste with empty text', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1122,7 +1122,7 @@ describe('InputHandler', () => {
 
     test('allows Ctrl+V to trigger paste', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1138,7 +1138,7 @@ describe('InputHandler', () => {
 
     test('allows Cmd+V to trigger paste', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1157,7 +1157,7 @@ describe('InputHandler', () => {
     test('an optional onPaste receives the text instead of onData', () => {
       const pasted: string[] = [];
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1178,7 +1178,7 @@ describe('InputHandler', () => {
     test('onPaste is invoked exactly once per paste event', () => {
       const pasted: string[] = [];
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {
@@ -1198,7 +1198,7 @@ describe('InputHandler', () => {
 
     test('without onPaste, handlePaste still sends raw text (standalone compatibility)', () => {
       const handler = new InputHandler(
-        ghostty,
+        engine,
         container as any,
         (data) => dataReceived.push(data),
         () => {

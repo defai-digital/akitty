@@ -1,10 +1,10 @@
 # AkiTTY implementation roadmap
 
 This roadmap distinguishes the 1.3.0 implementation baseline and remaining qualification.
-The native Mac app uses locally maintained source derived from `alacritty_terminal` 0.26.0 with AkiTTY's own
-Rust/Swift integration and rendering. AkiTTY Web separately uses Ghostty's VT
-parser compiled to WebAssembly and Canvas rendering. Native performance must be
-measured on AkiTTY; Ghostty's native core and renderer are not used by the Mac app.
+Native and Web now share the independently authored `akitty-vt` Rust engine.
+The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses
+WASM and a reauthored Canvas frontend. Neither builds an upstream terminal engine.
+Performance must be measured separately for each host.
 See [architecture](ARCHITECTURE.md) for the current implementation and
 [the README](../README.md#what-is-implemented) for shipped behavior.
 
@@ -52,7 +52,7 @@ latency, GPU behavior, idle power, or long-running stability.
 Acceptance: compare the same workloads before/after, preserve full/partial snapshot
 equivalence and protocol behavior, and pass `scripts/verify.sh` plus app smoke
 checks. Performance claims need measurements; stability claims need stress-test
-evidence. The local engine fork provides independent maintenance; integration improvements still require their own tests.
+evidence. The owned engine provides independent maintenance; integration improvements still require their own tests.
 
 ## 2. Shell integration (implemented in 1.1.0; qualification continues)
 

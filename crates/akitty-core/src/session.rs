@@ -1,9 +1,6 @@
 use crate::child::{ChildGuard, ChildSlot};
 use crate::model::{Model, Size};
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::index::{Column, Point, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::{TermMode, viewport_to_point};
+use akitty_vt::screen::Position;
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -258,7 +255,7 @@ impl Session {
         if model.exited {
             return Err("shell has exited".into());
         }
-        let bytes = if paste && model.term.mode().contains(TermMode::BRACKETED_PASTE) {
+        let bytes = if paste && model.term.modes.bracketed_paste {
             // Prevent pasted escape characters from terminating the bracketed paste.
             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
         } else {
@@ -277,7 +274,7 @@ impl Session {
         // instead of leaving the dirty flag set by human_input behind.
         if bytes.is_empty() { model.control.dirty = previous_dirty; return self.enqueue_input(bytes); }
         if let Err(error) = self.enqueue_input(bytes) { model.control.dirty = previous_dirty; return Err(error); }
-        model.term.scroll_display(Scroll::Bottom); model.revision += 1;
+        model.term.screen_mut().offset = 0; model.revision += 1;
         Ok(())
     }
     fn enqueue_input(&self, bytes: Vec<u8>) -> Result<(), String> {
@@ -363,7 +360,7 @@ impl Session {
             }
             self.wake();
         } else {
-            model.term.resize(size);
+            model.resize_grid(size);
             model.size = size;
             model.requested_size = size;
             model.revision += 1;
@@ -410,9 +407,7 @@ impl Session {
     }
     pub fn scroll(&self, lines: i32) -> Result<(), String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
-        model
-            .term
-            .scroll_display(Scroll::Delta(lines.clamp(-5000, 5000)));
+        model.term.screen_mut().scroll_display(lines.clamp(-5000, 5000));
         model.revision += 1;
         Ok(())
     }
@@ -425,14 +420,9 @@ impl Session {
         {
             return Err("selection outside viewport".into());
         }
-        let offset = model.term.grid().display_offset();
-        let start = viewport_to_point(offset, Point::new(sr, Column(sc)));
-        let end = viewport_to_point(offset, Point::new(er, Column(ec)));
-        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
-        selection.update(end, Side::Right);
-        model.term.selection = Some(selection);
+        model.term.screen_mut().select(Position { row: sr, col: sc }, Position { row: er, col: ec });
         model.revision += 1;
-        Ok(json!({"text": model.term.selection_to_string().unwrap_or_default()}))
+        Ok(json!({"text": model.term.screen().selection_text()}))
     }
     pub fn find(&self, text: &str, direction: Option<&str>, clear: bool) -> Result<Value, String> {
         let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
@@ -559,7 +549,7 @@ fn expire_and_queue(
     let mut state = lock_model(model);
     let replies = state.expire_sync();
     queue_parser_replies(&mut state, output, response_pending, replies);
-    state.parser.sync_timeout().sync_timeout()
+    state.sync_deadline()
 }
 
 /// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
@@ -872,7 +862,7 @@ fn run(
                 break;
             }
             let mut state = lock_model(&model);
-            state.term.resize(size);
+            state.resize_grid(size);
             state.size = size;
             state.revision += 1;
         }

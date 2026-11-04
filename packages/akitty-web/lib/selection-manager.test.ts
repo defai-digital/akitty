@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { Terminal } from './terminal';
+import { SelectionManager } from './selection-manager';
 import { createIsolatedTerminal } from './test-helpers';
 
 /**
@@ -629,18 +630,16 @@ describe('SelectionManager', () => {
       const selMgr = (term as any).selectionManager;
       const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
 
-      // Snapshot the stored references before dispose nulls them.
-      const stored: Array<[string, (e: MouseEvent) => void]> = [
-        ['mousedown', selMgr.boundCanvasMouseDownHandler],
-        ['mousemove', selMgr.boundCanvasMouseMoveHandler],
-        ['mouseleave', selMgr.boundCanvasMouseLeaveHandler],
-        ['mouseenter', selMgr.boundCanvasMouseEnterHandler],
-        ['dblclick', selMgr.boundCanvasDblClickHandler],
-      ];
-      for (const [type, handler] of stored) {
-        expect(typeof handler).toBe('function');
-        expect(type).toBeTruthy();
-      }
+      // Capture registration through the DOM API, independent of private field names.
+      const stored: Array<[string, EventListenerOrEventListenerObject]> = [];
+      const originalAdd = canvas.addEventListener;
+      canvas.addEventListener = function (type: string, callback: any, options?: any) {
+        stored.push([type, callback]); return originalAdd.call(this, type, callback, options);
+      } as typeof canvas.addEventListener;
+      let manager: SelectionManager;
+      try { manager = new SelectionManager(term, (term as any).renderer, term.wasmTerm!, term.textarea!); }
+      finally { canvas.addEventListener = originalAdd; }
+      expect(stored.map(([type]) => type)).toEqual(expect.arrayContaining(['mousedown', 'mousemove', 'mouseleave', 'mouseenter', 'dblclick']));
 
       const removed: Array<[string, unknown]> = [];
       const origRemove = canvas.removeEventListener;
@@ -649,7 +648,7 @@ describe('SelectionManager', () => {
         return origRemove.call(this, type, listener, options);
       };
       try {
-        selMgr.dispose();
+        manager!.dispose();
       } finally {
         canvas.removeEventListener = origRemove;
       }

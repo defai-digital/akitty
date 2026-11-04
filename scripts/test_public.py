@@ -13,13 +13,9 @@ class PublicationTests(unittest.TestCase):
         data = (Path(__file__).resolve().parents[1] / name).read_bytes()
         self.assertEqual(violations(name, data), [])
         self.assertTrue(violations(name, data + b'changed'))
-    def test_upstream_recording_exception_requires_exact_public_bytes(self):
-        name = 'third_party/alacritty_terminal/tests/ref/alt_reset/alacritty.recording'
-        data = (Path(__file__).resolve().parents[1] / name).read_bytes()
-        self.assertEqual(violations(name, data), [])
-        self.assertTrue(violations(name, data + b'changed'))
-        self.assertTrue(violations(name, data + b'ghp_' + b'A' * 36))
-        self.assertTrue(violations('other.recording', data))
+    def test_recordings_have_no_private_path_exception(self):
+        data = b'/'+b'Users/example/private'
+        self.assertTrue(violations('fixtures/terminal.recording', data))
     def test_normal_public_source_is_allowed(self):
         self.assertEqual(violations('src/main.rs',b'fn main() {}'),[])
 if __name__ == '__main__': unittest.main()
