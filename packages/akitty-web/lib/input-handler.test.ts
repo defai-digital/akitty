@@ -247,6 +247,45 @@ describe('InputHandler', () => {
   });
 
   describe('Printable Characters', () => {
+    test('sends printable characters outside the BMP without replacing them with the physical key', () => {
+      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {});
+      try {
+        simulateKey(container, createKeyEvent('KeyA', '𐐀'));
+        expect(dataReceived).toEqual(['𐐀']);
+      } finally { handler.dispose(); }
+    });
+
+    test('Alt preserves uppercase and composed non-ASCII text', () => {
+      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {});
+      try {
+        simulateKey(container, createKeyEvent('KeyA', 'A', { alt: true, shift: true }));
+        simulateKey(container, createKeyEvent('KeyE', 'é', { alt: true }));
+        expect(dataReceived).toEqual(['\x1bA', 'é']);
+      } finally { handler.dispose(); }
+    });
+
+    test('Alt escape prefix follows DEC mode 1036 as it changes', () => {
+      let altEscape = true;
+      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, mode => mode === 1036 && altEscape);
+      try {
+        simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
+        altEscape = false;
+        simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
+        expect(dataReceived).toEqual(['\x1ba', 'a']);
+      } finally { handler.dispose(); }
+    });
+
+    test('Home and End honor application cursor mode', () => {
+      const handler = new InputHandler(ghostty, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, mode => mode === 1);
+      try {
+        simulateKey(container, createKeyEvent('Home', 'Home'));
+        simulateKey(container, createKeyEvent('End', 'End'));
+        expect(dataReceived).toEqual(['\x1bOH', '\x1bOF']);
+      } finally { handler.dispose(); }
+    });
+
     test('encodes lowercase letters', () => {
       const handler = new InputHandler(
         ghostty,

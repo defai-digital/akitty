@@ -47,3 +47,26 @@ test('keyboard input and resize survive repeated reset and disposal', async ({ p
   await info.attach('after-lifecycle-cycles', { body: await page.locator('canvas').screenshot(), contentType: 'image/png' })
   expect(errors).toEqual([])
 })
+
+test('Home, End and Alt input follow the terminal modes and preserve shifted text', async ({ page }) => {
+  await page.evaluate(async () => {
+    const f = (window as any).fixture
+    await f.write('\x1b[?1h\x1b[?1036h')
+    f.input.length = 0
+    f.terminal.focus()
+  })
+  await page.keyboard.press('Home')
+  await page.keyboard.press('End')
+  await page.keyboard.press('Alt+Shift+KeyA')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1bOH', '\x1bOF', '\x1bA'])
+
+  await page.evaluate(async () => {
+    const f = (window as any).fixture
+    await f.write('\x1b[?1l\x1b[?1036l')
+    f.input.length = 0
+  })
+  await page.keyboard.press('Home')
+  await page.keyboard.press('End')
+  await page.keyboard.press('Alt+KeyA')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[H', '\x1b[F', 'a'])
+})
