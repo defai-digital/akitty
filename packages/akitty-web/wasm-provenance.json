@@ -18,6 +18,6 @@
     "crates/akitty-vt/src/wasm.rs": "97c888936aa5bbe1582242f9de208d1e33243c49204452aad6790ec38588c544",
     "crates/akitty-vt/tests/contracts.rs": "3a9f2e39daa8efa439b51377a9d6749d6645b36e46d5da439d3173d4576a9a5b",
     "scripts/build-vt-wasm.sh": "c0c8a5b7f8d245819faae89a9bcb085ede3eff51eb944ad6c3f29f2c8c745665",
-    "scripts/rust-toolchain.sh": "0f25abfa14f741738520c3dc9ebb46a9580a6c29985f32851dbfeec24e40c68a"
+    "scripts/rust-toolchain.sh": "d9ec70363f76822a54c9b9398ce298985fec8171283ffa337ca5dfe8ebb74507"
   }
 }

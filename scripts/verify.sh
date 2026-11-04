@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 [[ $(uname -s) == Darwin ]] || { echo 'macOS is required.' >&2; exit 1; }
 source scripts/rust-toolchain.sh
 export MACOSX_DEPLOYMENT_TARGET=14.0
+python3 scripts/test_rust_toolchain.py
 cargo build --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
