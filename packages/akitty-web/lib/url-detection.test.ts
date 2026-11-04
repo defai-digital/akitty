@@ -80,6 +80,21 @@ function getLinksFromCells(codepoints: number[]): Promise<ILink[] | undefined> {
 }
 
 describe('URL Detection', () => {
+  test('accepts short destinations for every supported protocol', async () => {
+    for (const url of ['http://a', 'https://a', 'ftp://a', 'ssh://a', 'git://a', 'tel:123', 'news:x', 'mailto:a', 'magnet:x', 'gemini://a', 'gopher://a']) {
+      const links = await getLinks(`See ${url}.`);
+      expect(links?.map((link) => link.text)).toEqual([url]);
+      expect(links?.[0].range.start.x).toBe(4);
+      expect(links?.[0].range.end.x).toBe(4 + url.length - 1);
+    }
+  });
+
+  test('rejects schemes without a destination after punctuation is removed', async () => {
+    for (const scheme of ['http://', 'https://', 'tel:', 'news:', 'mailto:', 'gemini://']) {
+      expect(await getLinks(`${scheme}...`)).toBeUndefined();
+    }
+  });
+
   test('detects HTTPS URLs', async () => {
     const links = await getLinks('Visit https://github.com for code');
     expect(links).toBeDefined();

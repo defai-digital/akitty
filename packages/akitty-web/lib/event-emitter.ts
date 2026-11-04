@@ -11,7 +11,7 @@ function reportListenerError(error: unknown): void {
 }
 
 export class EventEmitter<T> {
-  private listeners: Array<(arg: T) => void> = [];
+  private listeners: Array<{ listener: (arg: T) => void }> = [];
 
   fire(arg: T): void {
     // Snapshot so a listener removing itself cannot shift iteration past its
@@ -19,7 +19,7 @@ export class EventEmitter<T> {
     const listeners = this.listeners.slice();
     // A throwing listener (e.g. a host IPC channel already closed) must not abort the caller midway
     // through a write or keypress, nor starve the listeners after it; report it asynchronously instead.
-    for (const listener of listeners) {
+    for (const { listener } of listeners) {
       try {
         listener(arg);
       } catch (error) {
@@ -29,10 +29,12 @@ export class EventEmitter<T> {
   }
 
   event: IEvent<T> = (listener) => {
-    this.listeners.push(listener);
+    // A callback can be subscribed more than once; each disposable owns one entry.
+    const entry = { listener };
+    this.listeners.push(entry);
     return {
       dispose: () => {
-        const index = this.listeners.indexOf(listener);
+        const index = this.listeners.indexOf(entry);
         if (index >= 0) {
           this.listeners.splice(index, 1);
         }

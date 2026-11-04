@@ -713,6 +713,58 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('explicit OSC 8 targets take precedence over URL text on the same cells', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      try {
+        term.write('\x1b]8;;https://target.example\x07https://label.example\x1b]8;;\x07');
+        const detector = (term as any).linkDetector;
+        const link = await detector.getLinkAt(5, 0);
+        expect(link?.text).toBe('https://target.example');
+        expect((await detector.getLinkAt(5, 0))?.text).toBe('https://target.example');
+      } finally { term.dispose(); }
+    });
+
+    test('late hover results cannot replace the link under a newer mouse position', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      try {
+        const pending: ((link: any) => void)[] = [];
+        (term as any).linkDetector.getLinkAt = () => new Promise(resolve => pending.push(resolve));
+        const makeLink = (text: string) => ({ text, activate() {},
+          range: { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } } });
+        const old = makeLink('old');
+        const current = makeLink('current');
+        (term as any).processMouseMove(new MouseEvent('mousemove'));
+        (term as any).processMouseMove(new MouseEvent('mousemove', { clientX: 20 }));
+        pending[1](current);
+        await Promise.resolve();
+        pending[0](old);
+        await Promise.resolve();
+        expect((term as any).currentHoveredLink).toBe(current);
+      } finally { term.dispose(); }
+    });
+
+    test('leaving the terminal cancels both deferred hover results and queued mouse moves', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      try {
+        const pending: ((link: any) => void)[] = [];
+        (term as any).linkDetector.getLinkAt = () => new Promise(resolve => pending.push(resolve));
+        (term as any).handleMouseMove(new MouseEvent('mousemove'));
+        (term as any).handleMouseMove(new MouseEvent('mousemove', { clientX: 20 }));
+        (term as any).handleMouseLeave();
+        let entered = false;
+        pending[0]({ activate() {}, hover() { entered = true; },
+          range: { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } } });
+        await new Promise(resolve => setTimeout(resolve, 30));
+        expect(pending).toHaveLength(1);
+        expect(entered).toBe(false);
+        expect((term as any).currentHoveredLink).toBeUndefined();
+        expect(container.style.cursor).not.toBe('pointer');
+      } finally { term.dispose(); }
+    });
+
     test('pending link activation and hover stop at disposal', async () => {
       const term = await createIsolatedTerminal();
       term.open(container);

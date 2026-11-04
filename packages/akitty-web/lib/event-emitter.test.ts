@@ -6,6 +6,33 @@ import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from './event-emitter';
 
 describe('EventEmitter', () => {
+  test('each subscription removes only itself, including repeated disposal', () => {
+    const emitter = new EventEmitter<number>();
+    const seen: number[] = [];
+    const listener = (value: number) => seen.push(value);
+    const first = emitter.event(listener);
+    const second = emitter.event(listener);
+    first.dispose();
+    first.dispose();
+    emitter.fire(1);
+    expect(seen).toEqual([1]);
+    second.dispose();
+    emitter.fire(2);
+    expect(seen).toEqual([1]);
+  });
+
+  test('an old subscription cannot remove a new one after emitter disposal', () => {
+    const emitter = new EventEmitter<number>();
+    const seen: number[] = [];
+    const listener = (value: number) => seen.push(value);
+    const old = emitter.event(listener);
+    emitter.dispose();
+    emitter.event(listener);
+    old.dispose();
+    emitter.fire(1);
+    expect(seen).toEqual([1]);
+  });
+
   test('fire notifies listeners in subscription order', () => {
     const emitter = new EventEmitter<number>();
     const seen: number[] = [];

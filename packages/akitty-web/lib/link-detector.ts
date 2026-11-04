@@ -12,6 +12,7 @@ import type { IBufferCellPosition, ILink, ILinkProvider } from './types';
 const ABORTED = { aborted: true } as const;
 
 type ScanDeferred = { promise: Promise<void>; resolve: () => void };
+type CachedLink = { link: ILink; priority: number };
 
 type PendingScan = {
   generation: number;
@@ -37,7 +38,7 @@ export class LinkDetector {
 
   // Cache links by exact buffer range for fast, collision-free lookups.
   // Key format: `r${startY}:${startX}-${endY}:${endX}`
-  private linkCache = new Map<string, ILink>();
+  private linkCache = new Map<string, CachedLink>();
 
   // Rows whose provider scan completed for the current generation only.
   private scannedRows = new Set<number>();
@@ -99,14 +100,15 @@ export class LinkDetector {
     }
 
     // Cached links are keyed by their exact range, so containment is the
-    // lookup: hyperlink ids are page-local and cannot key a cache.
-    for (const link of this.linkCache.values()) {
-      if (this.isPositionInLink(col, row, link)) {
-        return link;
+    // lookup: hyperlink ids are page-local and cannot key a cache. Provider
+    // priority must survive overlapping links discovered by earlier row scans.
+    let best: CachedLink | undefined;
+    for (const entry of this.linkCache.values()) {
+      if ((!best || entry.priority < best.priority) && this.isPositionInLink(col, row, entry.link)) {
+        best = entry;
       }
     }
-
-    return undefined;
+    return best?.link;
   }
 
   /**
@@ -147,16 +149,16 @@ export class LinkDetector {
    * none of its links reach into a row invalidated after the scan started.
    */
   private async scanRow(row: number, scan: PendingScan, abort: Promise<void>): Promise<void> {
-    const allLinks: ILink[] = [];
+    const allLinks: CachedLink[] = [];
 
     // Query all providers
-    for (const provider of this.providers) {
+    for (const [priority, provider] of this.providers.entries()) {
       if (this.isScanStale(row, scan)) return;
 
       const links = await this.provideLinksOrAbort(provider, row, abort);
       if (links === ABORTED || this.isScanStale(row, scan)) return;
       if (Array.isArray(links)) {
-        allLinks.push(...links);
+        for (const link of links) allLinks.push({ link, priority });
       }
     }
 
@@ -189,9 +191,9 @@ export class LinkDetector {
    * True when any discovered link covers a row invalidated after the scan
    * started. Publishing such a link would expose stale multi-line content.
    */
-  private spansInvalidatedRow(links: ILink[], startChange: number): boolean {
+  private spansInvalidatedRow(links: CachedLink[], startChange: number): boolean {
     if (this.rowInvalidated.size === 0) return false;
-    for (const { range } of links) {
+    for (const { link: { range } } of links) {
       for (let row = range.start.y; row <= range.end.y; row++) {
         if (this.rowStamp(row) > startChange) return true;
       }
@@ -221,13 +223,14 @@ export class LinkDetector {
   /**
    * Cache a link for fast lookup
    */
-  private cacheLink(link: ILink): void {
+  private cacheLink(entry: CachedLink): void {
     // Key by the exact range: hyperlink ids are page-local and two links on
     // different pages can share one, so ids cannot identify a cached link.
     // Format: r${startY}:${startX}-${endY}:${endX}
-    const { start: s, end: e } = link.range;
+    const { start: s, end: e } = entry.link.range;
     const cacheKey = `r${s.y}:${s.x}-${e.y}:${e.x}`;
-    this.linkCache.set(cacheKey, link);
+    const previous = this.linkCache.get(cacheKey);
+    if (!previous || entry.priority < previous.priority) this.linkCache.set(cacheKey, entry);
   }
 
   /**
@@ -283,7 +286,7 @@ export class LinkDetector {
 
     // Remove cached links in this range.
     // This is conservative - we remove any link that touches these rows.
-    for (const [key, link] of this.linkCache) {
+    for (const [key, { link }] of this.linkCache) {
       const { start, end } = link.range;
       if (
         (start.y >= startRow && start.y <= endRow) ||
