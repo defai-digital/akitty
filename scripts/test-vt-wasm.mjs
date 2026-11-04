@@ -60,6 +60,13 @@ assert.equal(api.akitty_vt_write(id, pointer, 1, 400), 0, 'stale handles stay in
 assert.equal(api.akitty_vt_free(pointer, length - 1), 0);
 assert.equal(api.akitty_vt_free(pointer, length), 1);
 assert.equal(api.akitty_vt_free(pointer, length), 0);
+const keyPointer = api.akitty_vt_alloc(length);
+for (const [code, expected] of [[9, '\t'], [13, '\r'], [27, '\x1b'], [127, '\x7f'], [57414, '\r']]) {
+  const count = api.akitty_vt_key(code, 0, 0, 4, 1, 1024, keyPointer, 0, keyPointer, length);
+  assert.equal(new TextDecoder().decode(new Uint8Array(api.memory.buffer, keyPointer, count)), expected, `Ctrl key ${code}`);
+}
+assert.equal(api.akitty_vt_free(keyPointer, length), 1);
+
 
 const fixtures = JSON.parse(await readFile(new URL('../crates/akitty-vt/tests/fixtures/streams.json', import.meta.url), 'utf8'));
 const encoder = new TextEncoder();

@@ -114,3 +114,21 @@ test('SGR mouse down, drag and release preserve modifiers', async ({ page }) => 
   const input = await page.evaluate(() => (window as any).fixture.input)
   expect(input).toEqual(['\x1b[<16;3;2M', '\x1b[<48;4;2M', '\x1b[<16;4;2m'])
 })
+
+
+test('runtime theme changes recolor the canvas and modified editing keys reach the host', async ({ page }, info) => {
+  await page.evaluate(async () => {
+    const f = (window as any).fixture
+    await f.write('\x1b[?25l\x1b[31mred\x1b[0m\r\nplain')
+    f.terminal.options.theme = { foreground: '#00ff00', background: '#0000ff', red: '#ff0000' }
+    f.input.length = 0
+    f.terminal.focus()
+  })
+  await expect.poll(() => page.evaluate(() => (window as any).fixture.pixels().blue)).toBeGreaterThan(1000)
+  expect((await page.evaluate(() => (window as any).fixture.pixels())).red).toBeGreaterThan(10)
+  expect((await page.evaluate(() => (window as any).fixture.lines())).slice(0, 2)).toEqual(['red', 'plain'])
+  await page.keyboard.press('Control+Alt+KeyC')
+  await page.keyboard.press('Control+Enter')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b\x03', '\r'])
+  await info.attach('runtime-theme', { body: await page.locator('canvas').screenshot(), contentType: 'image/png' })
+})

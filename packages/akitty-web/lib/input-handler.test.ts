@@ -255,6 +255,43 @@ describe('InputHandler', () => {
       } finally { handler.dispose(); }
     });
 
+    test('dead keys allow browser composition instead of cancelling the keystroke', () => {
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
+      try {
+        const dead = createKeyEvent('Quote', 'Dead');
+        simulateKey(container, dead);
+        expect(dead.preventDefault).not.toHaveBeenCalled();
+        expect(dataReceived).toEqual([]);
+        container.dispatchEvent(createCompositionEvent('compositionstart', ''));
+        container.dispatchEvent(createCompositionEvent('compositionend', 'é'));
+        expect(dataReceived).toEqual(['é']);
+      } finally { handler.dispose(); }
+    });
+
+    test('enhanced keyboard reports layout text instead of physical Latin identities', () => {
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => 8);
+      try {
+        simulateKey(container, createKeyEvent('KeyE', 'é'));
+        simulateKey(container, createKeyEvent('KeyE', 'É', { shift: true }));
+        simulateKey(container, createKeyEvent('KeyA', '𐐀'));
+        simulateKey(container, createKeyEvent('', '€'));
+        simulateKey(container, Object.assign(createKeyEvent('KeyQ', '@', { ctrl: true, alt: true }),
+          { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
+        expect(dataReceived).toEqual(['\x1b[233;1u', '\x1b[233;2u', '\x1b[66560;1u', '\x1b[8364;1u', '\x1b[64;1u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('Ctrl+Alt chords remain distinct from composed AltGraph text', () => {
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
+      try {
+        simulateKey(container, createKeyEvent('KeyC', 'c', { ctrl: true, alt: true }));
+        simulateKey(container, Object.assign(createKeyEvent('KeyQ', '@', { ctrl: true, alt: true }),
+          { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
+        expect(dataReceived).toEqual(['\x1b\x03', '@']);
+      } finally { handler.dispose(); }
+    });
+
     test('Alt preserves uppercase and composed non-ASCII text', () => {
       const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
       try {

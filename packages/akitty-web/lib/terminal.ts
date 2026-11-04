@@ -75,6 +75,7 @@ export class Terminal implements ITerminalCore {
   private syncTimer?: ReturnType<typeof setTimeout>;
   viewportY = 0;
   private targetViewportY = 0;
+  private alternateWheelRemainder = 0;
   private scrollAnimationFrame?: number;
   private scrollbarAnimationFrame?: number;
   private scrollbarHideTimeout?: ReturnType<typeof setTimeout>;
@@ -146,7 +147,10 @@ export class Terminal implements ITerminalCore {
     const renderer = this.renderer; if (!renderer) return;
     if (key === 'cursorStyle') renderer.setCursorStyle(this.options.cursorStyle);
     else if (key === 'cursorBlink') renderer.setCursorBlink(this.options.cursorBlink);
-    else if (key === 'theme') renderer.setTheme(this.options.theme);
+    else if (key === 'theme') {
+      this.wasmTerm!.setTheme(this.config());
+      renderer.setTheme(this.options.theme);
+    }
     else if (key === 'fontSize' || key === 'fontFamily' || key === 'lineHeight') {
       if (key === 'fontSize') renderer.setFontSize(this.options.fontSize);
       if (key === 'fontFamily') renderer.setFontFamily(this.options.fontFamily);
@@ -283,13 +287,17 @@ export class Terminal implements ITerminalCore {
     const replacement = this.engine!.createTerminal(this.cols, this.rows, this.config());
     try { this.selectionManager?.setTerminal(replacement); } catch (error) { replacement.free(); throw error; }
     this.wasmTerm = replacement; previous.free();
+    this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
     this.linkDetector?.invalidateCache(); this.handleMouseLeave(); this.renderer?.clear();
     this.revision++; this.notifyBufferChangeIfSwitched(alternate); this.scrollEmitter.fire(0); this.applyTitle('');
   }
   private notifyBufferChangeIfSwitched(previous: boolean): void {
-    if (this.wasmTerm && previous !== this.wasmTerm.isAlternateScreen()) this.buffer._fireBufferChange(this.buffer.active);
+    if (this.wasmTerm && previous !== this.wasmTerm.isAlternateScreen()) {
+      this.alternateWheelRemainder = 0; this.mouseButton = undefined;
+      this.buffer._fireBufferChange(this.buffer.active);
+    }
   }
   private applyTitle(title: string): void { if (title !== this.currentTitle) { this.currentTitle = title; this.titleChangeEmitter.fire(title); } }
   focus(): void { if (this.isOpen && !this.isDisposed) (this.textarea ?? this.element)?.focus(); }
@@ -396,8 +404,13 @@ export class Terminal implements ITerminalCore {
       this.emitInput(mouseReport(button, x, y, false, engine.getMode(1006), engine.getMode(1005))); return;
     }
     if (engine.isAlternateScreen()) {
-      const count = Math.min(5, Math.abs(Math.round(event.deltaY / 33)));
-      for (let i = 0; i < count; i++) this.emitInput(event.deltaY > 0 ? '\x1b[B' : '\x1b[A');
+      if (!engine.getMode(1007)) { this.alternateWheelRemainder = 0; return; }
+      const delta = event.deltaMode === 1 ? event.deltaY : event.deltaMode === 2 ? event.deltaY * this.rows : event.deltaY / 33;
+      this.alternateWheelRemainder += delta;
+      const steps = Math.trunc(this.alternateWheelRemainder);
+      this.alternateWheelRemainder -= steps;
+      const prefix = engine.getMode(1) ? '\x1bO' : '\x1b[';
+      for (let i = 0; i < Math.min(5, Math.abs(steps)); i++) this.emitInput(prefix + (steps > 0 ? 'B' : 'A'));
       return;
     }
     const lines = event.deltaMode === 1 ? event.deltaY : event.deltaMode === 2 ? event.deltaY * this.rows : event.deltaY / (this.renderer?.getMetrics().height ?? 20);
@@ -424,7 +437,7 @@ export class Terminal implements ITerminalCore {
     }
   };
   private readonly handleMouseUp = (event: MouseEvent): void => {
-    if (this.mouseButton !== undefined && this.canvas && this.renderer && this.wasmTerm) {
+    if (this.mouseButton !== undefined && this.canvas && this.renderer && this.wasmTerm?.hasMouseTracking()) {
       const { x, y } = this.pointer(event);
       this.emitInput(mouseReport(this.mouseButton | this.mouseModifiers(event), x, y, true, this.wasmTerm.getMode(1006), this.wasmTerm.getMode(1005)));
     }

@@ -140,3 +140,68 @@ describe('terminal lifecycle hygiene', () => {
     term.dispose();
   });
 });
+
+
+describe('runtime terminal configuration', () => {
+  test('theme changes recolor cached viewport and history without resetting state', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    const container = document.createElement('div');
+    term.open(container);
+    try {
+      term.write('abc\x1b[31mR\x1b[0m\r\nsecond\r\nlive\x1b]2;retained\x07');
+      term.wasmTerm!.getLineView(0);
+      const history = term.getScrollbackLength();
+      term.options.theme = { foreground: '#123456', background: '#234567', red: '#abcdef', cursor: '#fedcba' };
+      expect(term.wasmTerm!.getColors()).toEqual({ foreground: { r: 18, g: 52, b: 86 },
+        background: { r: 35, g: 69, b: 103 }, cursor: { r: 254, g: 220, b: 186 } });
+      expect(term.wasmTerm!.getLineView(0)![0]).toMatchObject({ fg_r: 18, fg_g: 52, fg_b: 86, bg_r: 35, bg_g: 69, bg_b: 103 });
+      expect(term.getScrollbackLine(0)![3]).toMatchObject({ fg_r: 171, fg_g: 205, fg_b: 239 });
+      expect(term.getScrollbackLength()).toBe(history);
+      expect(term.title).toBe('retained');
+      expect(term.buffer.active.getLine(history)?.translateToString(true)).toBe('second');
+      term.write('\x1b]10;#ff0000\x07');
+      term.options.theme = { foreground: '#654321' };
+      expect(term.wasmTerm!.getColors().foreground).toEqual({ r: 255, g: 0, b: 0 });
+      term.write('\x1b]110\x07');
+      expect(term.wasmTerm!.getColors().foreground).toEqual({ r: 101, g: 67, b: 33 });
+    } finally { term.dispose(); }
+  });
+
+  test('alternate wheel input honors mode 1007, application cursor mode and delta units', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => sent.push(data));
+    try {
+      term.write('\x1b[?1049h\x1b[?1007l');
+      container.dispatchEvent(new WheelEvent('wheel', { deltaY: 120 }));
+      expect(sent).toEqual([]);
+      term.write('\x1b[?1007h\x1b[?1h');
+      container.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, deltaMode: 1 }));
+      expect(sent).toEqual(['\x1bOB']);
+      sent.length = 0;
+      for (let i = 0; i < 4; i++) container.dispatchEvent(new WheelEvent('wheel', { deltaY: -8.25 }));
+      expect(sent).toEqual(['\x1bOA']);
+    } finally { term.dispose(); }
+  });
+
+  test('reset and disabled mouse tracking discard a held mouse button', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => sent.push(data));
+    try {
+      for (const reset of [() => term.reset(), () => term.write('\x1b[?1000l')]) {
+        term.write('\x1b[?1000h\x1b[?1006h');
+        container.querySelector('canvas')!.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+        expect(sent.length).toBeGreaterThan(0);
+        reset(); sent.length = 0;
+        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }));
+        expect(sent).toEqual([]);
+      }
+    } finally { term.dispose(); container.remove(); }
+  });
+});
