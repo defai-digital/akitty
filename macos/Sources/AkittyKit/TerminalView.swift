@@ -559,7 +559,8 @@ import os
     }
     public func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
         let text = (snapshot?.text ?? "") as NSString
-        guard range.location != NSNotFound, range.location <= text.length else { return nil }
+        guard range.location != NSNotFound, range.location >= 0, range.length >= 0,
+              range.location <= text.length else { return nil }
         let safe = NSRange(location: range.location, length: min(range.length, text.length - range.location))
         actualRange?.pointee = safe; return NSAttributedString(string: text.substring(with: safe))
     }

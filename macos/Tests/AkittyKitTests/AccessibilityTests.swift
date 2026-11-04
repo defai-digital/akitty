@@ -3,6 +3,18 @@ import XCTest
 @testable import AkittyKit
 
 final class AccessibilityTests: XCTestCase {
+    @MainActor func testInvalidTextRangesAreRejectedBeforeCallingFoundation() throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        defer { terminal.shutdown() }
+        for range in [NSRange(location: -1, length: 1), NSRange(location: 0, length: -1),
+                      NSRange(location: NSNotFound, length: 1), NSRange(location: 1, length: 0)] {
+            XCTAssertNil(terminal.attributedSubstring(forProposedRange: range, actualRange: nil))
+            XCTAssertNil(terminal.accessibilityString(for: range))
+        }
+        XCTAssertEqual(terminal.accessibilityString(for: NSRange(location: 0, length: Int.max)), "")
+    }
+
     @MainActor func testPresentedApprovalKeepsDenyDefaultAndDenialReturnsHumanControl() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
