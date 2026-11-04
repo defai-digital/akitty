@@ -58,6 +58,34 @@ class DeferredProvider implements ILinkProvider {
 }
 
 describe('LinkDetector async scan cache', () => {
+  test('the first provider wins when two links have exactly the same range', async () => {
+    const detector = new LinkDetector(makeTerminal());
+    const explicit = makeLink(0, 0, 10, 'explicit target');
+    const detected = makeLink(0, 0, 10, 'detected target');
+    detector.registerProvider({ provideLinks: (_row, callback) => callback([explicit]) });
+    detector.registerProvider({ provideLinks: (_row, callback) => callback([detected]) });
+    await expect(detector.getLinkAt(5, 0)).resolves.toBe(explicit);
+    await expect(detector.getLinkAt(5, 0)).resolves.toBe(explicit);
+    detector.dispose();
+  });
+
+  test('provider priority survives overlapping multi-line links cached from another row', async () => {
+    const detector = new LinkDetector(makeTerminal());
+    const explicit = makeLink(1, 0, 10, 'explicit target');
+    const fallback: ILink = {
+      ...makeLink(0, 0, 10, 'fallback target'),
+      range: { start: { x: 0, y: 0 }, end: { x: 10, y: 1 } },
+    };
+    detector.registerProvider({ provideLinks: (row, callback) => callback(row === 1 ? [explicit] : undefined) });
+    detector.registerProvider({ provideLinks: (_row, callback) => callback([fallback]) });
+    await expect(detector.getLinkAt(5, 0)).resolves.toBe(fallback);
+    await expect(detector.getLinkAt(5, 1)).resolves.toBe(explicit);
+    await expect(detector.getLinkAt(5, 0)).resolves.toBe(fallback);
+    detector.invalidateRows(1, 1);
+    await expect(detector.getLinkAt(5, 1)).resolves.toBe(explicit);
+    detector.dispose();
+  });
+
   test('concurrent getLinkAt calls on one unscanned row share a single provider scan', async () => {
     const provider = new DeferredProvider();
     const detector = new LinkDetector(makeTerminal());

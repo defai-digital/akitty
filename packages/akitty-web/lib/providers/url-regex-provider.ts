@@ -31,7 +31,7 @@ export class UrlRegexProvider implements ILinkProvider {
    * Excludes file paths (no ./ or ../ or bare /)
    */
   private static readonly URL_REGEX =
-    /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
+    /(https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
 
   /**
    * Characters to strip from end of URLs
@@ -79,8 +79,8 @@ export class UrlRegexProvider implements ILinkProvider {
       const startX = cellByTextIndex[startIndex] ?? startIndex;
       const endX = cellByTextIndex[endIndex] ?? endIndex;
 
-      // Skip if URL is too short (e.g., just "http://")
-      if (url.length > 8) {
+      // Require a destination after the scheme, including after stripping punctuation.
+      if (url.length > match[1].length) {
         links.push({
           text: url,
           range: {

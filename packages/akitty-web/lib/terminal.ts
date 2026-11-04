@@ -312,6 +312,7 @@ export class Terminal implements ITerminalCore {
   // Link detection system
   private linkDetector?: LinkDetector;
   private currentHoveredLink?: ILink;
+  private hoverRequest = 0;
   private mouseMoveThrottleTimeout?: number;
   private pendingMouseMove?: MouseEvent;
 
@@ -1315,7 +1316,9 @@ export class Terminal implements ITerminalCore {
       throw new RangeError('scrollToLine line must be a finite number');
     }
     const scrollbackLength = this.getScrollbackLength();
-    const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
+    // Public line indices start at the oldest row; internal viewportY is the
+    // distance above the bottom, so convert before clamping.
+    const newViewportY = Math.max(0, Math.min(scrollbackLength, scrollbackLength - line));
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
@@ -1713,6 +1716,8 @@ export class Terminal implements ITerminalCore {
    */
   private handleMouseMove = (e: MouseEvent): void => {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
+    // A newer pointer position invalidates a pending lookup even while throttled.
+    this.hoverRequest++;
 
     // If dragging scrollbar, handle immediately without throttling
     if (this.isDraggingScrollbar) {
@@ -1745,6 +1750,7 @@ export class Terminal implements ITerminalCore {
    */
   private processMouseMove(e: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    const request = ++this.hoverRequest;
 
     // Convert mouse coordinates to terminal cell position
     const rect = this.canvas.getBoundingClientRect();
@@ -1822,7 +1828,7 @@ export class Terminal implements ITerminalCore {
     this.linkDetector
       .getLinkAt(x, bufferRow)
       .then((link) => {
-        if (this.isDisposed || !this.isOpen) return;
+        if (this.isDisposed || !this.isOpen || request !== this.hoverRequest) return;
         // Update hover state for cursor changes and click handling
         if (link !== this.currentHoveredLink) {
           // Notify old link we're leaving
@@ -1878,6 +1884,12 @@ export class Terminal implements ITerminalCore {
    * Handle mouse leave to clear link hover
    */
   private handleMouseLeave = (): void => {
+    this.hoverRequest++;
+    if (this.mouseMoveThrottleTimeout !== undefined) {
+      clearTimeout(this.mouseMoveThrottleTimeout);
+      this.mouseMoveThrottleTimeout = undefined;
+    }
+    this.pendingMouseMove = undefined;
     // Clear hyperlink underline
     if (this.renderer && this.wasmTerm) {
       const previousHyperlinkId = (this.renderer as any).hoveredHyperlinkId || 0;
