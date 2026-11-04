@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   CHROME_CLEAR_SEQUENCE,
+  SDK_VERSION,
   chromeSequence,
   createSprite,
   createTerminalClient,
@@ -15,6 +17,33 @@ const sprite = createSprite(1, 1, [
   new Uint8Array([0, 0, 255, 255]),
 ]);
 const body = (sequence) => JSON.parse(sequence.slice("\x1b]771;".length, -1));
+
+test("exported SDK version matches the package version", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(SDK_VERSION, manifest.version);
+});
+
+test("sparse sprite frames are rejected before emitting or changing chrome", () => {
+  for (const frames of [new Array(1), [, new Uint8Array(4)], [new Uint8Array(4), ,]]) {
+    assert.throws(() => createSprite(1, 1, frames), RangeError);
+  }
+  for (const frames of [new Array(1), [, "AAAAAA=="], ["AAAAAA==", ,]]) {
+    const invalid = { w: 1, h: 1, frames };
+    assert.throws(() => chromeSequence({ sprite: invalid }), RangeError);
+    const h = harness();
+    h.client.setStatus({ text: "Preserve", tone: "info" });
+    const previous = h.client.chrome;
+    for (const update of [
+      () => h.client.setSprite(invalid),
+      () => h.client.playSprite({ sprite: invalid, intervalMs: 150 }),
+    ]) {
+      assert.throws(update, RangeError);
+      assert.equal(h.client.chrome, previous);
+      assert.equal(h.writes.length, 1);
+      assert.equal(h.ticks.length, 0);
+    }
+  }
+});
 
 function harness(options = {}) {
   const writes = [];

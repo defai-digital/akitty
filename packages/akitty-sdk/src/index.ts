@@ -1,4 +1,4 @@
-export const SDK_VERSION = "0.2.1";
+export const SDK_VERSION = "0.2.2";
 export const CHROME_CLEAR_SEQUENCE = '\x1b]771;{"clear":true}\x07';
 
 export type Status = Readonly<{
@@ -101,7 +101,7 @@ function validateSprite(sprite: Sprite): Sprite {
     throw new RangeError("sprite needs 1..4 frames");
   }
   const length = sprite.w * sprite.h * 4;
-  const frames = sprite.frames.map((frame) => {
+  const frames = Array.from(sprite.frames, (frame) => {
     if (
       typeof frame !== "string" ||
       frame.length !== 4 * Math.ceil(length / 3)
@@ -138,7 +138,7 @@ export function createSprite(
   return validateSprite({
     w,
     h,
-    frames: frames.map((frame) => {
+    frames: Array.from(frames, (frame) => {
       if (!(frame instanceof Uint8Array) || frame.length !== w * h * 4)
         throw new RangeError("sprite frame does not match dimensions");
       return btoa(String.fromCharCode(...frame));
