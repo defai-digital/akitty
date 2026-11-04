@@ -117,7 +117,6 @@ export class AkittyTerminal {
   private viewportValid = false;
   private full = true;
   private alternate = false;
-  private cursorColor?: number;
 
   constructor(private exports: AkittyWasmExports, cols = 80, rows = 24, config?: TerminalConfig) {
     AkittyTerminal.validate(cols, rows);
@@ -128,12 +127,17 @@ export class AkittyTerminal {
     this.eventBytes = new ByteBuffer(api);
     this.handle = exports.akitty_vt_create(cols, rows, Math.max(0, Math.min(100000, Math.floor(config?.scrollbackLimit ?? 10000))));
     if (!this.handle) throw new Error('AkiTTY VT terminal allocation failed');
-    this.cursorColor = config?.cursorColor;
-    if (config?.fgColor !== undefined) exports.akitty_vt_color(this.handle, 256, config.fgColor);
-    if (config?.bgColor !== undefined) exports.akitty_vt_color(this.handle, 257, config.bgColor);
-    if (this.cursorColor !== undefined) exports.akitty_vt_color(this.handle, 258, this.cursorColor);
-    config?.palette?.slice(0, 16).forEach((color, index) => exports.akitty_vt_color(this.handle, index, color));
+    this.setTheme(config ?? {});
     this.initializeRows();
+  }
+  /** Update the host reset palette while retaining screen content and OSC overrides. */
+  setTheme(config: Pick<TerminalConfig, 'fgColor' | 'bgColor' | 'cursorColor' | 'palette'>): void {
+    if (!this.handle) return;
+    for (const [index, color] of [[256, config.fgColor], [257, config.bgColor], [258, config.cursorColor]] as const) {
+      if (color !== undefined) this.exports.akitty_vt_color(this.handle, index, color);
+    }
+    config.palette?.slice(0, 16).forEach((color, index) => this.exports.akitty_vt_color(this.handle, index, color));
+    this.invalidate(); this.full = true;
   }
   private static validate(cols: number, rows: number): void {
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 4096 || rows > 4096 || cols * rows > 1048576) {

@@ -140,3 +140,27 @@ The full verification and performance logs are task-owned ignored files under
 untracked and untouched. Root historical notices and retained Coder-derived tests
 are explicitly distinguished from current production authorship in the provenance
 ledgers. No memory, private reference corpus or generated build directory is committed.
+
+## Post-migration bug audit
+
+All local branches and worktrees were inspected before publication. Only `main`
+and its primary worktree remained; the six pending commits were already on it.
+No merge or branch deletion was needed. Cleanup removed 523 obsolete Alacritty/VTE
+build artifacts and preserved the untracked reference corpus.
+
+The follow-up audit corrected runtime theme updates that left WASM colors and
+cached rows unchanged; Ctrl+Alt chords confused with AltGraph text; enhanced
+keyboard reports that substituted physical Latin identities for Unicode layout
+text; cancelled browser dead-key composition; Ctrl-modified editing/keypad keys
+that produced no bytes; alternate-screen wheel input that ignored mode 1007,
+application cursor mode and delta units; and mouse releases retained after reset
+or after tracking was disabled. Palette changes preserve text, history and OSC
+overrides. Fractional alternate-wheel deltas accumulate rather than disappearing.
+
+The new regression tests reproduce the failures and the required verification
+passes with 220 Rust tests, 626 Web tests, 12 Chromium/WebKit tests and 258 Swift
+tests executed with one skip and zero failures. Native/WASM shared fixtures,
+WASM/native Clippy, SDK/ABI, shell, publication, release and installer checks also
+pass. Firefox retains the reported local startup exception; CI still requires it.
+Runtime-theme screenshots from both tested browsers were inspected. Physical
+keyboard-layout and IME hardware coverage is not implied by synthetic event tests.

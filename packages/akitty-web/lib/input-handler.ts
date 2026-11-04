@@ -18,12 +18,18 @@ const punctuation: Readonly<Record<string, string>> = {
 };
 function identity(event: KeyboardEvent): Key | undefined {
   if (functional[event.code] !== undefined) return functional[event.code];
+  const scalar = Array.from(event.key).length === 1 ? event.key.codePointAt(0) as Key : undefined;
+  if (scalar !== undefined) {
+    if (!event.shiftKey && !event.getModifierState?.('CapsLock')) return scalar;
+    const unshifted = event.key.toLowerCase();
+    if (unshifted !== event.key && Array.from(unshifted).length === 1) return unshifted.codePointAt(0) as Key;
+  }
   if (/^Key[A-Z]$/.test(event.code)) return event.code.toLowerCase().charCodeAt(3) as Key;
   if (/^Digit[0-9]$/.test(event.code)) return event.code.charCodeAt(5) as Key;
   if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;
   const fn = /^F([1-9]|[12][0-9]|3[0-5])$/.exec(event.code);
   if (fn) return (57363 + Number(fn[1])) as Key;
-  return punctuation[event.code]?.codePointAt(0) as Key | undefined;
+  return (punctuation[event.code]?.codePointAt(0) ?? scalar) as Key | undefined;
 }
 
 export class InputHandler {
@@ -58,17 +64,18 @@ export class InputHandler {
       this.onKey?.({ key: event.key, domEvent: event });
       if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
     }
+    if (event.key === 'Dead') return;
     if ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC') return;
     const printable = Array.from(event.key).length === 1;
-    // AltGr text is already composed by the keyboard layout. Plain text likewise
-    // needs no physical-key identity, including layouts with non-ASCII letters.
-    if (!release && !(flags & 8) && printable && !event.metaKey && event.ctrlKey === event.altKey) {
+    // AltGraph is a layout modifier; Ctrl+Alt alone remains a terminal chord.
+    const altGraph = event.getModifierState?.('AltGraph') ?? false;
+    if (!release && !(flags & 8) && printable && !event.metaKey && ((!event.ctrlKey && !event.altKey) || altGraph)) {
       event.preventDefault(); this.onData(event.key); return;
     }
     const code = identity(event);
     if (code === undefined) return;
-    const mods = (event.shiftKey ? Mods.SHIFT : 0) | (event.altKey ? Mods.ALT : 0)
-      | (event.ctrlKey ? Mods.CTRL : 0) | (event.metaKey ? Mods.SUPER : 0)
+    const mods = (event.shiftKey ? Mods.SHIFT : 0) | (event.altKey && !altGraph ? Mods.ALT : 0)
+      | (event.ctrlKey && !altGraph ? Mods.CTRL : 0) | (event.metaKey ? Mods.SUPER : 0)
       | (event.getModifierState?.('CapsLock') ? Mods.CAPSLOCK : 0) | (event.getModifierState?.('NumLock') ? Mods.NUMLOCK : 0);
     this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, this.getMode?.(1) ?? false);
     this.encoder.setOption(KeyEncoderOption.KEYPAD_KEY_APPLICATION, this.getMode?.(66) ?? false);

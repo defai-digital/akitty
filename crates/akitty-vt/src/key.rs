@@ -155,31 +155,36 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
             56 | 63 => Some(127),
             _ => None,
         };
-        control.map_or_else(|| key.text.as_bytes().to_vec(), |byte| vec![byte])
-    } else if !key.text.is_empty() {
-        key.text.as_bytes().to_vec()
+        control.map_or_else(|| legacy_text(key), |byte| vec![byte])
     } else {
-        match key.code {
-            9 => vec![9],
-            13 => vec![13],
-            27 => vec![27],
-            127 => vec![127],
-            57399..=57408 => vec![b'0' + (key.code - 57399) as u8],
-            57409 => b".".to_vec(),
-            57410 => b"/".to_vec(),
-            57411 => b"*".to_vec(),
-            57412 => b"-".to_vec(),
-            57413 => b"+".to_vec(),
-            57414 => vec![13],
-            57415 => b"=".to_vec(),
-            57416 => b",".to_vec(),
-            _ => Vec::new(),
-        }
+        legacy_text(key)
     };
     if options.alt_escape && mods & ALT != 0 && key.text.is_ascii() && !output.is_empty() {
         output.insert(0, 27);
     }
     output
+}
+
+fn legacy_text(key: &Key<'_>) -> Vec<u8> {
+    if !key.text.is_empty() {
+        return key.text.as_bytes().to_vec();
+    }
+    match key.code {
+        9 => vec![9],
+        13 => vec![13],
+        27 => vec![27],
+        127 => vec![127],
+        57399..=57408 => vec![b'0' + (key.code - 57399) as u8],
+        57409 => b".".to_vec(),
+        57410 => b"/".to_vec(),
+        57411 => b"*".to_vec(),
+        57412 => b"-".to_vec(),
+        57413 => b"+".to_vec(),
+        57414 => vec![13],
+        57415 => b"=".to_vec(),
+        57416 => b",".to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 fn function(code: u32) -> Option<(u16, char, Option<char>)> {
@@ -263,6 +268,26 @@ mod tests {
             "\x1bOq"
         );
     }
+    #[test]
+    fn legacy_control_modifiers_do_not_swallow_editing_or_keypad_keys() {
+        for (code, expected) in [(9, 9), (13, 13), (27, 27), (127, 127), (57414, 13)] {
+            assert_eq!(
+                encode(&Key::press(code, CTRL, ""), Options::default()),
+                [expected]
+            );
+        }
+        assert_eq!(
+            encode(
+                &Key::press(13, CTRL | ALT, ""),
+                Options {
+                    alt_escape: true,
+                    ..Options::default()
+                }
+            ),
+            [27, 13]
+        );
+    }
+
     #[test]
     fn kitty_flags_control_ambiguity_text_alternates_and_release() {
         let options = Options {
