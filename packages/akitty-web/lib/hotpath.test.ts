@@ -280,8 +280,35 @@ describe('CanvasRenderer work skipping', () => {
     renderer.render(renderable, false, 0);
     expect(resize).not.toHaveBeenCalled();
     expect(counts.fillText).toBe(0);
-    expect(counts.fillRect).toBe(1); // the cursor only
+    expect(counts.fillRect).toBe(0); // unchanged cursor pixels must not accumulate opacity
     renderer.dispose?.();
+  });
+
+  test('cursor overlays are not repainted on idle or unrelated row damage', () => {
+    const { renderer } = makeRenderer();
+    const { renderable, dirty, lines } = makeRenderable(20, 4, ['abc', 'def']);
+    let overlays = 0;
+    const context = (renderer as any).ctx;
+    context.fillRect = () => { if (context.globalAlpha === 0.5) overlays++; };
+    renderer.render(renderable, true, 0);
+    overlays = 0;
+    renderer.render(renderable, false, 0);
+    expect(overlays).toBe(0);
+    lines[1][0].codepoint = 90; dirty.add(1);
+    renderer.render(renderable, false, 0);
+    expect(overlays).toBe(0);
+    renderer.dispose();
+  });
+
+  test('idle frames do not recompute Rust row damage', async () => {
+    const term = await makeWasm();
+    const { renderer } = makeRenderer();
+    try {
+      renderer.render(term, true, 0);
+      const clears = countCalls(term, 'akitty_vt_clean');
+      for (let i = 0; i < 10; i++) renderer.render(term, false, 0);
+      expect(clears.count()).toBe(0);
+    } finally { renderer.dispose(); term.free(); }
   });
 
   test('an idle frame allocates no per-row hashes and reads no rows', () => {

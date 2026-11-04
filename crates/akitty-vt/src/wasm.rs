@@ -315,6 +315,89 @@ pub extern "C" fn akitty_vt_line(id: u32, row: i32, pointer: u32, capacity: u32)
     });
     output(pointer, capacity, &bytes)
 }
+/// Select a retained screen explicitly: 0 normal, 1 alternate. All buffer APIs
+/// are read-only and never switch modes, consume events or alter display offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_buffer_get(id: u32, alternate: u32, field: u32) -> u32 {
+    if alternate > 1 {
+        return 0;
+    }
+    inspect(id, |instance| {
+        let screen = instance.terminal.screen_for(alternate != 0);
+        match field {
+            0 => screen.cols as u32,
+            1 => screen.rows.len() as u32,
+            2 => screen.cursor.position.col as u32,
+            3 => screen.cursor.position.row as u32,
+            6 => screen.history.len() as u32,
+            _ => 0,
+        }
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_buffer_line(
+    id: u32,
+    alternate: u32,
+    row: i32,
+    pointer: u32,
+    capacity: u32,
+) -> u32 {
+    if alternate > 1 {
+        return 0;
+    }
+    let bytes: Vec<u8> = inspect(id, |instance| {
+        let term = &instance.terminal;
+        let Some(line) = term.screen_for(alternate != 0).line(row) else {
+            return Vec::new();
+        };
+        let mut bytes = Vec::with_capacity(line.cells.len() * 32);
+        append_cells(
+            &term.palette,
+            &line.cells,
+            &mut bytes,
+            term.modes.reverse_video,
+        );
+        bytes
+    });
+    output(pointer, capacity, &bytes)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_buffer_wrapped(id: u32, alternate: u32, row: i32) -> u32 {
+    if alternate > 1 {
+        return 0;
+    }
+    inspect(id, |instance| {
+        u32::from(
+            instance
+                .terminal
+                .screen_for(alternate != 0)
+                .line(row.saturating_sub(1))
+                .is_some_and(|line| line.wrapped),
+        )
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_buffer_text(
+    id: u32,
+    alternate: u32,
+    row: i32,
+    col: u32,
+    pointer: u32,
+    capacity: u32,
+) -> u32 {
+    if alternate > 1 {
+        return 0;
+    }
+    let text: String = inspect(id, |instance| {
+        instance
+            .terminal
+            .screen_for(alternate != 0)
+            .line(row)
+            .and_then(|line| line.cells.get(col as usize))
+            .map_or(String::new(), |cell| cell.text())
+    });
+    output(pointer, capacity, text.as_bytes())
+}
 fn append_cells(
     palette: &crate::cell::Palette,
     cells: &[crate::cell::Cell],

@@ -32,23 +32,23 @@ export class BufferNamespace implements IBufferNamespace {
 export class Buffer implements IBuffer {
   private readonly nullCell = new BufferCell(vacant(), 0);
   constructor(private readonly terminal: Terminal, readonly type: 'normal' | 'alternate') {}
-  get cursorX(): number { return this.terminal.wasmTerm?.getCursor().x ?? 0; }
-  get cursorY(): number { return this.terminal.wasmTerm?.getCursor().y ?? 0; }
-  get viewportY(): number { return Math.max(0, Math.floor(this.terminal.getViewportY())); }
-  get baseY(): number { return this.type === 'normal' ? this.terminal.wasmTerm?.getScrollbackLength() ?? 0 : 0; }
+  private get alternate(): boolean { return this.type === 'alternate'; }
+  get cursorX(): number { return this.terminal.wasmTerm?.getBufferField(this.alternate, 2) ?? 0; }
+  get cursorY(): number { return this.terminal.wasmTerm?.getBufferField(this.alternate, 3) ?? 0; }
+  get viewportY(): number { return this.terminal.buffer.active === this ? Math.max(0, Math.floor(this.terminal.getViewportY())) : 0; }
+  get baseY(): number { return this.terminal.wasmTerm?.getBufferField(this.alternate, 6) ?? 0; }
   get length(): number { return this.terminal.wasmTerm ? this.baseY + this.terminal.wasmTerm.rows : 0; }
   getNullCell(): IBufferCell { return this.nullCell; }
   getLine(row: number): IBufferLine | undefined {
     const engine = this.terminal.wasmTerm;
     if (!engine || !Number.isInteger(row) || row < 0) return undefined;
-    const history = this.type === 'normal' ? engine.getScrollbackLength() : 0;
+    const history = engine.getBufferField(this.alternate, 6);
     if (row >= history + engine.rows) return undefined;
-    const historic = row < history;
-    const index = historic ? row : row - history;
-    const cells = historic ? engine.getScrollbackLine(index) : engine.getLine(index);
+    const relativeRow = row - history;
+    const cells = engine.getBufferLine(this.alternate, relativeRow);
     if (!cells) return undefined;
-    const wrapped = historic ? engine.isScrollbackRowWrapped(index) : engine.isRowWrapped(index);
-    const lookup: Graphemes = column => historic ? engine.getScrollbackGrapheme(index, column) : engine.getGrapheme(index, column);
+    const wrapped = engine.isBufferRowWrapped(this.alternate, relativeRow);
+    const lookup: Graphemes = column => engine.getBufferGrapheme(this.alternate, relativeRow, column);
     return new BufferLine(cells, wrapped, engine.cols, lookup);
   }
 }

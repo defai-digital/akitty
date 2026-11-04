@@ -170,6 +170,10 @@ export interface AkittyWasmExports extends WebAssembly.Exports {
   akitty_vt_tick(id: number, now: number): number;
   akitty_vt_resize(id: number, cols: number, rows: number): number;
   akitty_vt_get(id: number, field: number): number;
+  akitty_vt_buffer_get(id: number, alternate: number, field: number): number;
+  akitty_vt_buffer_line(id: number, alternate: number, row: number, pointer: number, capacity: number): number;
+  akitty_vt_buffer_wrapped(id: number, alternate: number, row: number): number;
+  akitty_vt_buffer_text(id: number, alternate: number, row: number, col: number, pointer: number, capacity: number): number;
   akitty_vt_mode(id: number, mode: number, ansi: number): number;
   akitty_vt_line(id: number, row: number, pointer: number, capacity: number): number;
   akitty_vt_viewport(id: number, pointer: number, capacity: number): number;

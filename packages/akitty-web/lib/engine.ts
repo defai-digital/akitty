@@ -17,7 +17,7 @@ export class AkittyEngine {
   private readonly exports: AkittyWasmExports;
   constructor(instance: WebAssembly.Instance) {
     this.exports = instance.exports as AkittyWasmExports;
-    if (this.exports.akitty_vt_abi_version?.() !== 1) throw new Error('Unsupported AkiTTY VT WASM ABI');
+    if (this.exports.akitty_vt_abi_version?.() !== 1 || ['akitty_vt_buffer_get', 'akitty_vt_buffer_line', 'akitty_vt_buffer_wrapped', 'akitty_vt_buffer_text'].some(name => typeof this.exports[name] !== 'function')) throw new Error('Unsupported AkiTTY VT WASM ABI');
   }
   static async load(path?: string | URL): Promise<AkittyEngine> {
     const url = path === undefined ? new URL('../akitty-vt.wasm', import.meta.url) : path;
@@ -250,6 +250,28 @@ export class AkittyTerminal {
       this.rowParsed[row] = 1;
     }
     return this.rowViews[row];
+  }
+  getBufferField(alternate: boolean, field: number): number {
+    return this.handle ? this.exports.akitty_vt_buffer_get(this.handle, Number(alternate), field) >>> 0 : 0;
+  }
+  /** Rows are relative to the selected screen; negative rows address its history. */
+  getBufferLine(alternate: boolean, row: number): TerminalCell[] | null {
+    if (!this.handle || !Number.isInteger(row) || row >= this._rows || row < -this.getBufferField(alternate, 6)) return null;
+    if (alternate === this.isAlternateScreen()) return row < 0 ? this.getScrollbackLine(row + this.getScrollbackLength()) : this.getLine(row);
+    const size = this._cols * CELL_BYTES, pointer = this.historyBytes.reserve(size);
+    if (this.exports.akitty_vt_buffer_line(this.handle, Number(alternate), row, pointer, size) !== size) return null;
+    const view = new DataView(this.exports.memory.buffer, pointer, size);
+    return Array.from({ length: this._cols }, (_, col) => { const cell = emptyCell(); this.decodeCell(view, col * CELL_BYTES, cell); return cell; });
+  }
+  isBufferRowWrapped(alternate: boolean, row: number): boolean {
+    return !!this.handle && Number.isInteger(row) && row < this._rows && row >= -this.getBufferField(alternate, 6)
+      && !!this.exports.akitty_vt_buffer_wrapped(this.handle, Number(alternate), row);
+  }
+  getBufferGrapheme(alternate: boolean, row: number, col: number): number[] | null {
+    if (!this.handle || !Number.isInteger(row) || !Number.isInteger(col) || col < 0 || col >= this._cols || row >= this._rows || row < -this.getBufferField(alternate, 6)) return null;
+    const pointer = this.textBytes.reserve(8192);
+    const count = this.exports.akitty_vt_buffer_text(this.handle, Number(alternate), row, col, pointer, this.textBytes.capacity);
+    return count ? Array.from(text.decode(new Uint8Array(this.exports.memory.buffer, pointer, count)), ch => ch.codePointAt(0)!) : null;
   }
   getLine(row: number): TerminalCell[] | null { return this.getLineView(row)?.map(cell => ({ ...cell })) ?? null; }
   getViewport(): TerminalCell[] { for (let row = 0; row < this._rows; row++) this.getLineView(row); return this.cellPool.map(cell => ({ ...cell })); }

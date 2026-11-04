@@ -60,6 +60,10 @@ remain supported. Engine-specific exports intentionally change:
 - `unicode.activeVersion` reports the width tables (18.0); grapheme boundaries
   use Unicode 17.0. Web enables streaming grapheme mode 2027 by default. Native
   keeps its existing scalar-width profile; shared fixtures qualify both profiles.
+- Normal and alternate buffer objects expose their own cursor, retained text and
+  wrapping even while inactive. Reads do not switch the active terminal buffer.
+  Update TypeScript source and `akitty-vt.wasm` together: the loader requires the
+  explicit buffer-read exports in addition to WASM ABI 1.
 - Title/BEL events come from the common Rust parser. Theme colors survive RIS
   and OSC palette reset, and synchronized output deadlines flush even while hidden.
 

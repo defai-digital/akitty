@@ -103,6 +103,39 @@ for (const fixture of fixtures) {
     assert.equal(api.akitty_vt_destroy(terminal), 1);
   }
 }
+// Explicit buffer inspection must preserve the active screen and pending events.
+const feedTerminal = (handle, input) => {
+  const bytes = encoder.encode(input);
+  new Uint8Array(api.memory.buffer, scratch, bytes.length).set(bytes);
+  assert.equal(api.akitty_vt_write(handle, scratch, bytes.length, 0), 1);
+};
+const retained = api.akitty_vt_create(8, 2, 10);
+feedTerminal(retained, 'a中é\r\nb\r\nc\x1b[?1049halt中éabcdefg');
+const revision = api.akitty_vt_get(retained, 7);
+assert.equal(api.akitty_vt_buffer_get(retained, 0, 6), 1);
+assert.equal(api.akitty_vt_buffer_get(retained, 1, 6), 0);
+assert.equal(api.akitty_vt_buffer_get(retained, 0, 2), 1);
+assert.equal(api.akitty_vt_buffer_get(retained, 1, 2), 5);
+assert.equal(api.akitty_vt_buffer_line(retained, 0, -1, scratch, length), 8 * 32);
+assert.equal(new DataView(api.memory.buffer, scratch, 32).getUint32(0, true), 97);
+let count = api.akitty_vt_buffer_text(retained, 0, -1, 3, scratch, length);
+assert.equal(decoder.decode(new Uint8Array(api.memory.buffer, scratch, count)), 'é');
+assert.equal(api.akitty_vt_buffer_wrapped(retained, 1, 1), 1);
+assert.equal(api.akitty_vt_get(retained, 5), 1);
+assert.equal(api.akitty_vt_get(retained, 7), revision);
+feedTerminal(retained, '\x1b[?1049l');
+assert.equal(api.akitty_vt_buffer_line(retained, 1, 0, scratch, length), 8 * 32);
+assert.equal(api.akitty_vt_get(retained, 5), 0);
+assert.equal(api.akitty_vt_buffer_line(retained, 2, 0, scratch, length), 0);
+assert.equal(api.akitty_vt_buffer_line(retained, 0, -100, scratch, length), 0);
+assert.equal(api.akitty_vt_buffer_text(retained, 0, 0, 999, scratch, length), 0);
+assert.equal(api.akitty_vt_destroy(retained), 1);
+assert.equal(api.akitty_vt_buffer_get(retained, 0, 6), 0);
+const reflow = api.akitty_vt_create(8, 3, 10);
+feedTerminal(reflow, 'ab中xyz\x1b[1;4H');
+assert.equal(api.akitty_vt_resize(reflow, 3, 4), 1);
+assert.deepEqual([api.akitty_vt_get(reflow, 2), api.akitty_vt_get(reflow, 3)], [1, 1]);
+assert.equal(api.akitty_vt_destroy(reflow), 1);
 assert.equal(api.akitty_vt_free(scratch, length), 1);
 console.log('Independent VT WASM: text, Unicode, replies, modes, synchronization, resize and lifecycle passed');
 console.log(`Shared native/WASM contracts: ${fixtures.length} fixtures passed at every byte boundary`);

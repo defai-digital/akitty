@@ -132,3 +132,26 @@ test('runtime theme changes recolor the canvas and modified editing keys reach t
   expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b\x03', '\r'])
   await info.attach('runtime-theme', { body: await page.locator('canvas').screenshot(), contentType: 'image/png' })
 })
+
+
+test('idle cursor pixels stay stable and OSC cursor colors reach the canvas', async ({ page }) => {
+  const sample = () => page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!
+    return Array.from(canvas.getContext('2d')!.getImageData(1, 1, 1, 1).data).slice(0, 3)
+  })
+  const initial = await page.evaluate(() => {
+    const t = (window as any).fixture.terminal
+    t.write('\x1b[2J\x1b[H\x1b[?25h')
+    t.renderer.render(t.wasmTerm, true, 0, t, 0)
+    const canvas = document.querySelector('canvas')!
+    return Array.from(canvas.getContext('2d')!.getImageData(1, 1, 1, 1).data).slice(0, 3)
+  })
+  await page.evaluate(async () => { for (let i = 0; i < 12; i++) await new Promise(requestAnimationFrame) })
+  expect(await sample()).toEqual(initial)
+  await page.evaluate(() => (window as any).fixture.write('\x1b[2;1HX\x1b[H'))
+  expect(await sample()).toEqual(initial)
+  await page.evaluate(() => (window as any).fixture.write('\x1b]12;#ff0000\x07'))
+  await expect.poll(sample).toEqual([initial[0], 0, 0])
+  await page.evaluate(() => (window as any).fixture.write('\x1b]112\x07'))
+  await expect.poll(sample).toEqual(initial)
+})

@@ -170,3 +170,26 @@ CI preparation also exposed a toolchain-selection gap: selecting the pinned
 `RUSTUP_TOOLCHAIN` for the process, preserving global defaults. Four isolated
 shell-toolchain tests cover a differing default, the exact distribution fallback
 and rejection of incorrect compiler/Cargo versions. They run in the required gate.
+
+
+## Retained-buffer and cursor audit
+
+A further audit reproduced inactive normal/alternate buffer objects reading the
+active screen, cursor relocation to line end when resizing on a wide-cell trail,
+and cumulative cursor opacity from repeated idle or unrelated-row painting. The
+renderer also ignored the cursor color already reported by the core.
+
+Read-only WASM buffer exports now select a screen explicitly without changing
+modes, revisions or queued events. Native reflow preserves offsets within wide
+cells. Cursor overlays are painted only after their row has been repainted;
+unchanged frames skip both cursor blending and native damage-hash recomputation.
+OSC cursor colors invalidate the cursor row and are drawn from core state.
+
+Regression qualification includes inactive history/cursor/wrap/grapheme reads,
+retained row snapshots, direct WASM bounds/lifetime/state tests, native/WASM wide
+cursor reflow and real Canvas pixel stability/color/reset tests. The required
+local gate passes with 221 Rust tests, 629 Web tests, 14 Chromium/WebKit tests and
+258 Swift tests executed with one skip and zero failures. SDK/ABI, Clippy,
+source/artifact provenance, shell, release and installer checks pass. Firefox
+retains the previously documented local-only startup exception. No remote CI or
+push is part of this audit.

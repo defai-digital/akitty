@@ -205,3 +205,41 @@ describe('runtime terminal configuration', () => {
     } finally { term.dispose(); container.remove(); }
   });
 });
+
+
+describe('independent normal and alternate buffer reads', () => {
+  test('inactive buffers retain their own history, cursor, wrapping and graphemes', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(document.createElement('div'));
+    let changes = 0;
+    term.buffer.onBufferChange(() => changes++);
+    try {
+      term.write('a中é\r\nb\r\nc');
+      const retained = term.buffer.normal.getLine(0)!;
+      expect(retained.translateToString(true)).toBe('a中é');
+      term.write('\x1b[?1049halt中éabcdefg');
+      expect(term.buffer.active.type).toBe('alternate');
+      expect(term.buffer.normal.baseY).toBe(1);
+      expect(term.buffer.normal.length).toBe(3);
+      expect([term.buffer.normal.cursorX, term.buffer.normal.cursorY]).toEqual([1, 1]);
+      expect(term.buffer.normal.getLine(0)!.translateToString(true)).toBe('a中é');
+      expect(term.buffer.normal.getLine(1)!.translateToString(true)).toBe('b');
+      expect(term.buffer.normal.getLine(2)!.translateToString(true)).toBe('c');
+      expect(term.buffer.normal.getLine(1)!.isWrapped).toBe(false);
+      expect(term.buffer.alternate.getLine(0)!.translateToString(true)).toBe('alt中éab');
+      expect(term.buffer.alternate.getLine(1)!.translateToString(true)).toBe('cdefg');
+      expect(term.buffer.alternate.getLine(1)!.isWrapped).toBe(true);
+      expect([term.buffer.alternate.cursorX, term.buffer.alternate.cursorY]).toEqual([5, 1]);
+      expect(changes).toBe(1);
+      term.write('\x1b[?1049l');
+      expect(term.buffer.active.type).toBe('normal');
+      expect(term.buffer.alternate.baseY).toBe(0);
+      expect(term.buffer.alternate.length).toBe(2);
+      expect(term.buffer.alternate.getLine(0)!.translateToString(true)).toBe('alt中éab');
+      expect(term.buffer.alternate.getLine(1)!.isWrapped).toBe(true);
+      expect([term.buffer.alternate.cursorX, term.buffer.alternate.cursorY]).toEqual([5, 1]);
+      expect(retained.translateToString(true)).toBe('a中é');
+      expect(changes).toBe(2);
+    } finally { term.dispose(); }
+  });
+});

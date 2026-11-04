@@ -364,9 +364,12 @@ impl Screen {
                         output = self.blank(Color::Background);
                         col = 0;
                     }
-                    if cursor_logical == Some(position) {
+                    if let Some(target) = cursor_logical
+                        && target >= position
+                        && target < position + usize::from(cell.width)
+                    {
                         cursor_global = rebuilt.len();
-                        cursor_col = col;
+                        cursor_col = col + (target - position).min(width - 1);
                         cursor_found = true;
                         pending_wrap = false;
                     }
