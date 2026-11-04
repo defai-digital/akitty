@@ -217,6 +217,17 @@ describe('Maximum dimension cap', () => {
     return { mockTerminal, calls };
   };
 
+  test('fractional CSS padding cannot add a row or column that overflows the container', () => {
+    const { mockTerminal, calls } = createTerminal(915, 480, { width: 9, height: 16 });
+    mockTerminal.element.style.padding = '0.5px';
+    document.body.appendChild(mockTerminal.element);
+    try {
+      addon.activate(mockTerminal as any);
+      addon.fit();
+      expect(calls).toEqual([{ cols: 99, rows: 29 }]);
+    } finally { mockTerminal.element.remove(); }
+  });
+
   test('proposeDimensions caps columns at 4096 for an oversized container', () => {
     const { mockTerminal } = createTerminal(1_000_000, 480, { width: 9, height: 16 });
     addon.activate(mockTerminal as any);
