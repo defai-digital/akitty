@@ -5,8 +5,7 @@ cd "$(dirname "$0")/.."
 config=${1:-debug}
 [[ $config == debug || $config == release ]] || exit 2
 export MACOSX_DEPLOYMENT_TARGET=14.0
-export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
+source scripts/rust-toolchain.sh
 commit=$(git rev-parse --verify HEAD 2>/dev/null || true)
 dirty=false
 if [[ -n $(git status --porcelain 2>/dev/null) ]]; then dirty=true; fi
@@ -15,11 +14,30 @@ if [[ $config == release ]]; then
     [[ -n $commit ]] || { echo 'Release builds need a resolved Git HEAD.' >&2; exit 1; }
     [[ $dirty == false ]] || { echo 'Release builds must start from a clean committed tree.' >&2; exit 1; }
 fi
+python3 scripts/check-engine-source.py
 npm ci --ignore-scripts
 npm run build
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/redacted --remap-path-prefix=$PWD=/akitty"
-if [[ $config == release ]]; then cargo build --locked --release; else cargo build --locked; fi
-export AKITTY_RUST_LIB_DIR="$PWD/target/$config"
+native_library_root="$PWD/target"
+if [[ $AKITTY_RUST_DISTRIBUTION == true ]]; then
+    # Distribution std archives can target the build machine's newer macOS.
+    # Rebuild matching sources at our deployment target instead of shipping them.
+    test -f "$("$RUSTC" --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml" || {
+        echo 'Distribution Rust requires matching sources to build the macOS 14 standard library.' >&2; exit 1;
+    }
+    native_host_target="$("$RUSTC" -vV | sed -n 's/^host: //p')"
+    export RUSTC_BOOTSTRAP=1
+    native_library_root="$PWD/target/$native_host_target"
+fi
+build_native() {
+    if [[ $AKITTY_RUST_DISTRIBUTION == true ]]; then
+        cargo "$@" -Z build-std=std,panic_unwind --target "$native_host_target"
+    else
+        cargo "$@"
+    fi
+}
+if [[ $config == release ]]; then build_native build --locked --release; else build_native build --locked; fi
+export AKITTY_RUST_LIB_DIR="$native_library_root/$config"
 swift build --package-path macos --configuration "$config" -Xswiftc -debug-prefix-map -Xswiftc "$PWD=/akitty"
 bin=$(swift build --package-path macos --configuration "$config" --show-bin-path)
 mkdir -p build
@@ -53,7 +71,10 @@ xcrun strip -S "$app/Contents/MacOS/akitty-agent"
 python3 - "$app/Contents/MacOS/Akitty" "$app/Contents/MacOS/akitty-agent" <<'PYSCAN'
 import pathlib, re, sys
 for executable in sys.argv[1:]:
-    if re.search(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/', pathlib.Path(executable).read_bytes()):
+    data = pathlib.Path(executable).read_bytes()
+    if any(name in data.lower() for name in (b'alacritty_terminal', b'ghostty_', b'ghostty-vt.wasm', b'vte::')):
+        raise SystemExit('Packaged executable contains an obsolete engine')
+    if re.search(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/', data):
         raise SystemExit('Packaged executable contains private build paths')
 PYSCAN
 mkdir -p "$app/Contents/Frameworks"
@@ -70,6 +91,7 @@ swift scripts/build-icons.swift
 iconutil -c icns build/Akitty.iconset -o "$app/Contents/Resources/Akitty.icns"
 cp macos/Info.plist "$app/Contents/Info.plist"
 cp LICENSE "$app/Contents/Resources/LICENSE"
+cp third_party/unicode/LICENSE "$app/Contents/Resources/UNICODE_LICENSE"
 cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 python3 scripts/dependency-licenses.py
 cp build/THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"

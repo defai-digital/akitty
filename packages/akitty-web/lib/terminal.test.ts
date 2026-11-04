@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { vi } from 'vitest';
-import { Ghostty } from './ghostty';
+import { AkittyEngine } from './engine';
 import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
@@ -93,7 +93,7 @@ describe('Terminal', () => {
     });
 
     test('rejects noninteger and out-of-range dimensions before allocating', async () => {
-      const ghostty = await Ghostty.load();
+      const engine = await AkittyEngine.load();
       const invalid: Array<{ cols: number; rows: number }> = [
         { cols: 0, rows: 24 },
         { cols: 80, rows: 0 },
@@ -105,28 +105,29 @@ describe('Terminal', () => {
         { cols: 80, rows: Number.POSITIVE_INFINITY },
         { cols: Terminal.MAX_DIMENSION + 1, rows: 24 },
         { cols: 80, rows: Terminal.MAX_DIMENSION + 1 },
+        { cols: Terminal.MAX_DIMENSION, rows: Terminal.MAX_DIMENSION },
       ];
 
       for (const dims of invalid) {
-        expect(() => new Terminal({ ...dims, ghostty })).toThrow(RangeError);
+        expect(() => new Terminal({ ...dims, engine })).toThrow(RangeError);
       }
     });
 
     test('accepts the smallest and largest valid dimensions', async () => {
-      const ghostty = await Ghostty.load();
+      const engine = await AkittyEngine.load();
 
-      const smallest = new Terminal({ cols: 1, rows: 1, ghostty });
+      const smallest = new Terminal({ cols: 1, rows: 1, engine });
       expect([smallest.cols, smallest.rows]).toEqual([1, 1]);
       smallest.dispose();
 
       const largest = new Terminal({
         cols: Terminal.MAX_DIMENSION,
-        rows: Terminal.MAX_DIMENSION,
-        ghostty,
+        rows: Terminal.MAX_CELLS / Terminal.MAX_DIMENSION,
+        engine,
       });
       expect([largest.cols, largest.rows]).toEqual([
         Terminal.MAX_DIMENSION,
-        Terminal.MAX_DIMENSION,
+        Terminal.MAX_CELLS / Terminal.MAX_DIMENSION,
       ]);
       largest.dispose();
     });
@@ -607,11 +608,11 @@ describe('Terminal', () => {
   describe('Lifecycle recovery', () => {
     test('open can recover after WASM creation fails', async () => {
       const term = await createIsolatedTerminal();
-      const ghostty = (term as any).ghostty;
-      const create = ghostty.createTerminal;
-      ghostty.createTerminal = () => { throw new Error('allocation failed'); };
+      const engine = (term as any).engine;
+      const create = engine.createTerminal;
+      engine.createTerminal = () => { throw new Error('allocation failed'); };
       expect(() => term.open(container)).toThrow('allocation failed');
-      ghostty.createTerminal = create;
+      engine.createTerminal = create;
       expect(() => term.open(container)).not.toThrow();
       term.write('recovered');
       term.dispose();
@@ -625,11 +626,11 @@ describe('Terminal', () => {
       const free = previous.free.bind(previous);
       let freed = false;
       previous.free = () => { freed = true; free(); };
-      const ghostty = (term as any).ghostty;
-      const create = ghostty.createTerminal;
-      ghostty.createTerminal = () => { throw new Error('allocation failed'); };
+      const engine = (term as any).engine;
+      const create = engine.createTerminal;
+      engine.createTerminal = () => { throw new Error('allocation failed'); };
       expect(() => term.reset()).toThrow('allocation failed');
-      ghostty.createTerminal = create;
+      engine.createTerminal = create;
       expect(freed).toBe(false);
       expect(() => term.write(' after')).not.toThrow();
       expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('before after');
@@ -639,17 +640,19 @@ describe('Terminal', () => {
     test('reset clears a partial drag and stops selection autoscroll', async () => {
       const term = await createIsolatedTerminal();
       term.open(container);
-      const selection = (term as any).selectionManager;
-      selection.selectionStart = { col: 0, absoluteRow: 0 };
-      selection.selectionEnd = { col: 0, absoluteRow: 0 };
-      selection.isSelecting = true;
-      selection.startAutoScroll(1);
-      term.reset();
-      term.write('after');
-      expect(term.getSelection()).toBe('');
-      expect(selection.isSelecting).toBe(false);
-      expect(selection.autoScrollInterval).toBeNull();
-      term.dispose();
+      const canvas = term.renderer!.getCanvas();
+      const stop = vi.spyOn(globalThis, 'clearInterval');
+      try {
+        canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+        canvas.dispatchEvent(new MouseEvent('mouseleave', { clientY: canvas.getBoundingClientRect().bottom + 10 }));
+        stop.mockClear();
+        term.reset();
+        term.write('after');
+        expect(term.getSelection()).toBe('');
+        expect(stop).toHaveBeenCalled();
+        document.dispatchEvent(new MouseEvent('mousemove', { clientY: 10000 }));
+        expect(term.getSelection()).toBe('');
+      } finally { term.dispose(); stop.mockRestore(); }
     });
 
     test('reset clears scrollback position and pending smooth scrolling', async () => {
@@ -2018,7 +2021,7 @@ describe('Terminal Config', () => {
       // Scrollback should be limited based on the config
       const scrollbackLength = term.wasmTerm!.getScrollbackLength();
       // With 500 scrollback limit, we wrote 600 lines so scrollback should be capped
-      // The actual value depends on ghostty's implementation but should be around 500
+      // The actual value depends on engine's implementation but should be around 500
       expect(scrollbackLength).toBeLessThan(600);
       expect(scrollbackLength).toBeGreaterThan(450);
     } finally {
@@ -2995,27 +2998,19 @@ describe('Options Proxy handleOptionChange', () => {
     const term = await createIsolatedTerminal({ cursorBlink: false });
     term.open(container);
 
-    // Verify initial state
     expect(term.options.cursorBlink).toBe(false);
+    const start = vi.spyOn(globalThis, 'setInterval');
+    const stop = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      term.options.cursorBlink = true;
+      expect(term.options.cursorBlink).toBe(true);
+      expect(start).toHaveBeenLastCalledWith(expect.any(Function), 530);
+      const timer = start.mock.results.at(-1)!.value;
+      term.options.cursorBlink = false;
+      expect(term.options.cursorBlink).toBe(false);
+      expect(stop).toHaveBeenCalledWith(timer);
+    } finally { term.dispose(); start.mockRestore(); stop.mockRestore(); }
 
-    // Enable cursor blink
-    term.options.cursorBlink = true;
-    expect(term.options.cursorBlink).toBe(true);
-
-    // @ts-ignore - accessing private for test
-    const renderer = term.renderer;
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlink).toBe(true);
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlinkInterval).toBeDefined();
-
-    // Disable cursor blink
-    term.options.cursorBlink = false;
-    expect(term.options.cursorBlink).toBe(false);
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlink).toBe(false);
-
-    term.dispose();
   });
 
   test('changing cols/rows triggers resize', async () => {
@@ -3445,9 +3440,9 @@ describe('disableStdin', () => {
 // ==========================================================================
 
 describe('unicode API', () => {
-  test('activeVersion returns 15.1', async () => {
+  test('activeVersion reports the owned width table version', async () => {
     const term = await createIsolatedTerminal();
-    expect(term.unicode.activeVersion).toBe('15.1');
+    expect(term.unicode.activeVersion).toBe('18.0');
   });
 
   test('unicode object is readonly', async () => {

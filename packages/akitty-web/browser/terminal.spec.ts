@@ -23,6 +23,13 @@ test('ANSI backgrounds, Unicode glyphs and erase reach the actual canvas', async
   await info.attach('unicode-and-colors', { body: await page.locator('canvas').screenshot(), contentType: 'image/png' })
   await page.evaluate(() => (window as any).fixture.write('\x1b[0m\x1b[2J\x1b[H'))
   await expect.poll(() => page.evaluate(() => (window as any).fixture.pixels())).toMatchObject({ red: 0, blue: 0, white: 0 })
+  await page.evaluate(() => (window as any).fixture.write('\x1b[?5h'))
+  await expect.poll(() => page.evaluate(() => {
+    const pixels = (window as any).fixture.pixels()
+    return pixels.white / (pixels.width * pixels.height)
+  })).toBeGreaterThan(0.95)
+  await page.evaluate(() => (window as any).fixture.write('\x1b[?5l'))
+  await expect.poll(() => page.evaluate(() => (window as any).fixture.pixels().white)).toBe(0)
   expect(errors).toEqual([])
 })
 
@@ -69,4 +76,41 @@ test('Home, End and Alt input follow the terminal modes and preserve shifted tex
   await page.keyboard.press('End')
   await page.keyboard.press('Alt+KeyA')
   expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[H', '\x1b[F', 'a'])
+})
+
+
+test('hidden synchronized output flushes title and replies on the host deadline', async ({ page }) => {
+  await page.locator('#terminal').evaluate(element => { (element as HTMLElement).style.display = 'none' })
+  await expect(page.locator('#terminal')).toBeHidden()
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.input.length = 0
+    f.terminal.write('\x1b[?2026hhidden\x1b]2;pending\x07\x1b[6n')
+    if (f.terminal.title !== '' || f.input.length !== 0) throw new Error('synchronized output escaped early')
+  })
+  await expect.poll(() => page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[1;7R'])
+  expect(await page.evaluate(() => (window as any).fixture.terminal.title)).toBe('pending')
+  await page.locator('#terminal').evaluate(element => { (element as HTMLElement).style.display = '' })
+  await expect.poll(() => page.evaluate(() => (window as any).fixture.pixels().white)).toBeGreaterThan(30)
+  expect((await page.evaluate(() => (window as any).fixture.lines()))[0]).toBe('hidden')
+})
+
+test('SGR mouse down, drag and release preserve modifiers', async ({ page }) => {
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[?1002h\x1b[?1006h')
+    f.input.length = 0
+  })
+  const canvas = await page.locator('canvas').boundingBox()
+  if (!canvas) throw new Error('missing canvas')
+  const x = canvas.x + canvas.width / 32 * 2.5
+  const y = canvas.y + canvas.height / 8 * 1.5
+  await page.mouse.move(x, y)
+  await page.keyboard.down('Control')
+  await page.mouse.down()
+  await page.mouse.move(x + canvas.width / 32, y)
+  await page.mouse.up()
+  await page.keyboard.up('Control')
+  const input = await page.evaluate(() => (window as any).fixture.input)
+  expect(input).toEqual(['\x1b[<16;3;2M', '\x1b[<48;4;2M', '\x1b[<16;4;2m'])
 })

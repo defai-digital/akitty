@@ -2,13 +2,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ $(uname -s) == Darwin ]] || { echo 'macOS is required.' >&2; exit 1; }
-export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
+source scripts/rust-toolchain.sh
 export MACOSX_DEPLOYMENT_TARGET=14.0
 cargo build --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 python3 scripts/check-engine-source.py
+AKITTY_VT_CLIPPY=1 bash scripts/build-vt-wasm.sh
+node scripts/test-vt-wasm.mjs
+node scripts/test-vt-wasm.mjs packages/akitty-web/akitty-vt.wasm
 npm ci --ignore-scripts
 npm run build
 npm test
@@ -31,4 +33,4 @@ python3 scripts/test_public.py
 python3 scripts/test_r2_release.py
 python3 scripts/test_prepare_release.py
 bash scripts/test_install.sh
-if git rev-parse --verify HEAD >/dev/null 2>&1; then python3 scripts/check_public.py --revision HEAD; else python3 scripts/check_public.py; fi
+python3 scripts/check_public.py

@@ -4,22 +4,22 @@
  */
 
 import { describe, expect, test, vi } from 'vitest';
-import { Ghostty } from './ghostty';
-import type { GhosttyTerminal } from './ghostty';
+import { AkittyEngine } from './engine';
+import type { AkittyTerminal } from './engine';
 import { type IRenderable, CanvasRenderer } from './renderer';
 import { createIsolatedTerminal } from './test-helpers';
-import type { GhosttyCell } from './types';
+import type { TerminalCell } from './types';
 
-async function makeWasm(cols = 20, rows = 5): Promise<GhosttyTerminal> {
-  const ghostty = await Ghostty.load();
-  return ghostty.createTerminal(cols, rows);
+async function makeWasm(cols = 20, rows = 5): Promise<AkittyTerminal> {
+  const engine = await AkittyEngine.load();
+  return engine.createTerminal(cols, rows);
 }
 
-function rowText(cells: GhosttyCell[] | null): string {
+function rowText(cells: TerminalCell[] | null): string {
   return (cells ?? []).map((c) => (c.codepoint ? String.fromCodePoint(c.codepoint) : ' ')).join('').trimEnd();
 }
 
-function countCalls(term: GhosttyTerminal, name: string): { count: () => number } {
+function countCalls(term: AkittyTerminal, name: string): { count: () => number } {
   // The wasm exports object is frozen, so wrap a plain copy of it.
   const target = (term as any).exports;
   const wrapped: Record<string, unknown> = {};
@@ -34,11 +34,11 @@ function countCalls(term: GhosttyTerminal, name: string): { count: () => number 
   return { count: () => calls };
 }
 
-describe('GhosttyTerminal viewport cache', () => {
+describe('AkittyTerminal viewport cache', () => {
   test('reading every row parses the viewport once', async () => {
     const term = await makeWasm();
     term.write('one\r\ntwo\r\nthree');
-    const reads = countCalls(term, 'ghostty_render_state_get_viewport');
+    const reads = countCalls(term, 'akitty_vt_viewport');
 
     const rows = [0, 1, 2, 3, 4].map((y) => rowText(term.getLine(y)));
     expect(rows).toEqual(['one', 'two', 'three', '', '']);
@@ -82,11 +82,11 @@ describe('GhosttyTerminal viewport cache', () => {
   });
 });
 
-describe('GhosttyTerminal lazy row parsing', () => {
+describe('AkittyTerminal lazy row parsing', () => {
   test('a row read parses only that row', async () => {
     const term = await makeWasm(10, 4);
     term.write('aaa\r\nbbb\r\nccc');
-    const pool = (term as any).cellPool as GhosttyCell[];
+    const pool = (term as any).cellPool as TerminalCell[];
     for (const cell of pool) cell.codepoint = 0x2603; // sentinel: rows that are never parsed keep it
     term.write('\r\nddd'); // invalidates the viewport
 
@@ -117,7 +117,7 @@ describe('GhosttyTerminal lazy row parsing', () => {
     const term = await makeWasm(10, 3);
     term.write('one\r\ntwo\r\nthree');
     term.getLineView(1);
-    const reads = countCalls(term, 'ghostty_render_state_get_viewport');
+    const reads = countCalls(term, 'akitty_vt_viewport');
     const all = term.getViewport();
     expect(String.fromCodePoint(all[0].codepoint)).toBe('o');
     expect(String.fromCodePoint(all[20].codepoint)).toBe('t');
@@ -126,10 +126,10 @@ describe('GhosttyTerminal lazy row parsing', () => {
   });
 });
 
-describe('GhosttyTerminal write path', () => {
+describe('AkittyTerminal write path', () => {
   test('reuses one wasm buffer across writes', async () => {
     const term = await makeWasm();
-    const allocs = countCalls(term, 'ghostty_wasm_alloc_u8_array');
+    const allocs = countCalls(term, 'akitty_vt_alloc');
     for (let i = 0; i < 50; i++) term.write(`line ${i}\r\n`);
     // The first write sizes the buffer; the viewport read allocates once more.
     const duringWrites = allocs.count();
@@ -171,7 +171,7 @@ describe('GhosttyTerminal write path', () => {
 
 // A hand-rolled renderable and a counting context isolate what the renderer decides to draw.
 function makeRenderable(cols: number, rows: number, text: string[]) {
-  const cell = (ch: string, flags = 0): GhosttyCell => ({
+  const cell = (ch: string, flags = 0): TerminalCell => ({
     codepoint: ch === ' ' ? 32 : ch.codePointAt(0)!,
     fg_r: 200,
     fg_g: 200,
@@ -376,7 +376,7 @@ describe('CanvasRenderer work skipping', () => {
   test('a still view scrolled into history draws nothing per frame', async () => {
     const { renderer, counts, reset } = makeRenderer();
     const { renderable, dirty } = makeRenderable(20, 4, ['abc']);
-    const history: GhosttyCell[] = Array.from({ length: 20 }, () => ({
+    const history: TerminalCell[] = Array.from({ length: 20 }, () => ({
       codepoint: 'h'.codePointAt(0)!,
       fg_r: 1,
       fg_g: 1,
@@ -428,7 +428,7 @@ describe('CanvasRenderer work skipping', () => {
 describe('CanvasRenderer row reuse', () => {
   // The renderer's record of what each row shows must equal that row's real content after every frame, or a later
   // frame would skip a row whose pixels are stale.
-  function expectBookkeepingMatches(renderer: CanvasRenderer, term: GhosttyTerminal, rows: number): void {
+  function expectBookkeepingMatches(renderer: CanvasRenderer, term: AkittyTerminal, rows: number): void {
     const r = renderer as any;
     r.frameLines = [];
     const expected = Array.from({ length: rows }, (_, y) => r.rowHash(term, y));

@@ -1,11 +1,11 @@
-import { Ghostty, Terminal } from '../lib/index'
+import { AkittyEngine, Terminal } from '../lib/index'
 
-const ghostty = await Ghostty.load('/ghostty-vt.wasm')
+const engine = await AkittyEngine.load('/akitty-vt.wasm')
 const parent = document.querySelector<HTMLElement>('#terminal')!
 let terminal: Terminal
 const input: string[] = []
 function create() {
-  terminal = new Terminal({ ghostty, cols: 32, rows: 8, fontSize: 18, cursorBlink: false,
+  terminal = new Terminal({ engine, cols: 32, rows: 8, fontSize: 18, cursorBlink: false,
     theme: { background: '#000000', foreground: '#ffffff', cursor: '#ffffff' } })
   terminal.open(parent)
   terminal.onData(data => input.push(data))

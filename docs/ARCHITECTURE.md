@@ -1,8 +1,8 @@
 # Akitty architecture and implementation plan
 
-Akitty's native macOS app uses an AkiTTY-maintained engine derived from `alacritty_terminal` 0.26.0
-with Akitty's own Rust integration, Swift/AppKit interface, CoreText/Metal
-rendering, and a small TypeScript feature layer. Its own source is MIT licensed.
+Akitty's native macOS app uses the independently authored `akitty-vt` Rust
+terminal engine with its own Rust PTY integration, Swift/AppKit interface,
+CoreText/Metal rendering and TypeScript feature layer. Its own source is MIT licensed.
 Windows and Linux are reached through the separate AkiTTY Web browser terminal.
 The Experimental Linux and Windows Tauri desktops shipped in 1.3.5 are discontinued
 and removed from the tree; git history retains them.
@@ -22,20 +22,19 @@ process execution. See [native agent contracts and scope](AGENT_NATIVE.md).
 
 | Component | Technology |
 | --- | --- |
-| AkiTTY native Mac app | Alacritty terminal engine + Akitty-owned Rust/Swift code |
-| AkiTTY Web | Ghostty VT parser compiled to WebAssembly + Canvas rendering |
-| Ghostty app (separate upstream project) | Ghostty's own Zig core and native platform interfaces |
+| AkiTTY native Mac app | Owned akitty-vt engine + Rust PTYs + Swift/AppKit/CoreText/Metal |
+| AkiTTY Web | Same owned Rust engine compiled to WebAssembly + DOM/Canvas |
 
-Ghostty is a design and source reference for the native app, not its runtime
-engine. The Mac app does not reuse Ghostty's Zig core or renderer or inherit their
-performance characteristics. Web parser reuse does not establish native-app
-performance or feature parity. See [the roadmap](ROADMAP.md) for planned work.
+No Ghostty, Alacritty or VTE implementation is compiled or bundled. Historical
+notices and test origins are documented in the [provenance ledger](../third_party/TERMINAL_ENGINE.md).
+Native and browser platform behavior and performance require separate qualification.
 
 ## Decisions
 
-- Maintain local alacritty_terminal and VTE source for VT state and parsing; keep their types private. See [engine ownership](../third_party/TERMINAL_ENGINE.md).
-  Directly translating Ghostty's Zig core would recreate a substantial correctness
-  burden. Dependencies keep their own licenses (the engine is Apache-2.0).
+- Own the streaming parser, screens/history, protocol modes, mutation events and
+  keyboard encoder in `akitty-vt`. It has no PTY, filesystem or wall-clock access;
+  hosts supply time and enforce clipboard/process policy. Unicode libraries and
+  other ordinary dependencies retain their own licenses.
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
   One nonblocking worker owns each PTY. Session state is mutex protected; logical
   serialization does not assume DispatchQueue calls stay on one OS thread.
@@ -167,10 +166,11 @@ cross-platform release policy are not imported. See RELEASING.md for publication
 ## AkiTTY Web
 
 `packages/akitty-web` is how AkiTTY supports Windows and Linux. AX Code Desktop embeds this terminal in its web UI.
-The installable app stays Apple Silicon and macOS 14 or later, and this package is a separate implementation: it does
-not use the Rust core, the C ABI, or the Swift app. It renders to an HTML canvas and uses Ghostty's VT parser as a
-prebuilt WebAssembly module, behind an xterm.js-style API. The same library runs in a browser on Windows, Linux, and
-macOS. It started from coder/ghostty-web v0.4.0 and is now maintained independently.
+The installable app stays Apple Silicon and macOS 14 or later. Web uses the same
+Rust VT engine as native through its owned WASM ABI; the native C ABI and Swift
+app are separate. A reauthored DOM/Canvas frontend provides an xterm.js-style API.
+It runs in browsers on Windows, Linux and macOS. Version 0.6 changes the old
+engine-specific exports; see the package README migration notes.
 
 The package does not spawn a PTY. The host starts the shell on that operating system, writes output into the
 terminal, and receives keystrokes from the terminal. Browser keyboard events supply Ctrl, Alt, and Meta. Ctrl+C is
@@ -181,10 +181,10 @@ normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There
   native app has no Windows or Linux build. CI type-checks the package and runs Vitest on macOS. Playwright exercises Chromium, Firefox and WebKit on macOS, with Windows/Linux browser jobs also configured.
 - **Scope:** it was migrated from `ax-code-desktop`, which keeps its own copy for now. Neither side syncs automatically.
 - **Distribution:** private source package, never published. Consumers compile its TypeScript.
-- **Zig:** only rebuilding the wasm needs Zig 0.15.2. The macOS app, the Rust core and the normal build do not.
-- **Independence:** it is no longer a tracked fork. Nothing is synced from ghostty-web; fixes are made directly in
-  `lib/`. `packages/akitty-web/PROVENANCE.md` records only the origin, licenses and the wasm/patch pins and hashes.
-  Clipboard, link and mouse behavior has not had Akitty's native clipboard policy review.
+- **Build:** pinned Rust 1.99.1 compiles the owned WASM; no Zig or upstream terminal checkout.
+- **Ownership:** production frontend and engine implementations are AkiTTY-authored.
+  `packages/akitty-web/PROVENANCE.md` records historical test provenance and artifact hashes.
+  Clipboard, link and mouse behavior still needs host-specific policy qualification.
 - **Agent access:** `lib/agent` gives programs bounded, read-only text access (`readScreen`, `readOutput`), plain JSON
   tool definitions and an optional WebMCP adapter. Input and command execution are intentionally not offered: they need
   a host PTY service, authorization and an input-control rule that the browser package cannot enforce. Terminal text

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/akitty-agent-core", "crates/akitty-core", "third_party/alacritty_terminal", "third_party/vte"]
+members = ["crates/akitty-agent-core", "crates/akitty-core", "crates/akitty-vt"]
 default-members = ["crates/akitty-core"]
 resolver = "2"
 
