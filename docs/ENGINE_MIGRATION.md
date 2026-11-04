@@ -193,3 +193,27 @@ local gate passes with 221 Rust tests, 629 Web tests, 14 Chromium/WebKit tests a
 source/artifact provenance, shell, release and installer checks pass. Firefox
 retains the previously documented local-only startup exception. No remote CI or
 push is part of this audit.
+
+## Character-shift, mode-list, keypad and URL audit
+
+The next audit reproduced SS2/SS3 remaining active after one character, combined
+DEC mode lists failing to start/finish synchronized output, printable keypad
+input bypassing application/enhanced encoding, Unicode URL paths stopping at a
+wide-cell spacer, and balanced URL/IPv6 delimiters being removed as punctuation.
+
+Single shifts now preserve the locking GL selection and affect one character,
+following the public xterm control-sequence specification:
+https://invisible-island.net/xterm/ctlseqs/ctlseqs.html. Mode lists containing 2026
+are processed in order through the existing synchronization state machine.
+Keypad identities survive layout-text adaptation; normal numeric mode still
+emits text. URL detection uses complete graphemes, skips wide-cell spacers and
+maps the final glyph's full column extent. Delimiter trimming is linear and
+keeps balanced parentheses/brackets while removing surrounding prose punctuation.
+
+Local required verification passes with 223 Rust tests, 632 Web tests, 16
+Chromium/WebKit tests, and 258 Swift tests executed with one skip and zero
+failures. Sixteen shared native/WASM fixtures pass every byte boundary. Clippy,
+SDK/ABI, source/artifact provenance, shell, release and installer checks pass.
+The real-browser URL case uses the platform's primary link modifier and verifies
+activation from the trailing half of a wide glyph. Firefox retains the documented
+local startup exception; required remote CI runs before publication to main.

@@ -18,6 +18,7 @@ const punctuation: Readonly<Record<string, string>> = {
 };
 function identity(event: KeyboardEvent): Key | undefined {
   if (functional[event.code] !== undefined) return functional[event.code];
+  if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;
   const scalar = Array.from(event.key).length === 1 ? event.key.codePointAt(0) as Key : undefined;
   if (scalar !== undefined) {
     if (!event.shiftKey && !event.getModifierState?.('CapsLock')) return scalar;
@@ -26,7 +27,6 @@ function identity(event: KeyboardEvent): Key | undefined {
   }
   if (/^Key[A-Z]$/.test(event.code)) return event.code.toLowerCase().charCodeAt(3) as Key;
   if (/^Digit[0-9]$/.test(event.code)) return event.code.charCodeAt(5) as Key;
-  if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;
   const fn = /^F([1-9]|[12][0-9]|3[0-5])$/.exec(event.code);
   if (fn) return (57363 + Number(fn[1])) as Key;
   return (punctuation[event.code]?.codePointAt(0) ?? scalar) as Key | undefined;
@@ -69,7 +69,9 @@ export class InputHandler {
     const printable = Array.from(event.key).length === 1;
     // AltGraph is a layout modifier; Ctrl+Alt alone remains a terminal chord.
     const altGraph = event.getModifierState?.('AltGraph') ?? false;
-    if (!release && !(flags & 8) && printable && !event.metaKey && ((!event.ctrlKey && !event.altKey) || altGraph)) {
+    const applicationKeypad = this.getMode?.(66) ?? false;
+    if (!release && !(flags & 8) && printable && !event.metaKey && ((!event.ctrlKey && !event.altKey) || altGraph)
+      && !(applicationKeypad && event.code.startsWith('Numpad'))) {
       event.preventDefault(); this.onData(event.key); return;
     }
     const code = identity(event);
@@ -78,7 +80,7 @@ export class InputHandler {
       | (event.ctrlKey && !altGraph ? Mods.CTRL : 0) | (event.metaKey ? Mods.SUPER : 0)
       | (event.getModifierState?.('CapsLock') ? Mods.CAPSLOCK : 0) | (event.getModifierState?.('NumLock') ? Mods.NUMLOCK : 0);
     this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, this.getMode?.(1) ?? false);
-    this.encoder.setOption(KeyEncoderOption.KEYPAD_KEY_APPLICATION, this.getMode?.(66) ?? false);
+    this.encoder.setOption(KeyEncoderOption.KEYPAD_KEY_APPLICATION, applicationKeypad);
     this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, this.getMode?.(1036) ?? true);
     this.encoder.setKittyFlags(flags);
     const bytes = this.encoder.encode({ action: release ? KeyAction.RELEASE : event.repeat ? KeyAction.REPEAT : KeyAction.PRESS,

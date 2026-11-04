@@ -119,6 +119,7 @@ pub struct Terminal {
     saved_origin: [bool; 2],
     charsets: [bool; 4],
     charset: usize,
+    single_shift: Option<usize>,
     last_printed: Option<char>,
     sync_deadline: Option<u64>,
     sync_actions: Vec<Action>,
@@ -162,6 +163,7 @@ impl Terminal {
             saved_origin: [false; 2],
             charsets: [false; 4],
             charset: 0,
+            single_shift: None,
             last_printed: None,
             sync_deadline: None,
             sync_actions: Vec::new(),
@@ -242,6 +244,30 @@ impl Terminal {
         }
     }
     fn dispatch(&mut self, action: Action, now: u64, emit: &mut impl FnMut(Event)) {
+        if let Action::Csi(csi) = &action
+            && csi.prefix == Some(b'?')
+            && csi.intermediates.is_empty()
+            && matches!(csi.final_byte, b'h' | b'l')
+            && csi.params.len() > 1
+            && csi
+                .params
+                .iter()
+                .any(|parameter| parameter.first() == Some(&Some(2026)))
+        {
+            // Mode lists have the same left-to-right semantics as individual
+            // commands, including starting or flushing synchronized output.
+            for parameter in &csi.params {
+                self.dispatch(
+                    Action::Csi(Csi {
+                        params: vec![parameter.clone()],
+                        ..csi.clone()
+                    }),
+                    now,
+                    emit,
+                );
+            }
+            return;
+        }
         if let Action::Csi(csi) = &action
             && csi.prefix == Some(b'?')
             && csi.intermediates.is_empty()
@@ -335,7 +361,8 @@ impl Terminal {
         cells[col] = Cell::blank(bg);
     }
     fn print(&mut self, mut ch: char, emit: &mut impl FnMut(Event)) {
-        if self.charsets[self.charset] {
+        let charset = self.single_shift.take().unwrap_or(self.charset);
+        if self.charsets[charset] {
             ch = dec_graphic(ch);
         }
         if self.modes.grapheme_clusters && self.join_grapheme(ch, emit) {
@@ -581,8 +608,8 @@ impl Terminal {
             }
             b'=' => self.modes.app_keypad = true,
             b'>' => self.modes.app_keypad = false,
-            b'N' => self.charset = 2,
-            b'O' => self.charset = 3,
+            b'N' => self.single_shift = Some(2),
+            b'O' => self.single_shift = Some(3),
             b'c' => self.reset(emit),
             b'Z' => emit(Event::Reply(b"\x1b[?62;22c".to_vec())),
             _ => {}
@@ -1336,6 +1363,7 @@ impl Terminal {
         self.grapheme_target = None;
         self.charsets = [false; 4];
         self.charset = 0;
+        self.single_shift = None;
         self.title.clear();
         self.title_stack.clear();
         self.last_printed = None;
@@ -1514,6 +1542,37 @@ mod tests {
         feed(&mut term, b"m");
         assert_eq!(term.screen().rows[3].text(), "m   ");
     }
+    #[test]
+    fn single_shift_uses_g2_or_g3_for_one_character_and_preserves_gl() {
+        for (input, expected) in [
+            ("\x1b*0\x1bNqq", "─q      "),
+            ("\x1b+0\x1bOxx", "│x      "),
+            ("\x1b)0\x0e\x1bNqq", "q─      "),
+        ] {
+            let mut term = Terminal::new(8, 2, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            assert_eq!(term.screen().rows[0].text(), expected);
+        }
+    }
+
+    #[test]
+    fn synchronized_mode_lists_hold_output_until_the_reset_mode_is_processed() {
+        let mut term = Terminal::new(8, 2, 10).unwrap();
+        term.feed(b"\x1b[?25l\x1b[?2026;25habc\x1b[6n", 10, |_| {
+            panic!("synchronized reply escaped early")
+        });
+        assert!(term.sync_deadline().is_some());
+        assert!(!term.modes.cursor_visible);
+        assert_eq!(term.screen().rows[0].text(), "        ");
+        let mut events = Vec::new();
+        term.feed(b"\x1b[?2026;25l", 11, |event| events.push(event));
+        assert!(term.sync_deadline().is_none());
+        assert!(!term.modes.cursor_visible);
+        assert_eq!(term.screen().rows[0].text(), "abc     ");
+        assert_eq!(events, vec![Event::Reply(b"\x1b[1;4R".to_vec())]);
+        assert!(!term.expire_sync(1000, |_| panic!("reply repeated")));
+    }
+
     #[test]
     fn reflow_preserves_cursor_on_the_trailing_half_of_a_wide_cell() {
         for (input, cols, rows, expected) in [
