@@ -9,6 +9,7 @@ export interface IRenderable {
   getCursor(): { x: number; y: number; visible: boolean }; getDimensions(): { cols: number; rows: number };
   isRowDirty(row: number): boolean; isDirty?(): boolean; needsFullRedraw?(): boolean; clearDirty(): void;
   getGraphemeString?(row: number, col: number): string;
+  getColors?(): { cursor: { r: number; g: number; b: number } | null };
 }
 export interface IScrollbackProvider { getScrollbackLine(row: number): TerminalCell[] | null; getScrollbackLength(): number;
   getScrollbackGraphemeString?(row: number, col: number): string }
@@ -40,6 +41,7 @@ export class CanvasRenderer {
   private cursorVisible = true;
   private blinkTimer?: ReturnType<typeof setInterval>;
   private lastCursor = { x: -1, y: -1, visible: false };
+  private lastCursorColor = '';
   private viewport = 0;
   private history = 0;
   private scrollbar = 0;
@@ -124,14 +126,16 @@ export class CanvasRenderer {
     forceAll ||= this.invalid || buffer.needsFullRedraw?.() === true || viewportY !== this.viewport
       || opacity !== this.scrollbar || opacity > 0 && historyLength !== this.history || viewportY > 0 && dirtyRows.size > 0;
     const shownCursor = { ...cursor, visible: viewportY === 0 && cursor.visible && this.cursorVisible };
-    const cursorChanged = shownCursor.x !== this.lastCursor.x || shownCursor.y !== this.lastCursor.y || shownCursor.visible !== this.lastCursor.visible;
+    const engineCursor = buffer.getColors?.().cursor;
+    const cursorColor = engineCursor ? css(engineCursor.r, engineCursor.g, engineCursor.b) : this.theme.cursor;
+    const cursorChanged = shownCursor.x !== this.lastCursor.x || shownCursor.y !== this.lastCursor.y || shownCursor.visible !== this.lastCursor.visible
+      || cursorColor !== this.lastCursorColor;
     const selection = this.selectionManager?.getSelectionCoords() ?? null;
     const selectionKey = selection ? `${selection.startCol}:${selection.startRow}:${selection.endCol}:${selection.endRow}` : '';
     forceAll ||= selectionKey !== this.lastSelection;
     const selectionRows = this.selectionManager?.getDirtySelectionRows();
     if (!forceAll && !anyDirty && !cursorChanged && !selectionRows?.size) {
-      this.cursor(shownCursor);
-      buffer.clearDirty(); return;
+      return;
     }
     this.frameLines.length = 0; this.font = ''; this.fill = '';
     const reusable = viewportY === 0 && !selection && !this.hoveredId && !this.hoveredRange;
@@ -158,6 +162,7 @@ export class CanvasRenderer {
       }
     } else this.drawnRows = [];
     const offset = Math.max(0, Math.floor(viewportY));
+    let cursorRowPainted = false;
     for (let row = 0; row < dims.rows; row++) {
       const movedCursorRow = cursorChanged && (row === this.lastCursor.y || row === shownCursor.y);
       const cursorRepair = shift > 0 && (row === this.lastCursor.y - shift || row === shownCursor.y || row === 0);
@@ -170,15 +175,17 @@ export class CanvasRenderer {
       else { sourceRow = row - offset; cells = this.fetchLine(buffer, sourceRow); }
       this.paintRow(cells, row, dims.cols, selection,
         col => offset > row ? history?.getScrollbackGraphemeString?.(sourceRow, col) ?? '' : buffer.getGraphemeString?.(sourceRow, col) ?? '');
+      if (row === shownCursor.y) cursorRowPainted = true;
     }
     if (hashes) this.drawnRows = hashes;
-    this.cursor(shownCursor);
+    if (cursorRowPainted) this.cursor(shownCursor, cursorColor);
     if (opacity > 0 && historyLength > 0) {
       const height = dims.rows * this.metrics.height, thumb = Math.max(20, height * dims.rows / (historyLength + dims.rows));
       this.setFill(`rgba(128,128,128,${0.7 * opacity})`);
       this.ctx.fillRect(dims.cols * this.metrics.width - 8, (height - thumb) * (historyLength - offset) / historyLength, 6, thumb);
     }
     this.lastCursor = shownCursor; this.viewport = viewportY; this.history = historyLength; this.scrollbar = opacity; this.invalid = false;
+    this.lastCursorColor = cursorColor;
     this.lastSelection = selectionKey;
     this.selectionManager?.clearDirtySelectionRows(); buffer.clearDirty();
   }
@@ -221,10 +228,10 @@ export class CanvasRenderer {
       if (cell.flags & CellFlags.STRIKETHROUGH) { this.setFill(color); this.ctx.fillRect(col * width, row * height + Math.round(baseline * 0.65), cell.width * width, 1); }
     }
   }
-  private cursor(cursor: { x: number; y: number; visible: boolean }): void {
+  private cursor(cursor: { x: number; y: number; visible: boolean }, color: string): void {
     if (!cursor.visible) return;
     const { width, height } = this.metrics;
-    this.setFill(this.theme.cursor);
+    this.setFill(color);
     this.ctx.globalAlpha = this.cursorStyle === 'block' ? 0.5 : 1;
     this.ctx.fillRect(cursor.x * width, cursor.y * height + (this.cursorStyle === 'underline' ? height - 2 : 0),
       this.cursorStyle === 'bar' ? 2 : width, this.cursorStyle === 'underline' ? 2 : height);

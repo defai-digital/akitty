@@ -174,7 +174,11 @@ impl Terminal {
         })
     }
     pub fn screen(&self) -> &Screen {
-        if self.modes.alternate {
+        self.screen_for(self.modes.alternate)
+    }
+    /// Read either retained screen without changing the active buffer or modes.
+    pub fn screen_for(&self, alternate: bool) -> &Screen {
+        if alternate {
             &self.alternate
         } else {
             &self.main
@@ -1510,6 +1514,21 @@ mod tests {
         feed(&mut term, b"m");
         assert_eq!(term.screen().rows[3].text(), "m   ");
     }
+    #[test]
+    fn reflow_preserves_cursor_on_the_trailing_half_of_a_wide_cell() {
+        for (input, cols, rows, expected) in [
+            ("中abc\x1b[1;2H", 10, 3, Position { row: 0, col: 1 }),
+            ("ab中xyz\x1b[1;4H", 3, 4, Position { row: 1, col: 1 }),
+        ] {
+            let mut term = Terminal::new(8, 3, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            term.resize(cols, rows, |_| {}).unwrap();
+            assert_eq!(term.cursor(), expected, "{input:?}");
+            feed(&mut term, b"Z");
+            assert_eq!(term.screen().rows[expected.row].cells[expected.col].ch, 'Z');
+        }
+    }
+
     #[test]
     fn unsafe_or_unbounded_state_is_rejected() {
         assert!(Terminal::new(4096, 4096, 1).is_err());
