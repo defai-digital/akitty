@@ -268,6 +268,22 @@ describe('InputHandler', () => {
       } finally { handler.dispose(); }
     });
 
+    test('numeric keypad text follows application mode and retains enhanced identities', () => {
+      let application = true;
+      let flags = 0;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, mode => mode === 66 && application, undefined, () => flags);
+      try {
+        simulateKey(container, createKeyEvent('Numpad1', '1'));
+        simulateKey(container, createKeyEvent('NumpadAdd', '+'));
+        application = false;
+        simulateKey(container, createKeyEvent('Numpad1', '1'));
+        flags = 8;
+        simulateKey(container, createKeyEvent('Numpad1', '1'));
+        expect(dataReceived).toEqual(['\x1bOq', '\x1bOk', '1', '\x1b[57400;1u']);
+      } finally { handler.dispose(); }
+    });
+
     test('enhanced keyboard reports layout text instead of physical Latin identities', () => {
       const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
         undefined, undefined, undefined, undefined, () => 8);

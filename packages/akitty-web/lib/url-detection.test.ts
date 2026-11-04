@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { UrlRegexProvider } from './providers/url-regex-provider';
+import { createIsolatedTerminal } from './test-helpers';
 import type { ILink } from './types';
 
 /**
@@ -327,5 +328,30 @@ describe('URL ranges after invalid cells', () => {
     expect(links?.[0].text).toBe('https://example.com');
     expect(links?.[0].range.start.x).toBe(3);
     expect(links?.[0].range.end.x).toBe(21);
+  });
+});
+
+
+describe('complete terminal URL text', () => {
+  test('keeps wide glyphs, combining text and both columns of a final wide glyph', async () => {
+    const term = await createIsolatedTerminal({ cols: 80, rows: 2 });
+    term.open(document.createElement('div'));
+    const uri = 'https://example.test/中é😀';
+    try {
+      term.write('go ' + uri + ' tail');
+      const provider = new UrlRegexProvider(term);
+      const links = await new Promise<ILink[] | undefined>(resolve => provider.provideLinks(0, resolve));
+      expect(links).toHaveLength(1);
+      expect(links![0].text).toBe(uri);
+      expect(links![0].range).toEqual({ start: { x: 3, y: 0 }, end: { x: 28, y: 0 } });
+    } finally { term.dispose(); }
+  });
+
+  test('retains balanced URL delimiters while removing surrounding punctuation', async () => {
+    for (const uri of ['https://example.test/a_(b)', 'http://[::1]']) {
+      const links = await getLinks('(' + uri + ').');
+      expect(links).toHaveLength(1);
+      expect(links![0].text).toBe(uri);
+    }
   });
 });

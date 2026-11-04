@@ -85,7 +85,7 @@ test('hidden synchronized output flushes title and replies on the host deadline'
   await page.evaluate(() => {
     const f = (window as any).fixture
     f.input.length = 0
-    f.terminal.write('\x1b[?2026hhidden\x1b]2;pending\x07\x1b[6n')
+    f.terminal.write('\x1b[?2026;25hhidden\x1b]2;pending\x07\x1b[6n')
     if (f.terminal.title !== '' || f.input.length !== 0) throw new Error('synchronized output escaped early')
   })
   await expect.poll(() => page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[1;7R'])
@@ -154,4 +154,26 @@ test('idle cursor pixels stay stable and OSC cursor colors reach the canvas', as
   await expect.poll(sample).toEqual([initial[0], 0, 0])
   await page.evaluate(() => (window as any).fixture.write('\x1b]112\x07'))
   await expect.poll(sample).toEqual(initial)
+})
+
+
+test('Unicode URLs remain complete and activate from the trailing wide column', async ({ page }) => {
+  const uri = 'https://example.test/中é😀'
+  await page.evaluate(async value => {
+    const f = (window as any).fixture
+    ;(window as any).opened = []
+    window.open = url => { (window as any).opened.push(String(url)); return null }
+    await f.write('go ' + value + ' tail')
+  }, uri)
+  const point = await page.evaluate(() => {
+    const t = (window as any).fixture.terminal
+    const canvas = document.querySelector('canvas')!.getBoundingClientRect()
+    const metrics = t.renderer.getMetrics()
+    return { x: canvas.left + metrics.width * 28.5, y: canvas.top + metrics.height * 0.5 }
+  })
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await page.keyboard.down(modifier)
+  await page.mouse.click(point.x, point.y)
+  await page.keyboard.up(modifier)
+  await expect.poll(() => page.evaluate(() => (window as any).opened)).toEqual([uri])
 })
