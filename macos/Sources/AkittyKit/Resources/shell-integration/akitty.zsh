@@ -49,9 +49,9 @@ if ! () {
     return
 fi
 typeset -g __akitty_folder_file=${AKITTY_FOLDER_HISTORY_FILE:-$HOME/Library/Application Support/Akitty/folder-history}
-typeset -ga __akitty_folder_hooks __akitty_folder_menu __akitty_folder_cycle
+typeset -ga __akitty_folder_menu __akitty_folder_cycle
 typeset -g __akitty_folder_original __akitty_folder_keymap __akitty_folder_shown
-typeset -gi __akitty_folder_selected __akitty_folder_warned=0 __akitty_folder_named_result=0
+typeset -gi __akitty_folder_selected __akitty_folder_warned=0 __akitty_folder_named_result=0 __akitty_folder_hooks_ready=1
 function __akitty_folder_warning() {
     if (( ! __akitty_folder_warned )); then
         print -u2 -r -- "AkiTTY folder history unavailable: $1"
@@ -128,25 +128,30 @@ function __akitty_folder_append() {
     { print -r -u $descriptor -- "$1" } always { exec {descriptor}>&- }
     __akitty_folder_trim
 }
-# Stands in for zshaddhistory_functions so a line is saved only when zsh itself keeps it: the user's hooks run in
-# order with their statuses combined as zsh would (1 drops the line, 2 keeps it out of the file only), then
-# HIST_IGNORE_SPACE, HISTORY_IGNORE, multi-line and over-long commands are skipped. The named hook is wrapped
-# separately so zsh invokes it exactly once and its privacy decision is available to the array wrapper.
+# Observe each hook's status without hiding the registered names: add-zsh-hook must still be able to find,
+# remove and deduplicate them. zsh runs the hooks itself, preserving their order and native history decisions.
+# The named hook resets the decision for each line, even when a rejected line never reaches the final writer.
 function __akitty_folder_capture_named() {
-    __akitty_folder_named_saved "$@"
-    __akitty_folder_named_result=$?
+    local -i __akitty_folder_hook_depth=1
+    __akitty_folder_named_result=0
+    if (( $+functions[__akitty_folder_named_saved] )); then
+        __akitty_folder_named_saved "$@"
+        __akitty_folder_named_result=$?
+    fi
     return $__akitty_folder_named_result
 }
-function __akitty_folder_addhistory() {
-    local hook result=$__akitty_folder_named_result status_
-    for hook in "${__akitty_folder_hooks[@]}"; do
-        (( $+functions[$hook] )) || continue
-        "$hook" "$@"; status_=$?
-        (( status_ != 0 && result == 0 )) && result=$status_
-    done
-    # A storage skip/failure must not turn an otherwise accepted native history line into a rejection.
-    if (( result == 0 )); then __akitty_folder_store "$@" || true; fi
+function __akitty_folder_capture_hook() {
+    local saved=__akitty_folder_saved_${funcstack[1]} result
+    local -i __akitty_folder_hook_depth=$(( ${__akitty_folder_hook_depth:-0} + 1 ))
+    "$saved" "$@"; result=$?
+    # A hook can call another registered function and handle its failure; only the outer result counts.
+    (( __akitty_folder_hook_depth == 1 && result != 0 && __akitty_folder_named_result == 0 )) && __akitty_folder_named_result=$result
     return $result
+}
+function __akitty_folder_addhistory() {
+    # A storage skip/failure must not turn an otherwise accepted native history line into a rejection.
+    if (( __akitty_folder_hooks_ready && __akitty_folder_named_result == 0 )); then __akitty_folder_store "$@" || true; fi
+    return 0
 }
 function __akitty_folder_store() {
     emulate -L zsh
@@ -158,17 +163,27 @@ function __akitty_folder_store() {
     __akitty_folder_locked __akitty_folder_append "${EPOCHSECONDS:-0}"$'\t'"$PWD"$'\t'"$physical"$'\t'"$command"
 }
 # Hooks the user adds after startup join those run in front of the saved line.
+function __akitty_folder_wrap_hook() {
+    local hook=$1 wrapper=$2 saved=$3
+    [[ $functions[$hook] != $functions[$wrapper] ]] || return 0
+    # An unloaded autoload stub resolves its own name in fpath. Load it before copying it under a saved name.
+    if [[ $functions[$hook] == 'builtin autoload -X'* ]]; then autoload +X -- "$hook" || return 1; fi
+    functions -c "$hook" "$saved" && functions -c "$wrapper" "$hook"
+}
 function __akitty_folder_adopt_hooks() {
     local hook
-    __akitty_folder_named_result=0
-    if (( $+functions[zshaddhistory] )) && [[ $functions[zshaddhistory] != $functions[__akitty_folder_capture_named] ]]; then
-        functions -c zshaddhistory __akitty_folder_named_saved
+    __akitty_folder_hooks_ready=1
+    if (( $+functions[zshaddhistory] )); then
+        __akitty_folder_wrap_hook zshaddhistory __akitty_folder_capture_named __akitty_folder_named_saved || __akitty_folder_hooks_ready=0
+    else
+        unfunction __akitty_folder_named_saved 2>/dev/null
         functions -c __akitty_folder_capture_named zshaddhistory
     fi
     for hook in "${zshaddhistory_functions[@]}"; do
-        [[ $hook == __akitty_folder_addhistory ]] || __akitty_folder_hooks+=("$hook")
+        [[ $hook != __akitty_folder_addhistory ]] && (( $+functions[$hook] )) || continue
+        __akitty_folder_wrap_hook "$hook" __akitty_folder_capture_hook "__akitty_folder_saved_$hook" || __akitty_folder_hooks_ready=0
     done
-    zshaddhistory_functions=(__akitty_folder_addhistory)
+    zshaddhistory_functions=("${(@)zshaddhistory_functions:#__akitty_folder_addhistory}" __akitty_folder_addhistory)
 }
 # Sets reply to at most $1 distinct commands run in this folder (by either its logical or physical path) that extend
 # the line, best first: each run scores 4 within an hour, 2 within a day, 1/2 within a week and 1/4 after, and ties
