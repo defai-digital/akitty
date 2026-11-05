@@ -234,3 +234,26 @@ test('keyboard event-only mode reports repeats and releases and F3 is unambiguou
   await page.keyboard.up('Shift')
   expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[57441;2u', '\x1b[57441;1:3u'])
 })
+
+test('host shortcuts and custom key handlers keep their releases out of enhanced terminal input', async ({ page }) => {
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[=10u')
+    f.terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => event.code === 'KeyP')
+    f.input.length = 0
+    f.terminal.focus()
+    const input = document.querySelector('textarea')!
+    for (const modifiers of [{ ctrlKey: true }, { metaKey: true }]) {
+      input.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV', key: 'v', bubbles: true, ...modifiers }))
+      input.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyV', key: 'v', bubbles: true }))
+    }
+  })
+  await page.keyboard.press('p')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual([])
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[=1u')
+  })
+  await page.keyboard.press('Control+Alt+v')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[118;7u'])
+})

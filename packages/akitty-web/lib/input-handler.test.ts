@@ -325,6 +325,71 @@ describe('InputHandler', () => {
       } finally { handler.dispose(); }
     });
 
+    test('enhanced keyboard ignores releases for clipboard shortcuts, consumed keys and unmatched presses', () => {
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, event => event.code === 'KeyP', undefined, undefined, () => 10);
+      try {
+        for (const modifiers of [{ ctrl: true }, { meta: true }]) {
+          simulateKey(container, createKeyEvent('KeyV', 'v', modifiers));
+          container.dispatchEvent({ ...createKeyEvent('KeyV', 'v'), type: 'keyup' });
+        }
+        simulateKey(container, createKeyEvent('KeyC', 'c', { meta: true }));
+        container.dispatchEvent({ ...createKeyEvent('KeyC', 'c'), type: 'keyup' });
+        simulateKey(container, createKeyEvent('KeyP', 'p'));
+        container.dispatchEvent({ ...createKeyEvent('KeyP', 'p'), type: 'keyup' });
+        container.dispatchEvent({ ...createKeyEvent('ArrowLeft', 'ArrowLeft'), type: 'keyup' });
+        expect(dataReceived).toEqual([]);
+        simulateKey(container, createKeyEvent('KeyV', 'v'));
+        container.dispatchEvent({ ...createKeyEvent('KeyV', 'v', { ctrl: true }), type: 'keyup' });
+        expect(dataReceived).toEqual(['\x1b[118;1u', '\x1b[118;5:3u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('keyboard protocol transitions do not turn old or repeated releases into input', () => {
+      let flags = 0;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => flags);
+      try {
+        simulateKey(container, createKeyEvent('ArrowLeft', 'ArrowLeft'));
+        flags = 2;
+        container.dispatchEvent({ ...createKeyEvent('ArrowLeft', 'ArrowLeft'), type: 'keyup' });
+        expect(dataReceived).toEqual(['\x1b[D']);
+        flags = 10;
+        simulateKey(container, createKeyEvent('KeyA', 'a'));
+        flags = 0;
+        container.dispatchEvent({ ...createKeyEvent('KeyA', 'a'), type: 'keyup' });
+        flags = 10;
+        container.dispatchEvent({ ...createKeyEvent('KeyA', 'a'), type: 'keyup' });
+        expect(dataReceived).toEqual(['\x1b[D', '\x1b[97;1u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('paste shortcuts do not swallow AltGraph text or Ctrl+Alt terminal chords', () => {
+      let flags = 0;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => flags);
+      try {
+        simulateKey(container, Object.assign(createKeyEvent('KeyV', '@', { ctrl: true, alt: true }),
+          { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
+        simulateKey(container, createKeyEvent('KeyV', 'v', { ctrl: true, alt: true }));
+        flags = 8;
+        simulateKey(container, Object.assign(createKeyEvent('KeyV', '@', { ctrl: true, alt: true }),
+          { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
+        expect(dataReceived).toEqual(['@', '\x1b\x16', '\x1b[64;1u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('releasing layout modifiers before a key retains its reported key identity', () => {
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => 10);
+      try {
+        simulateKey(container, Object.assign(createKeyEvent('KeyV', '@', { ctrl: true, alt: true }),
+          { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
+        container.dispatchEvent({ ...createKeyEvent('KeyV', 'v'), type: 'keyup' });
+        expect(dataReceived).toEqual(['\x1b[64;1u', '\x1b[64;1:3u']);
+      } finally { handler.dispose(); }
+    });
+
     test('Ctrl+Alt chords remain distinct from composed AltGraph text', () => {
       const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
       try {

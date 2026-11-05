@@ -230,6 +230,11 @@ and alternate keys according to the requested progressive flags. Legacy mouse re
 UTF-8 mouse coordinates respect their encoding limit, and horizontal or stationary wheel events do not emit
 vertical reports. Regression evidence and protocol references are recorded in [the engine migration audit](ENGINE_MIGRATION.md#selection-resize-and-input-protocol-audit).
 
+The Web input adapter pairs enhanced key releases with presses it actually sent. Clipboard shortcuts and
+keys consumed by a host handler do not leak release events to the terminal. Release events retain the
+reported key identity even if a layout modifier was released first. AltGraph text and Ctrl+Alt chords remain
+terminal input rather than being mistaken for clipboard shortcuts.
+
 Native clipboard shortcuts run before enhanced keyboard encoding, so Command-V remains a paste even when a
 foreground TUI asks for all keys as escape codes. Edit menu Copy/Paste use standard responder-chain actions;
 the command palette retains its explicit pane target. Multiline/control text requires confirmation by default.

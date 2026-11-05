@@ -46,6 +46,7 @@ function identity(event: KeyboardEvent): Key | undefined {
 export class InputHandler {
   private readonly encoder: KeyEncoder;
   private readonly listeners: Array<[string, EventListener]> = [];
+  private readonly reportedKeys = new Map<string, Key>();
   private closed = false;
   private composing = false;
   constructor(engine: AkittyEngine, private readonly container: HTMLElement, private readonly onData: (data: string) => void,
@@ -68,25 +69,31 @@ export class InputHandler {
   }
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void { this.customKeyEventHandler = handler; }
   private key(event: KeyboardEvent, release: boolean): void {
-    if (this.closed || this.composing || event.isComposing || event.keyCode === 229) return;
+    if (this.closed) return;
+    const physicalKey = event.code || event.key;
+    const reportedKey = release ? this.reportedKeys.get(physicalKey) : undefined;
+    if (release) this.reportedKeys.delete(physicalKey);
+    if (this.composing || event.isComposing || event.keyCode === 229) return;
     const flags = this.getKeyboardFlags?.() ?? 0;
-    if (release && !(flags & 2)) return;
+    if (release && (reportedKey === undefined || !(flags & 2))) return;
     if (!release) {
       this.onKey?.({ key: event.key, domEvent: event });
       if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
     }
     if (event.key === 'Dead') return;
     if (modifierKeys[event.code] !== undefined && !(flags & 8)) return;
-    if ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC') return;
     const printable = Array.from(event.key).length === 1;
     // AltGraph is a layout modifier; Ctrl+Alt alone remains a terminal chord.
     const altGraph = event.getModifierState?.('AltGraph') ?? false;
+    if (!release && !altGraph && !event.altKey
+      && ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC')) return;
     const applicationKeypad = this.getMode?.(66) ?? false;
     if (!release && !(flags & 8) && printable && !event.metaKey && ((!event.ctrlKey && !event.altKey) || altGraph)
       && !(applicationKeypad && event.code.startsWith('Numpad'))) {
       event.preventDefault(); this.onData(event.key); return;
     }
-    const code = identity(event);
+    // Layout modifiers may be released first, changing event.key while the physical key is still held.
+    const code = release ? reportedKey : identity(event);
     if (code === undefined) return;
     const mods = (event.shiftKey ? Mods.SHIFT : 0) | (event.altKey && !altGraph ? Mods.ALT : 0)
       | (event.ctrlKey && !altGraph ? Mods.CTRL : 0) | (event.metaKey ? Mods.SUPER : 0)
@@ -99,7 +106,11 @@ export class InputHandler {
       key: code, mods, utf8: printable ? event.key : undefined,
       shiftedCodepoint: event.shiftKey && printable ? event.key.codePointAt(0) : undefined, baseLayoutCodepoint: baseLayout(event.code) });
     event.preventDefault(); event.stopPropagation();
-    if (bytes.length) this.onData(new TextDecoder().decode(bytes));
+    if (bytes.length) {
+      // Host shortcuts and custom handlers never claimed a terminal key press; their releases stay local too.
+      if (!release && flags !== 0) this.reportedKeys.set(physicalKey, code);
+      this.onData(new TextDecoder().decode(bytes));
+    }
   }
   private paste(event: ClipboardEvent): void {
     event.preventDefault(); event.stopPropagation();
@@ -117,6 +128,6 @@ export class InputHandler {
     if (this.closed) return;
     this.closed = true;
     for (const [name, callback] of this.listeners) this.container.removeEventListener(name, callback);
-    this.listeners.length = 0; this.encoder.dispose();
+    this.listeners.length = 0; this.reportedKeys.clear(); this.encoder.dispose();
   }
 }
