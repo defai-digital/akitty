@@ -263,3 +263,26 @@ Clippy, SDK/ABI, source/artifact provenance, shell, release and installer checks
 pass. Firefox retains the documented local startup exception. The final source
 review and regression sweep found no additional reproducible defects in the paths
 reviewed; this does not establish that the entire application is defect-free.
+
+## 1.3.10 reconciliation and clipboard audit
+
+The release reconciliation retains both branches' regression cases and the released
+cursor-state structure, including saved autowrap and a pending single shift. The
+shared native/WASM stream corpus now contains 27 fixtures.
+
+The clipboard audit reproduced Command-V arriving at the native key handler as an
+enhanced keyboard chord instead of pasted text. Clipboard shortcuts now run before
+the foreground program's Kitty keyboard encoding; Edit menu actions use the focused
+responder, while palette commands retain their explicit pane target. Actual-PTY
+tests verify the exact Unicode payload and bracket delimiters, both shortcut paths,
+and approval/cancellation of multiline pastes. The unfixed implementation fails the
+new shortcut regression by delivering an 8-byte key sequence instead of the expected
+24-byte bracketed payload.
+
+The release-merge verification gate passes with 236 Rust tests, 639 Web tests,
+20 browser tests, SDK/ABI, Clippy, source/artifact provenance, shell, release and
+installer checks. The final native clipboard revision passes 263 Swift tests with
+one skip and zero failures; the shell suite runs 26 tests with one skip and zero
+failures. The debug app bundle builds and launches an isolated interactive zsh with
+the bundled folder-history hooks. These checks do not establish comparative
+performance, complete terminal conformance or vendor-certified agent integration.

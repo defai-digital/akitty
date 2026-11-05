@@ -500,7 +500,22 @@ import os
         }
         kittyDown.removeAll(); heldModifierKeys.removeAll()
     }
+    /// Host editing shortcuts take priority over the foreground program's keyboard protocol.
+    private func performEditingShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command] else { return false }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "v": paste(nil); return true
+        case "c": copy(nil); return true
+        default: return false
+        }
+    }
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, performEditingShortcut(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
     public override func keyDown(with event: NSEvent) {
+        if performEditingShortcut(event) { return }
         switch kittyKey(event, type: event.isARepeat ? .repeat : .press) {
         case let .bytes(bytes):
             if let input = KittyKeyInput(event: event, optionAsAlt: preferences.optionAsAlt, type: .press) { kittyDown[event.keyCode] = input }

@@ -228,3 +228,9 @@ The shared keyboard encoder handles functional-key repeat/release events, keypad
 and alternate keys according to the requested progressive flags. Legacy mouse releases retain modifier bits,
 UTF-8 mouse coordinates respect their encoding limit, and horizontal or stationary wheel events do not emit
 vertical reports. Regression evidence and protocol references are recorded in [the engine migration audit](ENGINE_MIGRATION.md#selection-resize-and-input-protocol-audit).
+
+Native clipboard shortcuts run before enhanced keyboard encoding, so Command-V remains a paste even when a
+foreground TUI asks for all keys as escape codes. Edit menu Copy/Paste use standard responder-chain actions;
+the command palette retains its explicit pane target. Multiline/control text still requires confirmation,
+and bracketed paste strips escape characters that could terminate its delimiters. Actual-PTY regressions
+check Unicode payloads, both shortcut paths, approval and cancellation.
