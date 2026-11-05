@@ -101,6 +101,29 @@ impl Default for Modes {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SavedState {
+    style: Style,
+    origin: bool,
+    wrap: bool,
+    charsets: [bool; 4],
+    charset: usize,
+    single_shift: Option<usize>,
+}
+
+impl Default for SavedState {
+    fn default() -> Self {
+        Self {
+            style: Style::default(),
+            origin: false,
+            wrap: true,
+            charsets: [false; 4],
+            charset: 0,
+            single_shift: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Terminal {
     parser: Parser,
@@ -115,9 +138,7 @@ pub struct Terminal {
     link: Option<Arc<str>>,
     link_id: u32,
     title_stack: Vec<String>,
-    saved_style: [Style; 2],
-    saved_origin: [bool; 2],
-    saved_charsets: [([bool; 4], usize); 2],
+    saved_state: [SavedState; 2],
     charsets: [bool; 4],
     charset: usize,
     single_shift: Option<usize>,
@@ -160,9 +181,7 @@ impl Terminal {
             link: None,
             link_id: 0,
             title_stack: Vec::new(),
-            saved_style: [Style::default(); 2],
-            saved_origin: [false; 2],
-            saved_charsets: [([false; 4], 0); 2],
+            saved_state: [SavedState::default(); 2],
             charsets: [false; 4],
             charset: 0,
             single_shift: None,
@@ -561,16 +580,24 @@ impl Terminal {
     }
     fn save_cursor(&mut self) {
         self.screen_mut().saved_cursor = self.screen().cursor;
-        self.saved_style[usize::from(self.modes.alternate)] = self.style;
-        self.saved_origin[usize::from(self.modes.alternate)] = self.modes.origin;
-        self.saved_charsets[usize::from(self.modes.alternate)] = (self.charsets, self.charset);
+        self.saved_state[usize::from(self.modes.alternate)] = SavedState {
+            style: self.style,
+            origin: self.modes.origin,
+            wrap: self.modes.wrap,
+            charsets: self.charsets,
+            charset: self.charset,
+            single_shift: self.single_shift,
+        };
     }
     fn restore_cursor(&mut self) {
         self.screen_mut().cursor = self.screen().saved_cursor;
-        self.style = self.saved_style[usize::from(self.modes.alternate)];
-        self.modes.origin = self.saved_origin[usize::from(self.modes.alternate)];
-        (self.charsets, self.charset) = self.saved_charsets[usize::from(self.modes.alternate)];
-        self.single_shift = None;
+        let saved = self.saved_state[usize::from(self.modes.alternate)];
+        self.style = saved.style;
+        self.modes.origin = saved.origin;
+        self.modes.wrap = saved.wrap;
+        self.charsets = saved.charsets;
+        self.charset = saved.charset;
+        self.single_shift = saved.single_shift;
     }
     fn escape(&mut self, intermediate: &[u8], byte: u8, emit: &mut impl FnMut(Event)) {
         if let [slot @ (b'(' | b')' | b'*' | b'+')] = intermediate {
@@ -847,12 +874,9 @@ impl Terminal {
             (None, b'r') => {
                 let start = n - 1;
                 let bottom = c.value(1, 0);
-                let end = if bottom == 0 {
-                    self.rows()
-                } else {
-                    usize::from(bottom).min(self.rows())
-                };
-                if start + 1 < end && start < self.rows() {
+                let end = if bottom == 0 { self.rows() } else { usize::from(bottom).min(self.rows()) };
+                // Equal margins are invalid and must not move the cursor.
+                if start + 1 < end {
                     self.screen_mut().region = start..end;
                     self.goto(0, 0, true);
                 }
@@ -977,6 +1001,7 @@ impl Terminal {
                 }
                 if enabled && mode != 47 {
                     self.alternate = Screen::new(self.cols(), self.rows(), 0, true);
+                    self.saved_state[1] = SavedState::default();
                 }
                 self.modes.alternate = enabled;
                 if !enabled && mode == 1049 {
@@ -1377,9 +1402,7 @@ impl Terminal {
         self.title.clear();
         self.title_stack.clear();
         self.last_printed = None;
-        self.saved_style = [Style::default(); 2];
-        self.saved_origin = [false; 2];
-        self.saved_charsets = [([false; 4], 0); 2];
+        self.saved_state = [SavedState::default(); 2];
         emit(Event::Reset);
         emit(Event::Title(String::new()));
     }
@@ -1678,6 +1701,31 @@ mod tests {
         assert_eq!(term.screen().viewport_line(0).unwrap().text(), "ef");
         term.resize(8, 2, |_| {}).unwrap();
         assert_eq!(term.screen().viewport_line(0).unwrap().text(), "abcdefgh");
+    }
+
+    #[test]
+    fn cursor_save_restores_character_sets_and_pending_single_shift() {
+        let mut term = Terminal::new(8, 2, 10).unwrap();
+        feed(&mut term, b"\x1b)0\x0e\x1b*0\x1bN\x1b7\x1b(B\x1b)B\x1b*B\x0fq\x1b8qq");
+        assert_eq!(term.screen().rows[0].text(), "──      ");
+    }
+
+    #[test]
+    fn cursor_save_restores_autowrap_mode() {
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        feed(&mut term, b"\x1b7\x1b[?7l\x1b8abcde");
+        assert_eq!(term.screen().rows[0].text(), "abcd");
+        assert_eq!(term.screen().rows[1].text(), "e   ");
+    }
+
+    #[test]
+    fn scroll_margins_treat_zero_as_default_and_ignore_equal_bounds() {
+        let mut term = Terminal::new(8, 4, 10).unwrap();
+        feed(&mut term, b"\x1b[2;3r\x1b[0;0r");
+        assert_eq!(term.screen().region, 0..4);
+        feed(&mut term, b"\x1b[2;4r\x1b[3;5H\x1b[2;2r");
+        assert_eq!(term.screen().region, 1..4);
+        assert_eq!(term.cursor(), Position { row: 2, col: 4 });
     }
 
     #[test]

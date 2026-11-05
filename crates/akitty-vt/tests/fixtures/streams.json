@@ -346,5 +346,128 @@
     ],
     "history": 0,
     "replies": "\u001b[1;1R"
+  },
+  {
+    "name": "cursor save restores charsets and pending single shift",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b)0\u000e\u001b*0\u001bN\u001b7\u001b(B\u001b)B\u001b*B\u000fq\u001b8qq",
+    "lines": [
+      "──      ",
+      "        "
+    ],
+    "cursor": [
+      2,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "cursor save restores enabled autowrap",
+    "cols": 4,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b7\u001b[?7l\u001b8abcde",
+    "lines": [
+      "abcd",
+      "e   "
+    ],
+    "cursor": [
+      1,
+      1
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "cursor save restores disabled autowrap",
+    "cols": 4,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b[?7l\u001b7\u001b[?7h\u001b8abcde",
+    "lines": [
+      "abce",
+      "    "
+    ],
+    "cursor": [
+      3,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "alternate exit restores main charset and wrap state",
+    "cols": 4,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b)0\u000e\u001b[?7l\u001b[?1049h\u001b)B\u000f\u001b[?7hALT\u001b[?1049lqqqqq",
+    "lines": [
+      "────",
+      "    "
+    ],
+    "cursor": [
+      3,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "cleared alternate screen drops previous saved charset",
+    "cols": 4,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b[?1049h\u001b)0\u000e\u001b7\u001b[?1049l\u001b[?1049h\u001b8q",
+    "lines": [
+      "q   ",
+      "    "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "zero scroll margins reset to full screen and home",
+    "cols": 8,
+    "rows": 4,
+    "history_limit": 10,
+    "input": "\u001b[2;3r\u001b[0;0rX",
+    "lines": [
+      "X       ",
+      "        ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "equal scroll margins preserve region and cursor",
+    "cols": 8,
+    "rows": 4,
+    "history_limit": 10,
+    "input": "\u001b[2;4r\u001b[3;5H\u001b[2;2rX",
+    "lines": [
+      "        ",
+      "        ",
+      "    X   ",
+      "        "
+    ],
+    "cursor": [
+      5,
+      2
+    ],
+    "history": 0,
+    "replies": ""
   }
 ]

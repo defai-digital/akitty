@@ -102,6 +102,10 @@ its real path.
 
 A line is saved only when zsh itself keeps it in history: the user's `zshaddhistory`
 hooks run once and decide first; memory-only lines (hook status 2) are not persisted.
+Hook names and ordering remain visible to native registration, so `add-zsh-hook` can
+remove and deduplicate them. Replaced arrays and redefined functions take effect at
+the next prompt; autoloaded hooks load under their original names before wrapping.
+If a hook cannot load, folder persistence waits until its decision can be observed.
 Lines starting with a space, matching `HISTORY_IGNORE`, spanning
 several lines or over 1 KiB are skipped. Entries go to the owner-only file
 `~/Library/Application Support/Akitty/folder-history` (`AKITTY_FOLDER_HISTORY_FILE`
