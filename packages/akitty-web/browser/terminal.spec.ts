@@ -177,3 +177,60 @@ test('Unicode URLs remain complete and activate from the trailing wide column', 
   await page.keyboard.up(modifier)
   await expect.poll(() => page.evaluate(() => (window as any).opened)).toEqual([uri])
 })
+
+test('dragging from a wide spacer copies and highlights the whole glyph', async ({ page }) => {
+  const points = await page.evaluate(async () => {
+    const f = (window as any).fixture, t = f.terminal
+    t.resize(4, 3)
+    t.options.theme = { background: '#000000', foreground: '#ffffff', selectionBackground: '#ff0000' }
+    await f.write('\x1b[?25la中b')
+    const bounds = document.querySelector('canvas')!.getBoundingClientRect(), metrics = t.renderer.getMetrics()
+    return { start: { x: bounds.left + metrics.width * 2.5, y: bounds.top + metrics.height * 0.5 },
+      end: { x: bounds.left + metrics.width * 3.5, y: bounds.top + metrics.height * 0.5 } }
+  })
+  await page.mouse.move(points.start.x, points.start.y)
+  await page.mouse.down()
+  await page.mouse.move(points.end.x, points.end.y)
+  await page.mouse.up()
+  expect(await page.evaluate(() => (window as any).fixture.terminal.getSelection())).toBe('中b')
+  await expect.poll(() => page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!, context = canvas.getContext('2d')!
+    return [1, 2].map(col => Array.from(context.getImageData(Math.floor(canvas.width / 4 * (col + 0.5)),
+      Math.floor(canvas.height / 3 * 0.95), 1, 1).data).slice(0, 3))
+  })).toEqual([[255, 0, 0], [255, 0, 0]])
+  await page.evaluate(async () => {
+    const f = (window as any).fixture
+    f.terminal.reset()
+    await f.write('ab  cd')
+    f.terminal.select(0, 0, 6)
+  })
+  expect(await page.evaluate(() => (window as any).fixture.terminal.getSelection())).toBe('ab  cd')
+})
+
+test('keyboard event-only mode reports repeats and releases and F3 is unambiguous', async ({ page }) => {
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[=2u')
+    f.input.length = 0
+    f.terminal.focus()
+  })
+  await page.keyboard.down('ArrowLeft')
+  await page.keyboard.down('ArrowLeft')
+  await page.keyboard.up('ArrowLeft')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[D', '\x1b[1;1:2D', '\x1b[1;1:3D'])
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[=1u')
+    f.input.length = 0
+  })
+  await page.keyboard.press('Control+F3')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[13;5~'])
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.terminal.write('\x1b[=10u')
+    f.input.length = 0
+  })
+  await page.keyboard.down('Shift')
+  await page.keyboard.up('Shift')
+  expect(await page.evaluate(() => (window as any).fixture.input)).toEqual(['\x1b[57441;2u', '\x1b[57441;1:3u'])
+})

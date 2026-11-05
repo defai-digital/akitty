@@ -217,3 +217,49 @@ SDK/ABI, source/artifact provenance, shell, release and installer checks pass.
 The real-browser URL case uses the platform's primary link modifier and verifies
 activation from the trailing half of a wide glyph. Firefox retains the documented
 local startup exception; required remote CI runs before publication to main.
+
+## Selection, resize and input-protocol audit
+
+This audit reproduced selection copying soft wraps as hard newlines, losing
+significant spaces and nonbreaking spaces, omitting a wide glyph when the range
+started on its trailing column, and including padding before a wrapped wide glyph.
+Oversized selections could also reverse their final column, and bounded history
+eviction silently moved a selection onto replacement text.
+
+Selection extraction now follows logical wrapped lines and their explicit padding,
+retains selected written spaces, and includes overlapping wide glyphs in both text
+and highlighting. Ranges clamp to the last viewport cell and clear on resize.
+Additive WASM ABI 1 exports expose opaque 64-bit row identities, retained-anchor
+lookup and wrap padding. Selection anchors resolve once per core revision, so
+history eviction cannot silently select different rows. The native selection path
+also preserves spaces across wraps and omits wide-wrap padding.
+
+Native resize now relocates both live and saved cursors, including delayed wrap,
+and preserves the scrolled viewport through height changes and logical-line reflow.
+Rebuilding history no longer counts retained rows as new output. Cursor save and
+restore retain charset designations and locking selection, as described in the
+DEC VT100 User Guide (DECSC/DECRC). Zero bottom margins default to screen height;
+invalid single-row scrolling regions are ignored.
+
+Input regressions cover legacy mouse-release modifiers, the UTF-8 mouse coordinate
+ceiling, and horizontal/stationary wheel events producing vertical reports. Keyboard
+event-only mode now reports functional-key repeat/release events. Alternate-key
+reporting does not force otherwise legacy Shift keys into CSI-u; F3 uses its
+unambiguous enhanced encoding. Lock modifiers, editing-key releases and keypad
+identities follow progressive flag semantics. The Web adapter carries shifted and
+base-layout identities, reports standalone modifiers when all-key reporting is
+enabled, and omits associated text for Ctrl/Super chords while retaining legacy
+non-English Ctrl input. Protocol grounding:
+https://invisible-island.net/xterm/ctlseqs/ctlseqs.html and
+https://sw.kovidgoyal.net/kitty/keyboard-protocol/.
+
+Regression qualification includes 20 native/WASM stream fixtures at every byte
+boundary, 60,000 deterministic edit/resize/screen-switch operations checking both
+screens, direct WASM anchor/bounds/lifetime and keyboard checks, and real Canvas
+drag-selection pixels and keyboard press/repeat/release events. The complete local
+verification gate passes with 233 Rust tests, 639 Web tests, 20 Chromium/WebKit
+tests and 258 Swift tests executed with one skip and zero failures. Native/WASM
+Clippy, SDK/ABI, source/artifact provenance, shell, release and installer checks
+pass. Firefox retains the documented local startup exception. The final source
+review and regression sweep found no additional reproducible defects in the paths
+reviewed; this does not establish that the entire application is defect-free.

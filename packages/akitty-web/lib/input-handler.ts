@@ -11,12 +11,23 @@ const functional: Readonly<Record<string, Key>> = {
   Pause: Key.PAUSE, ContextMenu: Key.CONTEXT_MENU,
   NumpadDecimal: Key.KP_PERIOD, NumpadDivide: Key.KP_DIVIDE, NumpadMultiply: Key.KP_MULTIPLY,
   NumpadSubtract: Key.KP_MINUS, NumpadAdd: Key.KP_PLUS, NumpadEnter: Key.KP_ENTER, NumpadEqual: Key.KP_EQUAL,
+  NumpadComma: Key.KP_SEPARATOR,
 };
 const punctuation: Readonly<Record<string, string>> = {
   Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
   Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', IntlBackslash: '<',
 };
+const modifierKeys: Readonly<Record<string, Key>> = {
+  ShiftLeft: Key.LEFT_SHIFT, ControlLeft: Key.LEFT_CONTROL, AltLeft: Key.LEFT_ALT, MetaLeft: Key.LEFT_SUPER,
+  ShiftRight: Key.RIGHT_SHIFT, ControlRight: Key.RIGHT_CONTROL, AltRight: Key.RIGHT_ALT, MetaRight: Key.RIGHT_SUPER,
+};
+function baseLayout(code: string): number | undefined {
+  if (/^Key[A-Z]$/.test(code)) return code.toLowerCase().charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
+  return punctuation[code]?.codePointAt(0);
+}
 function identity(event: KeyboardEvent): Key | undefined {
+  if (modifierKeys[event.code] !== undefined) return modifierKeys[event.code];
   if (functional[event.code] !== undefined) return functional[event.code];
   if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;
   const scalar = Array.from(event.key).length === 1 ? event.key.codePointAt(0) as Key : undefined;
@@ -65,6 +76,7 @@ export class InputHandler {
       if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
     }
     if (event.key === 'Dead') return;
+    if (modifierKeys[event.code] !== undefined && !(flags & 8)) return;
     if ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC') return;
     const printable = Array.from(event.key).length === 1;
     // AltGraph is a layout modifier; Ctrl+Alt alone remains a terminal chord.
@@ -84,7 +96,8 @@ export class InputHandler {
     this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, this.getMode?.(1036) ?? true);
     this.encoder.setKittyFlags(flags);
     const bytes = this.encoder.encode({ action: release ? KeyAction.RELEASE : event.repeat ? KeyAction.REPEAT : KeyAction.PRESS,
-      key: code, mods, utf8: printable ? event.key : undefined });
+      key: code, mods, utf8: printable ? event.key : undefined,
+      shiftedCodepoint: event.shiftKey && printable ? event.key.codePointAt(0) : undefined, baseLayoutCodepoint: baseLayout(event.code) });
     event.preventDefault(); event.stopPropagation();
     if (bytes.length) this.onData(new TextDecoder().decode(bytes));
   }

@@ -272,6 +272,7 @@ export class Terminal implements ITerminalCore {
     this.wasmTerm!.resize(cols, rows); this.cols = cols; this.rows = rows; this.revision++;
     try { this.renderer!.resize(cols, rows); }
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
+    this.selectionManager?.clearSelection();
     this.resizePaintPending = true; this.finishResize();
   }
   private finishResize(): void {
@@ -398,6 +399,7 @@ export class Terminal implements ITerminalCore {
     if (!this.isOpen || this.isDisposed) return;
     event.preventDefault(); event.stopPropagation();
     if (this.customWheelEventHandler?.(event)) return;
+    if (!event.deltaY) return;
     const engine = this.wasmTerm!;
     if (engine.hasMouseTracking() && !event.shiftKey) {
       const { x, y } = this.pointer(event); const button = (event.deltaY < 0 ? 64 : 65) | this.mouseModifiers(event);

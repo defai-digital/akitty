@@ -280,7 +280,8 @@ describe('InputHandler', () => {
         simulateKey(container, createKeyEvent('Numpad1', '1'));
         flags = 8;
         simulateKey(container, createKeyEvent('Numpad1', '1'));
-        expect(dataReceived).toEqual(['\x1bOq', '\x1bOk', '1', '\x1b[57400;1u']);
+        simulateKey(container, createKeyEvent('NumpadComma', ','));
+        expect(dataReceived).toEqual(['\x1bOq', '\x1bOk', '1', '\x1b[57400;1u', '\x1b[57416;1u']);
       } finally { handler.dispose(); }
     });
 
@@ -295,6 +296,32 @@ describe('InputHandler', () => {
         simulateKey(container, Object.assign(createKeyEvent('KeyQ', '@', { ctrl: true, alt: true }),
           { getModifierState: (modifier: string) => modifier === 'AltGraph' }));
         expect(dataReceived).toEqual(['\x1b[233;1u', '\x1b[233;2u', '\x1b[66560;1u', '\x1b[8364;1u', '\x1b[64;1u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('enhanced keyboard retains alternate layout identities and omits text for Ctrl chords', () => {
+      let flags = 12;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => flags);
+      try {
+        simulateKey(container, createKeyEvent('KeyE', 'É', { shift: true }));
+        flags = 24;
+        simulateKey(container, createKeyEvent('KeyC', 'c', { ctrl: true }));
+        expect(dataReceived).toEqual(['\x1b[233:201:101;2u', '\x1b[99;5u']);
+      } finally { handler.dispose(); }
+    });
+
+    test('report-all includes modifier-only events while legacy Ctrl layout text stays usable', () => {
+      let flags = 10;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, undefined, undefined, () => flags);
+      try {
+        simulateKey(container, createKeyEvent('ShiftLeft', 'Shift', { shift: true }));
+        container.dispatchEvent({ ...createKeyEvent('ShiftLeft', 'Shift'), type: 'keyup' });
+        flags = 0;
+        simulateKey(container, createKeyEvent('ControlLeft', 'Control', { ctrl: true }));
+        simulateKey(container, createKeyEvent('KeyE', 'é', { ctrl: true }));
+        expect(dataReceived).toEqual(['\x1b[57441;2u', '\x1b[57441;1:3u', 'é']);
       } finally { handler.dispose(); }
     });
 

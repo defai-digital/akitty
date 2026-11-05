@@ -117,6 +117,7 @@ pub struct Terminal {
     title_stack: Vec<String>,
     saved_style: [Style; 2],
     saved_origin: [bool; 2],
+    saved_charsets: [([bool; 4], usize); 2],
     charsets: [bool; 4],
     charset: usize,
     single_shift: Option<usize>,
@@ -161,6 +162,7 @@ impl Terminal {
             title_stack: Vec::new(),
             saved_style: [Style::default(); 2],
             saved_origin: [false; 2],
+            saved_charsets: [([false; 4], 0); 2],
             charsets: [false; 4],
             charset: 0,
             single_shift: None,
@@ -561,11 +563,14 @@ impl Terminal {
         self.screen_mut().saved_cursor = self.screen().cursor;
         self.saved_style[usize::from(self.modes.alternate)] = self.style;
         self.saved_origin[usize::from(self.modes.alternate)] = self.modes.origin;
+        self.saved_charsets[usize::from(self.modes.alternate)] = (self.charsets, self.charset);
     }
     fn restore_cursor(&mut self) {
         self.screen_mut().cursor = self.screen().saved_cursor;
         self.style = self.saved_style[usize::from(self.modes.alternate)];
         self.modes.origin = self.saved_origin[usize::from(self.modes.alternate)];
+        (self.charsets, self.charset) = self.saved_charsets[usize::from(self.modes.alternate)];
+        self.single_shift = None;
     }
     fn escape(&mut self, intermediate: &[u8], byte: u8, emit: &mut impl FnMut(Event)) {
         if let [slot @ (b'(' | b')' | b'*' | b'+')] = intermediate {
@@ -841,8 +846,13 @@ impl Terminal {
             }
             (None, b'r') => {
                 let start = n - 1;
-                let end = usize::from(c.value(1, self.rows() as u16)).min(self.rows());
-                if start < end && start < self.rows() {
+                let bottom = c.value(1, 0);
+                let end = if bottom == 0 {
+                    self.rows()
+                } else {
+                    usize::from(bottom).min(self.rows())
+                };
+                if start + 1 < end && start < self.rows() {
                     self.screen_mut().region = start..end;
                     self.goto(0, 0, true);
                 }
@@ -1369,6 +1379,7 @@ impl Terminal {
         self.last_printed = None;
         self.saved_style = [Style::default(); 2];
         self.saved_origin = [false; 2];
+        self.saved_charsets = [([false; 4], 0); 2];
         emit(Event::Reset);
         emit(Event::Title(String::new()));
     }
@@ -1586,6 +1597,87 @@ mod tests {
             feed(&mut term, b"Z");
             assert_eq!(term.screen().rows[expected.row].cells[expected.col].ch, 'Z');
         }
+    }
+
+    #[test]
+    fn resizing_scrolled_history_keeps_the_visible_row() {
+        let mut term = Terminal::new(8, 3, 100).unwrap();
+        feed(&mut term, b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        term.screen_mut().scroll_display(2);
+        assert_eq!(
+            term.screen().viewport_line(0).unwrap().text().trim_end(),
+            "one"
+        );
+        for (cols, rows) in [(8, 4), (10, 3), (8, 2)] {
+            term.resize(cols, rows, |_| {}).unwrap();
+            assert_eq!(
+                term.screen().viewport_line(0).unwrap().text().trim_end(),
+                "one"
+            );
+        }
+    }
+
+    #[test]
+    fn native_selection_preserves_soft_wrap_spaces_and_omits_wide_padding() {
+        for (input, end, expected) in [
+            ("ab  cd", Position { row: 1, col: 1 }, "ab  cd"),
+            ("abc中", Position { row: 1, col: 1 }, "abc中"),
+        ] {
+            let mut term = Terminal::new(4, 3, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            term.screen_mut().select(Position { row: 0, col: 0 }, end);
+            assert_eq!(term.screen().selection_text(), expected);
+        }
+    }
+
+    #[test]
+    fn cursor_save_restores_charset_designation_and_locking_selection() {
+        for (input, expected) in [
+            ("\x1b(0\x1b7\x1b(B\x1b8q", "─       "),
+            ("\x1b)0\x0e\x1b7\x0f\x1b8q", "─       "),
+            ("\x1b)0\x0e\x1b[?1049h\x0f\x1b[?1049lq", "─       "),
+        ] {
+            let mut term = Terminal::new(8, 3, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            assert_eq!(term.screen().rows[0].text(), expected);
+        }
+    }
+
+    #[test]
+    fn zero_bottom_margin_resets_the_full_screen_region() {
+        let mut term = Terminal::new(8, 4, 10).unwrap();
+        feed(&mut term, b"\x1b[2;3r\x1b[0;0r");
+        assert_eq!(term.screen().region, 0..4);
+        feed(&mut term, b"\x1b[2;0r");
+        assert_eq!(term.screen().region, 1..4);
+        feed(&mut term, b"\x1b[3;3r");
+        assert_eq!(term.screen().region, 1..4);
+    }
+
+    #[test]
+    fn resizing_reflows_the_saved_cursor_and_its_delayed_wrap() {
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, b"abcd\x1b7");
+        term.resize(8, 3, |_| {}).unwrap();
+        feed(&mut term, b"\x1b8e");
+        assert_eq!(term.screen().rows[0].text(), "abcde   ");
+        assert_eq!(term.cursor(), Position { row: 0, col: 5 });
+        feed(&mut term, b"fghij\x1b7");
+        term.resize(4, 4, |_| {}).unwrap();
+        feed(&mut term, b"\x1b8k");
+        assert_eq!(term.screen().rows[2].text(), "ijk ");
+    }
+
+    #[test]
+    fn resizing_reflows_the_top_visible_wrapped_history_row() {
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        feed(&mut term, b"abcdefghijklmnop");
+        term.screen_mut().scroll_display(1);
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "efgh");
+        term.resize(2, 2, |_| {}).unwrap();
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "ef");
+        term.resize(8, 2, |_| {}).unwrap();
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "abcdefgh");
     }
 
     #[test]

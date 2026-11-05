@@ -71,14 +71,24 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         return Vec::new();
     }
     let mods = key.modifiers & 0x3f;
-    let kitty = flags & 8 != 0
-        || flags & 1 != 0 && (key.code == 27 || mods & !SHIFT != 0 || key.code >= 57344)
-        || flags & 4 != 0 && mods & SHIFT != 0;
-    if !kitty && key.action == Action::Release {
+    let code = if flags & 8 == 0 {
+        keypad_legacy_code(key.code).unwrap_or(key.code)
+    } else {
+        key.code
+    };
+    let kitty =
+        flags & 8 != 0 || flags & 1 != 0 && (code == 27 || mods & !SHIFT != 0 || code >= 57344);
+    let editing = matches!(key.code, 9 | 13 | 127 | 57414);
+    if key.action == Action::Release && editing && flags & 8 == 0 {
         return Vec::new();
     }
-    let modifier = u16::from(if kitty { key.modifiers } else { mods }) + 1;
-    let event = if report_events {
+    let text_key = (32..57344).contains(&code) && code != 127;
+    let modifier = u16::from(if flags & 8 != 0 || !text_key && flags & 3 != 0 {
+        key.modifiers
+    } else {
+        mods
+    }) + 1;
+    let event = if report_events && (!editing || flags & 8 != 0) {
         match key.action {
             Action::Press => "",
             Action::Repeat => ":2",
@@ -88,7 +98,13 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         ""
     };
     if let Some((number, final_byte, ss3)) = function(key.code) {
-        if kitty || mods != 0 {
+        if kitty
+            || mods != 0
+            || report_events && (key.action != Action::Press || key.modifiers != 0)
+        {
+            if flags & 11 != 0 && key.code == F1 + 2 {
+                return format!("\x1b[13;{modifier}{event}~").into_bytes();
+            }
             return format!("\x1b[{number};{modifier}{event}{final_byte}").into_bytes();
         }
         if let Some(final_byte) = ss3 {
@@ -99,8 +115,11 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         }
         return format!("\x1b[{number}{final_byte}").into_bytes();
     }
+    if !kitty && key.action == Action::Release {
+        return Vec::new();
+    }
     if kitty {
-        let mut identity = key.code.to_string();
+        let mut identity = code.to_string();
         if flags & 4 != 0 {
             if let Some(shifted) = key.shifted.filter(|n| *n != key.code) {
                 identity.push_str(&format!(":{shifted}"));
@@ -111,7 +130,10 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
                 identity.push_str(&format!(":{base}"));
             }
         }
-        let associated = if flags & 16 != 0 && key.action != Action::Release && !key.text.is_empty()
+        let associated = if flags & 16 != 0
+            && key.action != Action::Release
+            && !key.text.is_empty()
+            && key.modifiers & (CTRL | SUPER) == 0
         {
             format!(
                 ";{}",
@@ -174,17 +196,24 @@ fn legacy_text(key: &Key<'_>) -> Vec<u8> {
         13 => vec![13],
         27 => vec![27],
         127 => vec![127],
-        57399..=57408 => vec![b'0' + (key.code - 57399) as u8],
-        57409 => b".".to_vec(),
-        57410 => b"/".to_vec(),
-        57411 => b"*".to_vec(),
-        57412 => b"-".to_vec(),
-        57413 => b"+".to_vec(),
-        57414 => vec![13],
-        57415 => b"=".to_vec(),
-        57416 => b",".to_vec(),
+        code @ 57399..=57416 => vec![keypad_legacy_code(code).unwrap() as u8],
         _ => Vec::new(),
     }
+}
+
+fn keypad_legacy_code(code: u32) -> Option<u32> {
+    Some(match code {
+        57399..=57408 => u32::from(b'0') + code - 57399,
+        57409 => u32::from(b'.'),
+        57410 => u32::from(b'/'),
+        57411 => u32::from(b'*'),
+        57412 => u32::from(b'-'),
+        57413 => u32::from(b'+'),
+        57414 => 13,
+        57415 => u32::from(b'='),
+        57416 => u32::from(b','),
+        _ => return None,
+    })
 }
 
 fn function(code: u32) -> Option<(u16, char, Option<char>)> {
@@ -235,6 +264,126 @@ mod tests {
     fn text(key: Key<'_>, options: Options) -> String {
         String::from_utf8(encode(&key, options)).unwrap()
     }
+    #[test]
+    fn event_types_report_function_releases_without_disambiguation() {
+        for (action, expected) in [
+            (Action::Repeat, "\x1b[1;1:2D"),
+            (Action::Release, "\x1b[1;1:3D"),
+        ] {
+            let mut key = Key::press(LEFT, 0, "");
+            key.action = action;
+            assert_eq!(
+                text(
+                    key,
+                    Options {
+                        kitty_flags: 2,
+                        ..Options::default()
+                    }
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            text(
+                Key::press(LEFT, 64, ""),
+                Options {
+                    kitty_flags: 2,
+                    ..Options::default()
+                }
+            ),
+            "\x1b[1;65D"
+        );
+    }
+
+    #[test]
+    fn alternate_key_reporting_does_not_claim_shift_only_keys_and_f3_is_unambiguous() {
+        let options = Options {
+            kitty_flags: 4,
+            ..Options::default()
+        };
+        assert_eq!(text(Key::press(9, SHIFT, ""), options), "\x1b[Z");
+        assert_eq!(text(Key::press(97, SHIFT, "A"), options), "A");
+        assert_eq!(
+            text(
+                Key::press(F1 + 2, CTRL, ""),
+                Options {
+                    kitty_flags: 1,
+                    ..options
+                }
+            ),
+            "\x1b[13;5~"
+        );
+    }
+
+    #[test]
+    fn text_lock_modifiers_and_editing_release_follow_progressive_flags() {
+        assert_eq!(
+            text(
+                Key::press(99, CTRL | 64, "c"),
+                Options {
+                    kitty_flags: 1,
+                    ..Options::default()
+                }
+            ),
+            "\x1b[99;5u"
+        );
+        assert_eq!(
+            text(
+                Key::press(99, CTRL | 64, "c"),
+                Options {
+                    kitty_flags: 8,
+                    ..Options::default()
+                }
+            ),
+            "\x1b[99;69u"
+        );
+        for code in [9, 13, 127, 57414] {
+            let mut key = Key::press(code, SHIFT, "");
+            key.action = Action::Release;
+            assert!(
+                encode(
+                    &key,
+                    Options {
+                        kitty_flags: 3,
+                        ..Options::default()
+                    }
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn keypad_uses_legacy_text_until_report_all_claims_its_physical_identity() {
+        let options = Options {
+            kitty_flags: 1,
+            ..Options::default()
+        };
+        assert_eq!(text(Key::press(57414, 0, ""), options), "\r");
+        assert_eq!(text(Key::press(57400, 0, "1"), options), "1");
+        assert_eq!(text(Key::press(57414, CTRL, ""), options), "\x1b[13;5u");
+        assert_eq!(
+            text(
+                Key::press(57400, 0, "1"),
+                Options {
+                    app_keypad: true,
+                    ..options
+                }
+            ),
+            "\x1bOq"
+        );
+        assert_eq!(
+            text(
+                Key::press(57400, 0, "1"),
+                Options {
+                    kitty_flags: 8,
+                    ..options
+                }
+            ),
+            "\x1b[57400;1u"
+        );
+    }
+
     #[test]
     fn legacy_controls_modifiers_and_application_modes() {
         let options = Options {
