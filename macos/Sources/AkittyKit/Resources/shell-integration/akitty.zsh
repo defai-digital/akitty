@@ -141,12 +141,13 @@ function __akitty_folder_capture_named() {
     return $__akitty_folder_named_result
 }
 function __akitty_folder_capture_hook() {
-    local saved=__akitty_folder_saved_${funcstack[1]} result
+    # zsh locals are dynamically scoped: user hooks must still read and update their own variables.
+    local __akitty_folder_hook_result
     local -i __akitty_folder_hook_depth=$(( ${__akitty_folder_hook_depth:-0} + 1 ))
-    "$saved" "$@"; result=$?
+    "__akitty_folder_saved_${funcstack[1]}" "$@"; __akitty_folder_hook_result=$?
     # A hook can call another registered function and handle its failure; only the outer result counts.
-    (( __akitty_folder_hook_depth == 1 && result != 0 && __akitty_folder_named_result == 0 )) && __akitty_folder_named_result=$result
-    return $result
+    (( __akitty_folder_hook_depth == 1 && __akitty_folder_hook_result != 0 && __akitty_folder_named_result == 0 )) && __akitty_folder_named_result=$__akitty_folder_hook_result
+    return $__akitty_folder_hook_result
 }
 function __akitty_folder_addhistory() {
     # A storage skip/failure must not turn an otherwise accepted native history line into a rejection.

@@ -214,7 +214,8 @@ Native `zshaddhistory_functions` retains its registered names and order, so `add
 and remove hooks normally. Status-capturing wrappers let zsh invoke each hook itself; a final writer only
 persists lines whose named and array hooks accepted persistence. Autoloaded functions load under their
 original names before wrapping. Registration, removal and redefinition are reconciled before each prompt;
-handled failures inside nested function calls do not become history rejections. Storage errors never change
+wrapper bookkeeping uses private names so dynamically scoped user variables remain visible and writable.
+Handled failures inside nested function calls do not become history rejections. Storage errors never change
 the native history result. `scripts/test_shell_integration.py` covers these behaviors on isolated interactive PTYs.
 
 ## Selection and input state

@@ -394,6 +394,25 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertEqual((home / 'hook-calls').read_text().splitlines(), ['echo replaced'])
 
     @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_does_not_shadow_user_hook_variables(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hook-scope-') as directory:
+            home = pathlib.Path(directory)
+            rc = ('result=private\nsaved=private\n'
+                  'function gate() { if [[ $1 == "echo private"* && $result == private && $saved == private ]]; '
+                  'then return 2; fi; return 0; }\nzshaddhistory_functions=(gate)')
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo visible', 'echo private',
+                             'function gate() { result=updated; saved=updated; return 0; }',
+                             'echo next', 'print -r -- "$result:$saved" > "$HOME/hook-state"']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text().splitlines()
+                commands = [line.split('\t', 3)[3] for line in saved]
+                self.assertIn('echo visible', commands, repr(bytes(output)))
+                self.assertNotIn('echo private', commands, 'hook privacy decisions must see the user variables')
+                self.assertEqual((home / 'hook-state').read_text(), 'updated:updated\n',
+                                 'hook assignments must still update the user variables')
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
     def test_zsh_folder_history_handles_nested_hook_calls_and_named_hook_removal(self):
         with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
             home = pathlib.Path(directory)
