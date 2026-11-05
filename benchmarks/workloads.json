@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "cols": 120,
+  "rows": 40,
+  "history": 1000,
+  "chunk_bytes": 8192,
+  "grapheme_support": true,
+  "workloads": [
+    { "id": "ascii", "pattern": "The quick brown fox jumps over the lazy dog 0123456789\r\n" },
+    { "id": "ansi", "pattern": "\u001b[38;2;80;180;240mcolored output\u001b[0m normal text 0123456789\r\n" },
+    { "id": "unicode", "pattern": "中文 日本語 한국어 é 😀 👩🏽‍💻 🇯🇵 text\r\n" },
+    { "id": "long-lines", "pattern": "a long wrapped logical line with significant spaces    and a wide glyph 中 " },
+    { "id": "alternate-screen", "pattern": "\u001b[?1049h\u001b[H\u001b[2Jalternate screen 中\u001b[2;1Hsecond row\u001b[?1049lmain\r\n" }
+  ]
+}

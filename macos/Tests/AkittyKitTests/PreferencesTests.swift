@@ -4,6 +4,24 @@ import Darwin
 @testable import AkittyKit
 
 final class PreferencesTests: XCTestCase {
+    func testPasteConfirmationDefaultsOnAndRoundTrips() throws {
+        XCTAssertTrue(try JSONDecoder().decode(TerminalPreferences.self, from: Data("{}".utf8)).confirmPaste)
+        var preferences = TerminalPreferences(); preferences.confirmPaste = false
+        XCTAssertFalse(try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(preferences)).confirmPaste)
+    }
+    func testExternalPasteChoiceRefreshesSettingsWithoutDiscardingDraftEdits() {
+        var state = PreferencesDraft(preferences: TerminalPreferences(), automaticChecks: false)
+        state.draft.fontSize = 18
+        state.mergePasteConfirmation(false)
+        XCTAssertFalse(state.draft.confirmPaste)
+        XCTAssertFalse(state.saved.confirmPaste)
+        XCTAssertEqual(state.draft.fontSize, 18)
+        XCTAssertTrue(state.hasChanges)
+        state.draft.confirmPaste = true
+        state.mergePasteConfirmation(false)
+        XCTAssertTrue(state.draft.confirmPaste, "an explicit unsaved Settings choice is preserved")
+        XCTAssertFalse(state.saved.confirmPaste)
+    }
     @MainActor func testSettingsDirectoryCanBeSelectedClearedAndSavedWithKeyboard() throws {
         _ = NSApplication.shared
         let previousMenu = NSApp.mainMenu

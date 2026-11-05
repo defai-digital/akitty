@@ -293,14 +293,15 @@ impl Screen {
         {
             let start = if index == a.row { a.col } else { 0 };
             let end = if index == b.row { b.col + 1 } else { self.cols };
+            let content_end = end.min(self.cols - usize::from(row.wrapped && row.wrap_padding));
             let mut text = String::new();
             for (col, cell) in row.cells.iter().enumerate() {
-                let overlap = col < end && col + usize::from(cell.width) > start;
+                let overlap = col < content_end && col + usize::from(cell.width) > start;
                 if overlap && cell.width != 0 {
                     text.push_str(&cell.text());
                 }
             }
-            if end == self.cols || index != b.row {
+            if !row.wrapped && (end == self.cols || index != b.row) {
                 text.truncate(text.trim_end_matches(' ').len());
             }
             out.push_str(&text);
@@ -315,21 +316,32 @@ impl Screen {
     /// History is rebuilt through the same resource accounting as ordinary scroll.
     pub fn resize(&mut self, cols: usize, rows: usize, reflow: bool) -> i32 {
         let old_history = self.history.len();
+        let scrolled = self.offset != 0;
+        let old_viewport_row = old_history.saturating_sub(self.offset);
+        let mut viewport_global = old_viewport_row;
         let old_cols = self.cols;
         let old_cursor_row = old_history + self.cursor.position.row;
         let old_cursor_col = self.cursor.position.col;
         let old_wrap = self.cursor.pending_wrap;
+        let old_saved_row = old_history + self.saved_cursor.position.row;
+        let old_saved_col = self.saved_cursor.position.col;
+        let old_saved_wrap = self.saved_cursor.pending_wrap;
         let mut all: Vec<Row> = self.history.drain(..).chain(self.rows.drain(..)).collect();
         self.history_bytes = 0;
         self.cols = cols;
         let mut cursor_global = old_cursor_row;
         let mut cursor_col = old_cursor_col.min(cols - 1);
         let mut pending_wrap = old_wrap && cols == old_cols;
+        let mut saved_global = old_saved_row;
+        let mut saved_col = old_saved_col.min(cols - 1);
+        let mut saved_wrap = old_saved_wrap && cols == old_cols;
         if reflow && cols != old_cols {
             let mut rebuilt: Vec<Row> = Vec::new();
             let mut logical = Vec::<Cell>::new();
             let mut logical_id = 0;
             let mut cursor_logical: Option<usize> = None;
+            let mut saved_logical: Option<usize> = None;
+            let mut viewport_logical: Option<usize> = None;
             let source_len = all.len();
             for (index, row) in all.into_iter().enumerate() {
                 if logical.is_empty() {
@@ -344,6 +356,14 @@ impl Screen {
                     used = used.max(old_cursor_col + usize::from(old_wrap));
                     cursor_logical = Some(logical.len() + old_cursor_col + usize::from(old_wrap));
                 }
+                if index == old_saved_row {
+                    used = used.max(old_saved_col + usize::from(old_saved_wrap));
+                    saved_logical =
+                        Some(logical.len() + old_saved_col + usize::from(old_saved_wrap));
+                }
+                if index == old_viewport_row {
+                    viewport_logical = Some(logical.len());
+                }
                 logical.extend(row.cells.into_iter().take(used));
                 if row.wrapped && index + 1 != source_len {
                     continue;
@@ -352,6 +372,8 @@ impl Screen {
                 output.id = logical_id;
                 let mut col = 0;
                 let mut cursor_found = false;
+                let mut saved_found = false;
+                let mut viewport_found = false;
                 for (position, mut cell) in logical.drain(..).enumerate() {
                     if cell.width == 0 {
                         continue;
@@ -373,6 +395,22 @@ impl Screen {
                         cursor_found = true;
                         pending_wrap = false;
                     }
+                    if let Some(target) = viewport_logical
+                        && target >= position
+                        && target < position + usize::from(cell.width)
+                    {
+                        viewport_global = rebuilt.len();
+                        viewport_found = true;
+                    }
+                    if let Some(target) = saved_logical
+                        && target >= position
+                        && target < position + usize::from(cell.width)
+                    {
+                        saved_global = rebuilt.len();
+                        saved_col = col + (target - position).min(width - 1);
+                        saved_found = true;
+                        saved_wrap = false;
+                    }
                     cell.width = width as u8;
                     output.cells[col] = cell;
                     if width == 2 {
@@ -391,7 +429,17 @@ impl Screen {
                     cursor_col = col.min(cols - 1);
                     pending_wrap = col == cols;
                 }
+                if viewport_logical.is_some() && !viewport_found {
+                    viewport_global = rebuilt.len();
+                }
+                if saved_logical.is_some() && !saved_found {
+                    saved_global = rebuilt.len();
+                    saved_col = col.min(cols - 1);
+                    saved_wrap = col == cols;
+                }
                 cursor_logical = None;
+                saved_logical = None;
+                viewport_logical = None;
                 rebuilt.push(output);
             }
             all = rebuilt;
@@ -417,6 +465,9 @@ impl Screen {
         }
         let history_count = all.len().saturating_sub(rows);
         self.rows = all.split_off(history_count);
+        // Rebuilding retained history is not new terminal output. In particular,
+        // remember() must not advance a scrolled viewport for each retained row.
+        self.offset = 0;
         for row in all {
             self.remember(row);
         }
@@ -425,14 +476,25 @@ impl Screen {
             col: cursor_col,
         };
         self.cursor.pending_wrap = pending_wrap;
-        self.saved_cursor.position.row = self.saved_cursor.position.row.min(rows - 1);
-        self.saved_cursor.position.col = self.saved_cursor.position.col.min(cols - 1);
+        self.saved_cursor = Cursor {
+            position: Position {
+                row: saved_global.saturating_sub(history_count).min(rows - 1),
+                col: saved_col,
+            },
+            pending_wrap: saved_wrap,
+        };
         self.region = 0..rows;
         self.tabs.resize_with(cols, || false);
         for col in old_cols..cols {
             self.tabs[col] = col != 0 && col % 8 == 0;
         }
-        self.offset = self.offset.min(self.history.len());
+        self.offset = if scrolled {
+            history_count
+                .saturating_sub(viewport_global)
+                .min(self.history.len())
+        } else {
+            0
+        };
         self.selection = None;
         history_count as i32 - old_history as i32
     }

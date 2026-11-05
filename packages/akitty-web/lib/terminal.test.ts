@@ -14,6 +14,27 @@ import { vi } from 'vitest';
 import { AkittyEngine } from './engine';
 import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
+import { mouseReport } from './mouse';
+
+test('legacy mouse releases preserve modifiers and UTF-8 coordinates stay two bytes', () => {
+  expect(mouseReport(16, 2, 1, true, false, false)).toBe('\x1b[M3#"');
+  const report = mouseReport(0, 3000, 3000, false, false, true);
+  expect(Array.from(report.slice(4), ch => ch.codePointAt(0))).toEqual([2047, 2047]);
+});
+
+test('horizontal and stationary wheel events do not generate vertical mouse reports', async () => {
+  const term = await createIsolatedTerminal();
+  const container = document.createElement('div');
+  term.open(container);
+  const reports: string[] = [];
+  term.onData(value => reports.push(value));
+  try {
+    term.write('\x1b[?1000h\x1b[?1006h');
+    container.dispatchEvent(new WheelEvent('wheel', { deltaX: 20, deltaY: 0, clientX: 0, clientY: 0 }));
+    container.dispatchEvent(new WheelEvent('wheel', { deltaY: 0, clientX: 0, clientY: 0 }));
+    expect(reports).toEqual([]);
+  } finally { term.dispose(); }
+});
 
 /**
  * Helper to convert viewport row to absolute buffer row for selection tests.

@@ -229,7 +229,8 @@ for implementation details.
 - Native windows, tabs and split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
 - Bash/zsh shell integration records bounded command observations without editing
-  startup files. A persistent quick terminal has an opt-in global shortcut; hiding
+  startup files. zsh also offers [folder command history](#folder-command-history) on Tab and Up/Down.
+  A persistent quick terminal has an opt-in global shortcut; hiding
   it preserves its shell. File drops insert shell-quoted paths, and text drops use
   the clipboard confirmation policy.
 - Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
@@ -251,6 +252,11 @@ for implementation details.
   reported as unsupported), so cursor maths in apps stays aligned.
 - IME marked text, accessible terminal text/selection, text copy/paste, clipboard
   write approval, scrollback search and font-size controls.
+- Multiline/control-text paste confirmation has a **Don't ask again** checkbox. Choose **Paste** to save it;
+  **Settings → Sessions → Clipboard** can restore confirmation for open terminals.
+- Copying selections preserves wrapped lines, significant spaces and wide glyphs.
+  Web selections follow retained rows through scrollback eviction; native resizing preserves
+  live/saved cursor positions and the scrolled view.
 - SGR and legacy mouse reporting; hold Option to select/scroll locally.
 - Open a folder from Finder (**Open With**), a Dock drop or `open -a Akitty <path>` to start a window there. Files
   open in their folder, and at most 8 folders open per request; skipped items are reported.
@@ -270,6 +276,31 @@ approval service is not inherited by Web or AX Code Desktop's PTY host.
 lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
+
+See [unreleased improvements](docs/releases/unreleased.md) for changes since the latest release.
+The [compatibility matrix](docs/COMPATIBILITY.md), [quality plan](docs/QUALITY_IMPROVEMENTS.md),
+[Native/WASM benchmark](benchmarks/README.md) and [agent approval demo](docs/AGENT_DEMO.md)
+separate implemented behavior, reproducible evidence and remaining qualification.
+
+## Folder command history
+
+In an integrated zsh 5.9+ terminal, type a command prefix and press **Tab** to show up to five
+commands used in that folder, ranked by frequency and recency. **Up/Down** previews a match;
+**Enter** keeps it on the editable command line, and a second Enter runs it. **Esc** restores
+the prefix, and Tab returns to ordinary completion. Up/Down on a typed prefix also recalls
+matches directly. Keys keep their existing behavior when no folder match is available.
+Symlinked paths share matches with their physical directory.
+
+Turn **Folder history on Tab and Up/Down (zsh)** off in **Settings…** for new terminals,
+or start a shell with `AKITTY_FOLDER_HISTORY=0`. **Clear History** in Settings empties the
+shared store. It defaults to `~/Library/Application Support/Akitty/folder-history`;
+`AKITTY_FOLDER_HISTORY_FILE` can select a private file at an absolute path.
+
+The store is private and limited to 512 KiB; matching reads at most 3,000 recent records.
+Leading-whitespace, multiline, oversized and `HISTORY_IGNORE` commands are skipped.
+History hooks can reject persistence, including memory-only entries (status 2), and can be
+added, removed or redefined through normal zsh registration. Older zsh builds without safe
+nonblocking file opens keep their native history and keys and report that folder history is unavailable.
 
 ## Windows and Linux
 

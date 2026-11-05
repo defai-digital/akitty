@@ -906,7 +906,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let quick = file.addItem(withTitle: "Toggle Quick Terminal", action: #selector(toggleQuickTerminal(_:)), keyEquivalent: ""); quick.target = self
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        add(.copy,key: "c",to: edit); add(.paste,key: "v",to: edit)
+        // Standard editing actions follow the focused responder, including terminal panes, fields and sheets.
+        // Routing these through the app's key-window command handler can lose a paste during focus changes.
+        edit.addItem(withTitle: NativeCommand.copy.title, action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: NativeCommand.paste.title, action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         let reclaim = edit.addItem(withTitle: "Reclaim Terminal Control", action: #selector(TerminalView.reclaimAgentControl(_:)), keyEquivalent: "")
         reclaim.target = nil

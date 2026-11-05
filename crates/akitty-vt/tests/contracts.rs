@@ -55,7 +55,6 @@ fn shared_protocol_contracts() {
 
 #[test]
 fn random_edits_resizes_and_screen_switches_preserve_grid_invariants() {
-    let mut term = Terminal::new(12, 6, 10).unwrap();
     let commands = [
         "x",
         "中",
@@ -90,53 +89,83 @@ fn random_edits_resizes_and_screen_switches_preserve_grid_invariants() {
         "\x1b[?6l",
         "\x1b[?7h",
         "\x1b[?7l",
+        "\x1b7",
+        "\x1b8",
+        "\x1b[4h",
+        "\x1b[4l",
+        "\x1b[0;0r",
+        "\x1b[3;3r",
+        "\x1bc",
     ];
-    term.enable_grapheme_support(true);
-    let mut random = 0x5a17_c301_u32;
-    for index in 0..10_000 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        if random.is_multiple_of(19) {
-            term.resize(
-                1 + random as usize % 25,
-                1 + (random >> 8) as usize % 10,
-                |_| {},
-            )
-            .unwrap();
-        } else {
-            term.feed(
-                commands[random as usize % commands.len()].as_bytes(),
-                index,
-                |_| {},
+    for seed in [
+        0x5a17_c301_u32,
+        1,
+        42,
+        0xdead_beef,
+        0x1234_5678,
+        0xffff_ffff,
+    ] {
+        let mut term = Terminal::new(12, 6, 10).unwrap();
+        term.enable_grapheme_support(true);
+        let mut random = seed;
+        for index in 0..10_000 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            if random.is_multiple_of(19) {
+                term.resize(
+                    1 + random as usize % 25,
+                    1 + (random >> 8) as usize % 10,
+                    |_| {},
+                )
+                .unwrap();
+            } else {
+                term.feed(
+                    commands[random as usize % commands.len()].as_bytes(),
+                    index,
+                    |_| {},
+                );
+            }
+            assert!(
+                term.cursor().row < term.rows() && term.cursor().col < term.cols(),
+                "step {index}"
             );
-        }
-        let screen = term.screen();
-        assert!(
-            term.cursor().row < term.rows() && term.cursor().col < term.cols(),
-            "step {index}"
-        );
-        assert!(
-            screen.region.start < screen.region.end && screen.region.end <= term.rows(),
-            "step {index}"
-        );
-        assert!(screen.history.len() <= 10);
-        for row in screen.history.iter().chain(&screen.rows) {
-            assert_eq!(row.cells.len(), term.cols(), "step {index}");
-            for (col, cell) in row.cells.iter().enumerate() {
-                if cell.width == 0 {
-                    assert!(
-                        col > 0 && row.cells[col - 1].width == 2,
-                        "orphan trail step {index} col {col}"
-                    );
+            for alternate in [false, true] {
+                let screen = term.screen_for(alternate);
+                assert!(
+                    screen.cursor.position.row < term.rows()
+                        && screen.cursor.position.col < term.cols()
+                );
+                assert!(
+                    screen.saved_cursor.position.row < term.rows()
+                        && screen.saved_cursor.position.col < term.cols()
+                );
+                assert!(screen.offset <= screen.history.len());
+                assert!(
+                    screen.region.start < screen.region.end && screen.region.end <= term.rows(),
+                    "step {index}"
+                );
+                assert!(screen.history.len() <= 10);
+                let mut identities = std::collections::HashSet::new();
+                for row in screen.history.iter().chain(&screen.rows) {
+                    assert!(identities.insert(row.id));
+                    assert_eq!(row.cells.len(), term.cols(), "step {index}");
+                    for (col, cell) in row.cells.iter().enumerate() {
+                        if cell.width == 0 {
+                            assert!(
+                                col > 0 && row.cells[col - 1].width == 2,
+                                "orphan trail step {index} col {col}"
+                            );
+                        }
+                        if cell.width == 2 {
+                            assert!(
+                                col + 1 < term.cols() && row.cells[col + 1].width == 0,
+                                "orphan lead step {index} col {col}"
+                            );
+                        }
+                        assert!(cell.combining.len() <= akitty_vt::cell::MAX_COMBINING);
+                    }
                 }
-                if cell.width == 2 {
-                    assert!(
-                        col + 1 < term.cols() && row.cells[col + 1].width == 0,
-                        "orphan lead step {index} col {col}"
-                    );
-                }
-                assert!(cell.combining.len() <= akitty_vt::cell::MAX_COMBINING);
             }
         }
     }
