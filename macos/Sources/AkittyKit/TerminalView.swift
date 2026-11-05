@@ -67,7 +67,8 @@ import os
     var isShutdown: Bool { stopped }
     private let shutdownGroup = DispatchGroup()
     private var fontSize: CGFloat = 14
-    private var preferences = TerminalPreferences.load()
+    private var preferences = TerminalPreferences()
+    private let preferenceDefaults: UserDefaults
     private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
     private var fontLayout: (name: String, size: CGFloat, font: NSFont, cell: CGSize) {
         if let cachedFont, cachedFont.name == preferences.fontName, cachedFont.size == fontSize { return cachedFont }
@@ -110,7 +111,8 @@ import os
               FileManager.default.fileExists(atPath: directory.appendingPathComponent(wrapper).path) else { return nil }
         return directory.path
     }
-    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences) throws {
+    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard) throws {
+        preferenceDefaults = defaults
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
         let integrationDirectory = initial.shellIntegration && !headless
@@ -139,7 +141,10 @@ import os
     @objc private func preferencesChanged() {
         // A stopped terminal has no session behind it; a late notification must not surface an error.
         guard !stopped else { return }
-        preferences = TerminalPreferences.load(); fontSize = preferences.fontSize
+        let next = TerminalPreferences.load(from: preferenceDefaults)
+        // Pane zoom is local. Only an explicit change to the saved font size replaces it.
+        if next.fontSize != preferences.fontSize { fontSize = next.fontSize }
+        preferences = next
         do { try syncProgramChrome() } catch { show(error) }
         // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row.
         pendingDamage = nil
@@ -500,7 +505,22 @@ import os
         }
         kittyDown.removeAll(); heldModifierKeys.removeAll()
     }
+    /// Host editing shortcuts take priority over the foreground program's keyboard protocol.
+    private func performEditingShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command] else { return false }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "v": paste(nil); return true
+        case "c": copy(nil); return true
+        default: return false
+        }
+    }
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, performEditingShortcut(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
     public override func keyDown(with event: NSEvent) {
+        if performEditingShortcut(event) { return }
         switch kittyKey(event, type: event.isARepeat ? .repeat : .press) {
         case let .bytes(bytes):
             if let input = KittyKeyInput(event: event, optionAsAlt: preferences.optionAsAlt, type: .press) { kittyDown[event.keyCode] = input }
@@ -720,16 +740,32 @@ import os
         guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { onStatus?("Paste requires plain text up to 64 KiB"); return }
         paste(text)
     }
-    /// Sends already-validated clipboard text. Control or multiline text must not reach
-    /// the PTY without confirmation; without a window there is nowhere to ask, so fail closed.
+    /// Sends validated clipboard text. Confirmation defaults on and can be disabled by a saved user choice.
     func paste(_ text: String) {
         guard !stopped, ClipboardPolicy.acceptsText(text) else { return }
-        if ClipboardPolicy.needsPasteConfirmation(text) {
+        if let sheet = window?.attachedSheet {
+            onStatus?("Finish the current dialog before pasting.")
+            sheet.makeKeyAndOrderFront(nil)
+            return
+        }
+        if preferences.confirmPaste && ClipboardPolicy.needsPasteConfirmation(text) {
             guard let window else { onStatus?("Paste requires confirmation, but the terminal is not in a window"); return }
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"
             alert.informativeText = "This text may execute commands in the terminal."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Paste")
-            alert.beginSheetModal(for: window) { [weak self] result in if result == .alertSecondButtonReturn { self?.send(text, paste: true) } }
+            alert.showsSuppressionButton = true
+            let suppression = alert.suppressionButton
+            suppression?.title = "Don't ask again"
+            alert.beginSheetModal(for: window) { [weak self, weak window] result in
+                guard result == .alertSecondButtonReturn, let self, let window, !self.stopped, self.window === window else { return }
+                if suppression?.state == .on {
+                    var saved = TerminalPreferences.load(from: self.preferenceDefaults)
+                    saved.confirmPaste = false
+                    do { try saved.save(to: self.preferenceDefaults) }
+                    catch { self.show(error) }
+                }
+                self.send(text, paste: true)
+            }
         } else { send(text, paste: true) }
     }
     private func showClipboardRequest() {

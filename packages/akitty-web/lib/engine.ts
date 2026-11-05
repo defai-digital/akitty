@@ -17,7 +17,7 @@ export class AkittyEngine {
   private readonly exports: AkittyWasmExports;
   constructor(instance: WebAssembly.Instance) {
     this.exports = instance.exports as AkittyWasmExports;
-    if (this.exports.akitty_vt_abi_version?.() !== 1 || ['akitty_vt_buffer_get', 'akitty_vt_buffer_line', 'akitty_vt_buffer_wrapped', 'akitty_vt_buffer_text'].some(name => typeof this.exports[name] !== 'function')) throw new Error('Unsupported AkiTTY VT WASM ABI');
+    if (this.exports.akitty_vt_abi_version?.() !== 1 || ['akitty_vt_buffer_get', 'akitty_vt_buffer_line', 'akitty_vt_buffer_wrapped', 'akitty_vt_buffer_text', 'akitty_vt_wrap_padding', 'akitty_vt_row_id', 'akitty_vt_find_row'].some(name => typeof this.exports[name] !== 'function')) throw new Error('Unsupported AkiTTY VT WASM ABI');
   }
   static async load(path?: string | URL): Promise<AkittyEngine> {
     const url = path === undefined ? new URL('../akitty-vt.wasm', import.meta.url) : path;
@@ -87,7 +87,7 @@ export class KeyEncoder {
     const output = this.output.reserve(16384);
     new Uint8Array(this.api.memory.buffer, input, bytes.length).set(bytes);
     const action = event.action === KeyAction.RELEASE ? 3 : event.action === KeyAction.REPEAT ? 2 : 1;
-    const written = this.api.akitty_vt_key(event.unshiftedCodepoint || event.key, 0, 0, event.mods, action, this.options,
+    const written = this.api.akitty_vt_key(event.unshiftedCodepoint || event.key, event.shiftedCodepoint ?? 0, event.baseLayoutCodepoint ?? 0, event.mods, action, this.options,
       input, bytes.length, output, this.output.capacity);
     return new Uint8Array(this.api.memory.buffer, output, written).slice();
   }
@@ -284,6 +284,20 @@ export class AkittyTerminal {
     return Array.from({ length: this._cols }, (_, col) => { const cell = emptyCell(); this.decodeCell(view, col * CELL_BYTES, cell); return cell; });
   }
   isRowWrapped(row: number): boolean { return !!this.handle && Number.isInteger(row) && row >= 0 && row < this._rows && !!this.exports.akitty_vt_wrapped(this.handle, row); }
+  getRevision(): number { return this.field(7); }
+  getRowId(row: number): bigint | undefined {
+    if (!this.handle || !Number.isInteger(row) || row < -this.getScrollbackLength() || row >= this._rows) return undefined;
+    return this.exports.akitty_vt_row_id(this.handle, row) || undefined;
+  }
+  findRow(rowId: bigint): number | undefined {
+    if (!this.handle) return undefined;
+    const row = this.exports.akitty_vt_find_row(this.handle, rowId);
+    return row ? row - 1 : undefined;
+  }
+  hasWrapPadding(row: number): boolean {
+    return !!this.handle && Number.isInteger(row) && row >= -this.getScrollbackLength() && row < this._rows
+      && !!this.exports.akitty_vt_wrap_padding(this.handle, row);
+  }
   isScrollbackRowWrapped(offset: number): boolean {
     const length = this.getScrollbackLength();
     return !!this.handle && Number.isInteger(offset) && offset >= 0 && offset < length && !!this.exports.akitty_vt_wrapped(this.handle, offset - length);

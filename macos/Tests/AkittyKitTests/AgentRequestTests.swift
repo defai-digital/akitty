@@ -105,6 +105,52 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertEqual(commands.filter { $0["command"] as? String == command }.count, 1)
     }
 
+    @MainActor func testDemoScriptUsesTheRealCompanionAndApprovalUI() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let shell = root.appendingPathComponent("isolated-shell")
+        try "#!/bin/sh\nexec /bin/zsh -d -f -i\n".write(to: shell, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shell.path)
+        var preferences = TerminalPreferences(); preferences.shell = shell.path; preferences.directory = root.path; preferences.shellIntegration = false
+        let terminal = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = terminal
+        let path = root.appendingPathComponent("requests.sock").path
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
+        service.cooldownInterval = 0; service.startRecording(); try service.setEnabled(true)
+        defer { service.stop(); terminal.shutdown(); window.close() }
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let integration = repository.appendingPathComponent("macos/Sources/AkittyKit/Resources/shell-integration/akitty.zsh")
+        try terminal.session.input("AKITTY_FOLDER_HISTORY=0; source '\(integration.path)'\r")
+        try await waitUntil { try terminal.session.snapshot()?.shell?.ready == true }
+        let listing = try await Task.detached { try LocalSocket.request(Data("{\"version\":1,\"op\":\"list\"}".utf8), path: path) }.value
+        let envelope = try JSONSerialization.jsonObject(with: listing) as! [String: Any]
+        let pane = (((envelope["data"] as! [String: Any])["panes"] as! [[String: Any]])[0]["pane"] as! String)
+        let cli = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("akitty-agent")
+        for approved in [false, true] {
+            let expected = approved ? "approved" : "denied"
+            let pending = Task.detached { () throws -> (Int32, Data) in
+                let process = Process(), output = Pipe()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                process.arguments = [repository.appendingPathComponent("scripts/agent-demo.py").path, "--cli", cli.path,
+                    "--socket", path, "--pane", pane, "--expect", expected, "--effect-timeout", "3"]
+                process.standardOutput = output; process.standardError = Pipe()
+                try process.run(); let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+                return (process.terminationStatus, data)
+            }
+            try await waitUntil { window.attachedSheet != nil }
+            window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: approved ? .alertFirstButtonReturn : .alertSecondButtonReturn)
+            let (status, data) = try await pending.value
+            XCTAssertEqual(status, 0, String(decoding: data, as: UTF8.self))
+            let report = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            XCTAssertEqual(report["dispatch"] as? String, approved ? "queued" : "denied")
+            XCTAssertEqual(report["effect"] as? String, approved ? "expected_marker_observed" : "not_observed")
+            XCTAssertEqual(report["completion"] as? String, "unverified")
+            XCTAssertEqual(try terminal.session.snapshot()?.control?.agent, approved)
+            if approved { try terminal.session.reclaimControl() }
+        }
+    }
+
     @MainActor func testApprovalTimeoutCannotGrantAndStatusReportsRemainUnverified() async throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled], backing: .buffered, defer: false)

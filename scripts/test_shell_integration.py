@@ -355,6 +355,119 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertIn('echo visible', saved)
                 self.assertNotIn('echo private', saved, 'status 2 permits memory history, not persistence')
 
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_preserves_hook_registration_and_removal(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
+            home = pathlib.Path(directory)
+            rc = ("function gate() { print -r -- ${1%$'\\n'} >> \"$HOME/hook-calls\"; "
+                  "[[ $1 != *private* ]] || return 2; }\n"
+                  "autoload -Uz add-zsh-hook\nadd-zsh-hook zshaddhistory gate")
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo visible', 'add-zsh-hook zshaddhistory gate', 'echo private',
+                             'add-zsh-hook -d zshaddhistory gate', 'echo removed',
+                             'add-zsh-hook zshaddhistory gate', 'echo restored']:
+                    send(line + '\r')
+                calls = (home / 'hook-calls').read_text().splitlines()
+                self.assertEqual(calls.count('echo visible'), 1, repr(bytes(output)))
+                self.assertEqual(calls.count('echo private'), 1, 'registering an existing hook is idempotent')
+                self.assertNotIn('echo removed', calls, 'removed hooks must stop running')
+                self.assertEqual(calls.count('echo restored'), 1, 'a removed hook can be registered again')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
+                self.assertNotIn('echo private', saved)
+                self.assertIn('echo removed', saved)
+                self.assertIn('echo restored', saved)
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_honors_replaced_hook_arrays_and_functions(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
+            home = pathlib.Path(directory)
+            rc = "function gate() { return 2; }\nzshaddhistory_functions=(gate)"
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo private', 'zshaddhistory_functions=()', 'echo visible',
+                             'function gate() { print -r -- ${1%$\'\\n\'} >> "$HOME/hook-calls"; }',
+                             'zshaddhistory_functions=(gate)', 'echo replaced']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
+                self.assertNotIn('echo private', saved)
+                self.assertIn('echo visible', saved, repr(bytes(output)))
+                self.assertIn('echo replaced', saved)
+                self.assertEqual((home / 'hook-calls').read_text().splitlines(), ['echo replaced'])
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_does_not_shadow_user_hook_variables(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hook-scope-') as directory:
+            home = pathlib.Path(directory)
+            rc = ('result=private\nsaved=private\n'
+                  'function gate() { if [[ $1 == "echo private"* && $result == private && $saved == private ]]; '
+                  'then return 2; fi; return 0; }\nzshaddhistory_functions=(gate)')
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo visible', 'echo private',
+                             'function gate() { result=updated; saved=updated; return 0; }',
+                             'echo next', 'print -r -- "$result:$saved" > "$HOME/hook-state"']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text().splitlines()
+                commands = [line.split('\t', 3)[3] for line in saved]
+                self.assertIn('echo visible', commands, repr(bytes(output)))
+                self.assertNotIn('echo private', commands, 'hook privacy decisions must see the user variables')
+                self.assertEqual((home / 'hook-state').read_text(), 'updated:updated\n',
+                                 'hook assignments must still update the user variables')
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_handles_nested_hook_calls_and_named_hook_removal(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-hooks-') as directory:
+            home = pathlib.Path(directory)
+            rc = ("function gate() { [[ $1 != *private* ]] || return 2; }\n"
+                  "function handler() { gate private || true; }\n"
+                  "function zshaddhistory() { [[ $1 != *named-only* ]] || return 2; }\n"
+                  "zshaddhistory_functions=(handler gate)")
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo visible', 'echo private', 'echo named-only',
+                             'unfunction zshaddhistory', 'echo named-only-after-removal']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text().splitlines()
+                commands = [line.split('\t', 3)[3] for line in saved]
+                self.assertIn('echo visible', commands, 'a nested failure handled by its caller is not a hook rejection')
+                self.assertNotIn('echo private', commands)
+                self.assertNotIn('echo named-only', commands)
+                self.assertIn('echo named-only-after-removal', commands, repr(bytes(output)))
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_preserves_autoloaded_hooks_and_native_history(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-autoload-') as directory:
+            home = pathlib.Path(directory)
+            (home / 'hooks').mkdir()
+            for hook, word in [('zshaddhistory', 'named-private'), ('gate', 'array-private')]:
+                (home / 'hooks' / hook).write_text(
+                    f'print -r -- "{hook}:${{1%$\'\\n\'}}" >> "$HOME/hook-calls"\n'
+                    f'[[ $1 != *{word}* ]] || return 2\n')
+            rc = ('SAVEHIST=100\nHISTSIZE=100\nHISTFILE=$HOME/native-history\nsetopt incappendhistory\n'
+                  'fpath=("$HOME/hooks" $fpath)\n'
+                  'autoload -Uz zshaddhistory gate\nzshaddhistory_functions=(gate)')
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo visible', 'echo named-private', 'echo array-private']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
+                native = (home / 'native-history').read_text()
+                calls = (home / 'hook-calls').read_text().splitlines()
+                for history in [saved, native]:
+                    self.assertIn('echo visible', history, repr(bytes(output)))
+                    self.assertNotIn('echo named-private', history)
+                    self.assertNotIn('echo array-private', history)
+                self.assertEqual(calls.count('zshaddhistory:echo visible'), 1)
+                self.assertEqual(calls.count('gate:echo visible'), 1)
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_folder_history_does_not_persist_when_a_hook_cannot_load(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-folder-autoload-') as directory:
+            home = pathlib.Path(directory)
+            rc = 'autoload -Uz missing_gate\nzshaddhistory_functions=(missing_gate)'
+            with self.zsh_pty(home, rc) as (send, output):
+                for line in ['echo private', 'function missing_gate() { return 0; }', 'echo visible']:
+                    send(line + '\r')
+                saved = (home / 'Library/Application Support/Akitty/folder-history').read_text()
+                self.assertNotIn('echo private', saved)
+                self.assertIn('echo visible', saved, repr(bytes(output)))
+
     def folder_call(self, home, command):
         env = shell_environment(str(home), ZDOTDIR=str(home), AKITTY_FOLDER_HISTORY_FILE=str(home / 'folder-history'))
         return subprocess.run([ZSH, '-fic', f'source {shlex.quote(str(SCRIPT.parent / "akitty.zsh"))}; {command}'],

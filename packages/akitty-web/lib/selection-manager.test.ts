@@ -60,6 +60,59 @@ describe('SelectionManager', () => {
     }
   });
 
+  test('copy preserves logical lines, significant spaces and wide-cell overlaps', async () => {
+    for (const [input, startCol, startRow, length, expected] of [
+      ['ab  cd', 0, 0, 6, 'ab  cd'],
+      ['abc中', 0, 0, 6, 'abc中'],
+      ['a中b', 2, 0, 2, '中b'],
+      ['ab  ', 0, 0, 3, 'ab '],
+      ['ab\u00a0', 0, 0, 4, 'ab\u00a0'],
+      ['ab\r\ncd', 0, 0, 6, 'ab\ncd'],
+      ['abcd\r\nefgh\r\nijkl', 3, 2, 20, 'l'],
+    ] as const) {
+      const term = await createIsolatedTerminal({ cols: 4, rows: 3 });
+      term.open(container!);
+      try {
+        term.write(input);
+        term.select(startCol, startRow, length);
+        expect(term.getSelection(), JSON.stringify(input)).toBe(expected);
+      } finally { term.dispose(); }
+    }
+  });
+
+  test('selection follows retained row identity when bounded history evicts rows', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2, scrollback: 2 });
+    term.open(container!);
+    try {
+      term.write('zero\r\none\r\ntwo\r\nthree');
+      term.scrollToTop();
+      term.select(0, 1, 3);
+      expect(term.getSelection()).toBe('one');
+      term.write('\r\nfour');
+      expect(term.getSelection()).toBe('one');
+      term.write('\r\nfive');
+      expect(term.getSelection()).toBe('');
+      expect(term.hasSelection()).toBe(false);
+    } finally { term.dispose(); }
+  });
+
+  test('selection highlights both wide columns and clears after resize reflow', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.open(container!);
+    try {
+      term.write('a中bc');
+      term.select(2, 0, 2);
+      expect(term.getSelectionPosition()).toEqual({ start: { x: 1, y: 0 }, end: { x: 3, y: 0 } });
+      expect(term.getSelection()).toBe('中b');
+      term.select(0, 0, 2);
+      expect(term.getSelectionPosition()).toEqual({ start: { x: 0, y: 0 }, end: { x: 2, y: 0 } });
+      expect(term.getSelection()).toBe('a中');
+      term.resize(4, 3);
+      expect(term.getSelection()).toBe('');
+      expect(term.hasSelection()).toBe(false);
+    } finally { term.dispose(); }
+  });
+
   describe('Construction', () => {
     test('creates without errors', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24 });

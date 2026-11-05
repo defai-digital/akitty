@@ -159,5 +159,6 @@ actual zsh PTY approval and denial, input reclaim, record rotation and file-safe
 regressions. `scripts/build-app.sh` bundles and audits both native executables.
 Tests establish bounded behavior and observed effects, not complete terminal
 conformance, multi-day stability, vendor hook compatibility or VoiceOver user
-qualification. The native/Web terminal implementations remain separate; Web and
-AX Code Desktop hosts do not inherit this service.
+qualification. Native and Web share the Rust VT engine, while their rendering,
+input and host integrations remain separate. Web and AX Code Desktop hosts do not
+inherit this native request/approval service.

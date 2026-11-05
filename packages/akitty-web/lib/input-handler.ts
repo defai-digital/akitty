@@ -11,12 +11,23 @@ const functional: Readonly<Record<string, Key>> = {
   Pause: Key.PAUSE, ContextMenu: Key.CONTEXT_MENU,
   NumpadDecimal: Key.KP_PERIOD, NumpadDivide: Key.KP_DIVIDE, NumpadMultiply: Key.KP_MULTIPLY,
   NumpadSubtract: Key.KP_MINUS, NumpadAdd: Key.KP_PLUS, NumpadEnter: Key.KP_ENTER, NumpadEqual: Key.KP_EQUAL,
+  NumpadComma: Key.KP_SEPARATOR,
 };
 const punctuation: Readonly<Record<string, string>> = {
   Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
   Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', IntlBackslash: '<',
 };
+const modifierKeys: Readonly<Record<string, Key>> = {
+  ShiftLeft: Key.LEFT_SHIFT, ControlLeft: Key.LEFT_CONTROL, AltLeft: Key.LEFT_ALT, MetaLeft: Key.LEFT_SUPER,
+  ShiftRight: Key.RIGHT_SHIFT, ControlRight: Key.RIGHT_CONTROL, AltRight: Key.RIGHT_ALT, MetaRight: Key.RIGHT_SUPER,
+};
+function baseLayout(code: string): number | undefined {
+  if (/^Key[A-Z]$/.test(code)) return code.toLowerCase().charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
+  return punctuation[code]?.codePointAt(0);
+}
 function identity(event: KeyboardEvent): Key | undefined {
+  if (modifierKeys[event.code] !== undefined) return modifierKeys[event.code];
   if (functional[event.code] !== undefined) return functional[event.code];
   if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;
   const scalar = Array.from(event.key).length === 1 ? event.key.codePointAt(0) as Key : undefined;
@@ -35,6 +46,7 @@ function identity(event: KeyboardEvent): Key | undefined {
 export class InputHandler {
   private readonly encoder: KeyEncoder;
   private readonly listeners: Array<[string, EventListener]> = [];
+  private readonly reportedKeys = new Map<string, Key>();
   private closed = false;
   private composing = false;
   constructor(engine: AkittyEngine, private readonly container: HTMLElement, private readonly onData: (data: string) => void,
@@ -57,24 +69,31 @@ export class InputHandler {
   }
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void { this.customKeyEventHandler = handler; }
   private key(event: KeyboardEvent, release: boolean): void {
-    if (this.closed || this.composing || event.isComposing || event.keyCode === 229) return;
+    if (this.closed) return;
+    const physicalKey = event.code || event.key;
+    const reportedKey = release ? this.reportedKeys.get(physicalKey) : undefined;
+    if (release) this.reportedKeys.delete(physicalKey);
+    if (this.composing || event.isComposing || event.keyCode === 229) return;
     const flags = this.getKeyboardFlags?.() ?? 0;
-    if (release && !(flags & 2)) return;
+    if (release && (reportedKey === undefined || !(flags & 2))) return;
     if (!release) {
       this.onKey?.({ key: event.key, domEvent: event });
       if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
     }
     if (event.key === 'Dead') return;
-    if ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC') return;
+    if (modifierKeys[event.code] !== undefined && !(flags & 8)) return;
     const printable = Array.from(event.key).length === 1;
     // AltGraph is a layout modifier; Ctrl+Alt alone remains a terminal chord.
     const altGraph = event.getModifierState?.('AltGraph') ?? false;
+    if (!release && !altGraph && !event.altKey
+      && ((event.metaKey || event.ctrlKey) && event.code === 'KeyV' || event.metaKey && event.code === 'KeyC')) return;
     const applicationKeypad = this.getMode?.(66) ?? false;
     if (!release && !(flags & 8) && printable && !event.metaKey && ((!event.ctrlKey && !event.altKey) || altGraph)
       && !(applicationKeypad && event.code.startsWith('Numpad'))) {
       event.preventDefault(); this.onData(event.key); return;
     }
-    const code = identity(event);
+    // Layout modifiers may be released first, changing event.key while the physical key is still held.
+    const code = release ? reportedKey : identity(event);
     if (code === undefined) return;
     const mods = (event.shiftKey ? Mods.SHIFT : 0) | (event.altKey && !altGraph ? Mods.ALT : 0)
       | (event.ctrlKey && !altGraph ? Mods.CTRL : 0) | (event.metaKey ? Mods.SUPER : 0)
@@ -84,9 +103,14 @@ export class InputHandler {
     this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, this.getMode?.(1036) ?? true);
     this.encoder.setKittyFlags(flags);
     const bytes = this.encoder.encode({ action: release ? KeyAction.RELEASE : event.repeat ? KeyAction.REPEAT : KeyAction.PRESS,
-      key: code, mods, utf8: printable ? event.key : undefined });
+      key: code, mods, utf8: printable ? event.key : undefined,
+      shiftedCodepoint: event.shiftKey && printable ? event.key.codePointAt(0) : undefined, baseLayoutCodepoint: baseLayout(event.code) });
     event.preventDefault(); event.stopPropagation();
-    if (bytes.length) this.onData(new TextDecoder().decode(bytes));
+    if (bytes.length) {
+      // Host shortcuts and custom handlers never claimed a terminal key press; their releases stay local too.
+      if (!release && flags !== 0) this.reportedKeys.set(physicalKey, code);
+      this.onData(new TextDecoder().decode(bytes));
+    }
   }
   private paste(event: ClipboardEvent): void {
     event.preventDefault(); event.stopPropagation();
@@ -104,6 +128,6 @@ export class InputHandler {
     if (this.closed) return;
     this.closed = true;
     for (const [name, callback] of this.listeners) this.container.removeEventListener(name, callback);
-    this.listeners.length = 0; this.encoder.dispose();
+    this.listeners.length = 0; this.reportedKeys.clear(); this.encoder.dispose();
   }
 }

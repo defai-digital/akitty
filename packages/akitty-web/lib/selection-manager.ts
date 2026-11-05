@@ -4,7 +4,7 @@ import { EventEmitter } from './event-emitter';
 import type { AkittyTerminal } from './engine';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
-interface Point { col: number; absoluteRow: number }
+interface Point { col: number; absoluteRow: number; rowId?: bigint; revision?: number }
 export interface SelectionCoordinates { startCol: number; startRow: number; endCol: number; endRow: number }
 const compare = (a: Point, b: Point): number => a.absoluteRow - b.absoluteRow || a.col - b.col;
 
@@ -77,19 +77,37 @@ export class SelectionManager {
   private absolute(row: number): number { return this.wasmTerm.getScrollbackLength() + row - this.viewport(); }
   private point(x: number, y: number): Point {
     const size = this.wasmTerm.getDimensions(), metrics = this.renderer.getMetrics();
-    return { col: Math.max(0, Math.min(size.cols - 1, Math.floor(x / metrics.width))),
-      absoluteRow: this.absolute(Math.max(0, Math.min(size.rows - 1, Math.floor(y / metrics.height)))) };
+    return this.anchor({ col: Math.max(0, Math.min(size.cols - 1, Math.floor(x / metrics.width))),
+      absoluteRow: this.absolute(Math.max(0, Math.min(size.rows - 1, Math.floor(y / metrics.height)))) });
+  }
+  private anchor(point: Point): Point {
+    return { ...point, rowId: this.wasmTerm.getRowId(point.absoluteRow - this.wasmTerm.getScrollbackLength()),
+      revision: this.wasmTerm.getRevision() };
+  }
+  private resolve(point: Point): boolean {
+    if (point.rowId === undefined) return true;
+    const revision = this.wasmTerm.getRevision();
+    if (point.revision === revision) return true;
+    const row = this.wasmTerm.findRow(point.rowId);
+    if (row === undefined) return false;
+    point.absoluteRow = row; point.revision = revision;
+    return true;
   }
   private range(): [Point, Point] | null {
     if (!this.selectionStart || !this.selectionEnd) return null;
+    if (!this.resolve(this.selectionStart) || !this.resolve(this.selectionEnd)) return null;
     return compare(this.selectionStart, this.selectionEnd) <= 0 ? [this.selectionStart, this.selectionEnd] : [this.selectionEnd, this.selectionStart];
   }
   getSelectionCoords(): SelectionCoordinates | null {
     const range = this.range(); if (!range) return null;
     const [first, last] = range, size = this.wasmTerm.getDimensions(), base = this.absolute(0);
     if (last.absoluteRow < base || first.absoluteRow >= base + size.rows) return null;
-    return { startCol: first.absoluteRow < base ? 0 : first.col, startRow: Math.max(0, first.absoluteRow - base),
-      endCol: last.absoluteRow >= base + size.rows ? size.cols - 1 : last.col, endRow: Math.min(size.rows - 1, last.absoluteRow - base) };
+    const history = this.wasmTerm.getScrollbackLength();
+    const cells = (row: number) => row < history ? this.wasmTerm.getScrollbackLine(row) : this.wasmTerm.getLineView(row - history);
+    const startCol = Math.max(0, first.col - Number(cells(first.absoluteRow)?.[first.col]?.width === 0));
+    const endCol = Math.min(size.cols - 1, last.col + Number(cells(last.absoluteRow)?.[last.col]?.width === 2));
+    return { startCol: first.absoluteRow < base ? 0 : startCol, startRow: Math.max(0, first.absoluteRow - base),
+      endCol: last.absoluteRow >= base + size.rows ? size.cols - 1 : endCol, endRow: Math.min(size.rows - 1, last.absoluteRow - base) };
   }
   getSelectionPosition(): { start: { x: number; y: number }; end: { x: number; y: number } } | undefined {
     const coords = this.getSelectionCoords();
@@ -98,21 +116,28 @@ export class SelectionManager {
   getSelection(): string {
     const range = this.range(); if (!range) return '';
     const [start, end] = range, history = this.wasmTerm.getScrollbackLength();
-    const lines: string[] = [];
+    let text = '';
     for (let row = Math.max(0, start.absoluteRow); row <= Math.min(end.absoluteRow, history + this.wasmTerm.rows - 1); row++) {
       const cells = row < history ? this.wasmTerm.getScrollbackLine(row) : this.wasmTerm.getLine(row - history);
       if (!cells) continue;
       const first = row === start.absoluteRow ? start.col : 0, last = row === end.absoluteRow ? end.col : cells.length - 1;
+      const wrapped = row + 1 < history ? this.wasmTerm.isScrollbackRowWrapped(row + 1) : this.wasmTerm.isRowWrapped(row + 1 - history);
+      let contentEnd = Math.min(last + 1, cells.length - Number(this.wasmTerm.hasWrapPadding(row - history)));
+      if (!wrapped && row === end.absoluteRow && last < cells.length - 1) {
+        while (contentEnd > first && cells[contentEnd - 1]?.codepoint === 0 && cells[contentEnd - 1]?.width !== 0) contentEnd--;
+      }
       let value = '';
-      for (let column = first; column <= last; column++) {
+      for (let column = Math.max(0, first - Number(cells[first]?.width === 0)); column <= last && column < contentEnd; column++) {
         const cell = cells[column];
         if (cell?.width === 0) continue;
         if (cell?.grapheme_len) value += row < history ? this.wasmTerm.getScrollbackGraphemeString(row, column) : this.wasmTerm.getGraphemeString(row - history, column);
         else value += cellChar(cell?.codepoint);
       }
-      lines.push(value.trimEnd());
+      if (!wrapped && (last === cells.length - 1 || row !== end.absoluteRow)) value = value.replace(/ +$/, '');
+      text += value;
+      if (row !== end.absoluteRow && !wrapped) text += '\n';
     }
-    return lines.join('\n');
+    return text;
   }
   hasSelection(): boolean { const range = this.range(); return range !== null && compare(range[0], range[1]) !== 0; }
   private damage(): void {
@@ -121,7 +146,7 @@ export class SelectionManager {
   }
   private move(end: Point): void { this.damage(); this.selectionEnd = end; this.damage(); }
   private selectRange(start: Point, end: Point): void {
-    this.damage(); this.selectionStart = start; this.selectionEnd = end; this.damage(); this.changes.fire();
+    this.damage(); this.selectionStart = this.anchor(start); this.selectionEnd = this.anchor(end); this.damage(); this.changes.fire();
   }
   clearSelection(): void {
     this.damage(); this.selectionStart = null; this.selectionEnd = null; this.isSelecting = false; this.autoScroll(0);
@@ -131,9 +156,9 @@ export class SelectionManager {
   select(column: number, row: number, length: number): void {
     const { cols, rows } = this.wasmTerm.getDimensions();
     row = Math.max(0, Math.min(rows - 1, Math.floor(row))); column = Math.max(0, Math.min(cols - 1, Math.floor(column)));
-    const extent = column + Math.max(1, Math.floor(length)) - 1;
+    const extent = Math.min(row * cols + column + Math.max(1, Math.floor(length)) - 1, rows * cols - 1);
     this.selectRange({ col: column, absoluteRow: this.absolute(row) },
-      { col: extent % cols, absoluteRow: this.absolute(Math.min(rows - 1, row + Math.floor(extent / cols))) });
+      { col: extent % cols, absoluteRow: this.absolute(Math.floor(extent / cols)) });
   }
   selectLines(first: number, last: number): void {
     const { cols, rows } = this.wasmTerm.getDimensions();
@@ -153,7 +178,7 @@ export class SelectionManager {
       if (!this.isSelecting || this.closed) { this.autoScroll(0); return; }
       this.damage(); this.terminal.scrollLines(direction * 2);
       const row = direction < 0 ? 0 : this.wasmTerm.rows - 1;
-      this.selectionEnd = { col: direction < 0 ? 0 : this.wasmTerm.cols - 1, absoluteRow: this.absolute(row) }; this.damage();
+      this.selectionEnd = this.anchor({ col: direction < 0 ? 0 : this.wasmTerm.cols - 1, absoluteRow: this.absolute(row) }); this.damage();
     }, 50);
   }
   private word(event: MouseEvent): void {

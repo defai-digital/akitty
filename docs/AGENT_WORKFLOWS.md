@@ -102,6 +102,10 @@ its real path.
 
 A line is saved only when zsh itself keeps it in history: the user's `zshaddhistory`
 hooks run once and decide first; memory-only lines (hook status 2) are not persisted.
+Hook names and ordering remain visible to native registration, so `add-zsh-hook` can
+remove and deduplicate them. Replaced arrays and redefined functions take effect at
+the next prompt; autoloaded hooks load under their original names before wrapping.
+If a hook cannot load, folder persistence waits until its decision can be observed.
 Lines starting with a space, matching `HISTORY_IGNORE`, spanning
 several lines or over 1 KiB are skipped. Entries go to the owner-only file
 `~/Library/Application Support/Akitty/folder-history` (`AKITTY_FOLDER_HISTORY_FILE`
@@ -194,7 +198,7 @@ sleep/wake should also be checked on the target macOS version.
 Drop local files/folders into a pane to insert POSIX-shell-quoted absolute paths
 with no execution newline (up to 64 items / 64 KiB). Apostrophes, spaces and shell
 metacharacters are quoted. Plain text drops use clipboard paste protection;
-control/multiline text needs confirmation. Remote file URLs and mixed file/text
+control/multiline text follows the paste-confirmation preference (on by default). Remote file URLs and mixed file/text
 items are rejected. Agent ownership also blocks drops until human reclaim. A Dock
 or application drop instead opens a window in the folder; it does not paste a path.
 The native default background is `#080A0D`; explicit application-selected ANSI

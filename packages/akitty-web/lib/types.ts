@@ -123,13 +123,21 @@ export enum Key {
   KP_ENTER = 57414,
   KP_EQUAL = 57415,
   KP_SEPARATOR = 57416,
+  LEFT_SHIFT = 57441,
+  LEFT_CONTROL = 57442,
+  LEFT_ALT = 57443,
+  LEFT_SUPER = 57444,
+  RIGHT_SHIFT = 57447,
+  RIGHT_CONTROL = 57448,
+  RIGHT_ALT = 57449,
+  RIGHT_SUPER = 57450,
 }
 
 export enum Mods { NONE = 0, SHIFT = 1, ALT = 2, CTRL = 4, SUPER = 8, CAPSLOCK = 64, NUMLOCK = 128 }
 export enum KeyAction { RELEASE = 0, PRESS = 1, REPEAT = 2 }
 export enum KittyKeyFlags { DISABLED = 0, DISAMBIGUATE = 1, REPORT_EVENTS = 2, REPORT_ALTERNATES = 4, REPORT_ALL = 8, REPORT_ASSOCIATED = 16, ALL = 31 }
 export enum KeyEncoderOption { CURSOR_KEY_APPLICATION, KEYPAD_KEY_APPLICATION, IGNORE_KEYPAD_WITH_NUMLOCK, ALT_ESC_PREFIX, MODIFY_OTHER_KEYS_STATE_2, KITTY_KEYBOARD_FLAGS }
-export interface KeyEvent { action: KeyAction; key: Key; mods: Mods; consumedMods?: Mods; composing?: boolean; utf8?: string; unshiftedCodepoint?: number }
+export interface KeyEvent { action: KeyAction; key: Key; mods: Mods; consumedMods?: Mods; composing?: boolean; utf8?: string; unshiftedCodepoint?: number; shiftedCodepoint?: number; baseLayoutCodepoint?: number }
 export enum DirtyState { NONE, PARTIAL, FULL }
 export enum CellFlags { BOLD = 1, ITALIC = 2, UNDERLINE = 4, STRIKETHROUGH = 8, INVERSE = 16, INVISIBLE = 32, BLINK = 64, FAINT = 128 }
 export interface TerminalCell {
@@ -181,6 +189,9 @@ export interface AkittyWasmExports extends WebAssembly.Exports {
   akitty_vt_clean(id: number): void;
   akitty_vt_color(id: number, index: number, rgb: number): number;
   akitty_vt_wrapped(id: number, row: number): number;
+  akitty_vt_wrap_padding(id: number, row: number): number;
+  akitty_vt_row_id(id: number, row: number): bigint;
+  akitty_vt_find_row(id: number, rowId: bigint): number;
   akitty_vt_text(id: number, row: number, col: number, kind: number, pointer: number, capacity: number): number;
   akitty_vt_replies(id: number, pointer: number, capacity: number): number;
   akitty_vt_event(id: number, pointer: number, capacity: number): number;

@@ -196,3 +196,49 @@ normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There
 Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per existing folder (a file uses its
 parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
 The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses the opened folder. Settings supplies the directory when no folder was opened and the shell has not reported one.
+
+## zsh folder command history
+
+The bundled zsh integration stores accepted single-line commands with a timestamp and both the logical and
+physical working directory. Tab offers five prefix matches, while Up/Down can cycle through up to twenty;
+ranking combines frequency with recency. Suggestions only edit the command line. Enter from the suggestion
+menu keeps a choice for review before a second Enter executes it. Existing widgets handle keys with no match.
+
+Readers, appends, compaction and Settings' Clear History share a POSIX lock. Files and locks must be private,
+owned regular files without links; the directory must be owned and not writable by others. Reads are bounded
+to 512 KiB and 3,000 records, and appends compact files exceeding the byte limit. Commands are limited to
+1,024 UTF-8 bytes; leading whitespace, multiline input and HISTORY_IGNORE matches are skipped. Builds
+without safe nonblocking opens leave native history and keys active without installing folder storage.
+
+Native `zshaddhistory_functions` retains its registered names and order, so `add-zsh-hook` can deduplicate
+and remove hooks normally. Status-capturing wrappers let zsh invoke each hook itself; a final writer only
+persists lines whose named and array hooks accepted persistence. Autoloaded functions load under their
+original names before wrapping. Registration, removal and redefinition are reconciled before each prompt;
+wrapper bookkeeping uses private names so dynamically scoped user variables remain visible and writable.
+Handled failures inside nested function calls do not become history rejections. Storage errors never change
+the native history result. `scripts/test_shell_integration.py` covers these behaviors on isolated interactive PTYs.
+
+## Selection and input state
+
+Selection extraction follows soft wraps, preserves significant spaces and includes overlapping wide glyphs.
+The Web adapter resolves opaque retained-row identities once per core revision and clears selections after
+their rows are evicted or the terminal is resized. Native resizing relocates both live and saved cursors,
+including delayed wrap, and retains the scrolled viewport through height changes and line reflow.
+
+The shared keyboard encoder handles functional-key repeat/release events, keypad identities, lock modifiers
+and alternate keys according to the requested progressive flags. Legacy mouse releases retain modifier bits,
+UTF-8 mouse coordinates respect their encoding limit, and horizontal or stationary wheel events do not emit
+vertical reports. Regression evidence and protocol references are recorded in [the engine migration audit](ENGINE_MIGRATION.md#selection-resize-and-input-protocol-audit).
+
+The Web input adapter pairs enhanced key releases with presses it actually sent. Clipboard shortcuts and
+keys consumed by a host handler do not leak release events to the terminal. Release events retain the
+reported key identity even if a layout modifier was released first. AltGraph text and Ctrl+Alt chords remain
+terminal input rather than being mistaken for clipboard shortcuts.
+
+Native clipboard shortcuts run before enhanced keyboard encoding, so Command-V remains a paste even when a
+foreground TUI asks for all keys as escape codes. Edit menu Copy/Paste use standard responder-chain actions;
+the command palette retains its explicit pane target. Multiline/control text requires confirmation by default.
+The warning's Don't ask again checkbox persists only when Paste is chosen; Settings can re-enable it for open
+terminals. Additional pastes wait for the current dialog to finish. Bracketed paste strips escape characters
+that could terminate its delimiters. Actual-PTY regressions check Unicode payloads, both shortcut paths,
+approval/cancellation and the disabled-confirmation path.

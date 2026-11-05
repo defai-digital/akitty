@@ -276,6 +276,78 @@
     "replies": ""
   },
   {
+    "name": "saved cursor restores charset designation",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b(0\u001b7\u001b(B\u001b8q",
+    "lines": [
+      "─       ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "alternate screen restores the saved locking charset",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 10,
+    "input": "\u001b)0\u000e\u001b[?1049h\u000f\u001b[?1049lq",
+    "lines": [
+      "─       ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "zero bottom margin defaults to full height",
+    "cols": 8,
+    "rows": 4,
+    "history_limit": 10,
+    "input": "\u001b[2;3r\u001b[0;0r\u001b[?6h\u001b[H\u001b[6n",
+    "lines": [
+      "        ",
+      "        ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      0,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[1;1R"
+  },
+  {
+    "name": "single row margins are ignored",
+    "cols": 8,
+    "rows": 4,
+    "history_limit": 10,
+    "input": "\u001b[2;4r\u001b[3;3r\u001b[?6h\u001b[H\u001b[6n",
+    "lines": [
+      "        ",
+      "        ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      0,
+      1
+    ],
+    "history": 0,
+    "replies": "\u001b[1;1R"
+  },
+  {
     "name": "cursor save restores charsets and pending single shift",
     "cols": 8,
     "rows": 2,

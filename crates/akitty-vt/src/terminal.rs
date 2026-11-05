@@ -1623,6 +1623,87 @@ mod tests {
     }
 
     #[test]
+    fn resizing_scrolled_history_keeps_the_visible_row() {
+        let mut term = Terminal::new(8, 3, 100).unwrap();
+        feed(&mut term, b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        term.screen_mut().scroll_display(2);
+        assert_eq!(
+            term.screen().viewport_line(0).unwrap().text().trim_end(),
+            "one"
+        );
+        for (cols, rows) in [(8, 4), (10, 3), (8, 2)] {
+            term.resize(cols, rows, |_| {}).unwrap();
+            assert_eq!(
+                term.screen().viewport_line(0).unwrap().text().trim_end(),
+                "one"
+            );
+        }
+    }
+
+    #[test]
+    fn native_selection_preserves_soft_wrap_spaces_and_omits_wide_padding() {
+        for (input, end, expected) in [
+            ("ab  cd", Position { row: 1, col: 1 }, "ab  cd"),
+            ("abc中", Position { row: 1, col: 1 }, "abc中"),
+        ] {
+            let mut term = Terminal::new(4, 3, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            term.screen_mut().select(Position { row: 0, col: 0 }, end);
+            assert_eq!(term.screen().selection_text(), expected);
+        }
+    }
+
+    #[test]
+    fn cursor_save_restores_charset_designation_and_locking_selection() {
+        for (input, expected) in [
+            ("\x1b(0\x1b7\x1b(B\x1b8q", "─       "),
+            ("\x1b)0\x0e\x1b7\x0f\x1b8q", "─       "),
+            ("\x1b)0\x0e\x1b[?1049h\x0f\x1b[?1049lq", "─       "),
+        ] {
+            let mut term = Terminal::new(8, 3, 10).unwrap();
+            feed(&mut term, input.as_bytes());
+            assert_eq!(term.screen().rows[0].text(), expected);
+        }
+    }
+
+    #[test]
+    fn zero_bottom_margin_resets_the_full_screen_region() {
+        let mut term = Terminal::new(8, 4, 10).unwrap();
+        feed(&mut term, b"\x1b[2;3r\x1b[0;0r");
+        assert_eq!(term.screen().region, 0..4);
+        feed(&mut term, b"\x1b[2;0r");
+        assert_eq!(term.screen().region, 1..4);
+        feed(&mut term, b"\x1b[3;3r");
+        assert_eq!(term.screen().region, 1..4);
+    }
+
+    #[test]
+    fn resizing_reflows_the_saved_cursor_and_its_delayed_wrap() {
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, b"abcd\x1b7");
+        term.resize(8, 3, |_| {}).unwrap();
+        feed(&mut term, b"\x1b8e");
+        assert_eq!(term.screen().rows[0].text(), "abcde   ");
+        assert_eq!(term.cursor(), Position { row: 0, col: 5 });
+        feed(&mut term, b"fghij\x1b7");
+        term.resize(4, 4, |_| {}).unwrap();
+        feed(&mut term, b"\x1b8k");
+        assert_eq!(term.screen().rows[2].text(), "ijk ");
+    }
+
+    #[test]
+    fn resizing_reflows_the_top_visible_wrapped_history_row() {
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        feed(&mut term, b"abcdefghijklmnop");
+        term.screen_mut().scroll_display(1);
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "efgh");
+        term.resize(2, 2, |_| {}).unwrap();
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "ef");
+        term.resize(8, 2, |_| {}).unwrap();
+        assert_eq!(term.screen().viewport_line(0).unwrap().text(), "abcdefgh");
+    }
+
+    #[test]
     fn cursor_save_restores_character_sets_and_pending_single_shift() {
         let mut term = Terminal::new(8, 2, 10).unwrap();
         feed(&mut term, b"\x1b)0\x0e\x1b*0\x1bN\x1b7\x1b(B\x1b)B\x1b*B\x0fq\x1b8qq");

@@ -65,6 +65,19 @@ for (const [code, expected] of [[9, '\t'], [13, '\r'], [27, '\x1b'], [127, '\x7f
   const count = api.akitty_vt_key(code, 0, 0, 4, 1, 1024, keyPointer, 0, keyPointer, length);
   assert.equal(new TextDecoder().decode(new Uint8Array(api.memory.buffer, keyPointer, count)), expected, `Ctrl key ${code}`);
 }
+for (const [code, modifiers, action, options, expected] of [
+  [57350, 0, 3, 2, '\x1b[1;1:3D'],
+  [57350, 0, 2, 2, '\x1b[1;1:2D'],
+  [57366, 4, 1, 1, '\x1b[13;5~'],
+  [9, 1, 1, 4, '\x1b[Z'],
+  [99, 68, 1, 1, '\x1b[99;5u'],
+  [13, 1, 3, 3, ''],
+  [57414, 0, 1, 1, '\r'],
+  [57441, 1, 1, 10, '\x1b[57441;2u'],
+]) {
+  const count = api.akitty_vt_key(code, 0, 0, modifiers, action, options, keyPointer, 0, keyPointer, length);
+  assert.equal(new TextDecoder().decode(new Uint8Array(api.memory.buffer, keyPointer, count)), expected, `enhanced key ${code}`);
+}
 assert.equal(api.akitty_vt_free(keyPointer, length), 1);
 
 
@@ -149,6 +162,34 @@ count = api.akitty_vt_replies(syncModes, scratch, length);
 assert.equal(decoder.decode(new Uint8Array(api.memory.buffer, scratch, count)), '\x1b[1;4R');
 assert.equal(api.akitty_vt_tick(syncModes, 999), 0);
 assert.equal(api.akitty_vt_destroy(syncModes), 1);
+const anchors = api.akitty_vt_create(4, 2, 2);
+feedTerminal(anchors, 'abc中');
+const anchoredRow = api.akitty_vt_row_id(anchors, 0);
+assert.equal(typeof anchoredRow, 'bigint');
+assert.equal(api.akitty_vt_find_row(anchors, anchoredRow), 1);
+assert.equal(api.akitty_vt_wrap_padding(anchors, 0), 1);
+assert.equal(api.akitty_vt_wrap_padding(anchors, 1), 0);
+feedTerminal(anchors, '\r\nnext');
+assert.equal(api.akitty_vt_row_id(anchors, -1), anchoredRow);
+assert.equal(api.akitty_vt_wrap_padding(anchors, -1), 1);
+feedTerminal(anchors, '\r\nlast\r\nmore');
+assert.equal(api.akitty_vt_find_row(anchors, anchoredRow), 0, 'evicted anchors must not select replacement rows');
+const normalRow = api.akitty_vt_row_id(anchors, 0);
+feedTerminal(anchors, '\x1b[?1049h');
+const alternateRow = api.akitty_vt_row_id(anchors, 0);
+assert.notEqual(normalRow, alternateRow, '64-bit alternate row identities remain exact');
+assert.equal(api.akitty_vt_find_row(anchors, normalRow), 0);
+assert.equal(api.akitty_vt_find_row(anchors, alternateRow), 1);
+assert.equal(api.akitty_vt_row_id(anchors, 100), 0n);
+assert.equal(api.akitty_vt_destroy(anchors), 1);
+assert.equal(api.akitty_vt_row_id(anchors, 0), 0n);
+assert.equal(api.akitty_vt_find_row(anchors, alternateRow), 0);
+const savedCursor = api.akitty_vt_create(4, 3, 10);
+feedTerminal(savedCursor, 'abcd\x1b7');
+assert.equal(api.akitty_vt_resize(savedCursor, 8, 3), 1);
+feedTerminal(savedCursor, '\x1b8e');
+assert.deepEqual([api.akitty_vt_get(savedCursor, 2), api.akitty_vt_get(savedCursor, 3)], [5, 0]);
+assert.equal(api.akitty_vt_destroy(savedCursor), 1);
 assert.equal(api.akitty_vt_free(scratch, length), 1);
 console.log('Independent VT WASM: text, Unicode, replies, modes, synchronization, resize and lifecycle passed');
 console.log(`Shared native/WASM contracts: ${fixtures.length} fixtures passed at every byte boundary`);

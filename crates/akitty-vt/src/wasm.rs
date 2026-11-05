@@ -506,6 +506,41 @@ pub extern "C" fn akitty_vt_color(id: u32, index: u32, rgb: u32) -> u32 {
     })
 }
 #[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_row_id(id: u32, row: i32) -> u64 {
+    inspect(id, |instance| {
+        instance
+            .terminal
+            .screen()
+            .line(row)
+            .map_or(0, |line| line.id)
+    })
+}
+/// Return the retained absolute row plus one, or zero if the anchor was evicted.
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_find_row(id: u32, row_id: u64) -> u32 {
+    inspect(id, |instance| {
+        let screen = instance.terminal.screen();
+        screen
+            .history
+            .iter()
+            .chain(&screen.rows)
+            .position(|line| line.id == row_id)
+            .map_or(0, |row| row as u32 + 1)
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn akitty_vt_wrap_padding(id: u32, row: i32) -> u32 {
+    inspect(id, |instance| {
+        u32::from(
+            instance
+                .terminal
+                .screen()
+                .line(row)
+                .is_some_and(|line| line.wrapped && line.wrap_padding),
+        )
+    })
+}
+#[unsafe(no_mangle)]
 pub extern "C" fn akitty_vt_wrapped(id: u32, row: i32) -> u32 {
     inspect(id, |instance| {
         u32::from(

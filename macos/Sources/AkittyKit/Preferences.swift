@@ -11,6 +11,7 @@ struct TerminalPreferences: Codable, Equatable {
     var directory = ""
     var scrollback = 5000
     var optionAsAlt = false
+    var confirmPaste = true
     /// Programs may update chrome only when this preference is enabled.
     var programChrome = true
     /// On by default; terminals whose shell is not bash or zsh start as ordinary login shells.
@@ -121,7 +122,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
         /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
         case shellIntegrationDefaultOn
     }
@@ -135,6 +136,7 @@ extension TerminalPreferences {
         directory = try container.decodeIfPresent(String.self, forKey: .directory) ?? directory
         scrollback = try container.decodeIfPresent(Int.self, forKey: .scrollback) ?? scrollback
         optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? optionAsAlt
+        confirmPaste = try container.decodeIfPresent(Bool.self, forKey: .confirmPaste) ?? true
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
         quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
         quickShortcut = try container.decodeIfPresent(Int.self, forKey: .quickShortcut) ?? 0
@@ -153,6 +155,7 @@ extension TerminalPreferences {
         try container.encode(directory, forKey: .directory)
         try container.encode(scrollback, forKey: .scrollback)
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
+        try container.encode(confirmPaste, forKey: .confirmPaste)
         try container.encode(programChrome, forKey: .programChrome)
         try container.encode(shellIntegration, forKey: .shellIntegration)
         try container.encode(folderHistory, forKey: .folderHistory)
@@ -173,6 +176,11 @@ struct PreferencesDraft {
     }
     var hasChanges: Bool { draft != saved || automaticChecks != savedAutomaticChecks }
     mutating func markSaved() { saved = draft; savedAutomaticChecks = automaticChecks }
+    mutating func mergePasteConfirmation(_ enabled: Bool) {
+        // A choice made in a terminal updates an open Settings window without discarding other draft edits.
+        if draft.confirmPaste == saved.confirmPaste { draft.confirmPaste = enabled }
+        saved.confirmPaste = enabled
+    }
 }
 
 @MainActor private struct PreferencesView: View {
@@ -219,6 +227,11 @@ struct PreferencesDraft {
                 }.formStyle(.grouped)
                     .tabItem { Text("Appearance") }
                 Form {
+                    Section("Clipboard") {
+                        Toggle("Confirm multiline and control-character pastes", isOn: $state.draft.confirmPaste)
+                            .accessibilityIdentifier("confirm-paste")
+                        Text("Applies to open terminals. Turn this on to restore confirmation after choosing Don't ask again.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Section("New Terminals") {
                         Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
                         Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files. Other shells start normally.").font(.caption).foregroundStyle(.secondary)
@@ -292,6 +305,9 @@ struct PreferencesDraft {
                     .accessibilityIdentifier("apply-preferences")
             }.padding()
         }.frame(width: 560, height: 430)
+            .onReceive(NotificationCenter.default.publisher(for: .terminalPreferencesChanged)) { _ in
+                state.mergePasteConfirmation(TerminalPreferences.load(from: defaults).confirmPaste)
+            }
     }
 }
 
