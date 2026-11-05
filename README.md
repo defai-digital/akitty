@@ -294,7 +294,7 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 ## Limitations and roadmap
 
-**Source version: 1.3.9.** AkiTTY is not a drop-in Ghostty replacement.
+**Source version: 1.3.10.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current
