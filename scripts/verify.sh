@@ -12,6 +12,9 @@ python3 scripts/check-engine-source.py
 AKITTY_VT_CLIPPY=1 bash scripts/build-vt-wasm.sh
 node scripts/test-vt-wasm.mjs
 node scripts/test-vt-wasm.mjs packages/akitty-web/akitty-vt.wasm
+node --test scripts/benchmark-vt.test.mjs
+quality_run_dir=$(mktemp -d "$PWD/build/quality-smoke.XXXXXX")
+bash scripts/benchmark.sh --samples 3 --rounds 2 --output "$quality_run_dir/benchmark.json"
 npm ci --ignore-scripts
 npm run build
 npm test
@@ -30,6 +33,7 @@ clang -Wall -Wextra -Werror -mmacosx-version-min=14.0 -I include scripts/sdk-abi
 AKITTY_SDK_ABI_SMOKE="$PWD/build/sdk-abi-smoke" node --test packages/akitty-sdk/test/native.test.mjs
 swift test --package-path macos
 python3 scripts/test_shell_integration.py
+python3 scripts/test_agent_demo.py
 python3 scripts/test_public.py
 python3 scripts/test_r2_release.py
 python3 scripts/test_prepare_release.py

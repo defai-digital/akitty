@@ -231,6 +231,8 @@ vertical reports. Regression evidence and protocol references are recorded in [t
 
 Native clipboard shortcuts run before enhanced keyboard encoding, so Command-V remains a paste even when a
 foreground TUI asks for all keys as escape codes. Edit menu Copy/Paste use standard responder-chain actions;
-the command palette retains its explicit pane target. Multiline/control text still requires confirmation,
-and bracketed paste strips escape characters that could terminate its delimiters. Actual-PTY regressions
-check Unicode payloads, both shortcut paths, approval and cancellation.
+the command palette retains its explicit pane target. Multiline/control text requires confirmation by default.
+The warning's Don't ask again checkbox persists only when Paste is chosen; Settings can re-enable it for open
+terminals. Additional pastes wait for the current dialog to finish. Bracketed paste strips escape characters
+that could terminate its delimiters. Actual-PTY regressions check Unicode payloads, both shortcut paths,
+approval/cancellation and the disabled-confirmation path.

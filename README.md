@@ -252,6 +252,8 @@ for implementation details.
   reported as unsupported), so cursor maths in apps stays aligned.
 - IME marked text, accessible terminal text/selection, text copy/paste, clipboard
   write approval, scrollback search and font-size controls.
+- Multiline/control-text paste confirmation has a **Don't ask again** checkbox. Choose **Paste** to save it;
+  **Settings → Sessions → Clipboard** can restore confirmation for open terminals.
 - Copying selections preserves wrapped lines, significant spaces and wide glyphs.
   Web selections follow retained rows through scrollback eviction; native resizing preserves
   live/saved cursor positions and the scrolled view.
@@ -276,6 +278,9 @@ and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
 See [unreleased improvements](docs/releases/unreleased.md) for changes since the latest release.
+The [compatibility matrix](docs/COMPATIBILITY.md), [quality plan](docs/QUALITY_IMPROVEMENTS.md),
+[Native/WASM benchmark](benchmarks/README.md) and [agent approval demo](docs/AGENT_DEMO.md)
+separate implemented behavior, reproducible evidence and remaining qualification.
 
 ## Folder command history
 

@@ -9,6 +9,7 @@
     "Cargo.lock": "30b74687e4f3af647f184ec69283a72f5f4a04d5a72021ec9fda3b4500d79390",
     "Cargo.toml": "192a49980c1ebd8904ce3d4d14e3ec53509efcd53f8f26049711cb98db4cbe5c",
     "crates/akitty-vt/Cargo.toml": "16c6833e8fed57d9a291ad2be1160a67754841960ece98b89ba5605f059012ad",
+    "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",
     "crates/akitty-vt/src/cell.rs": "a85406b219264d74abc41b76bab58cfb686404bc7acfff5b69fa37c6251edc9b",
     "crates/akitty-vt/src/key.rs": "ce627a9e128be7c322c9670dd3b9c9a6e87bf1e3bf8f03162b36685ac16832b5",
     "crates/akitty-vt/src/lib.rs": "50019f82dc48b8c44b966b0197e3b1f526160b81da9b20beb282ce75eeca49f7",

@@ -27,6 +27,13 @@ jobs:
         run: scripts/build-app.sh release
       - name: Check generated TypeScript bundle is current
         run: git diff --exit-code -- macos/Sources/AkittyKit/Resources/features.js
+      - name: Retain Native and WASM benchmark smoke evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-wasm-benchmark-smoke
+          path: build/quality-smoke.*/benchmark.json
+          if-no-files-found: ignore
       - name: Retain macOS browser failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -5,6 +5,9 @@ Native and Web now share the independently authored `akitty-vt` Rust engine.
 The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses
 WASM and a reauthored Canvas frontend. Neither builds an upstream terminal engine.
 Performance must be measured separately for each host.
+The current [quality milestone](QUALITY_IMPROVEMENTS.md) adds a source-backed
+[compatibility matrix](COMPATIBILITY.md), [Native/WASM benchmark](../benchmarks/README.md)
+and [reproducible agent approval demo](AGENT_DEMO.md).
 See [architecture](ARCHITECTURE.md) for the current implementation and
 [the README](../README.md#what-is-implemented) for shipped behavior.
 
