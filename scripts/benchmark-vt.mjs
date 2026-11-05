@@ -8,6 +8,25 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const scriptPath = 'scripts/benchmark-vt.mjs';
+const loadedHarnessHash = hash(readFileSync(resolve(root, scriptPath)));
+
+function git(args) {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0); return result.stdout.trim();
+}
+
+function captureInputs(paths) {
+  const hashes = Object.fromEntries([...new Set(paths)].map(path => [path, hash(readFileSync(resolve(root, path)))]));
+  return { hashes, verify() {
+    for (const [path, digest] of Object.entries(hashes)) {
+      let current;
+      try { current = hash(readFileSync(resolve(root, path))); }
+      catch (error) { throw new Error(`${path} changed during benchmark`, { cause: error }); }
+      assert.equal(current, digest, `${path} changed during benchmark`);
+    }
+  } };
+}
 
 export function options(args) {
   const result = { samples: 30, rounds: 64 };
@@ -26,7 +45,7 @@ export function options(args) {
 }
 
 export function statistics(samples) {
-  assert(samples.length >= 3 && samples.every(n => Number.isSafeInteger(n) && n > 0), 'invalid timing samples');
+  assert(Array.isArray(samples) && samples.length >= 3 && Array.from(samples).every(n => Number.isSafeInteger(n) && n > 0), 'invalid timing samples');
   const sorted = [...samples].sort((a, b) => a - b);
   const percentile = p => sorted[Math.ceil(sorted.length * p) - 1] / 1e6;
   return { samples_ns: samples, p50_ms: percentile(.5), p95_ms: percentile(.95), p99_ms: percentile(.99) };
@@ -113,25 +132,33 @@ export async function benchmark(args) {
     text: pattern.repeat(Math.ceil(manifest.chunk_bytes / Buffer.byteLength(pattern))) }));
   const config = { ...manifest, ...opts, workloads };
   const wasmBytes = readFileSync(resolve(root, 'packages/akitty-web/akitty-vt.wasm'));
-  const provenance = JSON.parse(readFileSync(resolve(root, 'packages/akitty-web/wasm-provenance.json')));
+  const provenanceBytes = readFileSync(resolve(root, 'packages/akitty-web/wasm-provenance.json'));
+  const provenance = JSON.parse(provenanceBytes);
   assert.equal(hash(wasmBytes), provenance.sha256, 'WASM artifact is stale');
-  for (const [path, digest] of Object.entries(provenance.inputs)) assert.equal(hash(readFileSync(resolve(root, path))), digest, `stale source stamp: ${path}`);
-  const binary = resolve(root, 'target/release/examples/benchmark');
+  const binaryPath = 'target/release/examples/benchmark';
+  const inputs = captureInputs([...Object.keys(provenance.inputs), scriptPath, binaryPath, 'benchmarks/workloads.json',
+    'packages/akitty-web/akitty-vt.wasm', 'packages/akitty-web/wasm-provenance.json']);
+  for (const [path, digest] of Object.entries(provenance.inputs)) assert.equal(inputs.hashes[path], digest, `stale source stamp: ${path}`);
+  assert.equal(inputs.hashes[scriptPath], loadedHarnessHash, 'harness changed before benchmark');
+  assert.equal(inputs.hashes['benchmarks/workloads.json'], hash(manifestBytes), 'workload changed before benchmark');
+  assert.equal(inputs.hashes['packages/akitty-web/akitty-vt.wasm'], hash(wasmBytes), 'WASM changed before benchmark');
+  assert.equal(inputs.hashes['packages/akitty-web/wasm-provenance.json'], hash(provenanceBytes), 'source stamp changed before benchmark');
+  const commit = git(['rev-parse', 'HEAD']), dirty = !!git(['status', '--porcelain']);
+  const measuredAt = new Date().toISOString();
+  const binary = resolve(root, binaryPath);
   const child = spawnSync(binary, [], { input: JSON.stringify(config), encoding: 'utf8', timeout: 180000, maxBuffer: 8 * 1024 * 1024 });
   assert(!child.error && child.status === 0, child.error?.message || child.stderr || 'native benchmark failed');
   const native = JSON.parse(child.stdout);
   const wasm = await measureWasm(wasmBytes, config);
   const results = compare(native, wasm, workloads, opts.samples);
-  const git = args => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-    assert.equal(result.status, 0); return result.stdout.trim();
-  };
-  const report = { schema: 1, measured_at: new Date().toISOString(), scope: 'parser-grid-and-reflow',
-    git_commit: git(['rev-parse', 'HEAD']), dirty: !!git(['status', '--porcelain']),
+  inputs.verify();
+  assert.equal(git(['rev-parse', 'HEAD']), commit, 'Git revision changed during benchmark');
+  const report = { schema: 1, measured_at: measuredAt, scope: 'parser-grid-and-reflow',
+    git_commit: commit, dirty,
     host: { os: platform(), release: release(), architecture: arch(), cpu: cpus()[0]?.model, node: process.version },
     source_sha256: hash(JSON.stringify(provenance.inputs)), workload_sha256: hash(manifestBytes),
-    harness_sha256: hash(readFileSync(fileURLToPath(import.meta.url))), rust: provenance.rust, profile: 'release',
-    native_sha256: hash(readFileSync(binary)), wasm_sha256: hash(wasmBytes),
+    harness_sha256: loadedHarnessHash, rust: provenance.rust, profile: 'release',
+    native_sha256: inputs.hashes[binaryPath], wasm_sha256: hash(wasmBytes),
     configuration: { cols: config.cols, rows: config.rows, history: config.history, grapheme_support: true, rounds: opts.rounds, samples: opts.samples, warmup: 3 },
     percentile_method: 'nearest-rank', state_agreement: true, results };
   const json = JSON.stringify(report, null, 2) + '\n';

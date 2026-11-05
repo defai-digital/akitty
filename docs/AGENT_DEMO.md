@@ -31,6 +31,8 @@ Choose **Edit → Reclaim Terminal Control** afterward. Reclaim changes input ow
 `event_session`, `after_command_id` and `command_sha256` support correlation without turning program reports into proof.
 The generated marker is cleaned up at the end. A queued receipt without the expected effect is a failing demo,
 not success. Malformed responses, lost transport and uncertain dispatches are never retried automatically.
+Marker reads use nonblocking, no-follow opens and verify an owned, single-link regular file before reading.
+Symlinks, hard links and FIFOs cannot establish the expected effect or turn the observation into a blocking pipe read.
 
 The companion can target a separate test instance with `--socket`; pass that path to the demo as well.
 This is a local observer demonstration, not tamper-resistant execution attestation or interception of the agent's

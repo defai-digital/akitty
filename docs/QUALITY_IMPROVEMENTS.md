@@ -41,7 +41,7 @@ Those integrations need an explicit executor/decision/correlation contract and i
 
 This milestone implements all four deliverables above. `scripts/verify.sh` passes, including 236 Rust tests,
 639 Web unit tests, 20 local browser tests, the Native/WASM benchmark smoke, companion-demo checks, Clippy,
-ABI/provenance, shell, release and installer checks. The final Swift suite executes 270 tests with one skip
+ABI/provenance, shell, release and installer checks. The current Swift suite executes 272 tests with one skip
 and zero failures. Local Firefox retains the documented startup exception; its browser coverage remains required in CI.
 The [30-sample baseline](../benchmarks/baseline-macos-arm64.json) preserves the exact measured source,
 workload and harness fingerprints. Physical IME, VoiceOver, UI latency and competitor benchmarks remain the

@@ -3,13 +3,29 @@
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import secrets
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+
+
+def read_marker(path, maximum):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise ValueError('marker must be an owned, single-link regular file')
+        return os.read(descriptor, maximum)
+    finally:
+        os.close(descriptor)
 
 
 def run_demo(cli, pane, socket=None, expect='approved', effect_timeout=5, invoke=subprocess.run):
@@ -42,9 +58,8 @@ def run_demo(cli, pane, socket=None, expect='approved', effect_timeout=5, invoke
             report.update(dispatch='queued', event_session=data['event_session'], after_command_id=data['after_command_id'])
             deadline = time.monotonic() + effect_timeout
             while time.monotonic() < deadline:
-                if marker.exists():
-                    with marker.open('rb') as effect:
-                        observed = effect.read(len(nonce) + 1)
+                observed = read_marker(marker, len(nonce) + 1)
+                if observed is not None:
                     report['effect'] = 'expected_marker_observed' if observed == nonce.encode() else 'unexpected_marker'
                     if report['effect'] == 'expected_marker_observed':
                         break

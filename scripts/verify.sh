@@ -12,9 +12,9 @@ python3 scripts/check-engine-source.py
 AKITTY_VT_CLIPPY=1 bash scripts/build-vt-wasm.sh
 node scripts/test-vt-wasm.mjs
 node scripts/test-vt-wasm.mjs packages/akitty-web/akitty-vt.wasm
-node --test scripts/benchmark-vt.test.mjs
 quality_run_dir=$(mktemp -d "$PWD/build/quality-smoke.XXXXXX")
 bash scripts/benchmark.sh --samples 3 --rounds 2 --output "$quality_run_dir/benchmark.json"
+node --test scripts/benchmark-vt.test.mjs
 npm ci --ignore-scripts
 npm run build
 npm test

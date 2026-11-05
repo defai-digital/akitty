@@ -11,5 +11,8 @@ Changes after AkiTTY 1.3.10; these are not yet part of a published release.
 - Document folder-history navigation, settings, storage limits and hook behavior in the README and architecture guide.
 - Add a persistent Don't ask again checkbox to the paste confirmation dialog and a Settings toggle to restore confirmation. Keep cancellation from changing the preference and avoid stacking paste dialogs.
 - Publish a compatibility matrix, release-mode Native/WASM benchmark with raw percentile samples and state-equivalence checks, and a companion-driven approval/denial demo with a separately observed file effect.
+- Preserve per-pane font zoom when saving paste or other unrelated preferences; explicit font-size changes and Reset Font still apply.
+- Reject linked/non-regular Agent demo markers and avoid blocking on FIFOs while observing an effect.
+- Reject sparse benchmark timings and abort report publication when measured inputs or the Git revision change during a run.
 
 History regression coverage uses isolated interactive zsh terminals, including native history-file checks for memory-only entries. The engine migration guide records the selection, resize and input-protocol audit.

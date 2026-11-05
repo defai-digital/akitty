@@ -20,6 +20,9 @@ The runner checks source/artifact provenance and compares final viewport text, c
 screen before publishing a result. A disagreement, missing sample or invalid timing fails the run. Percentiles use
 nearest rank; every raw timing is retained in nanoseconds. Resize timings cover a pair, not an individual resize.
 Throughput is derived from actual UTF-8 bytes and median feed time. Small smoke runs have coarse percentiles.
+Measured inputs and Git revision are captured before timing and rechecked before publication. Changes to source,
+workloads, the runner, binaries or the revision abort the run without writing a success artifact. Sparse timing
+arrays are rejected instead of producing missing or non-finite percentile values.
 
 Results include the Git revision/dirty flag, source/workload/harness/binary hashes, CPU model, OS, architecture,
 Node/Rust versions and configuration. No username, hostname, home path or terminal contents are collected.

@@ -4,6 +4,48 @@ import AppKit
 
 final class PasteTests: XCTestCase {
     private enum Dispatch { case command, keyDown, keyEquivalent }
+    @MainActor func testPastePreferenceChangesPreservePaneZoom() throws {
+        _ = NSApplication.shared
+        let suite = "akitty-paste-zoom-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var settings = TerminalPreferences()
+        let terminal = try TerminalView(headless: true, forceSoftware: true, forceShaderFailure: false, initial: settings, defaults: defaults)
+        defer { terminal.shutdown() }
+        let original = terminal.cellSize
+        terminal.changeFont(6)
+        let zoomed = terminal.cellSize
+        XCTAssertGreaterThan(zoomed.height, original.height)
+        settings.confirmPaste = false; try settings.save(to: defaults)
+        XCTAssertEqual(terminal.cellSize, zoomed, "saving Don't ask again must not reset pane zoom")
+        terminal.changeFont(nil)
+        XCTAssertEqual(terminal.cellSize, original)
+        settings.fontSize = 24; try settings.save(to: defaults)
+        XCTAssertGreaterThan(terminal.cellSize.height, zoomed.height, "an explicit font-size preference still applies")
+    }
+    @MainActor func testPalettePasteCanPresentConfirmationAfterDismissingThePalette() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = terminal
+        defer { terminal.shutdown(); window.close() }
+        let palette = PaletteController { command in
+            XCTAssertEqual(command, .paste)
+            terminal.paste("first\nsecond")
+        }
+        let panel = try XCTUnwrap(palette.window)
+        window.beginSheet(panel, completionHandler: { _ in })
+        let search = try XCTUnwrap(panel.contentView?.subviews.compactMap { $0 as? NSSearchField }.first)
+        search.stringValue = "Paste Text"
+        palette.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        XCTAssertTrue(search.sendAction(try XCTUnwrap(search.action), to: search.target))
+        for _ in 0..<200 where window.attachedSheet == nil || window.attachedSheet === panel {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let confirmation = try XCTUnwrap(window.attachedSheet)
+        XCTAssertFalse(confirmation === panel)
+        window.endSheet(confirmation, returnCode: .alertFirstButtonReturn)
+    }
     @MainActor func testRepeatedPastesDoNotQueueAnotherConfirmation() async throws {
         _ = NSApplication.shared
         let terminal = try TerminalView(headless: true, forceSoftware: true)

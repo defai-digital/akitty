@@ -141,7 +141,10 @@ import os
     @objc private func preferencesChanged() {
         // A stopped terminal has no session behind it; a late notification must not surface an error.
         guard !stopped else { return }
-        preferences = TerminalPreferences.load(from: preferenceDefaults); fontSize = preferences.fontSize
+        let next = TerminalPreferences.load(from: preferenceDefaults)
+        // Pane zoom is local. Only an explicit change to the saved font size replaces it.
+        if next.fontSize != preferences.fontSize { fontSize = next.fontSize }
+        preferences = next
         do { try syncProgramChrome() } catch { show(error) }
         // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row.
         pendingDamage = nil
