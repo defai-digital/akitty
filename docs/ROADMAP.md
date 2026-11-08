@@ -32,8 +32,10 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   frames still repaint the whole bitmap; a bitmap scroll remains to evaluate.
 - The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
   up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
-- Hidden panes (background tabs, occluded windows, a hidden app) poll at 4 Hz; the
-  view polls again when shown. A pane in a background tab releases its window-sized
+- The PTY worker signals a host-notification pipe whenever it advances the model, so an
+  idle pane no longer polls on a 30 Hz timer; a 1 Hz safety tick backstops a missed wake.
+  Hidden panes (background tabs, occluded windows, a hidden app) coalesce wakeups to 4 Hz
+  and the view polls again when shown. A pane in a background tab releases its window-sized
   bitmaps and Metal textures and repaints in full when selected again. Minimized-window
   rasterization remains to measure.
 - Engine cells are 40 bytes (packed colours, boxed combining marks, one shared

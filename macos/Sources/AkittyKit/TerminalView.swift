@@ -1,8 +1,12 @@
 import AppKit
 import CoreText
+import Darwin
 import MetalKit
 import QuartzCore
 import os
+
+/// A hidden pane refreshes at most this often; also the coalescing window for a deferred wake.
+private let hiddenPollInterval: Double = 0.25
 
 @MainActor public final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     private var sessionStorage: TerminalSession?
@@ -42,12 +46,19 @@ import os
     private var lastStatus: String?
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
+    /// Idle backstop for a missed wakeup; the core drives refreshes in between.
+    static let safetyPollInterval: TimeInterval = 1
     private var timer: Timer?
+    /// Core wakeup pipe: readable whenever the PTY worker advanced the model, so an idle pane sleeps.
+    private var wakeSource: DispatchSourceRead?
+    private var wakeFD: Int32 = -1
+    /// A hidden pane's deferred wake is already queued (see `scheduleHiddenPoll`).
+    private var hiddenPollScheduled = false
     private var accessibilityValueTimer: Timer?
     /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
     /// Uptime seconds of the last changed snapshot or local input. Output, typing and graphics alike keep the
-    /// display-rate poll going for a second, so an echoed keystroke or a scrolling screen never waits for the 30 Hz tick.
+    /// display-rate poll going for a second, so an echoed keystroke or a scrolling screen never waits for the safety tick.
     private var lastChange: Double = 0
     private var composition = Composition()
     private var tracking: NSTrackingArea?
@@ -131,13 +142,22 @@ import os
             renderer.view.frame = bounds
             addSubview(renderer.view)
         } catch { renderFailed(error.localizedDescription) }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.timerTick() } }
+        // The core wakes the pane when its model changes; a slow safety tick only recovers a lost
+        // wakeup and resumes the display link, so an idle pane no longer polls at display cadence.
+        timer = Timer.scheduledTimer(withTimeInterval: Self.safetyPollInterval, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.timerTick() } }
         RunLoop.main.add(timer!, forMode: .common)
-        // The 30 Hz timer stays the idle fallback; the display link only adds polls while frames move.
+        startWakeSource()
+        // Un-occluding or un-hiding must not wait for the safety tick.
+        NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didUnhideNotification, object: nil)
         setAccessibilityIdentifier("akitty-terminal")
     }
     required init?(coder: NSCoder) { nil }
-    deinit { timer?.invalidate(); refreshLink?.invalidate(); NotificationCenter.default.removeObserver(self) }
+    deinit {
+        timer?.invalidate(); refreshLink?.invalidate()
+        // Cancelling closes this view's duplicate descriptor once dispatch has stopped watching it.
+        wakeSource?.cancel(); NotificationCenter.default.removeObserver(self)
+    }
     @objc private func preferencesChanged() {
         // A stopped terminal has no session behind it; a late notification must not surface an error.
         guard !stopped else { return }
@@ -157,6 +177,8 @@ import os
             timer?.invalidate(); timer = nil
             accessibilityValueTimer?.invalidate(); accessibilityValueTimer = nil
             stopRefreshLink()
+            // The cancel handler closes the duplicate; the core closes its own pipe with the session.
+            wakeSource?.cancel(); wakeSource = nil; wakeFD = -1
             pendingClipboard.removeAll()
             let cleanup = session.prepareClose(), group = shutdownGroup
             group.enter()
@@ -187,6 +209,13 @@ import os
     // A deselected NSTabView tab leaves the window (see viewDidMoveToWindow); these cover views hidden in place.
     public override func viewDidHide() { super.viewDidHide(); updatePolling() }
     public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll() }
+    /// App un-hide or window occlusion change: resume the display link and refresh at once.
+    @objc private func visibilityChanged(_ note: Notification) {
+        guard !stopped else { return }
+        if let changed = note.object as? NSWindow, changed !== window { return }
+        updatePolling()
+        if paneVisible { poll() }
+    }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
     private func resizeTerminal() {
@@ -209,7 +238,7 @@ import os
     private func updatePolling() {
         setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastChange, now: ProcessInfo.processInfo.systemUptime))
     }
-    /// The link is only created for a pane that is actually on screen; the idle timer keeps polling otherwise.
+    /// The link is only created for a pane that is actually on screen; the safety timer keeps polling otherwise.
     private func setFastPolling(_ fast: Bool) {
         guard fast, !stopped, paneVisible else { refreshLink?.isPaused = true; return }
         if refreshLink == nil {
@@ -220,7 +249,7 @@ import os
         }
         refreshLink?.isPaused = false
     }
-    /// Whether the display link is polling now, rather than only the 30 Hz idle timer.
+    /// Whether the display link is polling now, rather than only the 1 Hz safety timer.
     var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
     /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
@@ -232,7 +261,7 @@ import os
         return !window.isVisible || window.occlusionState.contains(.visible)
     }
     /// Hidden panes poll four times a second instead of at the display rate.
-    nonisolated static func pollDue(hidden: Bool, sinceLast: Double) -> Bool { !hidden || sinceLast >= 0.25 }
+    nonisolated static func pollDue(hidden: Bool, sinceLast: Double) -> Bool { !hidden || sinceLast >= hiddenPollInterval }
     private func timerTick() {
         let now = ProcessInfo.processInfo.systemUptime, hidden = !paneVisible
         // An occluded window paused the display link; resume it as soon as the pane is back in view.
@@ -240,6 +269,55 @@ import os
         guard Self.pollDue(hidden: hidden, sinceLast: now - lastHiddenPoll) else { return }
         if hidden { lastHiddenPoll = now }
         poll()
+    }
+    /// Reads the core's "model changed" pipe on the main queue through a duplicate descriptor that the
+    /// source's cancel handler closes; the core still owns and closes its own ends with the session.
+    private func startWakeSource() {
+        guard let shared = session.notifyFD() else { return } // headless: the host polls explicitly
+        // libdispatch requires a monitored descriptor to stay open until the cancel handler runs, but the
+        // core closes its pipe on a background queue at shutdown. Watch a private duplicate instead.
+        let fd = dup(shared)
+        guard fd >= 0 else { return } // the safety tick still refreshes the pane
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        wakeFD = fd
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+        source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.wakeFromCore() } }
+        source.setCancelHandler { Darwin.close(fd) }
+        source.resume()
+        wakeSource = source
+    }
+    /// One worker pass advanced the model. Visible panes refresh now; hidden panes coalesce to
+    /// 4 Hz but keep one deferred poll so the last change is never lost.
+    private func wakeFromCore() {
+        drainWake()
+        guard !stopped else { return }
+        let now = ProcessInfo.processInfo.systemUptime, hidden = !paneVisible
+        if !hidden { updatePolling(); poll(); return }
+        let since = now - lastHiddenPoll
+        if Self.pollDue(hidden: true, sinceLast: since) { lastHiddenPoll = now; poll() }
+        else { scheduleHiddenPoll(after: hiddenPollInterval - since) }
+    }
+    /// Drain every pending wake byte; the source only signals readiness. EAGAIN ends the drain.
+    private func drainWake() {
+        guard wakeFD >= 0 else { return }
+        var buffer = [UInt8](repeating: 0, count: 256)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(wakeFD, $0.baseAddress, $0.count) }
+            if count <= 0 { break }
+        }
+    }
+    private func scheduleHiddenPoll(after delay: TimeInterval) {
+        guard !hiddenPollScheduled else { return }
+        hiddenPollScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay)) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.stopped else { return }
+                self.hiddenPollScheduled = false
+                guard !self.paneVisible else { self.updatePolling(); self.poll(); return }
+                self.lastHiddenPoll = ProcessInfo.processInfo.systemUptime
+                self.poll()
+            }
+        }
     }
     fileprivate func displayTick(_ link: CADisplayLink) {
         guard !stopped, paneVisible else { link.isPaused = true; return }
@@ -436,7 +514,7 @@ import os
         lastBell = Date(); NSSound.beep()
     }
     /// Reports a failure. The beep is rate-limited like the bell: a snapshot that keeps failing (an oversized
-    /// screen, too many image fragments) fails on every 30-60 Hz poll and must not beep continuously.
+    /// screen, too many image fragments) fails on every display-rate poll and must not beep continuously.
     private func show(_ error: Error) {
         publishStatus(error.localizedDescription, force: true)
         let now = ProcessInfo.processInfo.systemUptime

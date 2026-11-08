@@ -30,10 +30,14 @@ pub struct Session {
     /// Self-pipe the worker polls next to the PTY: a queued command or a stop must not wait
     /// for the idle timeout. Absent on headless sessions, which have no worker.
     wake: Option<Arc<Wake>>,
+    /// Host-visible change pipe: one byte per worker pass that advanced the model, so the UI can
+    /// poll on demand instead of a fixed timer. Core-owned; `notify_fd` lends the read end.
+    notify: Option<Arc<Wake>>,
     worker: Mutex<Option<JoinHandle<Result<(), String>>>>,
 }
-/// Nonblocking, close-on-exec self-pipe. Only the readiness matters, never the bytes, so a full
-/// pipe is already a pending wake and signals may drop their byte.
+/// Nonblocking, close-on-exec pipe used for readiness only, never for payload: a full pipe is
+/// already a pending wake, so signals may drop their byte. The worker owns a self-pipe; a real
+/// session also exposes a host-notification pipe of the same shape (`notify_fd`).
 struct Wake {
     read: i32,
     write: i32,
@@ -67,6 +71,11 @@ impl Wake {
         // SAFETY: writes one byte from a live local into the owned wake descriptor.
         unsafe { libc::write(self.write, (&byte as *const u8).cast(), 1) };
     }
+    /// Read end the host may poll. The core keeps ownership (both ends close in `Drop`), so the
+    /// host must stop reading before the session closes rather than closing this descriptor.
+    fn read_fd(&self) -> i32 {
+        self.read
+    }
     /// Consume every pending wake byte; the poll flags already delivered the wake itself.
     fn drain(&self) {
         let mut buffer = [0u8; 64];
@@ -87,6 +96,12 @@ impl Drop for Wake {
         // SAFETY: both descriptors are owned by this Wake and closed exactly once here.
         unsafe { libc::close(self.read); libc::close(self.write) };
     }
+}
+/// The two readiness pipes the worker owns: its wake self-pipe and the host-notify pipe. Grouped
+/// so the worker entry point stays at clippy's argument bound without hiding either one.
+struct Wakes {
+    wake: Arc<Wake>,
+    notify: Arc<Wake>,
 }
 /// Worker-side access to the terminal state. A host panic may poison the mutex, but the exit path
 /// still has to publish `exited`, so the worker reuses whatever state the panic left behind.
@@ -122,6 +137,7 @@ impl Session {
                 pending,
                 snapshot_lock: Mutex::new(()),
                 wake: None,
+                notify: None,
                 worker: Mutex::new(None),
             });
         }
@@ -173,12 +189,16 @@ impl Session {
         drop(pty.slave);
         let child = ChildGuard::new(child, fd, slot);
         let wake = Arc::new(Wake::new()?);
+        // Separate from the worker wake: a host reading slowly must never delay the PTY loop.
+        let notify = Arc::new(Wake::new()?);
         let (tx, rx) = mpsc::sync_channel(4096);
         let model_worker = model.clone();
         let stop_worker = stop.clone();
         let pending_worker = pending.clone();
         let wake_worker = wake.clone();
+        let notify_worker = notify.clone();
         let panic_model = model.clone();
+        let panic_notify = notify.clone();
         let worker = thread::Builder::new()
             .name("akitty-pty".into())
             .spawn(move || {
@@ -190,7 +210,7 @@ impl Session {
                         model_worker,
                         stop_worker,
                         pending_worker,
-                        wake_worker,
+                        Wakes { wake: wake_worker, notify: notify_worker },
                     )
                 }));
                 outcome.unwrap_or_else(|_| {
@@ -198,6 +218,8 @@ impl Session {
                     // restartable failure instead of letting the dead thread strand the pane.
                     lock_model(&panic_model).error = Some(ENGINE_FAILED.into());
                     finalize(&panic_model, None, None);
+                    // Finalize bumped the revision outside the loop, so tell the host explicitly.
+                    panic_notify.signal();
                     Err("PTY worker panicked".into())
                 })
             })
@@ -209,6 +231,7 @@ impl Session {
             pending,
             snapshot_lock: Mutex::new(()),
             wake: Some(wake),
+            notify: Some(notify),
             worker: Mutex::new(Some(worker)),
         })
     }
@@ -285,6 +308,13 @@ impl Session {
             model.feed(chunk);
         }
         Ok(())
+    }
+    /// Read end of the host-notification pipe. The core owns both ends and closes them with the
+    /// session, so the host must cancel its reader before `close`/drop instead of closing the fd.
+    /// Headless sessions have no worker, so they return an error and the host polls explicitly.
+    pub fn notify_fd(&self) -> Result<Value, String> {
+        let notify = self.notify.as_ref().ok_or("headless session has no notification pipe")?;
+        Ok(json!({"fd": notify.read_fd()}))
     }
     pub fn input(&self, text: String, paste: bool) -> Result<(), String> {
         if text.len() > 65536 {
@@ -584,25 +614,35 @@ fn expire_and_queue(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
+    notify: &Wake,
 ) -> Option<Instant> {
     let mut state = lock_model(model);
+    let before = state.revision;
     let replies = state.expire_sync();
     queue_parser_replies(&mut state, output, response_pending, replies);
-    state.sync_deadline()
+    let deadline = state.sync_deadline();
+    let changed = state.revision != before;
+    drop(state);
+    // A synchronized-update deadline can pass with no output, yet the host must refresh.
+    if changed { notify.signal(); }
+    deadline
 }
 
 /// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
 /// drain both go through here, so the last answers a program asked for before exiting are
-/// not discarded with the parse result.
+/// not discarded with the parse result. `feed` bumps the revision, so one notification covers it.
 fn feed_and_queue(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
     bytes: &[u8],
+    notify: &Wake,
 ) {
     let mut state = lock_model(model);
     let replies = state.feed(bytes);
     queue_parser_replies(&mut state, output, response_pending, replies);
+    drop(state);
+    if !bytes.is_empty() { notify.signal(); }
 }
 
 /// Read one poll-ready batch, draining until the PTY reports no more bytes or the per-pass budget
@@ -614,6 +654,7 @@ fn feed_batch(
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
     hung_up: bool,
+    notify: &Wake,
 ) -> Result<Option<usize>, String> {
     let mut buffer = [0u8; READ_BUFFER];
     let mut total = 0usize;
@@ -622,7 +663,7 @@ fn feed_batch(
             Ok(Some(0)) => return Ok(None),
             Ok(None) => return Ok(Some(total)),
             Ok(Some(count)) => {
-                feed_and_queue(model, output, response_pending, &buffer[..count]);
+                feed_and_queue(model, output, response_pending, &buffer[..count], notify);
                 total += count;
                 if total >= MAX_READ_PER_PASS { return Ok(Some(total)); }
             }
@@ -766,6 +807,7 @@ fn drain_after_exit(
     response_pending: &mut usize,
     pending: &AtomicUsize,
     stop: &AtomicBool,
+    notify: &Wake,
 ) -> Option<String> {
     let mut buffer = [0u8; READ_BUFFER];
     let mut idle_waits = 0;
@@ -794,7 +836,7 @@ fn drain_after_exit(
             }
             Ok(Some(count)) => {
                 idle_waits = 0;
-                feed_and_queue(model, output, response_pending, &buffer[..count]);
+                feed_and_queue(model, output, response_pending, &buffer[..count], notify);
                 // The live loop will not run again, so a query answered here only reaches the
                 // program if the drain writes it before the master closes.
                 delivered |= flush_replies(fd, output, response_pending, pending);
@@ -814,6 +856,7 @@ fn drain_to_quiet(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
+    notify: &Wake,
 ) {
     let started = Instant::now();
     let mut quiet = 0usize;
@@ -827,7 +870,7 @@ fn drain_to_quiet(
         }
         quiet = 0;
         let hung_up = probe.revents & libc::POLLHUP != 0;
-        if !matches!(feed_batch(fd, model, output, response_pending, hung_up), Ok(Some(_))) {
+        if !matches!(feed_batch(fd, model, output, response_pending, hung_up, notify), Ok(Some(_))) {
             return;
         }
     }
@@ -878,7 +921,7 @@ fn run(
     model: Arc<Mutex<Model>>,
     stop: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
-    wake: Arc<Wake>,
+    Wakes { wake, notify }: Wakes,
 ) -> Result<(), String> {
     let fd = master.as_raw_fd().ok_or("PTY descriptor missing")?;
     let mut output: VecDeque<(Vec<u8>, usize, bool)> = VecDeque::new();
@@ -886,7 +929,7 @@ fn run(
     let mut io_error = None;
     let mut last_wait = Instant::now();
     while !stop.load(Ordering::SeqCst) {
-        let deadline = expire_and_queue(&model, &mut output, &mut response_pending);
+        let deadline = expire_and_queue(&model, &mut output, &mut response_pending, &notify);
         let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
         // Test-only: unwind with the state held, exactly like a parser panic during model.feed.
         #[cfg(test)]
@@ -913,6 +956,9 @@ fn run(
             state.resize_grid(size);
             state.size = size;
             state.revision += 1;
+            drop(state);
+            // A resize reflows rows the host has not seen; it is a host-visible revision.
+            notify.signal();
         }
         let mut poll = [
             libc::pollfd {
@@ -945,13 +991,13 @@ fn run(
         }
         let timed_out = ready == 0;
         if poll[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-            match feed_batch(fd, &model, &mut output, &mut response_pending, poll[0].revents & libc::POLLHUP != 0) {
+            match feed_batch(fd, &model, &mut output, &mut response_pending, poll[0].revents & libc::POLLHUP != 0, &notify) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     // A hangup can report EOF before try_wait sees the exit, so leaving here
                     // without draining would drop a query the program sent as it died. The
                     // post-loop flush still delivers whatever this drain queues.
-                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
+                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop, &notify) {
                         io_error = Some(error);
                     }
                     break;
@@ -971,10 +1017,12 @@ fn run(
                     state.exit_code = Some(status.exit_code());
                     state.revision += 1;
                     drop(state);
+                    // `exited` is the one change no further output will announce.
+                    notify.signal();
                     // Drain available final output without waiting for inherited slave FDs.
                     // A descendant can keep the slave writable after shell exit.
                     // Bound this drain so close never joins an endless reader.
-                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop) {
+                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop, &notify) {
                         io_error = Some(error);
                     }
                     break;
@@ -994,7 +1042,7 @@ fn run(
         let _ = flush_replies(fd, &mut output, &mut response_pending, &pending);
     } else {
         // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
-        drain_to_quiet(fd, &model, &mut output, &mut response_pending);
+        drain_to_quiet(fd, &model, &mut output, &mut response_pending, &notify);
     }
     if let Err(error) = child.finish()
         && io_error.is_none()
@@ -1002,6 +1050,8 @@ fn run(
         io_error = Some(error);
     }
     finalize(&model, child.exit_code(), io_error.as_deref());
+    // `finalize` is the last revision bump; a missed exit would strand the pane's status.
+    notify.signal();
     drop(master);
     if let Some(error) = io_error {
         Err(error)
@@ -1742,11 +1792,12 @@ mod reply_tests {
     #[test]
     fn post_exit_drain_queues_the_replies_the_program_asked_for() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let notify = Wake::new().unwrap();
         let mut output = VecDeque::new();
         let mut response_pending = 0;
         // The post-exit drain must share the live feed's reply queueing: answers parsed
         // after the shell exits used to be dropped on the floor.
-        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n");
+        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n", &notify);
         let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
         assert!(!queued.is_empty(), "post-exit replies must reach the PTY: {queued:?}");
         assert_eq!(queued, b"\x1b[1;1R");
@@ -1780,7 +1831,8 @@ mod reply_tests {
         let mut output = VecDeque::new();
         let mut response_pending = 0;
         let stop = AtomicBool::new(false);
-        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop);
+        let notify = Wake::new().unwrap();
+        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop, &notify);
         assert!(failure.is_none(), "{failure:?}");
         // The answer must be written back, not merely left queued for a reader that never runs.
         let mut received = [0u8; 16];
@@ -1939,7 +1991,8 @@ mod reply_tests {
         let mut output = VecDeque::new();
         let mut response_pending = 0;
         let stop = AtomicBool::new(false);
-        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop);
+        let notify = Wake::new().unwrap();
+        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop, &notify);
         assert!(failure.is_none(), "{failure:?}");
         writer.join().unwrap();
         let mut received = [0u8; 64];
