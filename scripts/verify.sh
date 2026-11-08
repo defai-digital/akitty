@@ -38,5 +38,7 @@ python3 scripts/test_public.py
 python3 scripts/test_r2_release.py
 python3 scripts/test_prepare_release.py
 python3 scripts/test_siri_metadata.py
+python3 scripts/test_siri_skills.py
+python3 scripts/check-siri-skills.py
 bash scripts/test_install.sh
 python3 scripts/check_public.py

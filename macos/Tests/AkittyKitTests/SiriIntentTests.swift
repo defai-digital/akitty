@@ -35,7 +35,7 @@ final class SiriIntentTests: XCTestCase {
         if #available(macOS 15.4, *) {
             XCTAssertEqual(first.appEntityIdentifier, EntityIdentifier(for: entity))
         }
-        var focus = FocusTerminalIntent(); focus.terminal = entity
+        let focus = FocusTerminalIntent(); focus.terminal = entity
         _ = try await focus.perform()
         XCTAssertTrue(window.active === first)
         XCTAssertTrue(window.tabs.selectedTabViewItem?.view?.subviews.contains(where: { ($0 as? TerminalPane)?.terminal === first }) == true)
@@ -49,6 +49,51 @@ final class SiriIntentTests: XCTestCase {
         let closed = try await TerminalEntityQuery().entities(for: [entity.id])
         XCTAssertTrue(closed.isEmpty)
         XCTAssertThrowsError(try app.resolveIntentTerminal(entity.id))
+    }
+
+    @MainActor func testStatusRefreshesCoreDataAndDoesNotTrustAnOldEntity() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let window = try app.createTerminalWindow(headless: true)
+        let terminal = try XCTUnwrap(window.active)
+        defer {
+            terminal.shutdown(); window.window?.close(); NSApp.delegate = previous
+        }
+        let action = GetTerminalStatusIntent()
+        action.terminal = TerminalEntity(id: app.intentID(for: terminal), name: "Old Name", reportedStatus: "Verified success")
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]2;Speech Pane\u{7}\u{1b}]7;file:///private/siri-test\u{7}\u{1b}]133;A\u{7}\u{1b}]7501;state=blocked:kind=permission:app=private-agent\u{7}PRIVATE_OUTPUT"])
+        _ = try terminal.session.acquireControl(actor: "private-agent")
+        let result = try await action.perform()
+        let entity = try XCTUnwrap(result.value)
+        XCTAssertEqual(entity.name, "Speech Pane")
+        XCTAssertEqual(entity.reportedStatus, "Program reports blocked; result not verified")
+        XCTAssertEqual(entity.inputOwnership, "Agent-controlled input")
+        XCTAssertEqual(entity.shellReadiness, "Shell reports an idle prompt")
+        for privateText in ["PRIVATE_OUTPUT", "private-agent", "/private/siri-test", "Verified success"] {
+            XCTAssertFalse(entity.summary.contains(privateText))
+        }
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]2;Fresh Pane\u{7}\u{1b}]133;C\u{7}"])
+        try terminal.session.reclaimControl()
+        let refreshed = try await action.perform()
+        XCTAssertEqual(refreshed.value?.name, "Fresh Pane")
+        XCTAssertEqual(refreshed.value?.inputOwnership, "Human-controlled input")
+        XCTAssertEqual(refreshed.value?.shellReadiness, "Shell does not report an idle prompt")
+        terminal.shutdown()
+        do { _ = try await action.perform(); XCTFail("Closed pane must not resolve") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("no longer open")) }
+    }
+
+    func testSpokenListHandlesEmptySingleAndManyPanesWithoutReadingAllMetadata() {
+        XCTAssertEqual(TerminalSpeech.list([]), "No AkiTTY terminal panes are open.")
+        let entities = (0..<7).map {
+            TerminalEntity(id: String($0), name: "Pane \($0)", reportedStatus: String(repeating: "private", count: 1000))
+        }
+        XCTAssertEqual(TerminalSpeech.list([entities[0]]), "One AkiTTY terminal pane is open: Pane 0.")
+        let spoken = TerminalSpeech.list(entities)
+        XCTAssertTrue(spoken.contains("7 open")); XCTAssertTrue(spoken.contains("4 more"))
+        XCTAssertFalse(spoken.contains("Pane 3")); XCTAssertFalse(spoken.contains("private"))
+        XCTAssertLessThan(spoken.count, 200)
     }
 
     @MainActor func testQuickTerminalShowIsIdempotentAndReusesHiddenWindow() async throws {
