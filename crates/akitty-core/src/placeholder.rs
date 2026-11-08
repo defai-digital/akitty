@@ -18,7 +18,7 @@ pub fn diacritic_index(c: char) -> Option<u32> {
 /// packs the channels, 256-colour uses the index, named colours mean none.
 pub fn color_id(color: Color) -> u32 {
     match color {
-        Color::Rgb(rgb) => rgb,
+        Color::Rgb(rgb) => Color::pack(rgb),
         Color::Indexed(index) => u32::from(index),
         Color::Foreground | Color::Background => 0,
     }
