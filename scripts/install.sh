@@ -206,11 +206,16 @@ sha256_of() {
 install_inner() {
     [ "$(uname -s)" = "Darwin" ] || die "AkiTTY installs on macOS only"
     [ "$(uname -m)" = "arm64" ] || die "only Apple Silicon builds exist today (found $(uname -m))"
-    local macos_version major
+    local macos_version major minor remainder
     macos_version="$(sw_vers -productVersion)"
     major="${macos_version%%.*}"
     case "$major" in ''|*[!0-9]*) die "cannot read the macOS version" ;; esac
-    [ "$major" -ge 14 ] || die "macOS 14 or later is required (found $macos_version)"
+    remainder="${macos_version#*.}"
+    minor="${remainder%%.*}"
+    [ "$remainder" != "$macos_version" ] || minor=0
+    case "$minor" in ''|*[!0-9]*) die "cannot read the macOS version" ;; esac
+    { [ "$major" -gt 27 ] || { [ "$major" -eq 27 ] && [ "$minor" -ge 2 ]; }; } \
+        || die "macOS 27.2 or later is required (found $macos_version)"
 
     case "${1:-}" in
         "") ;;

@@ -4,17 +4,7 @@ cd "$(dirname "$0")/.."
 [[ $(uname -s) == Darwin ]] || { echo 'Akitty builds only on macOS.' >&2; exit 1; }
 config=${1:-debug}
 [[ $config == debug || $config == release ]] || exit 2
-export MACOSX_DEPLOYMENT_TARGET=14.0
-if [[ ${AKITTY_SIRI_AI_PREVIEW:-0} == 1 ]]; then
-    siri_sdk_version=$(xcrun --sdk macosx --show-sdk-version)
-    python3 - "$siri_sdk_version" <<'PYSIRISDK'
-import sys
-if tuple(map(int, sys.argv[1].split('.')[:2])) < (27, 3):
-    raise SystemExit('Siri AI preview builds require the macOS 27.3+ SDK. Disable AKITTY_SIRI_AI_PREVIEW for the macOS 14-compatible build.')
-PYSIRISDK
-    # Keep Rust build scripts and build-time helpers runnable on the host.
-    # Package.swift and the app plist set the preview application's 27.3 target.
-fi
+export MACOSX_DEPLOYMENT_TARGET=27.2
 source scripts/rust-toolchain.sh
 commit=$(git rev-parse --verify HEAD 2>/dev/null || true)
 dirty=false
@@ -33,7 +23,7 @@ if [[ $AKITTY_RUST_DISTRIBUTION == true ]]; then
     # Distribution std archives can target the build machine's newer macOS.
     # Rebuild matching sources at our deployment target instead of shipping them.
     test -f "$("$RUSTC" --print sysroot)/lib/rustlib/src/rust/library/Cargo.toml" || {
-        echo 'Distribution Rust requires matching sources to build the macOS 14 standard library.' >&2; exit 1;
+        echo 'Distribution Rust requires matching sources to build the macOS 27.2 standard library.' >&2; exit 1;
     }
     native_host_target="$("$RUSTC" -vV | sed -n 's/^host: //p')"
     export RUSTC_BOOTSTRAP=1
@@ -100,12 +90,7 @@ cp macos/Sources/AkittyKit/Resources/Credits.html "$app/Contents/Resources/Credi
 swift scripts/build-icons.swift
 iconutil -c icns build/Akitty.iconset -o "$app/Contents/Resources/Akitty.icns"
 cp macos/Info.plist "$app/Contents/Info.plist"
-if [[ ${AKITTY_SIRI_AI_PREVIEW:-0} == 1 ]]; then
-    /usr/libexec/PlistBuddy -c 'Set :LSMinimumSystemVersion 27.3' "$app/Contents/Info.plist"
-    python3 scripts/build-siri-metadata.py --build-dir "$PWD/macos/.build" --configuration "$config" --resources "$app/Contents/Resources" --binary "$app/Contents/MacOS/Akitty" --preview
-else
-    python3 scripts/build-siri-metadata.py --build-dir "$PWD/macos/.build" --configuration "$config" --resources "$app/Contents/Resources" --binary "$app/Contents/MacOS/Akitty"
-fi
+python3 scripts/build-siri-metadata.py --build-dir "$PWD/macos/.build" --configuration "$config" --resources "$app/Contents/Resources" --binary "$app/Contents/MacOS/Akitty"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 cp third_party/unicode/LICENSE "$app/Contents/Resources/UNICODE_LICENSE"
 cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"

@@ -6,7 +6,7 @@ The wordmark is omitted from the app icon for readability at Dock/Finder sizes.
 
 `scripts/build-icons.swift` generates 16, 32, 128, 256 and 512 point images at
 1x/2x, including a 1024-pixel master, and `iconutil` packages the ICNS used by
-macOS 14 and later. Source transparency and consistent optical margins are
+macOS 27.2 and later. Source transparency and consistent optical margins are
 preserved. No account or source-machine metadata is written into generated PNGs.
 
 This is a conventional flat ICNS asset, not a claim of a layered Liquid Glass
