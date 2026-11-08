@@ -21,7 +21,11 @@ provider, cloud account or AX product is required.
 | macOS 27.2+ · Apple Silicon | Stable | [Download and install](#quick-start) |
 
 [Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
-[Release notes](docs/releases/1.3.5.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
+[Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.3.10.md) ·
+[Agent integration guide](docs/AGENT_NATIVE.md)
+
+This README describes the current source, including [unreleased changes](docs/releases/unreleased.md).
+Published downloads may contain an earlier feature set; check their release notes.
 
 See [Windows and Linux](#windows-and-linux) for the separate AkiTTY Web terminal
 library used on other platforms.
@@ -96,6 +100,32 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 You can also [download the latest published release](https://github.com/defai-digital/akitty/releases/latest).
 Choose the macOS arm64 ZIP, unzip it, move **Akitty.app** into **Applications**, and open it.
+
+## Siri and Shortcuts
+
+The current source includes seven built-in App Shortcuts for macOS 27.2. Install
+and open the app bundle, enable Siri in macOS, then try these English phrases:
+
+- “Open a new terminal in AkiTTY”
+- “Show the quick terminal in AkiTTY”
+- “Show agents in AkiTTY”
+- “List terminals in AkiTTY”
+- “Get terminal status in AkiTTY”
+- “Focus a terminal in AkiTTY”
+- “Request a command in AkiTTY”
+
+The same actions are available in the Shortcuts app without creating a custom
+workflow first. Siri asks for a terminal or command when an action needs one.
+For a command request, try `pwd`, review the exact command and target in AkiTTY,
+then approve or deny it. **Deny is the default.** These actions require local
+device authentication and bring AkiTTY to the foreground. The **Enable Local
+Agent Requests** setting is only needed for socket clients such as `akitty-agent`.
+
+The integration uses stable macOS 27.2 APIs. The macOS 27.3 Siri AI preview path
+has been removed, and 27.3-specific behavior is outside the current test scope.
+Automated action and packaging tests pass on 27.2; spoken Siri recognition and
+system discovery still require device qualification. See the
+[setup, troubleshooting, and validation guide](docs/SIRI.md) for details.
 
 ## Works with your AI agents
 

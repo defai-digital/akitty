@@ -4,11 +4,39 @@ The native Apple Silicon app requires macOS 27.2 or later. Siri integration is
 built and tested with stable Xcode 27.2 and macOS 27.2. Spoken Siri
 qualification is a separate device check described below.
 
+The macOS 27.3 Siri AI preview implementation has been removed. There are no
+preview build flags, custom tool annotations, or app skills. Later OS versions
+can meet the minimum deployment requirement, but 27.3-specific integration and
+behavior are outside the current qualification scope. Installing a beta SDK or
+upgrading the OS is not part of the macOS 27.2 setup.
+
 AkiTTY includes seven App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
-trigger phrases are in English. Enable Siri
-in macOS and use the installed app. System language, region, device support,
-and Siri settings affect discovery and speech recognition.
+trigger phrases are in English. System language, region, device support, and
+Siri settings affect discovery and speech recognition. This functionality is
+in the current source tree; check [unreleased changes](releases/unreleased.md)
+and the downloaded release's notes before expecting it in a published build.
+
+## Get started on macOS 27.2
+
+1. Install a build containing this integration and open **Akitty.app** once.
+   When building from source, use `bash scripts/build-app.sh debug` and open
+   `build/Akitty.app`. The packaging script includes the required metadata;
+   launching a standalone executable from `swift build` is not the setup path.
+2. Enable Siri in macOS. Open the Shortcuts app and look for AkiTTY's seven
+   actions. You can use these defaults directly or compose a workflow that
+   passes a terminal reference from List Terminals to another action.
+3. Try “List terminals in AkiTTY” or “Open a new terminal in AkiTTY.” Use the
+   English phrases below; recognition depends on your Siri configuration.
+4. Try “Request a command in AkiTTY,” choose a current terminal, and enter `pwd`.
+   Review the target and exact command in AkiTTY's approval sheet. Deny first,
+   then make a new request and explicitly approve it to check dispatch.
+
+Siri and Shortcuts requests do not require **Enable Local Agent Requests**.
+That setting controls the local socket interface used by clients such as
+`akitty-agent`. Command approval still applies to every Siri or Shortcuts request.
+
+## Available actions
 
 | Action | Example Siri phrase | Behavior |
 | --- | --- | --- |
@@ -25,6 +53,20 @@ values. Complex shell quoting and punctuation are best entered in Shortcuts
 or reviewed carefully in the approval sheet. The App Shortcuts phrases include
 the app name. A terminal reference is valid only while that pane remains open
 in the same app instance; saved shortcuts must query or select current panes.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| AkiTTY actions are missing | Confirm the installed app contains this integration, open the app bundle, then reopen Shortcuts. For source builds, use the packaging script above. |
+| Shortcuts works but a spoken phrase does not | Check that Siri is enabled and that its language matches the bundled English phrases. Spoken recognition remains a separate device check. |
+| A saved terminal is no longer available | Run List Terminals or choose a current pane again. Pane references expire when a pane closes or the app restarts. |
+| A command request is rejected | The chosen pane needs an idle integrated shell and must remain open. Finish or cancel any other pending request, then review a new request in AkiTTY. |
+| A command was dispatched but the outcome is unclear | Inspect the terminal before issuing another command. Dispatch does not prove successful completion; avoid automatic retries. |
+
+If discovery still fails, include the AkiTTY build, macOS version, Siri language,
+and whether the actions appear in Shortcuts when reporting the issue. Terminal
+output and command history are not needed for a discovery report.
 
 ## Command requests
 
@@ -96,8 +138,7 @@ metadata extractor for the library and app and the phrase training processor.
 The provider lives in the executable target because merging static library
 action metadata does not preserve that library's default App Shortcuts.
 Packaging fails if required metadata, foreground modes, or shortcuts are
-missing; the final
-`Contents/Resources/Metadata.appintents` is created before code signing.
+missing; `Contents/Resources/Metadata.appintents` is created before code signing.
 The bundle declares English as its development language. The packaging check
 also verifies that phrase training contains actual utterances: without a
 development language, Apple's processor can succeed with empty training data.
@@ -116,6 +157,13 @@ The full gate covers native intent behavior, real PTY dispatch, installer OS
 boundaries, release metadata, and the Web/Rust suites. Packaging checks all seven
 actions and default shortcuts and nonempty phrase training. Debug and optimized
 Swift builds must produce equivalent intent metadata.
+
+The macOS 27.2 baseline (`905984f`) passed the full gate, app bundle/signature
+checks, and both debug and optimized Swift metadata extraction. The native
+suite executed 282 tests with zero failures and one benchmark skipped. Web
+tests passed, including 22 Chromium/WebKit browser checks; Firefox could not
+start locally because of a profile error and remains a CI qualification item.
+These results do not establish spoken Siri recognition or system discovery.
 
 Device qualification still needs the following checks on the installed macOS
 27.2 bundle; calling `perform()` in a unit test does not establish spoken Siri
