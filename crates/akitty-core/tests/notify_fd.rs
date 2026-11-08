@@ -2,7 +2,14 @@
 //! close with the session. Its own test binary keeps the descriptor baseline free of other tests.
 use akitty_core::request;
 use serde_json::{json, Value};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// The descriptor count is process-wide, so PTY tests in this binary run one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct Session(u64);
 impl Session {
@@ -17,7 +24,12 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        call(json!({"op":"close","id":self.0}));
+        let reply = request(&serde_json::to_vec(&json!({"op":"close","id":self.0})).unwrap());
+        // A slow runner may hand a child that has not exited yet to the shared reaper (the bounded close,
+        // as in lifecycle_stress); its descriptors are released in the background, which the leak check waits for.
+        if reply["ok"] != true {
+            assert_eq!(reply["error"], "terminal child did not exit within 1 second; cleanup continues in background", "{reply}");
+        }
     }
 }
 fn call(value: Value) -> Value {
@@ -67,6 +79,7 @@ fn drain_readable(fd: i32) {
 
 #[test]
 fn notify_pipe_reports_output_and_exit_without_leaking() {
+    let _serial = serial();
     let baseline = descriptors();
     for _ in 0..50 {
         let session = Session::new();
@@ -114,6 +127,7 @@ fn headless_session_has_no_notify_pipe() {
 
 #[test]
 fn host_changes_wake_the_host_but_reads_do_not() {
+    let _serial = serial();
     let session = Session::new();
     let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
     // Let the shell's startup output settle, then start from a drained pipe.
