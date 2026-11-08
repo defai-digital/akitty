@@ -7,8 +7,12 @@ permissions:
 jobs:
   required:
     name: Required macOS verification
-    runs-on: macos-latest
+    # The app targets macOS 27.2 and needs the 27.2 SDK (App Intents metadata, NSView entity identifiers);
+    # macos-latest is still the macOS 26 image with Xcode 26.
+    runs-on: xcode-27
     timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
