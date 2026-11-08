@@ -10,9 +10,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 const MAX_PENDING: usize = 1_048_576;
+/// Host-visible failure text after an engine panic: the pane is done, but restarting it is safe.
+pub(crate) const ENGINE_FAILED: &str = "Terminal engine error. Use Shell → Restart Terminal.";
 enum Command {
     Input(Vec<u8>),
     Resize(Size),
+    /// Test-only: make the worker unwind so the panic path is exercised end to end.
+    #[cfg(test)]
+    Panic,
 }
 pub struct Session {
     model: Arc<Mutex<Model>>,
@@ -173,18 +178,28 @@ impl Session {
         let stop_worker = stop.clone();
         let pending_worker = pending.clone();
         let wake_worker = wake.clone();
+        let panic_model = model.clone();
         let worker = thread::Builder::new()
             .name("akitty-pty".into())
             .spawn(move || {
-                run(
-                    pty.master,
-                    child,
-                    rx,
-                    model_worker,
-                    stop_worker,
-                    pending_worker,
-                    wake_worker,
-                )
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(
+                        pty.master,
+                        child,
+                        rx,
+                        model_worker,
+                        stop_worker,
+                        pending_worker,
+                        wake_worker,
+                    )
+                }));
+                outcome.unwrap_or_else(|_| {
+                    // The parser or another engine step panicked with the state held. Publish a
+                    // restartable failure instead of letting the dead thread strand the pane.
+                    lock_model(&panic_model).error = Some(ENGINE_FAILED.into());
+                    finalize(&panic_model, None, None);
+                    Err("PTY worker panicked".into())
+                })
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -197,6 +212,28 @@ impl Session {
             worker: Mutex::new(Some(worker)),
         })
     }
+    /// Host-side model access. A poisoned lock means a host panic left the state behind, so fail
+    /// closed into a restartable session instead of reporting "unavailable" on every later call.
+    fn state(&self) -> Result<std::sync::MutexGuard<'_, Model>, String> {
+        match self.model.lock() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                // Keep an error the panic path already published; only the first recovery names it.
+                if state.error.is_none() { state.error = Some(ENGINE_FAILED.into()); }
+                drop(state);
+                if self.commands.is_some() {
+                    // The worker owns finalize: stop it so it publishes `exited` and clears the poison.
+                    self.stop.store(true, Ordering::SeqCst);
+                    self.wake();
+                } else {
+                    // No worker to finalize a headless session, so publish the exit here.
+                    finalize(&self.model, None, None);
+                }
+                Err(ENGINE_FAILED.into())
+            }
+        }
+    }
     /// Snapshot JSON, already serialized. The model lock covers the build and the commit only: serialization
     /// (1–19 ms on a dense screen) runs after it is released, so the PTY worker keeps feeding.
     pub fn snapshot(&self, since: Option<u64>, compact: bool, allow_shift: bool) -> Result<String, String> {
@@ -206,16 +243,18 @@ impl Session {
     fn snapshot_within(&self, since: Option<u64>, compact: bool, allow_shift: bool, max_bytes: usize) -> Result<String, String> {
         // Two concurrent snapshots must not interleave build and commit, or one would consume events the
         // other never delivered. This lock, not the model lock, spans the serialization.
-        let _serialize = self.snapshot_lock.lock().map_err(|_| "terminal unavailable")?;
+        // A host panic during a previous serialization poisons this lock, but it guards no data:
+        // recover it so later snapshots are not blocked by a stale serializer failure.
+        let _serialize = self.snapshot_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let built = {
-            let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+            let mut model = self.state()?;
             // Real PTY sessions expire in the worker, which owns delivery of replies.
             if self.commands.is_none() { model.expire_sync(); }
             model.build_snapshot(since, compact, allow_shift)?
         };
         let Some((value, commit)) = built else { return Ok(crate::model::UNCHANGED_SNAPSHOT.into()) };
         let json = serde_json::to_string(&value).expect("snapshot fields serialize");
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if json.len() > max_bytes {
             // Nothing the client would never receive may be committed; `sent` is dropped so the
             // next poll sends a full snapshot rather than a diff against it.
@@ -226,22 +265,22 @@ impl Session {
         Ok(json)
     }
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
-        Ok(self.model.lock().map_err(|_| "terminal unavailable")?.shell.history(after))
+        Ok(self.state()?.shell.history(after))
     }
     /// Shell and control summaries without a snapshot's side effects: a snapshot consumes
     /// pending bell and clipboard events, so hosts must not take one just to read the cwd.
     pub fn shell_state(&self) -> Result<Value, String> {
-        let model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let model = self.state()?;
         Ok(serde_json::json!({"shell": model.shell.summary(), "control": model.control.summary()}))
     }
     pub fn command_output(&self, id: u64) -> Result<Value, String> {
-        self.model.lock().map_err(|_| "terminal unavailable")?.shell.command_output(id)
+        self.state()?.shell.command_output(id)
     }
     pub fn feed(&self, bytes: &[u8]) -> Result<(), String> {
         if self.commands.is_some() {
             return Err("feed is only available on headless sessions".into());
         }
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         for chunk in bytes.chunks(8192) {
             model.feed(chunk);
         }
@@ -251,7 +290,7 @@ impl Session {
         if text.len() > 65536 {
             return Err("input exceeds 64 KiB".into());
         }
-        let model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let model = self.state()?;
         if model.exited {
             return Err("shell has exited".into());
         }
@@ -266,7 +305,7 @@ impl Session {
     }
     pub fn input_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
         if bytes.len() > 65548 { return Err("input exceeds 64 KiB plus paste delimiters".into()); }
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
         let previous_dirty = model.control.dirty;
         model.control.human_input()?;
@@ -303,16 +342,16 @@ impl Session {
         if let Some(wake) = &self.wake { wake.signal(); }
     }
     pub fn control_acquire(&self, actor: String) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if model.exited { return Err("shell has exited".into()); }
         let result = model.control.acquire(actor); if result.is_ok() { model.revision += 1; } result
     }
     pub fn control_release(&self, lease: Option<u64>) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         let result = model.control.release(lease); if result.is_ok() { model.revision += 1; } result
     }
     pub fn command_authorize(&self, lease: u64, command: String, expected_cwd: Option<String>) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if model.exited || !model.shell.ready || model.control.dirty { return Err("command requires an unedited integrated shell prompt".into()); }
         let cwd = model.shell.cwd.clone();
         if cwd != expected_cwd { return Err("working directory changed since approval request".into()); }
@@ -322,11 +361,11 @@ impl Session {
         result
     }
     pub fn command_deny(&self, lease: u64) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         let result = model.control.deny(lease); if result.is_ok() { model.revision += 1; } result
     }
     pub fn command_execute(&self, lease: u64, authorization: u64, command: String) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         let cwd = model.shell.cwd.clone();
         // Consume even on readiness or queue failure: retry always needs fresh approval.
         // A rejected consume only invalidates the snapshot when it appended audit.
@@ -344,11 +383,11 @@ impl Session {
         Ok(json!({"accepted":true,"after_command_id":model.shell.summary()["last_command_id"],"completion_untrusted":true}))
     }
     pub fn control_audit(&self, after: u64) -> Result<Value, String> {
-        Ok(self.model.lock().map_err(|_| "terminal unavailable")?.control.audit(after))
+        Ok(self.state()?.control.audit(after))
     }
     pub fn resize(&self, cols: usize, rows: usize) -> Result<(), String> {
         let size = Size::validate(cols, rows)?;
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if let Some(sender) = &self.commands {
             // Record the grid before the send so a concurrent pixel-size push repeats
             // this request instead of the worker's still-stale applied size.
@@ -371,7 +410,7 @@ impl Session {
         if !(1..=256).contains(&width) || !(1..=512).contains(&height) {
             return Err("cell size must be 1..256 by 1..512 pixels".into());
         }
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         let previous = model.cell_px;
         // Repeat the latest queued grid, not the applied one, so a scale change cannot
         // re-send an older grid after the new resize the host already recorded.
@@ -397,7 +436,7 @@ impl Session {
         // Hold the pixels by reference count under the lock, then copy outside it: a frame can be tens of MiB
         // and the worker must not wait for the copy. The held buffer is the frame that was on display.
         let pixels = {
-            let Ok(model) = self.model.lock() else { return 0 };
+            let Ok(model) = self.state() else { return 0 };
             let Some(found) = model.graphics.images.get(&image) else { return 0 };
             if found.rgba.len() > out.len() { return 0; }
             Arc::clone(&found.rgba)
@@ -406,13 +445,13 @@ impl Session {
         pixels.len()
     }
     pub fn scroll(&self, lines: i32) -> Result<(), String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         model.term.screen_mut().scroll_display(lines.clamp(-5000, 5000));
         model.revision += 1;
         Ok(())
     }
     pub fn select(&self, sr: usize, sc: usize, er: usize, ec: usize) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if sr >= model.size.rows
             || er >= model.size.rows
             || sc >= model.size.cols
@@ -425,7 +464,7 @@ impl Session {
         Ok(json!({"text": model.term.screen().selection_text()}))
     }
     pub fn find(&self, text: &str, direction: Option<&str>, clear: bool) -> Result<Value, String> {
-        let mut model = self.model.lock().map_err(|_| "terminal unavailable")?;
+        let mut model = self.state()?;
         if clear {
             if model.find.take().is_some() {
                 model.revision = model.revision.saturating_add(1);
@@ -444,10 +483,10 @@ impl Session {
         Ok(model.search(text, direction))
     }
     pub fn set_chrome(&self, input: crate::chrome::ChromeInput) -> Result<(), String> {
-        self.model.lock().map_err(|_| "terminal unavailable")?.set_chrome(input)
+        self.state()?.set_chrome(input)
     }
     pub fn set_program_chrome(&self, enabled: bool) -> Result<(), String> {
-        self.model.lock().map_err(|_| "terminal unavailable")?.set_program_chrome(enabled);
+        self.state()?.set_program_chrome(enabled);
         Ok(())
     }
     pub fn close(&self) -> Result<(), String> {
@@ -824,6 +863,9 @@ fn coalesce(batch: Vec<Command>) -> (Vec<Vec<u8>>, Option<Size>) {
         match command {
             Command::Input(bytes) => inputs.push(bytes),
             Command::Resize(size) => resize = Some(size),
+            // The run loop panics before coalescing, but the match must still be exhaustive.
+            #[cfg(test)]
+            Command::Panic => {}
         }
     }
     (inputs, resize)
@@ -846,6 +888,12 @@ fn run(
     while !stop.load(Ordering::SeqCst) {
         let deadline = expire_and_queue(&model, &mut output, &mut response_pending);
         let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
+        // Test-only: unwind with the state held, exactly like a parser panic during model.feed.
+        #[cfg(test)]
+        if batch.iter().any(|command| matches!(command, Command::Panic)) {
+            let _held = lock_model(&model);
+            panic!("test: PTY engine panic while holding the terminal state");
+        }
         if batch.len() == MAX_COMMANDS_PER_PASS {
             // More commands wait in the channel, so keep the next poll from sleeping on them.
             wake.signal();
@@ -1331,6 +1379,119 @@ mod tests {
         assert_eq!(state.exit_code, Some(0));
         drop(state);
         // Later host polls must work again, so the exit is actually observable.
+        assert!(session.snapshot(None, true, false).is_ok());
+    }
+
+    /// Panic while holding the model lock, as a host-side engine step would.
+    fn poison(model: &Arc<Mutex<Model>>) {
+        let poisoned = model.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("host panic while holding the terminal state");
+        })
+        .join();
+    }
+
+    #[test]
+    fn a_host_poison_fails_closed_and_the_next_poll_reports_the_exit() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        poison(&session.model);
+        // The next host call names the actionable failure instead of "terminal unavailable".
+        assert_eq!(session.input_bytes(b"x".to_vec()).unwrap_err(), ENGINE_FAILED);
+        // Headless recovery finalizes at once, so the exit is visible on the very next poll.
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(snapshot["exited"], true, "{snapshot}");
+        assert_eq!(snapshot["error"], ENGINE_FAILED, "{snapshot}");
+    }
+
+    #[test]
+    fn a_poisoned_pty_session_stops_the_worker_and_stays_observable() {
+        let session = Session::new(40, 8, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        poison(&session.model);
+        // The PTY session has no worker to finalize until it is told to stop.
+        assert_eq!(session.scroll(1).unwrap_err(), ENGINE_FAILED);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match session.snapshot(None, true, false) {
+                Ok(json) => {
+                    let snapshot: Value = serde_json::from_str(&json).unwrap();
+                    assert_eq!(snapshot["exited"], true, "{snapshot}");
+                    assert_eq!(snapshot["error"], ENGINE_FAILED, "{snapshot}");
+                    break;
+                }
+                Err(error) => {
+                    // Until the worker finalizes, the poison is still present.
+                    assert_eq!(error, ENGINE_FAILED, "{error}");
+                    assert!(Instant::now() < deadline, "the worker never finalized after the poison");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        session.close().unwrap();
+    }
+
+    #[test]
+    fn a_worker_panic_leaves_an_exited_restartable_session() {
+        let dir = std::env::temp_dir().join(format!("akitty-worker-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("shell.pid");
+        let script = dir.join("shell.sh");
+        // Report the pid before idling, so the test can prove the child died with the worker.
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nexec /bin/sleep 30\n", pid_file.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let session = Session::new(30, 8, Some(script.to_string_lossy().into_owned()), Some("/tmp".into()), false, 5000, None).unwrap();
+        let pid = {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<i32>() {
+                    break pid;
+                }
+                assert!(Instant::now() < deadline, "the fixture shell never reported its pid");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        session.commands.as_ref().unwrap().try_send(Command::Panic).unwrap();
+        session.wake();
+        // The caught panic publishes the failure and marks the pane exited.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let state = lock_model(&session.model);
+            if state.exited {
+                assert_eq!(state.error.as_deref(), Some(ENGINE_FAILED));
+                break;
+            }
+            drop(state);
+            assert!(Instant::now() < deadline, "the worker panic was never finalized");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // ChildGuard's Drop runs while the worker unwinds, so the shell must be gone.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the shell survived a worker panic");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Later host calls work, and close must not wait on the dead worker.
+        assert!(session.snapshot(None, true, false).is_ok());
+        let started = Instant::now();
+        let _ = session.close();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "close waited on the panicked worker");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_poisoned_snapshot_serializer_still_serializes() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = session.snapshot_lock.lock().unwrap();
+            panic!("host panic during snapshot serialization");
+        }));
+        assert!(session.snapshot_lock.lock().is_err(), "the serializer panic must poison the lock");
+        // The lock guards no data, so a poisoned serializer must not block later snapshots.
         assert!(session.snapshot(None, true, false).is_ok());
     }
 

@@ -892,6 +892,37 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(controller.panes.isEmpty)
     }
 
+    @MainActor func testRestartReplacesThePaneInPlaceAndShutsDownTheOldSession() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        try controller.newTab()
+        controller.perform(.split)
+        let split = try XCTUnwrap(controller.tabs.selectedTabViewItem?.view as? NSSplitView)
+        XCTAssertEqual(split.arrangedSubviews.count, 2)
+        let firstPane = split.arrangedSubviews[0]
+        let old = try XCTUnwrap((split.arrangedSubviews[1] as? TerminalPane)?.terminal)
+        let oldID = old.session.id
+        window.makeFirstResponder(old)
+        XCTAssertTrue(controller.active === old)
+        // A running shell asks first; approving replaces only this pane.
+        controller.restartFocusedPane()
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        for _ in 0..<100 where controller.panes.count != 3 || (split.arrangedSubviews[1] as? TerminalPane)?.terminal === old {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 2, "the tab count is unchanged")
+        XCTAssertEqual(split.arrangedSubviews.count, 2, "the pane is replaced, not removed")
+        XCTAssertTrue(split.arrangedSubviews[0] === firstPane, "the other pane keeps its slot")
+        let replacement = try XCTUnwrap((split.arrangedSubviews[1] as? TerminalPane)?.terminal)
+        XCTAssertFalse(replacement === old)
+        XCTAssertNotEqual(replacement.session.id, oldID, "the replacement is a new session")
+        XCTAssertTrue(controller.active === replacement, "the replacement takes focus")
+        XCTAssertThrowsError(try old.session.snapshot(), "the old session is shut down")
+    }
+
     @MainActor func testQuitCanBeCancelledAndRetriedWithoutDuplicateSheetsOrReplies() async throws {
         _ = NSApplication.shared
         let app = AkittyApplication()
