@@ -398,9 +398,14 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         var isDirectory: ObjCBool = false
         return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
-    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil) throws {
-        guard split.arrangedSubviews.count < 8 else { return }
-        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory); split.addArrangedSubview(pane)
+    @discardableResult
+    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil) throws -> TerminalPane? {
+        // A restart replaces a pane, so it may briefly hold a ninth before the old one is removed.
+        guard index != nil || split.arrangedSubviews.count < 8 else { return nil }
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory)
+        // A restart inserts in place; a new split appends as before.
+        if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
+        else { split.addArrangedSubview(pane) }
         app?.registerAgentTerminal(pane.terminal)
         pane.terminal.onExit = { [weak self, weak pane] in
             guard let self, let pane else { return }
@@ -429,6 +434,33 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             self.refreshActivity(of: split)
         }
         window?.makeFirstResponder(pane.terminal)
+        return pane
+    }
+    /// Restart the focused pane, keeping its tab and index.
+    func restartFocusedPane() { if let terminal = active { restart(terminal) } }
+    /// Replaces a pane with a fresh shell in the same slot, so an engine failure is recoverable.
+    private func restart(_ terminal: TerminalView) {
+        guard panes.contains(where: { $0.terminal === terminal }) else { return }
+        // An exited pane (including an engine failure) has nothing left to stop, so restart at once.
+        if terminal.snapshot?.exited == true { replace(terminal); return }
+        guard let window else { return }
+        closeConfirmation.present(in: window, title: "Restart this terminal?", message: "Running processes will be stopped.") { [weak self, weak terminal] approved in
+            if approved, let terminal { self?.replace(terminal) }
+        }
+    }
+    private func replace(_ terminal: TerminalView) {
+        guard let pane = panes.first(where: { $0.terminal === terminal }), let split = pane.superview as? NSSplitView,
+              let index = split.arrangedSubviews.firstIndex(of: pane) else { return }
+        // A failed session may no longer report, so fall back to where this pane started.
+        let reported = (try? terminal.session.shellState())?.shell?.cwd
+        let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.launchDirectory ?? self.directory
+        do {
+            // Insert before removing: an empty split would close the tab (and window) in between.
+            guard let replacement = try addPane(to: split, directory: directory, at: index) else { return }
+            remove(terminal)
+            window?.makeFirstResponder(replacement.terminal)
+            refreshTabs()
+        } catch { NSAlert(error: error).runModal() }
     }
     @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
     private func refreshTabs() {
@@ -908,6 +940,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         window.perform(command)
     }
     @objc private func selectTab(_ sender: NSMenuItem) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.selectTab(at: sender.tag) }
+    @objc private func restartTerminal(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.restartFocusedPane() }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
     @objc private func settings(_ sender: Any?) {
         if settingsWindow == nil { settingsWindow = PreferencesWindow(updater: updates) }
@@ -932,6 +965,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         let quick = file.addItem(withTitle: "Toggle Quick Terminal", action: #selector(toggleQuickTerminal(_:)), keyEquivalent: ""); quick.target = self
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
+        let restart = file.addItem(withTitle: "Restart Terminal", action: #selector(restartTerminal(_:)), keyEquivalent: "r")
+        restart.keyEquivalentModifierMask = [.command, .shift]; restart.target = self
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         // Standard editing actions follow the focused responder, including terminal panes, fields and sheets.
         // Routing these through the app's key-window command handler can lose a paste during focus changes.
