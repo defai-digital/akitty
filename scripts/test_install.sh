@@ -26,7 +26,7 @@ esac
 SH
 shim sw_vers <<'SH'
 #!/bin/bash
-echo "${TEST_MACOS:-14.5}"
+echo "${TEST_MACOS:-27.2}"
 SH
 shim curl <<'SH'
 #!/bin/bash
@@ -211,7 +211,15 @@ printf 'fake archive bytes\n' > "$fixtures/app.zip"
 expect_failure "signature failure" "code signature verification failed" TEST_CODESIGN=1
 expect_failure "gatekeeper failure" "Gatekeeper assessment failed" TEST_SPCTL=1
 expect_failure "wrong architecture" "Apple Silicon" TEST_ARCH=x86_64
-expect_failure "old macOS" "macOS 14" TEST_MACOS=13.6
+for unsupported in 14.7 26.9 27 27.0 27.1 27.1.9; do
+  expect_failure "unsupported macOS $unsupported" "macOS 27.2 or later" TEST_MACOS="$unsupported"
+done
+expect_failure "malformed macOS" "cannot read the macOS version" TEST_MACOS=27.invalid
+# Reach the first download failure to prove these versions pass the platform gate,
+# without installing a fixture or accepting a lexicographic minor-version check.
+for supported in 27.2 27.2.1 27.10 28.0; do
+  expect_failure "supported macOS $supported" "download failed" TEST_MACOS="$supported" CURL_MODE=fail
+done
 
 manifest "$sha" | sed 's/9\.9\.9/9.9/' > "$fixtures/latest-release-bad.json"
 cp "$fixtures/latest.json" "$fixtures/latest.json.bak"

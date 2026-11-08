@@ -25,6 +25,7 @@ IDENTITY_KEYS = [
     "SUPublicEDKey",
     "SUFeedURL",
     "SURequireSignedFeed",
+    "LSMinimumSystemVersion",
 ]
 
 
@@ -263,7 +264,7 @@ def prepare(
             "commit": head,
             "platform": "macos",
             "architecture": "arm64",
-            "minimum_macos": "14.0",
+            "minimum_macos": actual["LSMinimumSystemVersion"],
             "name": name,
             "url": prefix + name,
             "size": len(content),

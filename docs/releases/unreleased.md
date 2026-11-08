@@ -2,6 +2,8 @@
 
 Changes after AkiTTY 1.3.10; these are not yet part of a published release.
 
+- Require macOS 27.2 or later for the native Apple Silicon app and installer. Build and qualify Siri with stable Xcode/macOS 27.2. Keep seven default Siri and Shortcuts actions with foreground authentication and native command approval; remove the experimental Siri AI tools, app skills, and preview build mode. Release manifests and Sparkle feeds use the packaged app's minimum OS version.
+
 - Keep zsh history hooks visible to native registration. Removing, re-registering or replacing hooks no longer leaves stale or duplicate callbacks.
 - Preserve autoloaded history hooks and their persistence decisions. A missing hook suppresses folder persistence until it can be observed safely; handled nested failures do not reject otherwise accepted commands.
 - Keep history-hook bookkeeping in private variables so user hooks can read and update their own `result` and `saved` variables without changing privacy decisions.

@@ -32,9 +32,7 @@ final class SiriIntentTests: XCTestCase {
         let entity = try XCTUnwrap(named.first)
         XCTAssertEqual(named.count, 1)
         XCTAssertFalse(entity.summary.contains("PRIVATE_SCROLLBACK"))
-        if #available(macOS 15.4, *) {
-            XCTAssertEqual(first.appEntityIdentifier, EntityIdentifier(for: entity))
-        }
+        XCTAssertEqual(first.appEntityIdentifier, EntityIdentifier(for: entity))
         let focus = FocusTerminalIntent(); focus.terminal = entity
         _ = try await focus.perform()
         XCTAssertTrue(window.active === first)

@@ -9,7 +9,7 @@ engine is linked or bundled. Historical test origins remain documented in
 ## Platforms
 
 AkiTTY Web is the Windows and Linux terminal in this project. The installable AkiTTY app is macOS-only
-(Apple Silicon, macOS 14+). This package has no native Windows or Linux build because it does not need one:
+(Apple Silicon, macOS 27.2+). This package has no native Windows or Linux build because it does not need one:
 it draws to an HTML canvas and parses terminal output with WebAssembly, so the same library runs in a browser
 on Windows, Linux, and macOS.
 
