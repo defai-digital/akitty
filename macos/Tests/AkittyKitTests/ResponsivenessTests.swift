@@ -35,6 +35,31 @@ final class ResponsivenessTests: XCTestCase {
         XCTAssertTrue(TerminalView.pollDue(hidden: true, sinceLast: 0.25))
     }
 
+    /// The idle safety net is one poll per second; the core's wakeup pipe drives the rest.
+    @MainActor func testSafetyPollIntervalIsOneSecond() {
+        XCTAssertEqual(TerminalView.safetyPollInterval, 1)
+    }
+
+    /// A real PTY pane must show shell output without the test calling poll(): either the core's
+    /// notify pipe (visible pane) or the one-second safety tick must deliver it.
+    @MainActor func testRealPTYOutputAppearsWithoutExplicitPoll() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: false, forceSoftware: true)
+        defer { terminal.shutdown() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = terminal
+        defer { window.close() }
+        try terminal.session.input("printf 'CORE_WAKE_MARKER\\n'\r")
+        let start = Date()
+        while terminal.snapshot?.text.contains("CORE_WAKE_MARKER") != true, Date().timeIntervalSince(start) < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(terminal.snapshot?.text.contains("CORE_WAKE_MARKER") == true, "no explicit poll() was issued")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.2, "output must arrive within about one safety interval")
+    }
+
     // MARK: Image textures
 
     func testImagesBeyondTheTextureSideAreSkipped() {

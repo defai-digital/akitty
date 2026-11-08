@@ -54,7 +54,7 @@ final class GraphicsPollingTests: XCTestCase {
     func testWantsFastPollingFollowsAnimationsAndRecentFrameChanges() {
         XCTAssertTrue(TerminalView.wantsFastPolling(animating: true, changedAt: 0, now: 500))
         XCTAssertTrue(TerminalView.wantsFastPolling(animating: false, changedAt: 100, now: 100.5), "a fresh frame still polls at display rate")
-        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 100, now: 101), "idle for a second falls back to 30 Hz")
+        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 100, now: 101), "idle for a second falls back to the safety timer")
         XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 0, now: 10), "nothing ever changed")
     }
 

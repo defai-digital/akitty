@@ -1093,7 +1093,7 @@ final class AkittyTests: XCTestCase {
     }
 
     /// Text output and typing, not only graphics, switch to display-rate polling, so an echo or a scrolling
-    /// screen is shown on the next frame instead of waiting up to 33 ms for the idle timer.
+    /// screen is shown on the next frame instead of waiting up to 1 s for the safety timer.
     @MainActor func testOutputAndTypingPollAtDisplayRate() async throws {
         _ = NSApplication.shared
         func hosted(_ view: TerminalView) -> NSWindow {
