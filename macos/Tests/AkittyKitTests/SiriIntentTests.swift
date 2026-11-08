@@ -150,6 +150,8 @@ final class SiriIntentTests: XCTestCase {
         let terminal = try TerminalView(headless: true, forceSoftware: true)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = terminal
+        // Requests only prompt on an on-screen window; an ordered-out one must fail closed.
+        window.orderFront(nil)
         let socket = root.appendingPathComponent("requests.sock")
         let requests = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: socket.path)
         requests.cooldownInterval = 0
@@ -170,11 +172,13 @@ final class SiriIntentTests: XCTestCase {
             if outcome == "cancel" { pending.cancel() }
             else if outcome == "stop" { requests.stop() }
             else { window.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
-            do { _ = try await pending.value; XCTFail("Denied or cancelled request must fail") } catch {}
+            do { _ = try await pending.value; XCTFail("Denied or cancelled request must fail") }
+            catch { if outcome == "cancel" { XCTAssertTrue(error is CancellationError, "cancellation must not be reported as a denial: \(error)") } }
             XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
         }
         let events = String(decoding: try requests.store.export(), as: UTF8.self)
         XCTAssertTrue(events.contains("siri_shortcuts")); XCTAssertTrue(events.contains("denied"))
+        XCTAssertTrue(events.contains("request_cancelled"), "a cancelled intent must be recorded as cancelled")
         XCTAssertFalse(events.contains("private-command")); XCTAssertFalse(events.contains("\"event\":\"dispatched\""))
         XCTAssertFalse(requests.enabled); XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
         do { _ = try await requests.request("echo after-stop", in: terminal, origin: .siri); XCTFail("Stopped service must reject requests") }
@@ -193,6 +197,7 @@ final class SiriIntentTests: XCTestCase {
         let terminal = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = terminal
+        window.orderFront(nil)
         let requests = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("requests.sock").path)
         defer { requests.stop(); terminal.shutdown(); window.close() }
         let integration = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/AkittyKit/Resources/shell-integration/akitty.zsh")
