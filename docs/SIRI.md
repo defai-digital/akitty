@@ -1,6 +1,6 @@
 # Siri, Shortcuts, and Siri AI
 
-AkiTTY includes six App Intents and matching App Shortcuts. The shortcuts ship
+AkiTTY includes seven App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. Enable Siri
 in macOS and use the installed app. System language, region, device support,
@@ -11,7 +11,8 @@ and Siri settings affect discovery and speech recognition.
 | New Terminal | “Open a new terminal in AkiTTY” | Creates a window with the configured shell and directory; returns its pane reference. |
 | Show Quick Terminal | “Show the quick terminal in AkiTTY” | Shows the persistent quick terminal; repeating the request keeps it visible. |
 | Agent Overview | “Show agents in AkiTTY” | Shows reported activity and input ownership across windows and panes. |
-| List Terminals | “List terminals in AkiTTY” | Returns current panes and bounded reported status. |
+| List Terminals | “List terminals in AkiTTY” | Returns current panes and speaks a brief list of names, including the total count. |
+| Terminal Status | “Get terminal status in AkiTTY” | Prompts for a pane and reads fresh reported activity, input ownership, and shell readiness. |
 | Focus Terminal | “Focus a terminal in AkiTTY” | Prompts for a pane and brings its window and tab forward. |
 | Request Command | “Request a command in AkiTTY” | Prompts for a pane and exact command, then opens the native approval sheet. |
 
@@ -27,8 +28,8 @@ Request Command always requires approval of the exact command and target in
 AkiTTY. Deny is the default. It uses the same command validation, integrated
 shell readiness check, input lease, one-shot authorization, bounded approval
 lifetime, and event recording as local agent requests. Concurrent requests are
-rejected, and cancellation, a closed target, or a stopped request service cannot
-approve a command. Commands run with the shell's existing OS permissions.
+rejected. Cancellation before approval, a closed target, or a stopped request
+service prevents approval. Commands run with the shell's existing OS permissions.
 
 Siri and Shortcuts requests do not enable the local request socket. The
 **Enable Local Agent Requests** setting continues to apply to socket clients.
@@ -57,11 +58,13 @@ New Terminal returns an entity, List Terminals returns entities, and Focus
 Terminal and Request Command accept an entity, so workflows can pass exact pane
 references between actions. On macOS 15.4+, each pane's AppKit view also carries
 its entity identifier for onscreen context. A transferable text representation
-contains its name and reported status. Full terminal output, environment
+contains its name, reported status, host input ownership, and shell-reported
+readiness. Terminal Status reads a fresh core snapshot and resolves the current
+pane instead of repeating fields from a previously returned entity. Full terminal output, environment
 variables, command history, and working-directory fields are not exported or
 persistently indexed by this integration. Program reports remain unverified.
 
-All six actions require local device authentication and run in the foreground.
+All seven actions require local device authentication and run in the foreground.
 macOS 26+ uses `supportedModes`; earlier systems use `openAppWhenRun`. No
 terminal-specific system schema currently models these operations, so AkiTTY
 uses custom entities and actions rather than assigning an unrelated schema.
@@ -69,7 +72,7 @@ uses custom entities and actions rather than assigning an unrelated schema.
 ### Preview builds
 
 The regular build supports macOS 14+. A separate developer-preview build opts
-the same six actions into Siri AI as custom tools:
+the same seven actions into Siri AI as custom tools:
 
 ```sh
 AKITTY_SIRI_AI_PREVIEW=1 bash scripts/build-app.sh debug
@@ -88,11 +91,48 @@ testing are not supported by the preview. Arbitrary natural-language custom
 tool selection, multi-action orchestration, and app skills must therefore be
 qualified separately from the regular App Shortcuts integration.
 
-App skills are not bundled in this version. Their compiler, the Siri Integration
-Advisor, and SiriEvaluations need the preview development environment. AkiTTY
-does not include an agent that can independently complete “fix this project.”
+Two app skill sources are prepared in `macos/Siri/Skills.skillsbundle`: one for
+inspecting terminal activity and one for requesting an exact command. Their
+guidance covers pane disambiguation, fresh status, native approval, and uncertain
+dispatch. They guide Siri; enforcement remains in the native command host.
+
+These sources are not compiled or bundled by `build-app.sh`. The source checker
+validates Apple's documented directory structure, metadata, and length limits;
+it does not replace Apple's skills compiler. Compiling them into the main app
+through the preview Xcode build pipeline and verifying their selection remain
+outstanding. The Siri Integration Advisor and SiriEvaluations also need that
+preview development environment. AkiTTY does not include an agent that can independently complete “fix this project.”
 Request Command submits a shell command for approval, not an open-ended task to
 an external coding agent.
+
+### Upgrade the development environment
+
+Xcode 27.3 beta includes the macOS 27.3 SDK and can run on this project's current
+macOS 27.2 host. Download it from Apple's authenticated developer downloads and
+install it alongside the stable Xcode app. Select it for a build with
+`DEVELOPER_DIR` rather than replacing the machine-wide toolchain selection:
+
+For an `.aea` package, wait for the browser download to finish, then extract it
+using Apple's bundled tool:
+
+```sh
+archiveutil extractXcodeAEA /path/to/Xcode_27.3_beta.aea
+```
+
+Keep the extracted app alongside the existing Xcode installation, for example
+at `/Applications/Xcode-27.3-beta.app`, and complete Xcode's first-launch setup.
+Use that installation for a preview build:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode-27.3-beta.app/Contents/Developer \
+    AKITTY_SIRI_AI_PREVIEW=1 bash scripts/build-app.sh debug
+```
+
+Installing that SDK permits preview compilation on macOS 27.2; running the
+27.3-targeted app and qualifying Siri AI additionally require a macOS 27.3
+device and the development signing described above. Confirm the installed
+Xcode version and SDK with `xcodebuild -version` and
+`xcrun --sdk macosx --show-sdk-version` under that `DEVELOPER_DIR`.
 
 ## Implementation plan and build verification
 
@@ -104,7 +144,7 @@ The implementation follows these steps:
    closed or stale references, and annotate the corresponding AppKit views.
 3. Reuse native command approval and event handling for both system intents and
    existing socket clients; preserve cancellation and uncertain-dispatch handling.
-4. Extract library metadata, merge it into app metadata, validate the six default
+4. Extract library metadata, merge it into app metadata, validate the seven default
    shortcuts and entity declarations, and train the phrases before signing.
 5. Test pane resolution, startup, visibility, cancellation, denial, and real PTY
    dispatch, then qualify actual Siri recognition on supported devices.
@@ -125,17 +165,22 @@ Automated checks:
 ```sh
 swift test --package-path macos
 python3 scripts/test_siri_metadata.py
+python3 scripts/test_siri_skills.py
+python3 scripts/check-siri-skills.py
 bash scripts/build-app.sh debug
 ```
 
 Device qualification still needs the following checks on the installed bundle:
 
-- Confirm that all six actions appear under AkiTTY in Shortcuts and Spotlight.
+- Confirm that all seven actions appear under AkiTTY in Shortcuts and Spotlight.
 - Invoke each listed phrase with Siri, with the app both closed and running.
   New Terminal must create one window, and Show Quick Terminal must keep the
   existing quick terminal visible on repeated requests.
 - Select among similarly named panes, focus a background tab and hidden quick
   terminal, close a selected pane, and restart AkiTTY with an old pane reference.
+- Invoke Terminal Status after a program report or input-ownership change.
+  Verify its spoken response distinguishes unverified reports from host control,
+  and that List Terminals remains brief when many panes are open.
 - Request a harmless command such as `pwd`; deny it, cancel it, then explicitly
   approve it. Verify the target, lease, and event timeline. Check locked-device
   authentication and timeout behavior.
@@ -155,3 +200,4 @@ Device qualification still needs the following checks on the installed bundle:
 - [Siri AI Developer Preview](https://developer.apple.com/documentation/appintents/siri-ai-developer-preview)
 - [Bringing custom actions and content to Siri](https://developer.apple.com/documentation/appintents/bringing-custom-actions-and-content-to-siri)
 - [Orchestrating complex actions with app skills](https://developer.apple.com/documentation/appintents/orchestrating-complex-actions-with-app-skills)
+- [Xcode SDK and system requirements](https://developer.apple.com/xcode/system-requirements)

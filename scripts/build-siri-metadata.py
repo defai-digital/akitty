@@ -8,7 +8,7 @@ import tempfile
 
 INTENTS = {
     "NewTerminalIntent", "ShowQuickTerminalIntent", "ShowAgentOverviewIntent",
-    "ListTerminalsIntent", "FocusTerminalIntent", "RequestCommandIntent",
+    "ListTerminalsIntent", "GetTerminalStatusIntent", "FocusTerminalIntent", "RequestCommandIntent",
 }
 
 
