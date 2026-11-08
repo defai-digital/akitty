@@ -262,6 +262,8 @@ for implementation details.
   open in their folder, and at most 8 folders open per request; skipped items are reported.
 - A native command palette ranked by bundled TypeScript through JavaScriptCore.
   It adapts AX TUI's fuzzy ranking without importing its Zig-backed renderer.
+- Built-in [Siri and App Shortcuts](docs/SIRI.md) to open and focus terminals,
+  show agent activity, and request an exact shell command through native approval.
 - A versioned C ABI, explicit memory ownership, panic containment and tests across
   Rust, C, Swift and TypeScript.
 
@@ -366,7 +368,9 @@ These are remaining qualification goals for the implemented features. See the
 
 ## Build and run
 
-Requires macOS 14+, Xcode/Command Line Tools with Swift 6, Rust 1.99.1 and Node 22+.
+Requires macOS 14+, Rust 1.99.1 and Node 22+. App bundle packaging requires
+Xcode 27.2+ with its Swift build engine to extract Siri metadata. The optional
+[Siri AI developer-preview build](docs/SIRI.md#preview-builds) requires the macOS 27.3+ SDK.
 Dependency lockfiles are pinned. Build scripts select the pinned rustup toolchain,
 or accept an installed distribution toolchain with that exact compiler version.
 To rebuild the Web WASM, install `wasm32-unknown-unknown` or matching Rust sources
