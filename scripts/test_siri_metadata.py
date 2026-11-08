@@ -5,6 +5,8 @@ import tempfile
 import json
 import os
 import unittest
+from unittest.mock import patch
+import subprocess
 
 spec = importlib.util.spec_from_file_location("siri_metadata", Path(__file__).with_name("build-siri-metadata.py"))
 metadata = importlib.util.module_from_spec(spec)
@@ -19,11 +21,11 @@ class SiriMetadataTests(unittest.TestCase):
             "entities": {"TerminalEntity": {}},
         }
 
-    def validate(self, value):
+    def validate(self, value, preview=False):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "extract.actionsdata"
             path.write_text(json.dumps(value))
-            return metadata.validate_metadata(path)
+            return metadata.validate_metadata(path, preview=preview)
 
     def test_actions_without_library_shortcuts_fail_packaging(self):
         data = self.fixture()
@@ -74,6 +76,52 @@ class SiriMetadataTests(unittest.TestCase):
                 self.assertEqual(metadata.module_constants(root, module, anchor, "arm64"), [primary])
                 with self.assertRaisesRegex(ValueError, "Missing Swift intent constants"):
                     metadata.module_constants(root, module, anchor, "x86_64")
+
+    def test_preview_rejects_constants_without_every_tool_conformance(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "SiriIntents.swiftconstvalues"
+            declarations = [{"typeName": "AkittyKit." + name, "conformances": ["AppIntents.AppIntent", "AppIntents.ToolIntent"]}
+                            for name in sorted(metadata.INTENTS)]
+            path.write_text(json.dumps(declarations))
+            metadata.validate_preview_constants([path])
+            declarations[0]["conformances"] = ["AppIntents.AppIntent"]
+            path.write_text(json.dumps(declarations))
+            with self.assertRaisesRegex(ValueError, "tool conformances"):
+                metadata.validate_preview_constants([path])
+
+    def test_preview_requires_tool_registrations_in_final_metadata(self):
+        data = self.fixture()
+        for action in data["actions"].values():
+            action["systemProtocols"] = ["com.apple.link.systemProtocol.ToolIntent"]
+        self.validate(data, preview=True)
+        data["actions"]["RequestCommandIntent"]["systemProtocols"] = []
+        with self.assertRaisesRegex(ValueError, "tool registrations"):
+            self.validate(data, preview=True)
+        self.validate(data)
+
+    def test_skills_compilation_requires_a_fresh_nonempty_artifact(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            bundle = output / "Skills.skillsbundle"
+            artifact = output / "Skills.skillsc"
+            with patch.object(metadata.subprocess, "run"):
+                with self.assertRaisesRegex(ValueError, "did not produce"):
+                    metadata.compile_skills(bundle, output)
+            def compiler(command, **kwargs):
+                if "appintentsskillsprocessor" in command:
+                    artifact.write_bytes(b"compiled fixture")
+            with patch.object(metadata.subprocess, "run", side_effect=compiler):
+                self.assertEqual(metadata.compile_skills(bundle, output), artifact)
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    metadata.compile_skills(bundle, output)
+            artifact.unlink()
+            def failing_compiler(command, **kwargs):
+                if "appintentsskillsprocessor" in command:
+                    artifact.write_bytes(b"partial output")
+                    raise subprocess.CalledProcessError(1, command)
+            with patch.object(metadata.subprocess, "run", side_effect=failing_compiler):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    metadata.compile_skills(bundle, output)
 
 
 if __name__ == "__main__":
