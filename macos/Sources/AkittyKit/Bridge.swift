@@ -172,6 +172,12 @@ private struct SnapshotReply: Decodable {
     }
 }
 public struct Cursor: Codable, Sendable { public let row: Int; public let col: Int; public let visible: Bool }
+/// `data.cells_binary`: the cell count and byte length of the block after the NUL separator.
+public struct CellsBinary: Codable, Sendable {
+    public let version: UInt8
+    public let count: Int
+    public let bytes: Int
+}
 
 public struct ChromeStatus: Codable, Equatable, Sendable {
     public let text: String
@@ -368,6 +374,8 @@ public struct Snapshot: Codable, Sendable {
     public let program_status: ProgramStatus?
     /// For a partial snapshot, only the cells of the `dirty` rows; `TerminalSession.snapshot` merges them.
     public internal(set) var cells: [Cell]
+    /// Metadata for the negotiated binary cell block; absent when cells arrived as JSON.
+    public internal(set) var cells_binary: CellsBinary?
     /// For a partial snapshot, the text of the `dirty` rows in order.
     public internal(set) var lines: [String]
     public let partial: Bool?
@@ -441,6 +449,8 @@ public struct Snapshot: Codable, Sendable {
         }
         result.cells = merged
         result.lines = newLines
+        // The merged cells no longer correspond to any one wire block.
+        result.cells_binary = nil
         // A partial snapshot may not repeat the animation flag, but the animation is still running.
         if result.animating == nil { result.animating = animating }
         return result
@@ -530,16 +540,33 @@ public final class TerminalSession: @unchecked Sendable {
     /// Pass the snapshot you hold as `base` (and its revision as `since`) to receive only the rows that changed;
     /// the result is always a complete snapshot.
     public func snapshot(since: UInt64? = nil, base: Snapshot? = nil) throws -> Snapshot? {
+        try snapshot(since: since, base: base, binary: !Self.jsonCellsForced)
+    }
+    /// `binary` negotiates the cell block; any decode failure falls back to the JSON cells once.
+    func snapshot(since: UInt64?, base: Snapshot?, binary: Bool) throws -> Snapshot? {
         // Only the closed check needs the lock. Holding it across the core call would make main-thread
         // input, resize and mouse reports wait behind a large background snapshot. Session IDs are never
         // reused, so a close that lands meanwhile just makes the core answer with an error.
         guard !isClosed else { throw AkittyError.core("Session is closed") }
         var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true, "allow_shift": true]
         if let since { request["since"] = since }
+        if binary { request["cells"] = "binary" }
         let data = try CoreBridge.raw(request)
         // An idle pane answers with this same handful of bytes every poll; skip the scan and decode.
         if data == Self.unchangedEnvelope { return nil }
-        // The cells are most of a busy snapshot; they are read by hand and the rest by JSONDecoder.
+        if binary {
+            do { return try decodeBinarySnapshot(data, since: since, base: base) }
+            catch {
+                // A missing NUL, a bad block or a core that ignores the negotiation falls back to JSON.
+                // Re-request a full snapshot: the failed reply may already have committed one-shot events,
+                // so a diff against the old base could lose them.
+                return try snapshot(since: nil, base: nil, binary: false)
+            }
+        }
+        return try decodeJSONSnapshot(data, since: since, base: base)
+    }
+    /// The existing transport: read `data.cells` by hand and the rest with JSONDecoder.
+    private func decodeJSONSnapshot(_ data: Data, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
         let scanned = CellScanner.split(data)
         let reply = try JSONDecoder().decode(SnapshotReply.self, from: scanned?.rest ?? data)
         guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
@@ -547,14 +574,43 @@ public final class TerminalSession: @unchecked Sendable {
         switch reply.data {
         case .full(var snapshot):
             if let scanned { snapshot.cells = scanned.cells }
-            guard snapshot.partial == true else { return snapshot }
-            // A partial snapshot only makes sense on top of the exact snapshot it was computed against.
-            guard let base, base.revision == since, let merged = base.applying(snapshot) else { return try self.snapshot() }
-            return merged
+            return try finish(snapshot, since: since, base: base)
         case .unchanged: return nil
         case nil: throw AkittyError.core("Missing response data")
         }
     }
+    /// The negotiated transport: JSON head, one NUL separator, then the version-1 cell block.
+    private func decodeBinarySnapshot(_ data: Data, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
+        guard let separator = data.firstIndex(of: 0) else { throw AkittyError.core("Missing binary cell separator") }
+        let head = data[..<separator]
+        let block = data[data.index(after: separator)...]
+        let reply = try JSONDecoder().decode(SnapshotReply.self, from: head)
+        guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
+        guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
+        switch reply.data {
+        case .full(var snapshot):
+            guard let meta = snapshot.cells_binary, meta.version == 1, meta.bytes == block.count,
+                  let cells = try? CellBlock.decode(block, count: meta.count) else {
+                throw AkittyError.core("Invalid binary cell block")
+            }
+            snapshot.cells = cells
+            return try finish(snapshot, since: since, base: base)
+        case .unchanged: return nil
+        case nil: throw AkittyError.core("Missing response data")
+        }
+    }
+    /// Common partial-snapshot handling for both transports.
+    private func finish(_ snapshot: Snapshot, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
+        guard snapshot.partial == true else { return snapshot }
+        // A partial snapshot only makes sense on top of the exact snapshot it was computed against.
+        // The resync is a full frame, the case the binary block speeds up most; it still falls back to JSON.
+        guard let base, base.revision == since, let merged = base.applying(snapshot) else {
+            return try self.snapshot(since: nil, base: nil, binary: !Self.jsonCellsForced)
+        }
+        return merged
+    }
+    /// `AKITTY_JSON_CELLS=1` forces the JSON cell path, for transport comparisons and fallback tests.
+    private static let jsonCellsForced = ProcessInfo.processInfo.environment["AKITTY_JSON_CELLS"] == "1"
     /// RGBA pixels of a stored graphics image, or nil if it changed size or was removed meanwhile.
     public func imagePixels(_ image: UInt32, width: Int, height: Int) -> Data? {
         // Check the pixel cap before multiplication so even Int.max input fails safely.
