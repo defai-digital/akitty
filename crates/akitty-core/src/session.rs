@@ -244,8 +244,13 @@ impl Session {
                 let mut state = poisoned.into_inner();
                 // Keep an error the panic path already published; only the first recovery names it.
                 if state.error.is_none() { state.error = Some(ENGINE_FAILED.into()); }
+                let exited = state.exited;
                 drop(state);
-                if self.commands.is_some() {
+                if exited {
+                    // The worker already reached (or is about to reach) its own finalize, which will not run again:
+                    // clear the poison here so the exit and its error stay observable instead of failing forever.
+                    self.model.clear_poison();
+                } else if self.commands.is_some() {
                     // The worker owns finalize: stop it so it publishes `exited` and clears the poison.
                     self.stop.store(true, Ordering::SeqCst);
                     self.wake();
@@ -353,6 +358,11 @@ impl Session {
     /// Read end of the host-notification pipe. The core owns both ends and closes them with the
     /// session, so the host must cancel its reader before `close`/drop instead of closing the fd.
     /// Headless sessions have no worker, so they return an error and the host polls explicitly.
+    /// Wakes the host after a host-side change it may not poll for itself (an agent lease, a denial, chrome).
+    /// A spurious wake costs one unchanged poll. Never call it for reads, or a snapshot would wake its own poller.
+    pub(crate) fn notify_host(&self) {
+        if let Some(notify) = &self.notify { notify.signal(); }
+    }
     pub fn notify_fd(&self) -> Result<Value, String> {
         let notify = self.notify.as_ref().ok_or("headless session has no notification pipe")?;
         Ok(json!({"fd": notify.read_fd()}))
@@ -1518,6 +1528,26 @@ mod tests {
                 }
             }
         }
+        session.close().unwrap();
+    }
+
+    #[test]
+    fn a_poison_after_the_shell_exited_is_cleared_and_keeps_the_exit_code() {
+        let session = Session::new(40, 8, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        session.input("exit 3\r".into(), false).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !lock_model(&session.model).exited {
+            assert!(Instant::now() < deadline, "the shell did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Give the worker time to run its one finalize; a later poison has no worker left to clear it.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        poison(&session.model);
+        assert_eq!(session.scroll(1).unwrap_err(), ENGINE_FAILED);
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(snapshot["exited"], true, "{snapshot}");
+        assert_eq!(snapshot["exit_code"], 3, "the real exit code must survive the recovery: {snapshot}");
+        assert_eq!(snapshot["error"], ENGINE_FAILED, "{snapshot}");
         session.close().unwrap();
     }
 
