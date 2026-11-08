@@ -170,10 +170,18 @@ final class PasteTests: XCTestCase {
         app.makeMenu()
         window.contentView?.addSubview(terminal)
         window.makeKeyAndOrderFront(nil); window.makeFirstResponder(terminal)
-        for _ in 0..<200 where !FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path) {
+        // Cold system Python startup can exceed two seconds on a busy macOS
+        // runner. Wait for readiness separately from the paste assertions.
+        let ready = root.appendingPathComponent("ready")
+        let startupDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !FileManager.default.fileExists(atPath: ready.path), ContinuousClock.now < startupDeadline {
+            if try terminal.session.snapshot()?.exited == true { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path))
+        guard FileManager.default.fileExists(atPath: ready.path) else {
+            XCTFail("PTY reader exited or did not become ready within ten seconds")
+            return
+        }
         for _ in 0..<100 where try terminal.session.snapshot()?.bracketed_paste != true {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
