@@ -3,7 +3,7 @@
 //! Every input chunk is applied in order. Content movement events describe actual
 //! grid mutations, so consumers never need to simulate scrolling a second time.
 
-use crate::cell::{self, Cell, Color, Palette, Style};
+use crate::cell::{self, Cell, Color, Combining, Link, Palette, Style};
 use crate::parser::{Action, Csi, Parser, StringKind, Terminator};
 use crate::screen::{Cursor, Position, Screen};
 use base64::Engine;
@@ -135,7 +135,7 @@ pub struct Terminal {
     pub cell_pixels: (u32, u32),
     pub revision: u64,
     pub title: String,
-    link: Option<Arc<str>>,
+    link: Option<Arc<Link>>,
     link_id: u32,
     title_stack: Vec<String>,
     saved_state: [SavedState; 2],
@@ -148,6 +148,7 @@ pub struct Terminal {
     sync_bytes: usize,
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
+    cluster_scratch: String,
     pub preserve_erased_screen: bool,
     pub title_max_bytes: usize,
     pub title_max_chars: usize,
@@ -191,6 +192,7 @@ impl Terminal {
             sync_bytes: 0,
             grapheme_supported: false,
             grapheme_target: None,
+            cluster_scratch: String::new(),
             preserve_erased_screen: true,
             title_max_bytes: crate::parser::MAX_STRING_BYTES,
             title_max_chars: 128,
@@ -432,14 +434,12 @@ impl Terminal {
         }
         let style = self.style;
         let link = self.link.clone();
-        let link_id = if link.is_some() { self.link_id } else { 0 };
         self.screen_mut().rows[pos.row].cells[pos.col] = Cell {
             ch,
             width: width as u8,
             style,
             link: link.clone(),
-            link_id,
-            combining: Vec::new(),
+            combining: Combining::new(),
             written: true,
         };
         if width == 2 {
@@ -447,7 +447,6 @@ impl Terminal {
                 width: 0,
                 style,
                 link,
-                link_id,
                 ..Cell::default()
             };
         }
@@ -462,21 +461,35 @@ impl Terminal {
         let Some(mut position) = self.grapheme_target else {
             return false;
         };
-        let previous = &self.screen().rows[position.row].cells[position.col];
-        if ch.is_ascii() && previous.ch.is_ascii() && previous.combining.is_empty() {
-            return false;
+        {
+            let previous = &self.screen().rows[position.row].cells[position.col];
+            if ch.is_ascii() && previous.ch.is_ascii() && previous.combining.is_empty() {
+                return false;
+            }
         }
-        let mut cluster = previous.text();
+        // Build the candidate cluster in a reused buffer instead of allocating a fresh
+        // String for every printed non-ASCII character. It is moved back out below and
+        // restored on every early return.
+        let mut cluster = std::mem::take(&mut self.cluster_scratch);
+        cluster.clear();
+        let previous = &self.screen().rows[position.row].cells[position.col];
+        if previous.width != 0 {
+            cluster.push(previous.ch);
+            cluster.extend(&previous.combining);
+        }
         cluster.push(ch);
         if cluster.graphemes(true).nth(1).is_some() {
+            self.cluster_scratch = cluster;
             return false;
         }
         if previous.combining.len() >= cell::MAX_COMBINING {
+            self.cluster_scratch = cluster;
             return true;
         }
         let mut cell = previous.clone();
         let old_width = usize::from(cell.width);
         let width = cluster.width().clamp(1, 2).min(self.cols());
+        self.cluster_scratch = cluster;
         cell.combining.push(ch);
         cell.width = width as u8;
         if position.col + width > self.cols() {
@@ -497,7 +510,6 @@ impl Terminal {
             width: 0,
             style: cell.style,
             link: cell.link.clone(),
-            link_id: cell.link_id,
             ..Cell::default()
         };
         let row = &mut self.screen_mut().rows[position.row];
@@ -1000,7 +1012,7 @@ impl Terminal {
                     self.save_cursor();
                 }
                 if enabled && mode != 47 {
-                    self.alternate = Screen::new(self.cols(), self.rows(), 0, true);
+                    self.alternate.clear();
                     self.saved_state[1] = SavedState::default();
                 }
                 self.modes.alternate = enabled;
@@ -1180,14 +1192,14 @@ impl Terminal {
             Some(8) => {
                 if let Some(split) = body.iter().position(|&b| b == b';') {
                     let uri = &body[split + 1..];
-                    self.link = std::str::from_utf8(uri)
-                        .ok()
-                        .filter(|s| {
-                            !s.is_empty() && s.len() <= 2048 && !s.chars().any(char::is_control)
-                        })
-                        .map(Arc::from);
-                    if self.link.is_some() {
+                    let uri = std::str::from_utf8(uri).ok().filter(|s| {
+                        !s.is_empty() && s.len() <= 2048 && !s.chars().any(char::is_control)
+                    });
+                    if let Some(uri) = uri {
                         self.link_id = self.link_id.wrapping_add(1).max(1);
+                        self.link = Some(Arc::new(Link { id: self.link_id, uri: uri.into() }));
+                    } else {
+                        self.link = None;
                     }
                 }
             }
@@ -1319,9 +1331,7 @@ impl Terminal {
                 Some(Color::Indexed(index)) => parts.push(format!("{selector};5;{index}")),
                 Some(Color::Rgb(rgb)) => parts.push(format!(
                     "{selector};2;{};{};{}",
-                    (rgb >> 16) & 255,
-                    (rgb >> 8) & 255,
-                    rgb & 255
+                    rgb[0], rgb[1], rgb[2]
                 )),
                 _ => {}
             }
@@ -1389,7 +1399,7 @@ impl Terminal {
         self.main.keyboard_flags = 0;
         self.main.selection = None;
         self.main.tabs = (0..cols).map(|col| col != 0 && col % 8 == 0).collect();
-        self.alternate = Screen::new(cols, rows, 0, true);
+        self.alternate.clear();
         self.modes = Modes::default();
         self.style = Style::default();
         self.palette.reset();

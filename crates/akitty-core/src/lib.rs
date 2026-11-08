@@ -405,3 +405,25 @@ pub unsafe extern "C" fn akitty_buffer_free_v1(buffer: AkittyBuffer) {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Swift idle-poll shortcut compares the unchanged reply byte-for-byte, so the
+    /// wire bytes are pinned here; a change on either side breaks this test first.
+    #[test]
+    fn unchanged_snapshot_envelope_is_exact() {
+        let created: Value =
+            serde_json::from_slice(&respond(br#"{"op":"create","cols":20,"rows":4,"headless":true}"#)).unwrap();
+        let id = created["data"]["id"].as_u64().expect("session id");
+        let full: Value =
+            serde_json::from_slice(&respond(format!(r#"{{"op":"snapshot","id":{id}}}"#).as_bytes())).unwrap();
+        assert_eq!(full["ok"], true, "first snapshot failed: {full}");
+        let revision = full["data"]["revision"].as_u64().expect("revision");
+        let unchanged =
+            respond(format!(r#"{{"op":"snapshot","id":{id},"since":{revision},"compact":true,"allow_shift":true}}"#).as_bytes());
+        assert_eq!(unchanged.as_slice(), br#"{"version":1,"ok":true,"data":{"changed":false}}"#.as_slice());
+        let _ = respond(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
+    }
+}

@@ -172,11 +172,19 @@ import os
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // The display link belongs to the view's display, so it is dropped with the window.
-        if window == nil { stopRefreshLink() } else { updatePolling() }
+        if window == nil {
+            stopRefreshLink()
+            // A background tab's pane keeps no window-sized pixels; it repaints in full when it is shown again.
+            pendingDamage = nil; bitmap = nil; presenter?.releaseTextures()
+            let rasterizer = self.rasterizer
+            rasterQueue.async { rasterizer.releaseFrames() }
+        } else { updatePolling() }
         resizeTerminal(); poll(); showClipboardRequest()
+        // A pane whose snapshot did not change (the poll answers "unchanged") still gets its bitmap back here.
+        if window != nil { redraw() }
     }
     public override func layout() { super.layout(); presenter?.view.frame = bounds; resizeTerminal(); redraw() }
-    // NSTabView hides the views of unselected tabs, so these fire on tab switches without a window move.
+    // A deselected NSTabView tab leaves the window (see viewDidMoveToWindow); these cover views hidden in place.
     public override func viewDidHide() { super.viewDidHide(); updatePolling() }
     public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll() }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
@@ -380,7 +388,8 @@ import os
                     guard !self.stopped else { return }
                     do {
                         let frame = try result.get()
-                        if size == self.bounds.size, let presenter = self.presenter {
+                        // A frame that finished after the pane left its window would re-retain the pixels just released.
+                        if size == self.bounds.size, self.window != nil, let presenter = self.presenter {
                             try presenter.updateLayers(background: frame.background, foreground: frame.foreground, damage: frame.damage, grid: grid,
                                                        placements: self.snapshot?.images ?? snapshot.images ?? [], pixels: self.imageStore.entries)
                         } else { self.pendingDamage = nil }
@@ -397,7 +406,7 @@ import os
                 guard !self.stopped else { return }
                 do {
                     let frame = try result.get()
-                    if size == self.bounds.size {
+                    if size == self.bounds.size, self.window != nil {
                         self.bitmap = frame.context
                         if let presenter = self.presenter { do { try presenter.update(bitmap: frame.context, damage: frame.damage) } catch { self.renderFailed(error.localizedDescription) } }
                         self.needsDisplay = true

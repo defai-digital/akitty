@@ -33,7 +33,15 @@ Establish repeatable baselines before changing hot paths. Priorities are:
 - The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
   up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
 - Hidden panes (background tabs, occluded windows, a hidden app) poll at 4 Hz; the
-  view polls again when shown. Minimized-window rasterization remains to measure.
+  view polls again when shown. A pane in a background tab releases its window-sized
+  bitmaps and Metal textures and repaints in full when selected again. Minimized-window
+  rasterization remains to measure.
+- Engine cells are 40 bytes (packed colours, boxed combining marks, one shared
+  hyperlink record per OSC 8 target), so grid and scrollback memory halved and the
+  64 MiB history cap retains twice as many rows. Printable ASCII bypasses the parser
+  state machine, the alternate screen is blanked in place, and snapshots resolve the
+  selection range once rather than per cell. Measured on the same Mac with the
+  committed benchmark: see `benchmarks/baseline-macos-arm64.json`.
 - Extend malformed-input and stream-chunking coverage, including graphics/chrome
   sequences, Unicode, resets, resize, and partial/full snapshot equivalence.
 - Stress repeated open/close, shell exit during output, resize/input bursts,

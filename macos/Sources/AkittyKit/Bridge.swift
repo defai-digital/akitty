@@ -469,6 +469,8 @@ public final class TerminalSession: @unchecked Sendable {
     private let lock = NSLock()
     public let id: UInt64
     private var closed = false
+    /// The core's exact reply when nothing changed since `since`; matched byte-for-byte so an idle poll decodes nothing.
+    private static let unchangedEnvelope = Data(#"{"version":1,"ok":true,"data":{"changed":false}}"#.utf8)
     public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000, shellIntegrationDirectory: String? = nil, folderHistory: Bool = true) throws {
         var request: [String: Any] = ["op": "create", "cols": cols, "rows": rows, "headless": headless, "scrollback": scrollback]
         if let shell, !shell.isEmpty { request["shell"] = shell }
@@ -535,6 +537,8 @@ public final class TerminalSession: @unchecked Sendable {
         var request: [String: Any] = ["op": "snapshot", "id": id, "compact": true, "allow_shift": true]
         if let since { request["since"] = since }
         let data = try CoreBridge.raw(request)
+        // An idle pane answers with this same handful of bytes every poll; skip the scan and decode.
+        if data == Self.unchangedEnvelope { return nil }
         // The cells are most of a busy snapshot; they are read by hand and the rest by JSONDecoder.
         let scanned = CellScanner.split(data)
         let reply = try JSONDecoder().decode(SnapshotReply.self, from: scanned?.rest ?? data)
