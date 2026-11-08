@@ -1,4 +1,5 @@
 import AppKit
+import AppIntents
 
 /// A close request must not enter a nested application-modal event loop or
 /// enqueue more confirmations behind a sheet the user is already answering.
@@ -759,14 +760,20 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
 }
 
 @MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
-    private var windows: [TerminalWindow] = []
+    private(set) var windows: [TerminalWindow] = []
+    let intentInstance = UUID().uuidString
     private var eventMenuItem: NSMenuItem?
     private lazy var agentRequests: AgentRequests = {
         let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
         requests.onFailure = { [weak self] message in self?.eventMenuItem?.title = "Agent Event Timeline (recording warning)…"; self?.eventMenuItem?.toolTip = message }
         return requests
     }()
-    func registerAgentTerminal(_ terminal: TerminalView) { agentRequests.register(terminal) }
+    func registerAgentTerminal(_ terminal: TerminalView) {
+        agentRequests.register(terminal)
+        if #available(macOS 15.4, *) {
+            terminal.appEntityIdentifier = EntityIdentifier(for: TerminalEntity.self, identifier: intentID(for: terminal))
+        }
+    }
     @objc private func toggleAgentRequests(_ sender: NSMenuItem) {
         do { try agentRequests.setEnabled(!agentRequests.enabled); sender.state = agentRequests.enabled ? .on : .off }
         catch { NSAlert(error: error).runModal() }
@@ -783,6 +790,16 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     func configureQuickTerminal(_ preferences: TerminalPreferences) throws { try quickTerminal.configure(preferences) }
     @objc private func toggleQuickTerminal(_ sender: Any?) {
         do { try quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
+    }
+    func showQuickTerminal() throws {
+        try quickTerminal.show()
+        if !launched { openedFolderAtLaunch = true }
+    }
+    func revealQuickTerminalIfNeeded(_ window: TerminalWindow) throws {
+        if window === quickTerminal.terminalWindow { try showQuickTerminal() }
+    }
+    func requestSiriCommand(_ command: String, in terminal: TerminalView) async throws {
+        _ = try await agentRequests.request(command, in: terminal, origin: .siri)
     }
     public func applicationWillTerminate(_ notification: Notification) { agentRequests.stop(); quickTerminal.stop() }
     let updates = UpdateController()
@@ -811,8 +828,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
         makeMenu()
         do { try configureQuickTerminal(.load()) } catch { NSAlert(error: error).runModal() }
-        // A cold launch for a folder delivers application(_:open:) before this; that window replaces the default one.
-        if !openedFolderAtLaunch { newWindow(nil) }
+        // Intent/service launches must not create an extra shell. A folder or
+        // intent delivered before didFinishLaunching also replaces the default.
+        let defaultLaunch = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
+        do { try createInitialWindowIfNeeded(defaultLaunch: defaultLaunch) } catch { NSAlert(error: error).runModal() }
         NSApp.activate(ignoringOtherApps: true); updates.start()
     }
     public func application(_ sender: NSApplication, open urls: [URL]) {
@@ -826,9 +845,19 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if launched { NSApp.activate(ignoringOtherApps: true) }
     }
     @objc public func newWindow(_ sender: Any?) { newWindow(directory: nil) }
+    func createInitialWindowIfNeeded(defaultLaunch: Bool, headless: Bool = false) throws {
+        if !openedFolderAtLaunch && defaultLaunch { try createTerminalWindow(headless: headless) }
+    }
     func newWindow(directory: String?) {
-        do { let controller = try TerminalWindow(app: self, directory: directory); windows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil) }
+        do { _ = try createTerminalWindow(directory: directory) }
         catch { NSAlert(error: error).runModal() }
+    }
+    @discardableResult func createTerminalWindow(directory: String? = nil, headless: Bool = false) throws -> TerminalWindow {
+        let controller = try TerminalWindow(app: self, headless: headless, directory: directory)
+        windows.append(controller)
+        if !launched { openedFolderAtLaunch = true }
+        controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        return controller
     }
     fileprivate func remove(_ controller: TerminalWindow) { quickTerminal.closed(controller); windows.removeAll { $0 === controller } }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

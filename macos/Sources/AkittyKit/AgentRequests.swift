@@ -15,6 +15,9 @@ import AgentIPC
     private var reports: [UInt64: [String: Int]] = [:]
     private weak var pendingWindow: NSWindow?
     private weak var pendingSheet: NSWindow?
+    private var activeRequest: UUID?
+    private var pendingLocalRequest = false
+    private var stopped = false
     private var timeline: NSWindowController?
     private var nextPromptTime: TimeInterval = 0
     var cooldownInterval: TimeInterval = 3
@@ -46,6 +49,7 @@ import AgentIPC
     }
     func setEnabled(_ value: Bool) throws {
         if value {
+            guard !stopped else { throw AkittyError.core("Request service has stopped.") }
             startRecording()
             try server.start { [weak self] data, peer in
                 guard let self else { return Data("{\"version\":1,\"ok\":false,\"error\":\"Host stopped\"}".utf8) }
@@ -54,10 +58,13 @@ import AgentIPC
             enabled = true
         } else {
             enabled = false; server.stop()
-            if let sheet = pendingSheet, pendingWindow?.attachedSheet === sheet { pendingWindow?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+            if pendingLocalRequest { cancelPendingApproval() }
         }
     }
-    func stop() { try? setEnabled(false); collectAll(); timer?.invalidate(); timer = nil }
+    func stop() { stopped = true; cancelPendingApproval(); try? setEnabled(false); collectAll(); timer?.invalidate(); timer = nil }
+    private func cancelPendingApproval() {
+        if let sheet = pendingSheet, pendingWindow?.attachedSheet === sheet { pendingWindow?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+    }
     private func persist(event: String, id: UInt64, provenance: String = "host", fields: [String: Any] = [:]) {
         later(event, session: sessions[id] ?? "unknown", provenance: provenance, fields: ["pane_session_id": id].merging(fields) { _, new in new })
     }
@@ -93,8 +100,87 @@ import AgentIPC
         } catch { failure = error.localizedDescription }
     }
     private func paneID(_ terminal: TerminalView) -> String { "\(instance)/\(terminal.session.id)" }
+    enum Origin {
+        case localProcess(LocalPeer), siri
+        var actor: String {
+            switch self { case .localProcess(let peer): return "local process \(peer.pid)"; case .siri: return "Siri / Shortcuts" }
+        }
+        func isValid(enabled: Bool) -> Bool {
+            switch self { case .localProcess(let peer): return enabled && peer.connected; case .siri: return true }
+        }
+        var fields: [String: Any] {
+            switch self {
+            case .localProcess(let peer): return ["peer_uid": peer.uid, "peer_pid": peer.pid]
+            case .siri: return ["request_source": "siri_shortcuts"]
+            }
+        }
+        var explanation: String {
+            switch self {
+            case .localProcess(let peer): return "Connection opened by OS process \(peer.pid), user \(peer.uid). Agent/product identity and shell-reported directory are not verified. This command uses your shell's permissions. Reclaim returns input without stopping it."
+            case .siri: return "Requested through Siri or Shortcuts. Review the exact command and target; speech recognition may differ from what you intended. The directory is reported by the shell and is not verified. This command uses your shell's permissions. Reclaim returns input without stopping it."
+            }
+        }
+    }
+    /// System intents and socket requests share approval and audit handling.
+    /// Siri does not enable the local socket or carry core authorizations.
+    func request(_ command: String, in terminal: TerminalView, origin: Origin) async throws -> [String: Any] {
+        try Task.checkCancellation()
+        guard !stopped, origin.isValid(enabled: enabled), !terminal.isShutdown,
+              source().contains(where: { $0 === terminal }), let window = terminal.window else {
+            throw AkittyError.core("Request source or target terminal is no longer available.")
+        }
+        try AgentCommandHost.validateCommand(command)
+        guard activeRequest == nil else { throw AkittyError.core("Another command request is awaiting approval.") }
+        guard ProcessInfo.processInfo.systemUptime >= nextPromptTime else { throw AkittyError.core("Local requests are rate limited. Wait before requesting again.") }
+        guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
+        let id = UUID(); activeRequest = id
+        if case .localProcess = origin { pendingLocalRequest = true }
+        defer {
+            activeRequest = nil; pendingLocalRequest = false; pendingWindow = nil; pendingSheet = nil
+            nextPromptTime = ProcessInfo.processInfo.systemUptime + cooldownInterval
+        }
+        startRecording(); register(terminal)
+        let eventSession = sessions[terminal.session.id] ?? "unknown"
+        do {
+            return try await withTaskCancellationHandler {
+                // Persist intent before acquiring authority; an I/O failure prevents dispatch.
+                try await store.appendDurably(event: "execution_requested", session: eventSession, provenance: "host",
+                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count]) { _, value in value })
+                try Task.checkCancellation()
+                guard !stopped, origin.isValid(enabled: enabled) else { throw AkittyError.core("Request service or caller has stopped.") }
+                let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: origin.actor, command: command) { [weak self] request in
+                    guard let self, !self.stopped, origin.isValid(enabled: self.enabled), !terminal.isShutdown,
+                          terminal.window === window, window.attachedSheet == nil, !Task.isCancelled else { return false }
+                    window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+                    let alert = AgentCommandHost.approvalAlert(request, callerDescription: origin.explanation)
+                    self.pendingWindow = window; self.pendingSheet = alert.window
+                    let accepted = await Self.present(alert, in: window, valid: { [weak self, weak terminal] in
+                        guard let self, let terminal else { return false }
+                        return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window
+                    })
+                    return accepted && !Task.isCancelled && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
+                }
+                record(terminal)
+                guard failure == nil else { throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.") }
+                return ["accepted": receipt.dispatch.accepted, "after_command_id": receipt.dispatch.after_command_id, "event_session": eventSession,
+                    "completion_untrusted": true, "input_remains_leased": true,
+                    "next_step": "Review the terminal, then use Reclaim Terminal Control. It does not stop the process."]
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeRequest == id else { return }
+                    self.cancelPendingApproval()
+                }
+            }
+        } catch {
+            collectAll()
+            if error.localizedDescription.contains("Dispatch outcome is unknown") {
+                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host") }
+                catch { failure = error.localizedDescription }
+            }
+            throw error
+        }
+    }
     func handle(_ data: Data, peer: LocalPeer) async -> Data {
-        var activeSession: String?
         do {
             guard enabled, peer.connected else { throw AkittyError.core("Local requests are disabled or the caller disconnected.") }
             guard let input = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -114,43 +200,12 @@ import AgentIPC
                 }, "next_offset": offset + 16 < panes.count ? offset + 16 : NSNull(), "total_panes": panes.count]
             } else if operation == "request", Set(input.keys) == ["version", "op", "pane", "command"],
                       let pane = input["pane"] as? String, let command = input["command"] as? String,
-                      let terminal = panes.first(where: { paneID($0) == pane }), let window = terminal.window {
-                register(terminal)
-                activeSession = sessions[terminal.session.id]
-                try AgentCommandHost.validateCommand(command)
-                guard ProcessInfo.processInfo.systemUptime >= nextPromptTime else { throw AkittyError.core("Local requests are rate limited. Wait before requesting again.") }
-                guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
-                let actor = "local process \(peer.pid)"
-                // Persist intent before acquiring authority. Failure here prevents execution. The fsync runs off
-                // the main thread; awaiting it keeps both the ordering and the fail-closed contract.
-                try await store.appendDurably(event: "execution_requested", session: sessions[terminal.session.id] ?? "unknown", provenance: "host",
-                    fields: ["pane_session_id": terminal.session.id, "peer_uid": peer.uid, "peer_pid": peer.pid, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count])
-                let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: actor, command: command) { [weak self] request in
-                    guard let self, self.enabled, peer.connected, window.attachedSheet == nil else { return false }
-                    self.nextPromptTime = ProcessInfo.processInfo.systemUptime + self.cooldownInterval
-                    window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-                    let alert = AgentCommandHost.approvalAlert(request, callerDescription: "Connection opened by OS process \(peer.pid), user \(peer.uid). Agent/product identity and shell-reported directory are not verified. This command uses your shell's permissions. Reclaim returns input without stopping it.")
-                    self.pendingWindow = window; self.pendingSheet = alert.window
-                    let accepted = await Self.present(alert, in: window, valid: { [weak self, weak terminal] in
-                        self?.enabled == true && peer.connected && terminal?.window === window
-                    })
-                    self.pendingWindow = nil; self.pendingSheet = nil
-                    self.nextPromptTime = ProcessInfo.processInfo.systemUptime + self.cooldownInterval
-                    return accepted && self.enabled && peer.connected
-                }
-                record(terminal)
-                guard failure == nil else { throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.") }
-                result = ["accepted": receipt.dispatch.accepted, "after_command_id": receipt.dispatch.after_command_id, "event_session": activeSession ?? "unknown",
-                    "completion_untrusted": true, "input_remains_leased": true,
-                    "next_step": "Review the terminal, then use Reclaim Terminal Control. It does not stop the process."]
+                      let terminal = panes.first(where: { paneID($0) == pane }) {
+                result = try await request(command, in: terminal, origin: .localProcess(peer))
             } else { throw AkittyError.core("Unsupported request, unknown fields, or stale pane identifier.") }
             return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys])
         } catch {
             collectAll()
-            if error.localizedDescription.contains("Dispatch outcome is unknown") {
-                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: activeSession ?? "host", provenance: "host") }
-                catch { failure = error.localizedDescription }
-            }
             return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])) ?? Data()
         }
     }

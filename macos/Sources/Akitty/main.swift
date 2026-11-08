@@ -5,5 +5,6 @@ MainActor.assumeIsolated {
     application.setActivationPolicy(.regular)
     let delegate = AkittyApplication()
     application.delegate = delegate
+    AkittyShortcuts.updateAppShortcutParameters()
     withExtendedLifetime(delegate) { application.run() }
 }
