@@ -416,7 +416,7 @@ fn append_cells(
                 .underline_color
                 .map_or(u32::MAX, |c| palette.resolve(c)),
             u32::from(cell.width),
-            cell.link_id,
+            cell.link_id(),
             cell.combining.len() as u32,
         ] {
             bytes.extend_from_slice(&word.to_le_bytes());
@@ -454,7 +454,7 @@ fn row_hash(term: &Terminal, row: usize) -> u64 {
         mix(u64::from(cell.style.underline));
         mix(u64::from(term.palette.resolve(cell.style.fg)));
         mix(u64::from(term.palette.resolve(cell.style.bg)));
-        mix(u64::from(cell.link_id));
+        mix(u64::from(cell.link_id()));
         mix(cell
             .style
             .underline_color
@@ -574,9 +574,7 @@ pub extern "C" fn akitty_vt_text(
             return String::new();
         };
         if kind == 1 {
-            cell.link
-                .as_ref()
-                .map_or(String::new(), |link| link.to_string())
+            cell.link_uri().map_or(String::new(), str::to_owned)
         } else {
             cell.text()
         }

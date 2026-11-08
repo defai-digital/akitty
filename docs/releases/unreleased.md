@@ -16,5 +16,9 @@ Changes after AkiTTY 1.3.10; these are not yet part of a published release.
 - Preserve per-pane font zoom when saving paste or other unrelated preferences; explicit font-size changes and Reset Font still apply.
 - Reject linked/non-regular Agent demo markers and avoid blocking on FIFOs while observing an effect.
 - Reject sparse benchmark timings and abort report publication when measured inputs or the Git revision change during a run.
+- Halve terminal grid and scrollback memory: each engine cell now occupies 40 bytes instead of 80 (packed colours, boxed combining marks, one shared hyperlink record per OSC 8 target), so the 64 MiB history cap retains twice as many rows and scroll, fill and snapshot hashing move half the bytes.
+- Speed up the engine: printable ASCII runs bypass the parser state machine, grapheme joining reuses one scratch buffer, and entering the alternate screen or resetting blanks the retained screen in place instead of reallocating it.
+- Resolve the selection range once per snapshot instead of once per cell, so dragging a selection over a long scrollback no longer stalls rendering. Feed PTY output to the engine in 1 KiB slices rather than 64-byte slices.
+- Skip JSON decoding when an idle poll reports no change, and drop a background tab's window-sized bitmaps and Metal textures until it is shown again.
 
 History regression coverage uses isolated interactive zsh terminals, including native history-file checks for memory-only entries. The engine migration guide records the selection, resize and input-protocol audit.

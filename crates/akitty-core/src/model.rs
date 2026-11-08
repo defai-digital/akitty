@@ -405,9 +405,11 @@ impl Model {
     fn advance(&mut self, data: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
         self.term.cell_pixels = (self.cell_px.0.max(1), self.cell_px.1.max(1));
         if self.cell_px.0 == 0 { self.term.cell_pixels = (8, 16); }
-        // Bound temporary events while always applying content movement, even
-        // after reply overflow. The engine has no cross-thread event queue.
-        for slice in data.chunks(64) {
+        // Bound temporary events (at most one per byte) while always applying content
+        // movement, even after reply overflow. 1 KiB keeps a full-size PTY read to a
+        // handful of feeds instead of one per 64 bytes, with a still-tiny event vector.
+        // The engine has no cross-thread event queue.
+        for slice in data.chunks(1024) {
             let mut events = Vec::new();
             self.term.feed(slice, clock_ms(), |event| events.push(event));
             let mut discarded = Vec::new();
@@ -575,13 +577,15 @@ impl Model {
         let mut placeholders: Vec<Vec<placeholder::Cell>> = vec![Vec::new(); rows];
         {
             let content = &self.term;
+            // Resolved once: the per-cell lookup must not rescan history for each anchor.
+            let selection = content.screen().selection_range();
             for indexed in view_cells(content) {
                 let row = indexed.line + content.screen().offset as i32;
                 if row < 0 || row as usize >= rows {
                     continue;
                 }
                 let cell = indexed.cell;
-                let selected = content.screen().selected(indexed.line, indexed.col);
+                let selected = content.screen().selected_in(selection, indexed.line, indexed.col);
                 let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.col, indexed.line);
                 let mut hash = mix(hashes[row as usize], u64::from(cell.ch) | (u64::from(cell.style.attrs) | u64::from(cell.style.underline) << 8 | u64::from(cell.width) << 16) << 32);
                 hash = mix(hash, pack(resolve(cell.style.fg, &content.palette)) << 32 | pack(resolve(cell.style.bg, &content.palette)));
@@ -591,7 +595,7 @@ impl Model {
                         hash = mix(hash, u64::from(*ch));
                     }
                 }
-                if let Some(link) = cell.link.as_deref() {
+                if let Some(link) = cell.link_uri() {
                     for byte in link.bytes() {
                         hash = mix(hash, u64::from(byte));
                     }
@@ -643,6 +647,7 @@ impl Model {
             shift = None;
         }
         let content = &self.term;
+        let selection = content.screen().selection_range();
         let mut cells = Vec::new();
         let mut text = vec![String::new(); rows];
         // OSC 8 targets are deduplicated into a bounded table; cells reference them by index.
@@ -671,7 +676,7 @@ impl Model {
             if cell.style.attrs & cell::FAINT != 0 {
                 fg = fg.map(|v| (v as f32 * 0.65) as u8);
             }
-            let selected = content.screen().selected(indexed.line, indexed.col);
+            let selected = content.screen().selected_in(selection, indexed.line, indexed.col);
             let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.col, indexed.line);
             // Row text carries every column. Appending the glyph directly avoids allocating a
             // cell string for the blank cells omitted below; emitted cells copy just their own bytes.
@@ -694,7 +699,7 @@ impl Model {
                 && !searched
                 && !active
                 && bg == DEFAULT_BACKGROUND
-                && cell.link.as_deref().is_none()
+                && cell.link_uri().is_none()
                 && cell.style.underline_color.is_none()
             {
                 continue;
@@ -719,7 +724,7 @@ impl Model {
                 bg,
                 attrs,
                 ucolor: ustyle.and(cell.style.underline_color).map(|color| resolve(color, &content.palette)),
-                link: cell.link.as_deref().and_then(|link| link_index(&mut links, link)),
+                link: cell.link_uri().and_then(|link| link_index(&mut links, link)),
             });
         }
         let alternate = content.modes.alternate;

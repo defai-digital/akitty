@@ -1,6 +1,6 @@
 //! Screen storage with bounded history and stable row identities.
 
-use crate::cell::{Cell, Color};
+use crate::cell::{Cell, Color, Link};
 use std::collections::VecDeque;
 
 pub const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
@@ -48,8 +48,10 @@ impl Row {
                 .cells
                 .iter()
                 .map(|c| {
-                    c.combining.capacity() * std::mem::size_of::<char>()
-                        + c.link.as_ref().map_or(0, |s| s.len())
+                    c.combining.heap_bytes()
+                        + c.link
+                            .as_ref()
+                            .map_or(0, |l| std::mem::size_of::<Link>() + l.uri.len())
                 })
                 .sum::<usize>()
     }
@@ -124,6 +126,40 @@ impl Screen {
             generation: 0,
             history_cost: 0,
         }
+    }
+
+    /// Blank this screen in place, keeping its allocations. Row ids keep advancing from the
+    /// current counter so an anchor or host row identity recorded before the clear never
+    /// aliases a new row.
+    pub fn clear(&mut self) {
+        let cols = self.cols;
+        let rows = self.rows.len();
+        let mut next_id = self.next_row_id;
+        for row in &mut self.rows {
+            row.id = next_id;
+            next_id = next_id.wrapping_add(1);
+            if row.cells.len() == cols {
+                row.cells.fill(Cell::blank(Color::Background));
+            } else {
+                row.cells = vec![Cell::blank(Color::Background); cols];
+            }
+            row.wrapped = false;
+            row.wrap_padding = false;
+            row.generation = row.generation.wrapping_add(1);
+            row.history_cost = 0;
+        }
+        self.next_row_id = next_id;
+        self.history.clear();
+        self.history_bytes = 0;
+        self.cursor = Cursor::default();
+        self.saved_cursor = Cursor::default();
+        self.offset = 0;
+        self.selection = None;
+        self.keyboard_stack.clear();
+        self.keyboard_flags = 0;
+        self.region = 0..rows;
+        self.tabs.clear();
+        self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
     }
 
     /// Negative indices address history, with -1 immediately before screen row 0.
@@ -251,7 +287,12 @@ impl Screen {
         Some(if a <= b { (a, b) } else { (b, a) })
     }
     pub fn selected(&self, line: i32, col: usize) -> bool {
-        let Some((a, b)) = self.selection_range() else {
+        self.selected_in(self.selection_range(), line, col)
+    }
+    /// `selected` with the anchor scan already resolved, so a snapshot pays for it once
+    /// instead of once per cell.
+    pub fn selected_in(&self, range: Option<(Position, Position)>, line: i32, col: usize) -> bool {
+        let Some((a, b)) = range else {
             return false;
         };
         let row = i64::from(line) + self.history.len() as i64;
@@ -418,7 +459,6 @@ impl Screen {
                             width: 0,
                             style: output.cells[col].style,
                             link: output.cells[col].link.clone(),
-                            link_id: output.cells[col].link_id,
                             ..Cell::default()
                         };
                     }

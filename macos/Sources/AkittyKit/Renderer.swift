@@ -182,6 +182,12 @@ struct Quad {
         self.grid = grid; self.placements = Self.ordered(placements)
         view.needsDisplay = true
     }
+    /// Frees every texture while the pane is out of the window. A command buffer still in flight retains the textures it
+    /// samples, so dropping our references is safe; the next `update`/`updateLayers` uploads a fresh full frame.
+    func releaseTextures() {
+        texture = nil; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = []
+        layerSize = nil; layered = false; view.needsDisplay = true
+    }
     /// Kitty z-index ties keep snapshot order, so sort with the original offset as the tie-break.
     nonisolated static func ordered(_ placements: [ImagePlacement]) -> [ImagePlacement] {
         placements.enumerated().sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
@@ -472,6 +478,9 @@ final class GridRasterizer: @unchecked Sendable {
     private var layerPasses: (background: GridRasterizer, foreground: GridRasterizer)?
     var hasLayerPasses: Bool { layerPasses != nil }
     var cachedColors: Int { colors.count }
+    /// Drops the retained bitmaps (and the layer passes) so a pane out of view holds no window-sized pixels. The next
+    /// frame is a full repaint, as after a size change; the glyph and colour caches are kept, they are small.
+    func releaseFrames() { context = nil; layout = nil; layerPasses = nil; lastCursorRow = nil; lastHadImages = false }
 
     static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
         try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context

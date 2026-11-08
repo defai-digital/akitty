@@ -11,18 +11,55 @@ pub const STRIKE: u16 = 32;
 pub const BLINK: u16 = 64;
 pub const MAX_COMBINING: usize = 16;
 
+#[allow(clippy::box_collection)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Combining(Option<Box<Vec<char>>>);
+
+impl Combining {
+    pub const fn new() -> Self {
+        Self(None)
+    }
+    pub fn push(&mut self, ch: char) {
+        self.0.get_or_insert_with(Default::default).push(ch);
+    }
+    /// Heap bytes owned by this value, for history accounting.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.as_ref().map_or(0, |v| {
+            std::mem::size_of::<Vec<char>>() + v.capacity() * std::mem::size_of::<char>()
+        })
+    }
+}
+
+impl std::ops::Deref for Combining {
+    type Target = [char];
+    fn deref(&self) -> &[char] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<'a> IntoIterator for &'a Combining {
+    type Item = &'a char;
+    type IntoIter = std::slice::Iter<'a, char>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Color {
     #[default]
     Foreground,
     Background,
     Indexed(u8),
-    Rgb(u32),
+    Rgb([u8; 3]),
 }
 
 impl Color {
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self::Rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+        Self::Rgb([r, g, b])
+    }
+    pub fn pack(rgb: [u8; 3]) -> u32 {
+        u32::from(rgb[0]) << 16 | u32::from(rgb[1]) << 8 | u32::from(rgb[2])
     }
 }
 
@@ -48,15 +85,20 @@ impl Default for Style {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Link {
+    pub id: u32,
+    pub uri: Box<str>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
-    pub combining: Vec<char>,
+    pub combining: Combining,
     /// 0 is the trailing column of a wide character, otherwise 1 or 2.
     pub width: u8,
     pub style: Style,
-    pub link: Option<Arc<str>>,
-    pub link_id: u32,
+    pub link: Option<Arc<Link>>,
     pub written: bool,
 }
 
@@ -64,11 +106,10 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             ch: ' ',
-            combining: Vec::new(),
+            combining: Combining::new(),
             width: 1,
             style: Style::default(),
             link: None,
-            link_id: 0,
             written: false,
         }
     }
@@ -83,6 +124,12 @@ impl Cell {
             },
             ..Self::default()
         }
+    }
+    pub fn link_id(&self) -> u32 {
+        self.link.as_ref().map_or(0, |l| l.id)
+    }
+    pub fn link_uri(&self) -> Option<&str> {
+        self.link.as_deref().map(|l| &*l.uri)
     }
     pub fn text(&self) -> String {
         if self.width == 0 {
@@ -132,7 +179,7 @@ impl Palette {
             Color::Indexed(index) => self.overrides[usize::from(index)]
                 .or(self.configured[usize::from(index)])
                 .unwrap_or_else(|| Self::indexed(index)),
-            Color::Rgb(rgb) => rgb,
+            Color::Rgb(rgb) => Color::pack(rgb),
         }
     }
     pub fn cursor(&self) -> Option<u32> {
@@ -167,5 +214,22 @@ impl Palette {
         let n = u32::from(index - 16);
         let channel = |x| if x == 0 { 0 } else { 55 + x * 40 };
         channel(n / 36) << 16 | channel(n / 6 % 6) << 8 | channel(n % 6)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_layout_stays_compact() {
+        assert_eq!(std::mem::size_of::<Color>(), 4);
+        assert_eq!(std::mem::size_of::<Option<Color>>(), 4);
+        assert!(
+            std::mem::size_of::<Style>() <= 16,
+            "{}",
+            std::mem::size_of::<Style>()
+        );
+        assert_eq!(std::mem::size_of::<Cell>(), 40);
     }
 }

@@ -91,8 +91,22 @@ impl Parser {
     }
 
     pub fn feed(&mut self, input: &[u8], mut emit: impl FnMut(Action)) {
-        for &byte in input {
-            self.byte(byte, &mut emit);
+        let mut index = 0;
+        while index < input.len() {
+            // In text with no pending UTF-8 sequence, printable ASCII has exactly one
+            // possible effect: one Print action. Emit a whole run without re-entering
+            // the state machine, then fall back to `byte` for the next non-ASCII byte.
+            if matches!(self.state, State::Text) && self.utf8_len == 0 {
+                while index < input.len() && (0x20..=0x7e).contains(&input[index]) {
+                    emit(Action::Print(char::from(input[index])));
+                    index += 1;
+                }
+                if index == input.len() {
+                    break;
+                }
+            }
+            self.byte(input[index], &mut emit);
+            index += 1;
         }
     }
 
