@@ -65,6 +65,15 @@ import Carbon
     }
     func toggle() throws {
         if terminalWindow?.window?.isVisible == true { hide(); return }
+        try show()
+    }
+    /// An explicit show action is idempotent, including when invoked by Siri.
+    func show() throws {
+        if let window = terminalWindow?.window, window.isVisible {
+            window.deminiaturize(nil)
+            NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+            return
+        }
         previousApp = NSWorkspace.shared.frontmostApplication; previousWindow = NSApp.keyWindow
         if terminalWindow == nil {
             let controller = try makeWindow()
@@ -79,6 +88,7 @@ import Carbon
         if let frame = screen?.visibleFrame {
             window.setFrame(NSRect(x: frame.minX + frame.width * 0.1, y: frame.midY, width: frame.width * 0.8, height: frame.height * 0.5), display: true)
         }
+        window.deminiaturize(nil)
         NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
         if let terminal = terminalWindow?.active { window.makeFirstResponder(terminal); terminal.poll() }
     }
