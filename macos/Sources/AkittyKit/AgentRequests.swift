@@ -135,9 +135,12 @@ import AgentIPC
         guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
         let id = UUID(); activeRequest = id
         if case .localProcess = origin { pendingLocalRequest = true }
+        // The cooldown only follows a sheet the human actually saw: a request that failed before display
+        // (a busy shell) must not lock out the immediate retry.
+        var prompted = false
         defer {
             activeRequest = nil; pendingLocalRequest = false; pendingWindow = nil; pendingSheet = nil
-            nextPromptTime = ProcessInfo.processInfo.systemUptime + cooldownInterval
+            if prompted { nextPromptTime = ProcessInfo.processInfo.systemUptime + cooldownInterval }
         }
         startRecording(); register(terminal)
         let eventSession = sessions[terminal.session.id] ?? "unknown"
@@ -149,16 +152,21 @@ import AgentIPC
                 try Task.checkCancellation()
                 guard !stopped, origin.isValid(enabled: enabled) else { throw AkittyError.core("Request service or caller has stopped.") }
                 let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: origin.actor, command: command) { [weak self] request in
+                    // A cancelled intent is not a human denial: throwing releases the lease instead of denying it.
+                    if Task.isCancelled { throw CancellationError() }
                     guard let self, !self.stopped, origin.isValid(enabled: self.enabled), !terminal.isShutdown,
-                          terminal.window === window, window.attachedSheet == nil, !Task.isCancelled else { return false }
+                          terminal.window === window, window.attachedSheet == nil else { return false }
                     window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
                     let alert = AgentCommandHost.approvalAlert(request, callerDescription: origin.explanation)
                     self.pendingWindow = window; self.pendingSheet = alert.window
+                    prompted = true
                     let accepted = await Self.present(alert, in: window, valid: { [weak self, weak terminal] in
                         guard let self, let terminal else { return false }
-                        return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window
+                        return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window && window.isVisible
                     })
-                    return accepted && !Task.isCancelled && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
+                    // The sheet ended from a hidden window or cancelled intent; never let that read as approval.
+                    if Task.isCancelled { throw CancellationError() }
+                    return accepted && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
                 }
                 record(terminal)
                 guard failure == nil else { throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.") }
@@ -173,6 +181,11 @@ import AgentIPC
             }
         } catch {
             collectAll()
+            if error is CancellationError {
+                // The intent was cancelled (not denied by a human); record who ended the wait before rethrowing.
+                do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host") }
+                catch { failure = error.localizedDescription }
+            }
             if error.localizedDescription.contains("Dispatch outcome is unknown") {
                 do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host") }
                 catch { failure = error.localizedDescription }

@@ -23,6 +23,8 @@ final class AgentRequestTests: XCTestCase {
         let terminal = try TerminalView(headless: true, forceSoftware: true)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = terminal
+        // Approval only prompts on an on-screen window; an ordered-out one must fail closed.
+        window.orderFront(nil)
         let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("requests.sock").path)
         service.startRecording(); try service.setEnabled(true)
         defer { service.stop(); terminal.shutdown(); window.close() }
@@ -72,6 +74,7 @@ final class AgentRequestTests: XCTestCase {
         var preferences = TerminalPreferences(); preferences.shell = "/bin/zsh"; preferences.directory = root.path; preferences.shellIntegration = false
         let terminal = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false); window.isReleasedWhenClosed = false; window.contentView = terminal
+        window.orderFront(nil)
         let path = root.appendingPathComponent("requests.sock").path
         let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
         service.startRecording(); try service.setEnabled(true)
@@ -115,6 +118,7 @@ final class AgentRequestTests: XCTestCase {
         let terminal = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = terminal
+        window.orderFront(nil)
         let path = root.appendingPathComponent("requests.sock").path
         let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
         service.cooldownInterval = 0; service.startRecording(); try service.setEnabled(true)
@@ -221,6 +225,7 @@ final class AgentRequestTests: XCTestCase {
         let terminal = try TerminalView(headless: true, forceSoftware: true)
         let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = terminal
+        window.orderFront(nil)
         let path = root.appendingPathComponent("requests.sock").path
         let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
         service.cooldownInterval = 0; try service.setEnabled(true)
@@ -249,6 +254,57 @@ final class AgentRequestTests: XCTestCase {
         try service.setEnabled(true)
         let limited = try await Task.detached { try LocalSocket.request(request, path: path) }.value
         XCTAssertTrue(String(decoding: limited, as: UTF8.self).contains("rate limited"))
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
+    }
+
+    @MainActor func testRequestFailingBeforeTheSheetDoesNotArmTheCooldown() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = terminal; window.orderFront(nil)
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("requests.sock").path)
+        service.cooldownInterval = 60
+        defer { service.stop(); terminal.shutdown(); window.close() }
+        // No OSC 133;A prompt: the shell is busy, so the request fails before any approval sheet exists.
+        do { _ = try await service.request("echo busy", in: terminal, origin: .siri); XCTFail("A busy shell must fail the request") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("integrated shell prompt")) }
+        XCTAssertNil(window.attachedSheet)
+        // The retry must reach the pre-sheet failure again, never the cooldown guard.
+        do { _ = try await service.request("echo busy again", in: terminal, origin: .siri); XCTFail("A busy shell must keep failing") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("integrated shell prompt"), "an unseen sheet must not rate limit: \(error)") }
+        // A sheet the human never saw must not arm the cooldown: the retry reaches the sheet, not "rate limited".
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
+        let pending = Task { try await service.request("echo retry", in: terminal, origin: .siri) }
+        try await waitUntil { window.attachedSheet != nil }
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertSecondButtonReturn)
+        do { _ = try await pending.value; XCTFail("Denied request must fail") } catch {}
+        XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
+    }
+
+    @MainActor func testHidingTheWindowUnderAnApprovalSheetFailsClosed() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = terminal; window.orderFront(nil)
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("requests.sock").path)
+        service.cooldownInterval = 0
+        defer { service.stop(); terminal.shutdown(); window.close() }
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
+        var settled = false
+        let pending = Task { @MainActor () -> Error? in
+            defer { settled = true }
+            do { _ = try await service.request("echo hidden", in: terminal, origin: .siri); return nil } catch { return error }
+        }
+        try await waitUntil { window.attachedSheet != nil }
+        XCTAssertTrue(window.isVisible)
+        // The quick terminal hotkey hides the window; the request must fail closed, not wait for the 120 s timeout.
+        window.orderOut(nil)
+        try await waitUntil { settled }
+        let settledError = await pending.value
+        XCTAssertNotNil(settledError)
         XCTAssertNil(window.attachedSheet)
         XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
     }
