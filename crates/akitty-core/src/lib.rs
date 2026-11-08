@@ -291,7 +291,10 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 .cloned()
                 .ok_or("unknown or closed session")?;
             drop(registry);
-            match request {
+            // Reads must not wake the host: a snapshot that signalled would make its poller poll again forever.
+            let mutating = !matches!(request, Request::ShellState { .. } | Request::CommandHistory { .. }
+                | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. });
+            let result = match request {
                 Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
                 Request::ControlRelease { lease, .. } => session.control_release(Some(lease)),
                 Request::ControlReclaim { .. } => session.control_release(None),
@@ -351,7 +354,9 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 }
                 Request::NotifyFd { .. } => session.notify_fd(),
                 _ => unreachable!(),
-            }
+            };
+            if mutating { session.notify_host(); }
+            result
         }
     };
     value.map(Reply::Value)

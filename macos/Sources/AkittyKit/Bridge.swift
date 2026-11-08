@@ -554,10 +554,12 @@ public final class TerminalSession: @unchecked Sendable {
         let data = try CoreBridge.raw(request)
         // An idle pane answers with this same handful of bytes every poll; skip the scan and decode.
         if data == Self.unchangedEnvelope { return nil }
-        if binary {
+        // The core declines the block (a cell text over 255 bytes, an error reply) by answering with plain JSON:
+        // that reply is complete and may carry one-shot events, so decode it rather than re-request.
+        if binary, data.contains(0) {
             do { return try decodeBinarySnapshot(data, since: since, base: base) }
             catch {
-                // A missing NUL, a bad block or a core that ignores the negotiation falls back to JSON.
+                // A bad block or head falls back to JSON.
                 // Re-request a full snapshot: the failed reply may already have committed one-shot events,
                 // so a diff against the old base could lose them.
                 return try snapshot(since: nil, base: nil, binary: false)
