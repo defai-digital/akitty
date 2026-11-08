@@ -110,6 +110,9 @@ pub(crate) struct SnapshotOut {
     rows: usize,
     title: String,
     cells: Vec<CellOut>,
+    /// Set only when the client negotiated the binary cell block; `cells` is then empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cells_binary: Option<CellsBinaryOut>,
     lines: Vec<String>,
     links: Vec<String>,
     images: Vec<Value>,
@@ -143,6 +146,56 @@ pub(crate) struct SnapshotOut {
     /// Rows the client moves up before replacing `dirty`; omitted unless the screen scrolled.
     #[serde(skip_serializing_if = "Option::is_none")]
     shift: Option<usize>,
+}
+
+/// `data.cells_binary` metadata for the negotiated block that follows a NUL byte.
+#[derive(Serialize)]
+struct CellsBinaryOut {
+    version: u8,
+    count: usize,
+    bytes: usize,
+}
+
+impl SnapshotOut {
+    /// The version-1 binary cell block, or `None` when a cell's text cannot fit the one-byte
+    /// length field: the caller keeps the JSON cells for the whole snapshot instead.
+    /// Layout per cell is the compact JSON fields in the same order, little-endian:
+    /// row i32, col u16, fg[3], bg[3], attrs u16, presence u8 (bit0 ucolor, bit1 link),
+    /// [ucolor[3]], [link u32], text_len u8, UTF-8 text.
+    pub(crate) fn take_binary_cells(&mut self) -> Option<Vec<u8>> {
+        let mut block = Vec::with_capacity(self.cells.len() * 24);
+        for cell in &self.cells {
+            // Anything longer would make the block ambiguous; fail the negotiation, not the snapshot.
+            if !push_binary_cell(&mut block, cell) { return None; }
+        }
+        let count = self.cells.len();
+        self.cells.clear();
+        self.cells_binary = Some(CellsBinaryOut { version: 1, count, bytes: block.len() });
+        Some(block)
+    }
+}
+
+/// Appends one version-1 cell; `false` when its text cannot fit the one-byte length field.
+fn push_binary_cell(block: &mut Vec<u8>, cell: &CellOut) -> bool {
+    let text = cell.text.as_bytes();
+    let Ok(col) = u16::try_from(cell.col) else { return false };
+    let link = match cell.link {
+        Some(index) => match u32::try_from(index) { Ok(link) => Some(link), Err(_) => return false },
+        None => None,
+    };
+    if text.len() > 255 { return false; }
+    block.extend_from_slice(&cell.row.to_le_bytes());
+    block.extend_from_slice(&col.to_le_bytes());
+    block.extend_from_slice(&cell.fg);
+    block.extend_from_slice(&cell.bg);
+    block.extend_from_slice(&cell.attrs.to_le_bytes());
+    let presence = u8::from(cell.ucolor.is_some()) | (u8::from(cell.link.is_some()) << 1);
+    block.push(presence);
+    if let Some(color) = cell.ucolor { block.extend_from_slice(&color); }
+    if let Some(link) = link { block.extend_from_slice(&link.to_le_bytes()); }
+    block.push(text.len() as u8);
+    block.extend_from_slice(text);
+    true
 }
 
 /// What the client holds after the last snapshot sent: lets the next one carry only changed rows.
@@ -804,6 +857,7 @@ impl Model {
             rows: self.size.rows,
             title: self.title.clone(),
             cells,
+            cells_binary: None,
             lines,
             links: links.clone(),
             images,
@@ -1794,5 +1848,27 @@ mod tests {
         assert_eq!(cell_at(&snap, 2, 0), ("👨\u{200d}".into(), true));
         assert_eq!(cell_at(&snap, 2, 2), ("👩".into(), true));
         assert_eq!(cell_at(&snap, 2, 4), ("x".into(), false));
+    }
+    #[test]
+    fn binary_cell_encoding_is_exact_and_rejects_oversized_text() {
+        let cell = CellOut { compact: true, row: -1, col: 7, text: "e\u{301}".into(), fg: [1, 2, 3],
+            bg: [4, 5, 6], attrs: 0x0104, ucolor: Some([7, 8, 9]), link: Some(3) };
+        let mut block = Vec::new();
+        assert!(push_binary_cell(&mut block, &cell));
+        assert_eq!(block, [
+            0xff, 0xff, 0xff, 0xff, // row -1, little-endian
+            7, 0,                   // col
+            1, 2, 3, 4, 5, 6,       // fg, bg
+            0x04, 0x01,             // attrs
+            3,                      // presence: ucolor + link
+            7, 8, 9,                // ucolor
+            3, 0, 0, 0,             // link index
+            3, b'e', 0xcc, 0x81,    // text_len + UTF-8
+        ]);
+        // A cell over 255 text bytes cannot be represented; the caller keeps JSON cells instead.
+        let long = CellOut { text: "a".repeat(256), ..cell };
+        let mut block = Vec::new();
+        assert!(!push_binary_cell(&mut block, &long));
+        assert!(block.is_empty(), "a rejected cell must not leave a partial block");
     }
 }

@@ -259,11 +259,46 @@ impl Session {
     }
     /// Snapshot JSON, already serialized. The model lock covers the build and the commit only: serialization
     /// (1–19 ms on a dense screen) runs after it is released, so the PTY worker keeps feeding.
+    #[cfg(test)]
     pub fn snapshot(&self, since: Option<u64>, compact: bool, allow_shift: bool) -> Result<String, String> {
-        self.snapshot_within(since, compact, allow_shift, crate::model::MAX_SNAPSHOT_BYTES)
+        self.snapshot_with(since, compact, allow_shift, false).map(|(json, _)| json)
+    }
+    /// Snapshot plus the negotiated binary cell block. When `binary_cells` is honored the JSON head
+    /// carries `cells: []` and `cells_binary` metadata, and the block follows a NUL on the wire.
+    pub(crate) fn snapshot_with(
+        &self,
+        since: Option<u64>,
+        compact: bool,
+        allow_shift: bool,
+        binary_cells: bool,
+    ) -> Result<(String, Option<Vec<u8>>), String> {
+        self.snapshot_inner(since, compact, allow_shift, binary_cells, crate::model::MAX_SNAPSHOT_BYTES)
     }
     /// `snapshot` with the size bound passed in, so a test can drive the oversize branch without an 8 MiB screen.
+    #[cfg(test)]
     fn snapshot_within(&self, since: Option<u64>, compact: bool, allow_shift: bool, max_bytes: usize) -> Result<String, String> {
+        self.snapshot_inner(since, compact, allow_shift, false, max_bytes).map(|(json, _)| json)
+    }
+    /// The binary-capable form of the same injected bound, for the size-accounting test.
+    #[cfg(test)]
+    fn snapshot_with_bound(
+        &self,
+        since: Option<u64>,
+        compact: bool,
+        allow_shift: bool,
+        binary_cells: bool,
+        max_bytes: usize,
+    ) -> Result<(String, Option<Vec<u8>>), String> {
+        self.snapshot_inner(since, compact, allow_shift, binary_cells, max_bytes)
+    }
+    fn snapshot_inner(
+        &self,
+        since: Option<u64>,
+        compact: bool,
+        allow_shift: bool,
+        binary_cells: bool,
+        max_bytes: usize,
+    ) -> Result<(String, Option<Vec<u8>>), String> {
         // Two concurrent snapshots must not interleave build and commit, or one would consume events the
         // other never delivered. This lock, not the model lock, spans the serialization.
         // A host panic during a previous serialization poisons this lock, but it guards no data:
@@ -275,17 +310,23 @@ impl Session {
             if self.commands.is_none() { model.expire_sync(); }
             model.build_snapshot(since, compact, allow_shift)?
         };
-        let Some((value, commit)) = built else { return Ok(crate::model::UNCHANGED_SNAPSHOT.into()) };
+        let Some((mut value, commit)) = built else {
+            return Ok((crate::model::UNCHANGED_SNAPSHOT.into(), None));
+        };
+        // The block replaces the JSON cells entirely, so the two never double-count.
+        let binary = if binary_cells { value.take_binary_cells() } else { None };
         let json = serde_json::to_string(&value).expect("snapshot fields serialize");
+        // The response limit covers the JSON head, its NUL separator and the block.
+        let total = json.len() + binary.as_ref().map_or(0, |block| block.len() + 1);
         let mut model = self.state()?;
-        if json.len() > max_bytes {
+        if total > max_bytes {
             // Nothing the client would never receive may be committed; `sent` is dropped so the
             // next poll sends a full snapshot rather than a diff against it.
             model.forget_sent();
             return Err("snapshot exceeds 8 MiB".into());
         }
         model.commit_snapshot(commit);
-        Ok(json)
+        Ok((json, binary))
     }
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
         Ok(self.state()?.shell.history(after))
@@ -1726,6 +1767,134 @@ mod tests {
         assert_eq!(last["bell"], false, "{last}");
         let (rung, sent) = lock_model(&session.model).bell_counts();
         assert_eq!((rung, sent), (rung, rung), "every bell rung was delivered exactly once");
+    }
+
+    /// One compact JSON cell or one binary-block cell, normalized so the transports compare directly.
+    #[derive(Debug, PartialEq)]
+    struct WireCell {
+        row: i32,
+        col: u16,
+        fg: [u8; 3],
+        bg: [u8; 3],
+        attrs: u16,
+        ucolor: Option<[u8; 3]>,
+        link: Option<u32>,
+        text: String,
+    }
+
+    fn take<'a>(block: &'a [u8], at: &mut usize, len: usize) -> &'a [u8] {
+        let bytes = &block[*at..*at + len];
+        *at += len;
+        bytes
+    }
+
+    fn decode_binary(block: &[u8], count: usize) -> Vec<WireCell> {
+        let mut at = 0;
+        let mut cells = Vec::with_capacity(count);
+        while at < block.len() {
+            let row = i32::from_le_bytes(take(block, &mut at, 4).try_into().unwrap());
+            let col = u16::from_le_bytes(take(block, &mut at, 2).try_into().unwrap());
+            let fg = take(block, &mut at, 3).try_into().unwrap();
+            let bg = take(block, &mut at, 3).try_into().unwrap();
+            let attrs = u16::from_le_bytes(take(block, &mut at, 2).try_into().unwrap());
+            let presence = take(block, &mut at, 1)[0];
+            let ucolor = (presence & 1 != 0).then(|| take(block, &mut at, 3).try_into().unwrap());
+            let link = (presence & 2 != 0)
+                .then(|| u32::from_le_bytes(take(block, &mut at, 4).try_into().unwrap()));
+            let len = take(block, &mut at, 1)[0] as usize;
+            let text = std::str::from_utf8(take(block, &mut at, len)).unwrap().to_string();
+            cells.push(WireCell { row, col, fg, bg, attrs, ucolor, link, text });
+        }
+        assert_eq!(at, block.len(), "the block must end exactly after the last cell");
+        assert_eq!(cells.len(), count, "cells_binary.count must match the block");
+        cells
+    }
+
+    fn json_cells(json: &str) -> Vec<WireCell> {
+        let value: Value = serde_json::from_str(json).unwrap();
+        let rgb = |value: &Value| {
+            let packed = value.as_u64().unwrap() as u32;
+            [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8]
+        };
+        value["cells"].as_array().unwrap().iter().map(|cell| {
+            let cell = cell.as_array().unwrap();
+            WireCell {
+                row: cell[0].as_i64().unwrap() as i32,
+                col: cell[1].as_u64().unwrap() as u16,
+                text: cell[2].as_str().unwrap().to_string(),
+                fg: rgb(&cell[3]),
+                bg: rgb(&cell[4]),
+                attrs: cell[5].as_u64().unwrap() as u16,
+                ucolor: (cell.len() > 6 && !cell[6].is_null()).then(|| rgb(&cell[6])),
+                link: (cell.len() > 7).then(|| cell[7].as_u64().unwrap() as u32),
+            }
+        }).collect()
+    }
+
+    /// A screen with wide/CJK, combining, links, underline colours, RGB cells, selection and a search hit.
+    fn feed_showcase(session: &Session) {
+        session.feed(concat!(
+            "\x1b[2J\x1b[H",
+            "\x1b[31mred \x1b[4m\x1b[58;2;200;10;10munder\x1b[0m ",
+            "\x1b]8;;https://example.test/a\x1b\\link\x1b]8;;\x1b\\ ",
+            "界 wide e\u{301}combining\r\n",
+            "\x1b[38;2;10;200;30m\x1b[48;2;1;2;3mRGB\x1b[0m\r\n",
+            "boring last line"
+        ).as_bytes()).unwrap();
+        session.select(0, 0, 0, 5).unwrap();
+        session.find("link", None, false).unwrap();
+    }
+
+    fn binary_head(json: &str, block: &[u8]) -> Value {
+        let head: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(head["cells"], json!([]), "binary snapshots must not also send JSON cells");
+        assert_eq!(head["cells_binary"]["version"], 1);
+        assert_eq!(head["cells_binary"]["bytes"].as_u64().unwrap() as usize, block.len());
+        head
+    }
+
+    #[test]
+    fn binary_cells_match_compact_json_on_full_and_partial_snapshots() {
+        let json_session = Session::new(40, 8, None, None, true, 5000, None).unwrap();
+        let binary_session = Session::new(40, 8, None, None, true, 5000, None).unwrap();
+        for session in [&json_session, &binary_session] { feed_showcase(session); }
+        let (json_full, none) = json_session.snapshot_with(None, true, true, false).unwrap();
+        assert!(none.is_none());
+        let (json_head, block) = binary_session.snapshot_with(None, true, true, true).unwrap();
+        let block = block.expect("binary cells are honored");
+        let head = binary_head(&json_head, &block);
+        let count = head["cells_binary"]["count"].as_u64().unwrap() as usize;
+        assert_eq!(json_cells(&json_full), decode_binary(&block, count));
+        // Scroll both screens identically; the shift/dirty shape must agree as well as the cells.
+        for session in [&json_session, &binary_session] {
+            session.feed(b"\x1b[8;1H\r\none\r\ntwo\r\nthree").unwrap();
+        }
+        let json_rev = serde_json::from_str::<Value>(&json_full).unwrap()["revision"].as_u64().unwrap();
+        let bin_rev = head["revision"].as_u64().unwrap();
+        let (json_partial, _) = json_session.snapshot_with(Some(json_rev), true, true, false).unwrap();
+        let (bin_partial, block) = binary_session.snapshot_with(Some(bin_rev), true, true, true).unwrap();
+        let block = block.expect("binary cells are honored");
+        let head = binary_head(&bin_partial, &block);
+        let count = head["cells_binary"]["count"].as_u64().unwrap() as usize;
+        assert_eq!(json_cells(&json_partial), decode_binary(&block, count));
+        let value: Value = serde_json::from_str(&json_partial).unwrap();
+        assert_eq!(value["partial"], true, "the scroll should ship a partial");
+        assert!(value["shift"].as_u64().is_some(), "the scroll should be detected as a shift");
+        assert_eq!(value["dirty"], head["dirty"]);
+        assert_eq!(value["shift"], head["shift"]);
+    }
+
+    #[test]
+    fn binary_cell_bytes_count_against_the_response_limit() {
+        let session = Session::new(40, 8, None, None, true, 5000, None).unwrap();
+        feed_showcase(&session);
+        let (json, block) = session.snapshot_with_bound(None, true, true, true, usize::MAX).unwrap();
+        let block = block.expect("binary cells are honored");
+        // Above the JSON head but below head + NUL + block: JSON-only accounting would have accepted it.
+        let bound = json.len() + block.len() / 2;
+        assert!(bound > json.len() && bound < json.len() + block.len() + 1);
+        let error = session.snapshot_with_bound(None, true, true, true, bound).unwrap_err();
+        assert_eq!(error, "snapshot exceeds 8 MiB", "{error}");
     }
 }
 

@@ -56,6 +56,8 @@ enum Request {
         since: Option<u64>,
         compact: Option<bool>,
         allow_shift: Option<bool>,
+        /// `binary` opts into the binary cell block; only honored together with `compact`.
+        cells: Option<String>,
     },
     Input {
         id: u64,
@@ -127,10 +129,12 @@ struct Registry {
 }
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 
-/// Response data: a value, or JSON a hot path (snapshots) already serialized.
+/// Response data: a value, JSON a hot path (snapshots) already serialized, or that JSON
+/// followed by a NUL and a raw binary cell block.
 enum Reply {
     Value(Value),
     Json(String),
+    JsonBinary { json: String, binary: Vec<u8> },
 }
 
 /// Runs one request, turning a panic into an error response.
@@ -151,7 +155,7 @@ fn envelope(result: Result<Value, String>) -> Value {
 pub fn request(bytes: &[u8]) -> Value {
     envelope(guarded(bytes).and_then(|reply| match reply {
         Reply::Value(value) => Ok(value),
-        Reply::Json(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+        Reply::Json(json) | Reply::JsonBinary { json, .. } => serde_json::from_str(&json).map_err(|e| e.to_string()),
     }))
 }
 
@@ -170,11 +174,25 @@ impl Drop for CreatingSlot {
 
 fn respond(bytes: &[u8]) -> Vec<u8> {
     let result = match guarded(bytes) {
-        Ok(Reply::Json(json)) => return format!(r#"{{"version":{ABI_VERSION},"ok":true,"data":{json}}}"#).into_bytes(),
+        Ok(Reply::Json(json)) => return envelope_json(&json, None),
+        // One response: the JSON head, a NUL (JSON never contains one), then the cell block.
+        Ok(Reply::JsonBinary { json, binary }) => return envelope_json(&json, Some(&binary)),
         Ok(Reply::Value(value)) => Ok(value),
         Err(error) => Err(error),
     };
     serde_json::to_vec(&envelope(result)).unwrap_or_default()
+}
+
+fn envelope_json(json: &str, binary: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(json.len() + 64 + binary.map_or(0, |block| block.len() + 1));
+    out.extend_from_slice(format!(r#"{{"version":{ABI_VERSION},"ok":true,"data":"#).as_bytes());
+    out.extend_from_slice(json.as_bytes());
+    out.push(b'}');
+    if let Some(block) = binary {
+        out.push(0);
+        out.extend_from_slice(block);
+    }
+    out
 }
 
 fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
@@ -284,7 +302,16 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 Request::CommandHistory { after, .. } => session.command_history(after.unwrap_or(0)),
                 Request::ShellState { .. } => session.shell_state(),
                 Request::CommandOutput { command_id, .. } => session.command_output(command_id),
-                Request::Snapshot { since, compact, allow_shift, .. } => return session.snapshot(since, compact.unwrap_or(false), allow_shift.unwrap_or(false)).map(Reply::Json),
+                Request::Snapshot { since, compact, allow_shift, cells, .. } => {
+                    let compact = compact.unwrap_or(false);
+                    // Binary is an opt-in negotiation and only replaces compact cells.
+                    let binary = compact && cells.as_deref() == Some("binary");
+                    let (json, block) = session.snapshot_with(since, compact, allow_shift.unwrap_or(false), binary)?;
+                    return Ok(match block {
+                        Some(binary) => Reply::JsonBinary { json, binary },
+                        None => Reply::Json(json),
+                    });
+                }
                 Request::Input { text, paste, .. } => {
                     session.input(text, paste.unwrap_or(false))?;
                     Ok(json!({}))
@@ -430,5 +457,50 @@ mod tests {
             respond(format!(r#"{{"op":"snapshot","id":{id},"since":{revision},"compact":true,"allow_shift":true}}"#).as_bytes());
         assert_eq!(unchanged.as_slice(), br#"{"version":1,"ok":true,"data":{"changed":false}}"#.as_slice());
         let _ = respond(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
+    }
+
+    #[test]
+    fn negotiated_binary_cells_follow_a_nul_separator() {
+        let created: Value =
+            serde_json::from_slice(&respond(br#"{"op":"create","cols":20,"rows":4,"headless":true}"#)).unwrap();
+        let id = created["data"]["id"].as_u64().expect("session id");
+        let fed = respond(format!(
+            r#"{{"op":"feed","id":{id},"text":"\u001b[31mhello\u001b[0m \u001b[4m\u001b[58;2;1;2;3mworld"}}"#
+        ).as_bytes());
+        assert_eq!(serde_json::from_slice::<Value>(&fed).unwrap()["ok"], true);
+        let bytes = respond(format!(r#"{{"op":"snapshot","id":{id},"compact":true,"cells":"binary"}}"#).as_bytes());
+        // A raw NUL is the separator; JSON output never contains one.
+        let nul = bytes.iter().position(|byte| *byte == 0).expect("binary reply must carry a NUL separator");
+        let head: Value = serde_json::from_slice(&bytes[..nul]).unwrap();
+        assert_eq!(head["ok"], true, "{head}");
+        assert_eq!(head["data"]["cells"], json!([]));
+        let meta = &head["data"]["cells_binary"];
+        assert_eq!(meta["version"], 1);
+        assert!(meta["count"].as_u64().unwrap() > 0);
+        assert_eq!(meta["bytes"].as_u64().unwrap() as usize, bytes.len() - nul - 1);
+        // The head is valid JSON; the whole reply is not, because the block follows it.
+        assert!(serde_json::from_slice::<Value>(&bytes).is_err());
+        // Without compact the negotiation is ignored, and without the field nothing changes.
+        for plain in [
+            format!(r#"{{"op":"snapshot","id":{id},"cells":"binary"}}"#),
+            format!(r#"{{"op":"snapshot","id":{id},"compact":true}}"#),
+        ] {
+            let reply = respond(plain.as_bytes());
+            assert!(!reply.contains(&0), "JSON-cells replies must stay NUL-free");
+            let value: Value = serde_json::from_slice(&reply).unwrap();
+            assert!(!value["data"]["cells"].as_array().unwrap().is_empty(), "{value}");
+        }
+        let _ = respond(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
+        // A blank screen carries zero cells: the block is empty and only the NUL remains.
+        let blank: Value =
+            serde_json::from_slice(&respond(br#"{"op":"create","cols":20,"rows":4,"headless":true}"#)).unwrap();
+        let blank_id = blank["data"]["id"].as_u64().expect("blank session id");
+        let empty = respond(format!(r#"{{"op":"snapshot","id":{blank_id},"compact":true,"cells":"binary"}}"#).as_bytes());
+        let nul = empty.iter().position(|byte| *byte == 0).expect("an empty block keeps the separator");
+        let head: Value = serde_json::from_slice(&empty[..nul]).unwrap();
+        assert_eq!(head["data"]["cells_binary"]["count"], 0);
+        assert_eq!(head["data"]["cells_binary"]["bytes"], 0);
+        assert_eq!(empty.len(), nul + 1, "no bytes may follow an empty block");
+        let _ = respond(format!(r#"{{"op":"close","id":{blank_id}}}"#).as_bytes());
     }
 }

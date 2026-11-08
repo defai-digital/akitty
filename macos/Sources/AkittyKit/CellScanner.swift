@@ -217,3 +217,69 @@ enum CellScanner {
         }
     }
 }
+
+/// Reads the negotiated version-1 binary cell block into the same `Cell` values `CellScanner` produces.
+/// Every read is bounds-checked; any inconsistency throws so the caller can fall back to JSON cells.
+enum CellBlock {
+    struct Invalid: Error {}
+    static func decode(_ data: Data, count: Int) throws -> [Cell] {
+        // Each cell is at least 16 bytes, so this also rejects an absurd count before reserving.
+        guard count >= 0, count <= data.count / 16 else { throw Invalid() }
+        guard count > 0 else {
+            guard data.isEmpty else { throw Invalid() }
+            return []
+        }
+        return try data.withUnsafeBytes { raw -> [Cell] in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { throw Invalid() }
+            var reader = Reader(p: base, end: raw.count)
+            var cells: [Cell] = []
+            cells.reserveCapacity(count)
+            for _ in 0..<count { cells.append(try reader.cell()) }
+            guard reader.i == reader.end else { throw Invalid() }
+            return cells
+        }
+    }
+
+    private struct Reader {
+        let p: UnsafePointer<UInt8>
+        let end: Int
+        var i = 0
+        /// The same colour-array sharing as `CellScanner`: neighbouring cells mostly repeat colours.
+        var colors: [UInt32: [UInt8]] = [:]
+
+        mutating func take(_ count: Int) throws -> UnsafeBufferPointer<UInt8> {
+            guard count >= 0, end - i >= count else { throw Invalid() }
+            let slice = UnsafeBufferPointer(start: p + i, count: count)
+            i += count
+            return slice
+        }
+        mutating func byte() throws -> UInt8 { try take(1)[0] }
+        mutating func u16() throws -> UInt16 { let b = try take(2); return UInt16(b[0]) | UInt16(b[1]) << 8 }
+        mutating func u32() throws -> UInt32 {
+            let b = try take(4)
+            return UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+        }
+        mutating func rgb() throws -> [UInt8] {
+            let b = try take(3)
+            let packed = UInt32(b[0]) << 16 | UInt32(b[1]) << 8 | UInt32(b[2])
+            if let known = colors[packed] { return known }
+            let rgb = [b[0], b[1], b[2]]
+            if colors.count < 4096 { colors[packed] = rgb }
+            return rgb
+        }
+        /// row i32, col u16, fg[3], bg[3], attrs u16, presence u8, [ucolor[3]], [link u32], text_len u8, text.
+        mutating func cell() throws -> Cell {
+            let row = Int(Int32(bitPattern: try u32()))
+            let col = Int(try u16())
+            let fg = try rgb(), bg = try rgb()
+            let attrs = try u16()
+            let presence = try byte()
+            guard presence & ~0b11 == 0 else { throw Invalid() }
+            let ucolor = presence & 1 != 0 ? try rgb() : nil
+            let link = presence & 2 != 0 ? Int(try u32()) : nil
+            let length = Int(try byte())
+            guard let text = String(bytes: try take(length), encoding: .utf8) else { throw Invalid() }
+            return Cell(row: row, col: col, text: text, fg: fg, bg: bg, attrs: attrs, ucolor: ucolor, link: link)
+        }
+    }
+}
