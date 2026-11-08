@@ -573,6 +573,15 @@ public final class TerminalSession: @unchecked Sendable {
     public func shellState() throws -> ShellState {
         try JSONDecoder().decode(ShellState.self, from: call("shell_state"))
     }
+    /// Read end of the core's host-notify pipe, or nil for a headless/closed session. The core owns
+    /// both ends and closes them with the session, so the caller must cancel its reader (not close
+    /// the descriptor) before `close()`/`prepareClose()`.
+    func notifyFD() -> Int32? {
+        guard !isClosed, let data = try? call("notify_fd"),
+              let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return (value["fd"] as? NSNumber)?.int32Value
+    }
     public func commandHistory(after: UInt64 = 0) throws -> Data { try call("command_history", ["after": after]) }
     public func commandOutput(_ commandID: UInt64) throws -> Data { try call("command_output", ["command_id": commandID]) }
     public func input(_ text: String, paste: Bool = false) throws { _ = try call("input", ["text": text, "paste": paste]) }

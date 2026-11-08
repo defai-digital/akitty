@@ -113,6 +113,9 @@ enum Request {
     },
     /// When `enabled` is false, `OSC 771` no longer changes the document.
     ProgramChrome { id: u64, enabled: bool },
+    /// Read end of a pipe the core writes when the model revision advances. The core owns both
+    /// ends and closes them on `close`; the host must stop reading before closing the session.
+    NotifyFd { id: u64 },
 }
 
 #[derive(Default)]
@@ -260,7 +263,8 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 | Request::Select { id, .. }
                 | Request::Find { id, .. }
                 | Request::Chrome { id, .. }
-                | Request::ProgramChrome { id, .. } => *id,
+                | Request::ProgramChrome { id, .. }
+                | Request::NotifyFd { id } => *id,
                 _ => unreachable!(),
             };
             let session = registry
@@ -318,6 +322,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                     session.set_program_chrome(enabled)?;
                     Ok(json!({}))
                 }
+                Request::NotifyFd { .. } => session.notify_fd(),
                 _ => unreachable!(),
             }
         }
