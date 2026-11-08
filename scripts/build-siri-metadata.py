@@ -45,6 +45,20 @@ def validate_training(data, path):
                 raise ValueError("Siri training is missing spoken phrases; check CFBundleDevelopmentRegion")
 
 
+def module_constants(intermediates, module, anchor, architecture):
+    # Whole-module optimization emits one *-primary file instead of a file for
+    # each source. Both configurations must ship the same intent declarations.
+    candidates = [p for name in [anchor, module + "-primary"]
+                  for p in intermediates.rglob(name + ".swiftconstvalues")
+                  if p.parent.name == architecture]
+    if not candidates:
+        raise ValueError("Missing Swift intent constants. Build with Xcode 27.2+ and the Swift build engine before packaging.")
+    selected = max(candidates, key=lambda p: p.stat().st_mtime_ns)
+    if selected.name == module + "-primary.swiftconstvalues":
+        return [selected]
+    return sorted(p for p in selected.parent.glob("*.swiftconstvalues") if not p.name.endswith("-primary.swiftconstvalues"))
+
+
 def extract(build_dir, configuration, resources, binary, preview=False):
     root = Path(__file__).resolve().parents[1]
     # Swift's build engine emits constants as a supplemental compile output.
@@ -62,14 +76,11 @@ def extract(build_dir, configuration, resources, binary, preview=False):
         work = Path(temporary)
         outputs = []
         for module, anchor in [("AkittyKit", "SiriIntents"), ("Akitty", "AkittyShortcuts")]:
-            candidates = list(intermediates.rglob(anchor + ".swiftconstvalues"))
-            if not candidates:
-                raise ValueError("Missing Swift intent constants. Build with Xcode 27.2+ and the Swift build engine before packaging.")
-            objects = max(candidates, key=lambda p: p.stat().st_mtime_ns).parent
+            module_values = module_constants(intermediates, module, anchor, architectures[0])
             sources = work / (module + ".sources")
             constants = work / (module + ".constants")
             sources.write_text("".join(str(p) + "\n" for p in sorted((root / "macos/Sources" / module).glob("*.swift"))))
-            constants.write_text("".join(str(p) + "\n" for p in sorted(objects.glob("*.swiftconstvalues"))))
+            constants.write_text("".join(str(p) + "\n" for p in module_values))
             output = work / module if module == "AkittyKit" else resources
             command = [
                 "xcrun", "appintentsmetadataprocessor", "--module-name", module,
