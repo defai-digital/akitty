@@ -96,12 +96,18 @@ inspecting terminal activity and one for requesting an exact command. Their
 guidance covers pane disambiguation, fresh status, native approval, and uncertain
 dispatch. They guide Siri; enforcement remains in the native command host.
 
-These sources are not compiled or bundled by `build-app.sh`. The source checker
-validates Apple's documented directory structure, metadata, and length limits;
-it does not replace Apple's skills compiler. Compiling them into the main app
-through the preview Xcode build pipeline and verifying their selection remain
-outstanding. The Siri Integration Advisor and SiriEvaluations also need that
-preview development environment. AkiTTY does not include an agent that can independently complete “fix this project.”
+Developer-preview packaging validates these sources, invokes Apple's
+`appintentsskillsprocessor`, and requires a nonempty
+`Metadata.appintents/Skills.skillsc` before signing. Regular builds omit this
+preview resource. The source checker validates Apple's documented structure,
+metadata, and length limits; it does not replace Apple's compiler. Preview
+packaging also requires all seven compiled `ToolIntent` conformances and their
+corresponding registrations in the emitted metadata, preventing a regular build
+from being packaged as a Siri AI preview accidentally.
+
+Verifying Siri's actual skill selection remains a separate device qualification
+step. The Siri Integration Advisor and SiriEvaluations need the preview
+development environment. AkiTTY does not include an agent that can independently complete “fix this project.”
 Request Command submits a shell command for approval, not an open-ended task to
 an external coding agent.
 
@@ -133,6 +139,8 @@ Installing that SDK permits preview compilation on macOS 27.2; running the
 device and the development signing described above. Confirm the installed
 Xcode version and SDK with `xcodebuild -version` and
 `xcrun --sdk macosx --show-sdk-version` under that `DEVELOPER_DIR`.
+Rust libraries and build-time helpers retain the macOS 14 deployment target;
+the Swift package and final app plist apply the preview app's macOS 27.3 target.
 
 ## Implementation plan and build verification
 

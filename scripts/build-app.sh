@@ -12,7 +12,8 @@ import sys
 if tuple(map(int, sys.argv[1].split('.')[:2])) < (27, 3):
     raise SystemExit('Siri AI preview builds require the macOS 27.3+ SDK. Disable AKITTY_SIRI_AI_PREVIEW for the macOS 14-compatible build.')
 PYSIRISDK
-    export MACOSX_DEPLOYMENT_TARGET=27.3
+    # Keep Rust build scripts and build-time helpers runnable on the host.
+    # Package.swift and the app plist set the preview application's 27.3 target.
 fi
 source scripts/rust-toolchain.sh
 commit=$(git rev-parse --verify HEAD 2>/dev/null || true)
