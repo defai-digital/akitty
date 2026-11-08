@@ -18,7 +18,7 @@ provider, cloud account or AX product is required.
 
 | Platform | Status | Get started |
 | --- | --- | --- |
-| macOS 14+ · Apple Silicon | Stable | [Download and install](#quick-start) |
+| macOS 27.2+ · Apple Silicon | Stable | [Download and install](#quick-start) |
 
 [Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
 [Release notes](docs/releases/1.3.5.md) · [Agent integration guide](docs/AGENT_NATIVE.md)
@@ -71,7 +71,7 @@ paths; launching an ordinary CLI alone does not add activity reporting or approv
 
 ## Quick start
 
-Requires an **Apple Silicon Mac running macOS 14 or later**.
+Requires an **Apple Silicon Mac running macOS 27.2 or later**.
 
 ```sh
 curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
@@ -368,15 +368,16 @@ These are remaining qualification goals for the implemented features. See the
 
 ## Build and run
 
-Requires macOS 14+, Rust 1.99.1 and Node 22+. App bundle packaging requires
-Xcode 27.2+ with its Swift build engine to extract Siri metadata. The optional
-[Siri AI developer-preview build](docs/SIRI.md#preview-builds) requires the macOS 27.3+ SDK.
+Requires macOS 27.2+, Rust 1.99.1 and Node 22+. App bundle packaging requires
+the stable Xcode 27.2 toolchain with its Swift build engine to extract Siri
+metadata. Siri and Shortcuts target macOS 27.2; see the
+[Siri integration guide](docs/SIRI.md).
 Dependency lockfiles are pinned. Build scripts select the pinned rustup toolchain,
 or accept an installed distribution toolchain with that exact compiler version.
 To rebuild the Web WASM, install `wasm32-unknown-unknown` or matching Rust sources
 and `wasm-ld`; no Zig compiler or upstream terminal checkout is needed.
 Distribution toolchains also need matching Rust sources: app packaging rebuilds
-the standard library for macOS 14 instead of linking a newer Homebrew deployment
+the standard library for macOS 27.2 instead of linking a newer Homebrew deployment
 baseline. Builds target the current Mac architecture.
 
 ```sh

@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 
 INTENTS = {
@@ -13,7 +12,7 @@ INTENTS = {
 }
 
 
-def validate_metadata(path, preview=False):
+def validate_metadata(path):
     data = json.loads(Path(path).read_text())
     actions = data.get("actions", {})
     if not INTENTS.issubset(actions):
@@ -27,10 +26,10 @@ def validate_metadata(path, preview=False):
             raise ValueError("Each Siri phrase must include the application name")
     if "TerminalEntity" not in data.get("entities", {}):
         raise ValueError("Siri metadata is missing terminal entities")
-    if any(not actions[name].get("openAppWhenRun") for name in INTENTS):
+    # IntentModes.foreground(.immediate) is encoded as 2 by the stable SDK.
+    # Reject modes that permit background execution before approval is visible.
+    if any(actions[name].get("supportedModes") != 2 for name in INTENTS):
         raise ValueError("Terminal actions must run in the foreground")
-    if preview and any("com.apple.link.systemProtocol.ToolIntent" not in actions[name].get("systemProtocols", []) for name in INTENTS):
-        raise ValueError("Siri preview metadata is missing tool registrations")
     return data
 
 
@@ -62,29 +61,7 @@ def module_constants(intermediates, module, anchor, architecture):
     return sorted(p for p in selected.parent.glob("*.swiftconstvalues") if not p.name.endswith("-primary.swiftconstvalues"))
 
 
-def validate_preview_constants(files):
-    tools = set()
-    for path in files:
-        for item in json.loads(path.read_text()):
-            if "AppIntents.ToolIntent" in item.get("conformances", []):
-                tools.add(item.get("typeName", "").removeprefix("AkittyKit."))
-    if not INTENTS.issubset(tools):
-        raise ValueError("Preview build is missing compiled Siri tool conformances; rebuild with AKITTY_SIRI_AI_PREVIEW=1")
-
-
-def compile_skills(bundle, output):
-    artifact = output / "Skills.skillsc"
-    if artifact.exists():
-        raise ValueError("Skills output already exists; use a fresh staging directory")
-    checker = Path(__file__).with_name("check-siri-skills.py")
-    subprocess.run([sys.executable, str(checker), "--bundle", str(bundle)], check=True)
-    subprocess.run(["xcrun", "appintentsskillsprocessor", "--skillsbundle", str(bundle), "--output", str(output)], check=True)
-    if not artifact.is_file() or artifact.stat().st_size == 0:
-        raise ValueError("Apple's skills compiler did not produce Skills.skillsc")
-    return artifact
-
-
-def extract(build_dir, configuration, resources, binary, preview=False):
+def extract(build_dir, configuration, resources, binary):
     root = Path(__file__).resolve().parents[1]
     # Swift's build engine emits constants as a supplemental compile output.
     # Restrict discovery to the selected configuration, never another build's
@@ -96,14 +73,12 @@ def extract(build_dir, configuration, resources, binary, preview=False):
     architectures = tool_output("lipo", "-archs", str(binary)).split()
     if len(architectures) != 1:
         raise ValueError("Extract Siri metadata before assembling a universal app")
-    deployment = "27.3" if preview else "14.0"
+    deployment = "27.2"
     with tempfile.TemporaryDirectory(prefix="akitty-intents-") as temporary:
         work = Path(temporary)
         outputs = []
         for module, anchor in [("AkittyKit", "SiriIntents"), ("Akitty", "AkittyShortcuts")]:
             module_values = module_constants(intermediates, module, anchor, architectures[0])
-            if preview and module == "AkittyKit":
-                validate_preview_constants(module_values)
             sources = work / (module + ".sources")
             constants = work / (module + ".constants")
             sources.write_text("".join(str(p) + "\n" for p in sorted((root / "macos/Sources" / module).glob("*.swift"))))
@@ -123,7 +98,7 @@ def extract(build_dir, configuration, resources, binary, preview=False):
                 command += ["--static-metadata-file-list", str(dependencies)]
             subprocess.run(command, check=True)
             outputs.append(output / "Metadata.appintents/extract.actionsdata")
-        data = validate_metadata(outputs[-1], preview=preview)
+        data = validate_metadata(outputs[-1])
         # Train/validate Siri phrases against the real bundle identity, just as
         # Xcode does for an app target. Failure must stop packaging before signing.
         subprocess.run([
@@ -132,8 +107,6 @@ def extract(build_dir, configuration, resources, binary, preview=False):
             "--product-path", str(resources), "--temp-dir-path", str(work / "training"),
         ], check=True)
         validate_training(data, resources / "Metadata.appintents/root.ssu.yaml")
-        if preview:
-            compile_skills(root / "macos/Siri/Skills.skillsbundle", resources / "Metadata.appintents")
 
 
 if __name__ == "__main__":
@@ -142,6 +115,5 @@ if __name__ == "__main__":
     parser.add_argument("--configuration", choices=["debug", "release"], required=True)
     parser.add_argument("--resources", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
-    extract(args.build_dir, args.configuration, args.resources, args.binary, args.preview)
+    extract(args.build_dir, args.configuration, args.resources, args.binary)

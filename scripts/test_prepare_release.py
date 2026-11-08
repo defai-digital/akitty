@@ -34,7 +34,7 @@ def appcast(
     signature=SIGNATURE,
     url=ARCHIVE_URL,
     length=len(ARCHIVE_BYTES),
-    minimum="14.0",
+    minimum="27.2",
 ):
     minimum_element = (
         ""
@@ -72,6 +72,7 @@ def workspace(root):
                 "CFBundleIdentifier": "com.defai.akitty",
                 "CFBundleShortVersionString": VERSION,
                 "CFBundleVersion": BUILD,
+                "LSMinimumSystemVersion": "27.2",
                 "SUPublicEDKey": PUBLIC_KEY,
             }
         )
@@ -161,6 +162,7 @@ def verifier(plist=None, build_stamp=None):
         "CFBundleIdentifier": "com.defai.akitty",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": BUILD,
+        "LSMinimumSystemVersion": "27.2",
     }
     if plist:
         row.update(plist)
@@ -215,6 +217,7 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertEqual(manifest["commit"], HEAD)
         self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(manifest["build"], BUILD)
+        self.assertEqual(manifest["minimum_macos"], "27.2")
         archive = (destination / ARCHIVE).read_bytes()
         self.assertEqual(manifest["sha256"], hashlib.sha256(archive).hexdigest())
         self.assertEqual(manifest["size"], len(archive))
@@ -280,6 +283,31 @@ class PrepareReleaseTests(unittest.TestCase):
                     self.prepare(run=AppcastRunner(**overrides))
                 self.assertEqual([path.name for path in self.output.iterdir()], [])
                 self.assertFalse((self.output / ("v" + VERSION)).exists())
+
+    def test_packaged_minimum_must_match_source_before_signing_checks(self):
+        expected = plistlib.loads((self.root / "macos/Info.plist").read_bytes())
+        for minimum in [None, "27.1", "28.0"]:
+            with self.subTest(minimum=minimum):
+                def extract(*args):
+                    self.assertEqual(args[:3], ("ditto", "-x", "-k"))
+                    app = Path(args[-1]) / "Akitty.app"
+                    (app / "Contents/Resources").mkdir(parents=True)
+                    actual = dict(expected)
+                    if minimum is None:
+                        actual.pop("LSMinimumSystemVersion")
+                    else:
+                        actual["LSMinimumSystemVersion"] = minimum
+                    (app / "Contents/Info.plist").write_bytes(plistlib.dumps(actual))
+                    (app / prepare.STAMP_PATH).write_text(json.dumps(stamp()))
+                with self.assertRaisesRegex(prepare.ReleaseError, "LSMinimumSystemVersion"):
+                    prepare.verify_package(self.root / "build/Akitty-macOS.zip", expected,
+                                           VERSION, self.root / "private", run=extract)
+
+    def test_manifest_minimum_is_read_from_the_packaged_app(self):
+        self.prepare(verify=verifier(plist={"LSMinimumSystemVersion": "28.0"}),
+                     run=AppcastRunner(minimum="28.0"))
+        manifest = json.loads((self.output / ("v" + VERSION) / "release.json").read_text())
+        self.assertEqual(manifest["minimum_macos"], "28.0")
 
     def test_appcast_requires_the_manifest_minimum_macos(self):
         feed = self.root / "feed.xml"

@@ -166,7 +166,7 @@ cross-platform release policy are not imported. See RELEASING.md for publication
 ## AkiTTY Web
 
 `packages/akitty-web` is how AkiTTY supports Windows and Linux. AX Code Desktop embeds this terminal in its web UI.
-The installable app stays Apple Silicon and macOS 14 or later. Web uses the same
+The installable app stays Apple Silicon and macOS 27.2 or later. Web uses the same
 Rust VT engine as native through its owned WASM ABI; the native C ABI and Swift
 app are separate. A reauthored DOM/Canvas frontend provides an xterm.js-style API.
 It runs in browsers on Windows, Linux and macOS. Version 0.6 changes the old

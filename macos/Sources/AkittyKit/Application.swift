@@ -770,9 +770,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }()
     func registerAgentTerminal(_ terminal: TerminalView) {
         agentRequests.register(terminal)
-        if #available(macOS 15.4, *) {
-            terminal.appEntityIdentifier = EntityIdentifier(for: TerminalEntity.self, identifier: intentID(for: terminal))
-        }
+        terminal.appEntityIdentifier = EntityIdentifier(for: TerminalEntity.self, identifier: intentID(for: terminal))
     }
     @objc private func toggleAgentRequests(_ sender: NSMenuItem) {
         do { try agentRequests.setEnabled(!agentRequests.enabled); sender.state = agentRequests.enabled ? .on : .off }
