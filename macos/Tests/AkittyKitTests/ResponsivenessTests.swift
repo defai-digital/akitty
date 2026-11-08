@@ -40,6 +40,24 @@ final class ResponsivenessTests: XCTestCase {
         XCTAssertEqual(TerminalView.safetyPollInterval, 1)
     }
 
+    /// A poll requested while another is in flight must not be dropped: the running one may have been built before
+    /// the change, and with no 30 Hz timer the next chance would be the one-second safety tick.
+    @MainActor func testPollRequestedDuringAnInFlightPollRunsAfterIt() async throws {
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        defer { terminal.shutdown() }
+        terminal.poll()
+        // Block main so the first poll's snapshot is built off-main before the feed, while its completion (which
+        // clears `pollInFlight`) is still queued behind this test on the main thread.
+        Thread.sleep(forTimeInterval: 0.1)
+        _ = try terminal.session.call("feed", ["text": "SECOND_POLL_MARKER"])
+        terminal.poll()
+        let start = Date()
+        while terminal.snapshot?.text.contains("SECOND_POLL_MARKER") != true, Date().timeIntervalSince(start) < 0.5 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(terminal.snapshot?.text.contains("SECOND_POLL_MARKER") == true, "the second poll was dropped")
+    }
+
     /// A real PTY pane must show shell output without the test calling poll(): either the core's
     /// notify pipe (visible pane) or the one-second safety tick must deliver it.
     @MainActor func testRealPTYOutputAppearsWithoutExplicitPoll() async throws {

@@ -38,6 +38,8 @@ private let hiddenPollInterval: Double = 0.25
     private var rasterPending = false
     /// A poll arrived while the raster was drawing; it runs as soon as the frame is handed to the GPU.
     private var pollDeferred = false
+    /// A wake arrived while a poll was in flight: that poll may predate the change, so run one more after it.
+    private var pollAgain = false
     /// Uptime of the last low-rate poll of a hidden pane (see `pollDue`).
     private var lastHiddenPoll: Double = 0
     /// Trackpad points accumulated towards the next scroll line.
@@ -276,9 +278,9 @@ private let hiddenPollInterval: Double = 0.25
         guard let shared = session.notifyFD() else { return } // headless: the host polls explicitly
         // libdispatch requires a monitored descriptor to stay open until the cancel handler runs, but the
         // core closes its pipe on a background queue at shutdown. Watch a private duplicate instead.
-        let fd = dup(shared)
+        // Atomically close-on-exec, so a shell spawned meanwhile on another thread cannot inherit it.
+        let fd = fcntl(shared, F_DUPFD_CLOEXEC, 0)
         guard fd >= 0 else { return } // the safety tick still refreshes the pane
-        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         wakeFD = fd
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.wakeFromCore() } }
@@ -303,7 +305,11 @@ private let hiddenPollInterval: Double = 0.25
         var buffer = [UInt8](repeating: 0, count: 256)
         while true {
             let count = buffer.withUnsafeMutableBytes { Darwin.read(wakeFD, $0.baseAddress, $0.count) }
-            if count <= 0 { break }
+            if count > 0 { continue }
+            // EOF: the core closed its write end, so the source would report readable forever. The safety
+            // tick keeps the pane refreshing; dispatch closes the duplicate in the cancel handler.
+            if count == 0 { wakeSource?.cancel(); wakeSource = nil; wakeFD = -1 }
+            break
         }
     }
     private func scheduleHiddenPoll(after delay: TimeInterval) {
@@ -332,7 +338,9 @@ private let hiddenPollInterval: Double = 0.25
         do { try session.reclaimControl(); poll() } catch { show(error) }
     }
     public func poll() {
-        guard !stopped, !pollInFlight else { return }
+        guard !stopped else { return }
+        // Without the old 30 Hz timer nothing else would pick up a change that landed after this poll's build.
+        if pollInFlight { pollAgain = true; return }
         // Under heavy output every vsync would build a snapshot a newer raster immediately drops. Defer it
         // until the raster is handed off, then poll once: the newest frame is never lost.
         if rasterInFlight { pollDeferred = true; return }
@@ -348,6 +356,7 @@ private let hiddenPollInterval: Double = 0.25
                 guard !self.stopped else { return }
                 self.applySnapshot(result)
                 self.updatePolling()
+                if self.pollAgain { self.pollAgain = false; self.poll() }
             }
         }
     }

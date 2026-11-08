@@ -111,3 +111,23 @@ fn headless_session_has_no_notify_pipe() {
     );
     let _ = request(&serde_json::to_vec(&json!({"op":"close","id":id})).unwrap());
 }
+
+#[test]
+fn host_changes_wake_the_host_but_reads_do_not() {
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    // Let the shell's startup output settle, then start from a drained pipe.
+    std::thread::sleep(Duration::from_millis(300));
+    drain_readable(fd);
+    // Reads (snapshot, shell state, audit) must not signal, or a poller would wake itself forever.
+    session.command("snapshot", json!({"compact":true}));
+    session.command("shell_state", json!({}));
+    session.command("control_audit", json!({}));
+    assert!(!wait_readable(fd, Duration::from_millis(150)), "a read woke the host");
+    // An agent lease changes the pane's status without any PTY output: the host must be told.
+    let lease = session.command("control_acquire", json!({"actor":"notify-test"}))["lease"].as_u64().expect("lease");
+    assert!(wait_readable(fd, Duration::from_millis(500)), "a host-side lease did not wake the host");
+    drain_readable(fd);
+    session.command("control_release", json!({"lease":lease}));
+    assert!(wait_readable(fd, Duration::from_millis(500)), "a release did not wake the host");
+}

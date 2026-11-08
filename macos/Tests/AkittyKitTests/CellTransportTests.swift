@@ -39,6 +39,21 @@ final class CellTransportTests: XCTestCase {
         _ = try session.call("find", ["text": "link"])
     }
 
+    /// One-shot events travel in the JSON head of a binary reply and must reach the caller exactly once, including on
+    /// a cell at the engine's combining-mark cap (the longest cell text the block has to carry).
+    func testBinarySnapshotDeliversOneShotBellOnce() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "a" + String(repeating: "\u{301}", count: 40) + " ok\u{7}"])
+        let first = try XCTUnwrap(try session.snapshot(since: nil, base: nil, binary: true))
+        XCTAssertNotNil(first.cells_binary)
+        XCTAssertEqual(first.bell, true)
+        XCTAssertTrue(first.cells.contains { $0.text.unicodeScalars.count > 1 })
+        _ = try session.call("feed", ["text": "!"])
+        let next = try XCTUnwrap(try session.snapshot(since: first.revision, base: first, binary: true))
+        XCTAssertNotEqual(next.bell, true, "a bell is delivered once")
+    }
+
     func testBinaryAndJSONSnapshotsAgree() throws {
         let jsonSession = try TerminalSession(cols: 40, rows: 8, headless: true)
         let binarySession = try TerminalSession(cols: 40, rows: 8, headless: true)
