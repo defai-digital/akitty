@@ -15,15 +15,29 @@ public struct TerminalEntity: AppEntity, Transferable {
     public let id: String
     @Property(title: "Name") var name: String
     @Property(title: "Reported Status") var reportedStatus: String
+    @Property(title: "Input Ownership") var inputOwnership: String
+    @Property(title: "Shell Readiness") var shellReadiness: String
     public var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(title: "\(name)", subtitle: "\(reportedStatus)")
     }
-    var summary: String { "\(name): \(reportedStatus)" }
+    var summary: String { "\(name): \(reportedStatus). \(inputOwnership). \(shellReadiness)." }
     public static var transferRepresentation: some TransferRepresentation {
         ProxyRepresentation(exporting: \.summary)
     }
-    init(id: String, name: String, reportedStatus: String) {
+    init(id: String, name: String, reportedStatus: String,
+         inputOwnership: String = "Input ownership unavailable", shellReadiness: String = "Integrated shell state unavailable") {
         self.id = id; self.name = name; self.reportedStatus = reportedStatus
+        self.inputOwnership = inputOwnership; self.shellReadiness = shellReadiness
+    }
+}
+
+enum TerminalSpeech {
+    static func list(_ entities: [TerminalEntity]) -> String {
+        guard !entities.isEmpty else { return "No AkiTTY terminal panes are open." }
+        if entities.count == 1 { return "One AkiTTY terminal pane is open: \(entities[0].name)." }
+        let names = entities.prefix(3).map(\.name).joined(separator: ", ")
+        let remainder = entities.count > 3 ? " There are \(entities.count - 3) more panes." : ""
+        return "There are \(entities.count) open AkiTTY terminal panes: \(names).\(remainder)"
     }
 }
 
@@ -56,12 +70,20 @@ extension AkittyApplication {
             guard !terminal.isShutdown else { return nil }
             // Titles and program reports are untrusted. Expose bounded metadata,
             // without indexing scrollback, environment variables or commands.
-            let snapshot = terminal.snapshot
-            let title = String(ProgramStatusRecord.displayText(snapshot?.title ?? "Terminal").prefix(80))
-            let status = snapshot?.program_status?.active.map { "Program reports \($0.state); result not verified" }
-                ?? (snapshot?.exited == true ? "Exited" : "No program status reported")
-            return TerminalEntity(id: intentID(for: terminal), name: title.isEmpty ? "Terminal" : title, reportedStatus: status)
+            return terminalEntity(for: terminal, snapshot: terminal.snapshot)
         }
+    }
+    func terminalEntity(for terminal: TerminalView, snapshot: Snapshot?) -> TerminalEntity {
+        let title = String(ProgramStatusRecord.displayText(snapshot?.title ?? "Terminal").prefix(80))
+        let status = snapshot?.exited == true ? "Exited" : snapshot?.program_status?.active.map {
+            "Program reports \($0.state); result not verified"
+        } ?? "No program status reported"
+        let ownership = snapshot?.control.map { $0.agent ? "Agent-controlled input" : "Human-controlled input" }
+            ?? "Input ownership unavailable"
+        let readiness = snapshot?.shell.map { $0.ready ? "Shell reports an idle prompt" : "Shell does not report an idle prompt" }
+            ?? "Integrated shell state unavailable"
+        return TerminalEntity(id: intentID(for: terminal), name: title.isEmpty ? "Terminal" : title,
+                              reportedStatus: status, inputOwnership: ownership, shellReadiness: readiness)
     }
     func resolveIntentTerminal(_ id: String) throws -> (TerminalWindow, TerminalView) {
         for window in windows {
@@ -154,9 +176,34 @@ public struct ListTerminalsIntent: AppIntent {
     public static let openAppWhenRun = true
     @available(macOS 26.0, *) public static var supportedModes: IntentModes { .foreground(.immediate) }
     public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
-    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<[TerminalEntity]> {
+    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<[TerminalEntity]> & ProvidesDialog {
         try Task.checkCancellation()
-        return .result(value: try AkittyApplication.intentApplication().terminalEntities())
+        let entities = try AkittyApplication.intentApplication().terminalEntities()
+        return .result(value: entities, dialog: "\(TerminalSpeech.list(entities))")
+    }
+}
+
+#if AKITTY_SIRI_AI_PREVIEW
+@AppIntent(.tool)
+#endif
+public struct GetTerminalStatusIntent: AppIntent {
+    public init() {}
+    public static let title: LocalizedStringResource = "Get AkiTTY Terminal Status"
+    public static let description = IntentDescription("Read a current terminal pane's reported activity, host input ownership, and shell-reported readiness. Refreshes the pane reference before responding. Program reports do not verify completion. Does not read terminal output or execute commands.")
+    public static let openAppWhenRun = true
+    @available(macOS 26.0, *) public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @Parameter(title: "Terminal", description: "The currently open terminal pane to inspect, including a pane referenced from onscreen context.") var terminal: TerminalEntity
+    public static var parameterSummary: some ParameterSummary { Summary("Get status of \(\.$terminal)") }
+    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<TerminalEntity> & ProvidesDialog {
+        try Task.checkCancellation()
+        let app = try AkittyApplication.intentApplication()
+        let (_, view) = try app.resolveIntentTerminal(terminal.id)
+        // Read the core now rather than repeat a previously returned entity or
+        // wait for the UI's asynchronous snapshot refresh.
+        guard let snapshot = try view.session.snapshot() else { throw AkittyError.core("Terminal status is unavailable. Try again after the pane finishes starting.") }
+        let entity = app.terminalEntity(for: view, snapshot: snapshot)
+        return .result(value: entity, dialog: "\(entity.summary)")
     }
 }
 
