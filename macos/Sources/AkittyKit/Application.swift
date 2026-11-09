@@ -447,6 +447,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
               let split = item.view as? NSSplitView else {
             throw AkittyError.core("That terminal is no longer open. Choose a current AkiTTY terminal.")
         }
+        // Check before selecting, so a refused split leaves the user's tab and focus alone.
+        guard split.arrangedSubviews.count < 8 else { throw AkittyError.core("This tab already has 8 panes.") }
         tabs.selectTabViewItem(item)
         guard let pane = try addPane(to: split) else { throw AkittyError.core("This tab already has 8 panes.") }
         return pane.terminal
@@ -844,13 +846,14 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if window === quickTerminal.terminalWindow { try showQuickTerminal() }
     }
     /// The window a foreground action without a pane reference should use. The
-    /// key window wins; otherwise a regular window beats the hidden quick terminal.
+    /// key window wins; otherwise a regular window. A hidden quick terminal is
+    /// never chosen, so New Tab creates a window instead of revealing it.
     func intentWindow() -> TerminalWindow? {
         let regular = windows.filter { $0 !== quickTerminal.terminalWindow }
         return regular.first { $0.window?.isKeyWindow == true }
             ?? windows.first { $0.window?.isKeyWindow == true }
             ?? regular.first { $0.window?.isMainWindow == true }
-            ?? regular.first ?? windows.first
+            ?? regular.first ?? windows.first { $0.window?.isVisible == true }
     }
     func requestSiriCommand(_ command: String, in terminal: TerminalView) async throws {
         _ = try await agentRequests.request(command, in: terminal, origin: .siri)

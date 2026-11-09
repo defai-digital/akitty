@@ -297,6 +297,44 @@ final class SiriIntentTests: XCTestCase {
         XCTAssertEqual(result.value?.id, app.intentID(for: try XCTUnwrap(window.selectedPane)))
     }
 
+    @MainActor func testNewTabIntentDoesNotRevealAHiddenQuickTerminal() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        defer {
+            app.windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() }
+            NSApp.delegate = previous
+        }
+        try app.showQuickTerminal()
+        let quick = try XCTUnwrap(app.windows.first)
+        quick.window?.orderOut(nil)
+        XCTAssertNil(app.intentWindow())
+        _ = try await NewTerminalTabIntent().perform()
+        XCTAssertEqual(app.windows.count, 2)
+        XCTAssertEqual(quick.tabs.numberOfTabViewItems, 1)
+        XCTAssertFalse(quick.window?.isVisible == true)
+    }
+
+    @MainActor func testRefusedSplitKeepsTheSelectedTab() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let window = try app.createTerminalWindow(headless: true)
+        defer {
+            window.panes.forEach { $0.terminal.shutdown() }; window.window?.close()
+            NSApp.delegate = previous
+        }
+        let pane = try XCTUnwrap(window.selectedPane)
+        for _ in 1..<8 { _ = try window.splitPane(containing: pane) }
+        try window.newTab()
+        let other = try XCTUnwrap(window.tabs.selectedTabViewItem)
+        let action = SplitTerminalPaneIntent()
+        action.terminal = try app.intentEntity(for: pane)
+        do { _ = try await action.perform(); XCTFail("A ninth pane must fail") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("8 panes")) }
+        XCTAssertTrue(window.tabs.selectedTabViewItem === other)
+    }
+
     @MainActor func testSplitPaneIntentAddsPaneAndRejectsANinth() async throws {
         _ = NSApplication.shared
         let previous = NSApp.delegate
