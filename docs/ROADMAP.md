@@ -39,6 +39,10 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   and the view polls again when shown. A pane in a background tab releases its window-sized
   bitmaps and Metal textures and repaints in full when selected again. Minimized-window
   rasterization remains to measure.
+  Measured idle on an Apple M5 Max Mac (macOS 27.2, release build, idle zsh, 60 s `top` samples): four
+  windows use 0.10% CPU and about 34 context switches a second, eight use 0.21% and about 63, with almost
+  no idle wakeups; hiding the app changes neither. Each pane adds about eight switches a second, which
+  matches the PTY worker's 250 ms idle poll for a silent child exit.
 - Engine cells are 40 bytes (packed colours, boxed combining marks, one shared
   hyperlink record per OSC 8 target), so grid and scrollback memory halved and the
   64 MiB history cap retains twice as many rows. Printable ASCII bypasses the parser

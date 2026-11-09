@@ -384,4 +384,18 @@ final class SiriIntentTests: XCTestCase {
         XCTAssertTrue(AkittyApplication.shouldActivateAfterLaunch(windowCount: 1))
         XCTAssertTrue(AkittyApplication.shouldActivateAfterLaunch(windowCount: 3))
     }
+
+    // A launch that restores saved state is not default, so didFinishLaunching opens nothing; AppKit then
+    // asks for an untitled window, which must open exactly one.
+    @MainActor func testAnUntitledWindowRequestOpensOneWindowOnlyWhenNoneExists() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        defer { app.windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() } }
+        try app.createInitialWindowIfNeeded(defaultLaunch: false, headless: true)
+        XCTAssertTrue(app.windows.isEmpty)
+        XCTAssertTrue(app.openUntitledWindow(headless: true))
+        XCTAssertEqual(app.windows.count, 1)
+        XCTAssertFalse(app.openUntitledWindow(headless: true))
+        XCTAssertEqual(app.windows.count, 1)
+    }
 }

@@ -898,6 +898,17 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// A default launch or a folder opened before launch owns a window and still
     /// activates. A background intent launch has no window and stays in place.
     nonisolated static func shouldActivateAfterLaunch(windowCount: Int) -> Bool { windowCount > 0 }
+    /// AppKit asks for an untitled window when a Dock, Finder or `open` launch ends with none. A launch that
+    /// restores saved state (after a crash, a forced quit, or with "Close windows when quitting" off) is not
+    /// default, so didFinishLaunching skips its window; AkiTTY restores none, so it opens one here. A
+    /// background intent launch is not an open-application launch and never reaches this.
+    public func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool { openUntitledWindow() }
+    /// Only an app with no windows gets one, so a Dock reopen that already opened a window adds none.
+    func openUntitledWindow(headless: Bool = false) -> Bool {
+        guard windows.isEmpty else { return false }
+        do { try createTerminalWindow(headless: headless) } catch { NSAlert(error: error).runModal(); return false }
+        return true
+    }
     public func application(_ sender: NSApplication, open urls: [URL]) {
         let request = folderOpenRequest(from: urls)
         for directory in request.directories { newWindow(directory: directory) }
