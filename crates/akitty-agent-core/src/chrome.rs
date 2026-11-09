@@ -164,6 +164,12 @@ impl Chrome {
         !self.expired(now_ms) && (self.status_text.is_some() || self.progress.is_some())
     }
 
+    /// When the visible status or progress expires, in Unix milliseconds. A host shows the
+    /// change only when it next polls, so the session wakes it at this moment.
+    pub fn expiry(&self, now_ms: u64) -> Option<u64> {
+        self.expires_ms.filter(|_| self.transient_visible(now_ms))
+    }
+
     pub fn to_json(&self, now_ms: u64) -> Option<Value> {
         let mut object = Map::new();
         if !self.expired(now_ms) {
@@ -507,6 +513,17 @@ mod tests {
             out.push((kind, bytes));
         }
         out
+    }
+
+    #[test]
+    fn expiry_is_reported_only_while_a_timed_status_is_visible() {
+        let mut chrome = Chrome::default();
+        assert_eq!(chrome.expiry(0), None);
+        chrome.apply_bytes(br#"{"status":{"text":"Saved","tone":"info","expires":1000}}"#).unwrap();
+        assert_eq!(chrome.expiry(999), Some(1000));
+        assert_eq!(chrome.expiry(1000), None, "an expired status needs no wake");
+        chrome.apply_bytes(br#"{"status":{"text":"Working","tone":"info"}}"#).unwrap();
+        assert_eq!(chrome.expiry(0), None, "an untimed status never expires");
     }
 
     #[test]

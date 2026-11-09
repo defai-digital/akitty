@@ -1,3 +1,4 @@
+use crate::chrome;
 use crate::child::{ChildGuard, ChildSlot};
 use crate::model::{Model, Size};
 use akitty_vt::screen::Position;
@@ -199,6 +200,8 @@ impl Session {
         let notify_worker = notify.clone();
         let panic_model = model.clone();
         let panic_notify = notify.clone();
+        let clock_wake = wake.clone();
+        let clock_stop = stop.clone();
         let worker = thread::Builder::new()
             .name("akitty-pty".into())
             .spawn(move || {
@@ -213,7 +216,7 @@ impl Session {
                         Wakes { wake: wake_worker, notify: notify_worker },
                     )
                 }));
-                outcome.unwrap_or_else(|_| {
+                let result = outcome.unwrap_or_else(|_| {
                     // The parser or another engine step panicked with the state held. Publish a
                     // restartable failure instead of letting the dead thread strand the pane.
                     lock_model(&panic_model).error = Some(ENGINE_FAILED.into());
@@ -221,7 +224,11 @@ impl Session {
                     // Finalize bumped the revision outside the loop, so tell the host explicitly.
                     panic_notify.signal();
                     Err("PTY worker panicked".into())
-                })
+                });
+                // Exit, failure or panic: the PTY and command channel are gone, but a timed status
+                // on the finished pane still needs a clock until the session closes.
+                keep_chrome_time(&panic_model, &clock_wake, &panic_notify, &clock_stop, false);
+                result
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -331,6 +338,12 @@ impl Session {
             return Err("snapshot exceeds 8 MiB".into());
         }
         model.commit_snapshot(commit);
+        // A status that expired while this reply serialized is already stale on arrival, and the
+        // worker may have checked before the commit. Wake the host once so its next poll clears it;
+        // that poll commits the cleared state, so this cannot repeat.
+        let stale = model.chrome_stale(chrome::now_ms());
+        drop(model);
+        if stale { self.notify_host(); }
         Ok((json, binary))
     }
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
@@ -571,7 +584,11 @@ impl Session {
         Ok(model.search(text, direction))
     }
     pub fn set_chrome(&self, input: crate::chrome::ChromeInput) -> Result<(), String> {
-        self.state()?.set_chrome(input)
+        self.state()?.set_chrome(input)?;
+        // The worker keeps the clock for a timed status, so it must see a new expiry now
+        // rather than after its idle poll.
+        self.wake();
+        Ok(())
     }
     pub fn set_program_chrome(&self, enabled: bool) -> Result<(), String> {
         self.state()?.set_program_chrome(enabled);
@@ -666,24 +683,68 @@ fn queue_parser_replies(
 
 /// Expire the parser deadline and queue its replies under one model lock, so a concurrent
 /// feed cannot reset the backlog between the expiry and the drop decision. Returns the next
-/// deadline the worker must poll for, so a synchronized update expires on time instead of at
-/// the idle timeout.
+/// deadline the worker must poll for, so a synchronized update or a timed chrome status
+/// expires on time instead of at the idle timeout or the host's safety tick.
+/// `chrome_signalled` records that the host was already woken for the current stale status.
 fn expire_and_queue(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
     notify: &Wake,
+    chrome_signalled: &mut bool,
 ) -> Option<Instant> {
     let mut state = lock_model(model);
     let before = state.revision;
     let replies = state.expire_sync();
     queue_parser_replies(&mut state, output, response_pending, replies);
-    let deadline = state.sync_deadline();
+    let (chrome_due, chrome_next) = chrome_tick(&state, chrome_signalled);
+    let deadline = earliest(state.sync_deadline(), chrome_next);
     let changed = state.revision != before;
     drop(state);
     // A synchronized-update deadline can pass with no output, yet the host must refresh.
-    if changed { notify.signal(); }
+    if changed || chrome_due { notify.signal(); }
     deadline
+}
+
+/// Chrome timekeeping for one worker pass: whether to wake the host, and when to look again.
+/// A timed status leaves the next snapshot without any output or revision change, so the host
+/// is woken once while it still shows a status that has gone. This compares against what the
+/// host last received rather than an expiry the worker saw earlier, so a status that was set
+/// and expired between two passes is still announced.
+fn chrome_tick(state: &Model, signalled: &mut bool) -> (bool, Option<Instant>) {
+    let now_ms = chrome::now_ms();
+    let stale = state.chrome_stale(now_ms);
+    let due = stale && !*signalled;
+    *signalled = stale;
+    (due, chrome_deadline(state.chrome_expiry(now_ms), now_ms))
+}
+
+/// The worker deadline for a Unix-millisecond chrome expiry. A program chooses `expires`, so a
+/// date too far ahead to represent simply never expires instead of overflowing.
+fn chrome_deadline(expiry: Option<u64>, now_ms: u64) -> Option<Instant> {
+    let delay = std::time::Duration::from_millis(expiry?.saturating_sub(now_ms));
+    Instant::now().checked_add(delay)
+}
+
+/// After exit the worker is the session's only clock. Keep announcing a timed status the host
+/// still shows until it expires, including one the host sets on the exited pane; close ends the
+/// wait through the worker wake.
+fn keep_chrome_time(model: &Arc<Mutex<Model>>, wake: &Wake, notify: &Wake, stop: &AtomicBool, mut signalled: bool) {
+    while !stop.load(Ordering::SeqCst) {
+        let (due, next) = chrome_tick(&lock_model(model), &mut signalled);
+        if due { notify.signal(); }
+        // Nothing else happens on an exited pane, so sleep until the expiry or a wake, not the idle bound.
+        let timeout = next.map_or(-1, |deadline| {
+            deadline.saturating_duration_since(Instant::now()).as_millis().saturating_add(1).min(libc::c_int::MAX as u128) as libc::c_int
+        });
+        let mut poll = libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll references one valid pollfd owned by this frame.
+        if unsafe { libc::poll(&mut poll, 1, timeout) } > 0 { wake.drain(); }
+    }
+}
+
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) }
 }
 
 /// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
@@ -986,8 +1047,9 @@ fn run(
     let mut response_pending = 0usize;
     let mut io_error = None;
     let mut last_wait = Instant::now();
+    let mut chrome_signalled = false;
     while !stop.load(Ordering::SeqCst) {
-        let deadline = expire_and_queue(&model, &mut output, &mut response_pending, &notify);
+        let deadline = expire_and_queue(&model, &mut output, &mut response_pending, &notify, &mut chrome_signalled);
         let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
         // Test-only: unwind with the state held, exactly like a parser panic during model.feed.
         #[cfg(test)]
@@ -1618,6 +1680,17 @@ mod tests {
         }
         // Later host calls work, and close must not wait on the dead worker.
         assert!(session.snapshot(None, true, false).is_ok());
+        // The thread outlives the panic as the pane's clock: a timed status still clears on time.
+        let notify = session.notify.clone().unwrap();
+        let expires = chrome::now_ms() + 200;
+        let input = serde_json::from_value(json!({"status":{"text":"Failed","tone":"error","expires":expires}})).unwrap();
+        session.set_chrome(input).unwrap();
+        assert!(session.snapshot(None, true, false).is_ok());
+        notify.drain();
+        let mut poll = libc::pollfd { fd: notify.read_fd(), events: libc::POLLIN, revents: 0 };
+        let waited = Instant::now();
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 900) }, 1, "a timed status after a panic never woke the host");
+        assert!(waited.elapsed() < std::time::Duration::from_millis(700), "woke after {:?}", waited.elapsed());
         let started = Instant::now();
         let _ = session.close();
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "close waited on the panicked worker");
