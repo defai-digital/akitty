@@ -72,13 +72,23 @@ extension AkittyApplication {
         }
     }
     func terminalEntity(for terminal: TerminalView, snapshot: Snapshot?) -> TerminalEntity {
-        let title = String(ProgramStatusRecord.displayText(snapshot?.title ?? "Terminal").prefix(80))
-        let status = snapshot?.exited == true ? "Exited" : snapshot?.program_status?.active.map {
+        terminalEntity(for: terminal, title: snapshot?.title, exited: snapshot?.exited, programStatus: snapshot?.program_status,
+                       control: snapshot?.control, shell: snapshot?.shell)
+    }
+    /// Status from the core's non-consuming read, so asking Siri never takes the pane's bell or clipboard events.
+    func terminalEntity(for terminal: TerminalView, state: ShellState) -> TerminalEntity {
+        terminalEntity(for: terminal, title: state.title, exited: state.exited, programStatus: state.program_status,
+                       control: state.control, shell: state.shell)
+    }
+    private func terminalEntity(for terminal: TerminalView, title rawTitle: String?, exited: Bool?, programStatus: ProgramStatus?,
+                                control: ControlSummary?, shell: ShellSummary?) -> TerminalEntity {
+        let title = String(ProgramStatusRecord.displayText(rawTitle ?? "Terminal").prefix(80))
+        let status = exited == true ? "Exited" : programStatus?.active.map {
             "Program reports \($0.state); result not verified"
         } ?? "No program status reported"
-        let ownership = snapshot?.control.map { $0.agent ? "Agent-controlled input" : "Human-controlled input" }
+        let ownership = control.map { $0.agent ? "Agent-controlled input" : "Human-controlled input" }
             ?? "Input ownership unavailable"
-        let readiness = snapshot?.shell.map { $0.ready ? "Shell reports an idle prompt" : "Shell does not report an idle prompt" }
+        let readiness = shell.map { $0.ready ? "Shell reports an idle prompt" : "Shell does not report an idle prompt" }
             ?? "Integrated shell state unavailable"
         return TerminalEntity(id: intentID(for: terminal), name: title.isEmpty ? "Terminal" : title,
                               reportedStatus: status, inputOwnership: ownership, shellReadiness: readiness)
@@ -250,7 +260,7 @@ public struct GetTerminalStatusIntent: AppIntent {
     public init() {}
     public static let title: LocalizedStringResource = "Get AkiTTY Terminal Status"
     public static let description = IntentDescription("Read a current terminal pane's reported activity, host input ownership, and shell-reported readiness. Refreshes the pane reference before responding. Program reports do not verify completion. Does not read terminal output or execute commands. Runs without bringing AkiTTY forward.")
-    // Read-only: one bounded core snapshot, no window or approval UI.
+    // Read-only: one non-consuming core read, no window or approval UI.
     public static var supportedModes: IntentModes { .background }
     public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
     @Parameter(title: "Terminal", description: "The currently open terminal pane to inspect, including a pane referenced from onscreen context.") var terminal: TerminalEntity
@@ -259,10 +269,9 @@ public struct GetTerminalStatusIntent: AppIntent {
         try Task.checkCancellation()
         let app = try AkittyApplication.intentApplication()
         let (_, view) = try app.resolveIntentTerminal(terminal.id)
-        // Read the core now rather than repeat a previously returned entity or
-        // wait for the UI's asynchronous snapshot refresh.
-        guard let snapshot = try view.session.snapshot() else { throw AkittyError.core("Terminal status is unavailable. Try again after the pane finishes starting.") }
-        let entity = app.terminalEntity(for: view, snapshot: snapshot)
+        // Read the core now rather than repeat a previously returned entity or wait for the UI's
+        // asynchronous refresh. shell_state does not consume the bell or clipboard events a snapshot would.
+        let entity = app.terminalEntity(for: view, state: try view.session.shellState())
         return .result(value: entity, dialog: "\(entity.summary)")
     }
 }
