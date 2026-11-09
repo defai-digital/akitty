@@ -251,7 +251,7 @@ These are additive schema-1 operations; no C symbols or existing fields change.
 | Operation | Fields after id | Result / behavior |
 | --- | --- | --- |
 | command_history | after? (default 0) | commands with id > after, oldest_id, last_id, untrusted |
-| shell_state | none | `{shell, control}`, the same summaries a snapshot carries, without consuming the snapshot's pending bell, clipboard or animation state |
+| shell_state | none | `{shell, control, title, exited, program_status}`, the same fields a snapshot carries, without consuming the snapshot's pending bell, clipboard or animation state |
 | command_output | command_id | command_id, output_base64, truncated, complete, untrusted; unknown/evicted id fails |
 | control_acquire | actor | exclusive lease; actor 1–64 UTF-8 bytes without controls |
 | control_release | lease | return control; stale lease fails |

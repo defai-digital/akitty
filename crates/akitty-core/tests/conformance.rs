@@ -298,6 +298,9 @@ fn shell_state_reads_summaries_without_consuming_snapshot_events() {
     assert_eq!(snapshot["bell"], true, "{snapshot}");
     assert_eq!(snapshot["clipboard"], json!(["hello"]));
     assert_eq!(snapshot["shell"], state["shell"]);
+    for field in ["title", "exited", "program_status", "control"] {
+        assert_eq!(snapshot[field], state[field], "{field}: {state}");
+    }
     assert_eq!(
         response(json!({"op":"shell_state","id":999_999}))["ok"],
         false

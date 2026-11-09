@@ -319,6 +319,10 @@ public struct ChromeDocument: Codable, Equatable, Sendable {
 public struct ShellState: Codable, Sendable {
     public let shell: ShellSummary?
     public let control: ControlSummary?
+    /// The snapshot's title, exit flag and program reports, read without consuming one-shot events.
+    public let title: String?
+    public let exited: Bool?
+    public let program_status: ProgramStatus?
 }
 
 public struct ShellSummary: Codable, Sendable {
@@ -399,15 +403,24 @@ public struct Snapshot: Codable, Sendable {
     public let kitty_flags: UInt8?
     public let offset: Int
     public let history: Int
-    public let clipboard: [String]
+    public internal(set) var clipboard: [String]
     /// A BEL arrived since the previous snapshot.
-    public let bell: Bool?
+    public internal(set) var bell: Bool?
     public let error: String?
     public let exited: Bool
     public let exit_code: UInt32?
     /// Present when a mark, sprite, status, or progress is still current. Omitted by the core otherwise.
     public let chrome: ChromeDocument?
     public var text: String { lines.joined(separator: "\n") }
+    /// This snapshot also carrying the one-shot events of an earlier reply the host could not use.
+    /// The core commits a reply's bell and clipboard entries when it sends them, so a resync that
+    /// replaces that reply must hand them on or they are lost.
+    func carrying(bell earlierBell: Bool?, clipboard earlier: [String]) -> Snapshot {
+        var copy = self
+        if earlierBell == true { copy.bell = true }
+        copy.clipboard = earlier + clipboard
+        return copy
+    }
     /// Drops `selected` marks from this cached snapshot. Used when the host has no selection but
     /// the core still holds one, because schema 1 has no deselect request.
     mutating func clearSelectionMarks() {
@@ -479,6 +492,11 @@ public final class TerminalSession: @unchecked Sendable {
     private let lock = NSLock()
     public let id: UInt64
     private var closed = false
+    /// Bell and clipboard entries the core already sent in a reply that never reached the caller
+    /// because its replacement request failed. Guarded by `lock`; the next snapshot delivers them.
+    private var undelivered: (bell: Bool, clipboard: [String]) = (false, [])
+    /// The view keeps only the latest clipboard request, so a few held entries are enough.
+    private static let maxUndeliveredClipboard = 8
     /// The core's exact reply when nothing changed since `since`; matched byte-for-byte so an idle poll decodes nothing.
     private static let unchangedEnvelope = Data(#"{"version":1,"ok":true,"data":{"changed":false}}"#.utf8)
     public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000, shellIntegrationDirectory: String? = nil, folderHistory: Bool = true) throws {
@@ -540,7 +558,30 @@ public final class TerminalSession: @unchecked Sendable {
     /// Pass the snapshot you hold as `base` (and its revision as `since`) to receive only the rows that changed;
     /// the result is always a complete snapshot.
     public func snapshot(since: UInt64? = nil, base: Snapshot? = nil) throws -> Snapshot? {
-        try snapshot(since: since, base: base, binary: !Self.jsonCellsForced)
+        let held = takeUndelivered()
+        guard held.bell || !held.clipboard.isEmpty else { return try snapshot(since: since, base: base, binary: !Self.jsonCellsForced) }
+        // A full request always answers with a snapshot, so held events surface even on an idle pane.
+        return try replacing(bell: held.bell, clipboard: held.clipboard) { try snapshot(since: nil, base: nil, binary: !Self.jsonCellsForced) }
+    }
+    /// Runs the request that replaces a reply whose bell and clipboard entries the core already committed.
+    /// Its result carries them; if it fails, they are held for the next snapshot instead of being lost.
+    func replacing(bell: Bool?, clipboard: [String], with request: () throws -> Snapshot?) throws -> Snapshot? {
+        do {
+            if let full = try request() { return full.carrying(bell: bell, clipboard: clipboard) }
+            holdUndelivered(bell: bell, clipboard: clipboard); return nil
+        } catch { holdUndelivered(bell: bell, clipboard: clipboard); throw error }
+    }
+    /// Held events are older than anything a failed nested request held, so they go first.
+    private func holdUndelivered(bell: Bool?, clipboard: [String]) {
+        guard bell == true || !clipboard.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        undelivered.bell = undelivered.bell || bell == true
+        undelivered.clipboard = Array((clipboard + undelivered.clipboard).suffix(Self.maxUndeliveredClipboard))
+    }
+    private func takeUndelivered() -> (bell: Bool, clipboard: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        let held = undelivered; undelivered = (false, [])
+        return held
     }
     /// `binary` negotiates the cell block; any decode failure falls back to the JSON cells once.
     func snapshot(since: UInt64?, base: Snapshot?, binary: Bool) throws -> Snapshot? {
@@ -557,13 +598,18 @@ public final class TerminalSession: @unchecked Sendable {
         // The core declines the block (a cell text over 255 bytes, an error reply) by answering with plain JSON:
         // that reply is complete and may carry one-shot events, so decode it rather than re-request.
         if binary, data.contains(0) {
-            do { return try decodeBinarySnapshot(data, since: since, base: base) }
+            // Only a decode failure of this reply may recover its events; a failed resync inside
+            // `finish` already held them, so it must propagate rather than hold them twice.
+            let decoded: Snapshot?
+            do { decoded = try decodeBinarySnapshot(data) }
             catch {
-                // A bad block or head falls back to JSON.
-                // Re-request a full snapshot: the failed reply may already have committed one-shot events,
-                // so a diff against the old base could lose them.
-                return try snapshot(since: nil, base: nil, binary: false)
+                // A bad block falls back to a full JSON snapshot. The core already committed this reply's
+                // one-shot events, so recover them from its head when it is readable.
+                let lost = Self.oneShotEvents(head: data[..<(data.firstIndex(of: 0) ?? data.endIndex)])
+                return try replacing(bell: lost.bell, clipboard: lost.clipboard) { try snapshot(since: nil, base: nil, binary: false) }
             }
+            guard let decoded else { return nil }
+            return try finish(decoded, since: since, base: base)
         }
         return try decodeJSONSnapshot(data, since: since, base: base)
     }
@@ -582,7 +628,8 @@ public final class TerminalSession: @unchecked Sendable {
         }
     }
     /// The negotiated transport: JSON head, one NUL separator, then the version-1 cell block.
-    private func decodeBinarySnapshot(_ data: Data, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
+    /// Decodes only; the caller applies `finish`, so its resync errors stay out of the decode fallback.
+    private func decodeBinarySnapshot(_ data: Data) throws -> Snapshot? {
         guard let separator = data.firstIndex(of: 0) else { throw AkittyError.core("Missing binary cell separator") }
         let head = data[..<separator]
         let block = data[data.index(after: separator)...]
@@ -596,7 +643,7 @@ public final class TerminalSession: @unchecked Sendable {
                 throw AkittyError.core("Invalid binary cell block")
             }
             snapshot.cells = cells
-            return try finish(snapshot, since: since, base: base)
+            return snapshot
         case .unchanged: return nil
         case nil: throw AkittyError.core("Missing response data")
         }
@@ -607,9 +654,18 @@ public final class TerminalSession: @unchecked Sendable {
         // A partial snapshot only makes sense on top of the exact snapshot it was computed against.
         // The resync is a full frame, the case the binary block speeds up most; it still falls back to JSON.
         guard let base, base.revision == since, let merged = base.applying(snapshot) else {
-            return try self.snapshot(since: nil, base: nil, binary: !Self.jsonCellsForced)
+            // The unusable partial already took its bell and clipboard entries from the core.
+            return try replacing(bell: snapshot.bell, clipboard: snapshot.clipboard) {
+                try self.snapshot(since: nil, base: nil, binary: !Self.jsonCellsForced)
+            }
         }
         return merged
+    }
+    /// Bell and clipboard from a reply head whose cells could not be decoded.
+    static func oneShotEvents(head: Data) -> (bell: Bool?, clipboard: [String]) {
+        guard let reply = (try? JSONSerialization.jsonObject(with: head)) as? [String: Any],
+              let data = reply["data"] as? [String: Any] else { return (nil, []) }
+        return (data["bell"] as? Bool, data["clipboard"] as? [String] ?? [])
     }
     /// `AKITTY_JSON_CELLS=1` forces the JSON cell path, for transport comparisons and fallback tests.
     private static let jsonCellsForced = ProcessInfo.processInfo.environment["AKITTY_JSON_CELLS"] == "1"

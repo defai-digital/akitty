@@ -339,8 +339,15 @@ impl Session {
     /// Shell and control summaries without a snapshot's side effects: a snapshot consumes
     /// pending bell and clipboard events, so hosts must not take one just to read the cwd.
     pub fn shell_state(&self) -> Result<Value, String> {
-        let model = self.state()?;
-        Ok(serde_json::json!({"shell": model.shell.summary(), "control": model.control.summary()}))
+        let mut model = self.state()?;
+        // An exited pane reports only final program records, as its next snapshot would.
+        if model.exited { model.program_status.finish_work(); }
+        // Status readers (Siri, the Overview) get the same title, exit and program reports a
+        // snapshot carries, without taking the bell or clipboard events the pane's poller owns.
+        Ok(serde_json::json!({
+            "shell": model.shell.summary(), "control": model.control.summary(), "title": model.title,
+            "exited": model.exited, "program_status": model.program_status.to_json(),
+        }))
     }
     pub fn command_output(&self, id: u64) -> Result<Value, String> {
         self.state()?.shell.command_output(id)
@@ -1226,6 +1233,19 @@ mod tests {
         // still report a change instead of serving the stale placeholder layout.
         assert_eq!(second["changed"], true, "{second}");
         assert_eq!(session.model.lock().unwrap().cell_px, (10, 20));
+    }
+
+    #[test]
+    fn shell_state_of_an_exited_pane_reports_only_final_program_records() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]7501;state=working\x07\x07").unwrap();
+        session.model.lock().unwrap().exited = true;
+        let state = session.shell_state().unwrap();
+        assert_eq!(state["exited"], true, "{state}");
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(state["program_status"], snapshot["program_status"], "{state}");
+        // The read took no snapshot event: the bell went to the snapshot.
+        assert_eq!(snapshot["bell"], true, "{snapshot}");
     }
 
     #[test]

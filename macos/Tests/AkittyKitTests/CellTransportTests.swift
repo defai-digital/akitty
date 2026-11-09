@@ -54,6 +54,48 @@ final class CellTransportTests: XCTestCase {
         XCTAssertNotEqual(next.bell, true, "a bell is delivered once")
     }
 
+    /// A partial reply the host cannot apply (its base is gone) already took the bell and clipboard
+    /// entries from the core, so the full resync that replaces it must still deliver them.
+    func testPartialResyncKeepsOneShotEvents() throws {
+        for binary in [true, false] {
+            let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+            defer { try? session.close() }
+            _ = try session.call("feed", ["text": "first"])
+            let first = try XCTUnwrap(try session.snapshot(since: nil, base: nil, binary: binary))
+            _ = try session.call("feed", ["text": "\r\nsecond\u{7}\u{1b}]52;c;aGk=\u{7}"])
+            // No base: the partial cannot be applied and resyncs.
+            let resynced = try XCTUnwrap(try session.snapshot(since: first.revision, base: nil, binary: binary))
+            XCTAssertNotEqual(resynced.partial, true)
+            XCTAssertEqual(resynced.bell, true, "binary=\(binary)")
+            XCTAssertEqual(resynced.clipboard, ["hi"], "binary=\(binary)")
+            XCTAssertTrue(resynced.text.contains("second"))
+            let after = try XCTUnwrap(try session.snapshot(since: nil, base: nil, binary: binary))
+            XCTAssertNotEqual(after.bell, true, "delivered once")
+            XCTAssertEqual(after.clipboard, [])
+        }
+    }
+
+    /// A replacement request that fails must not lose the events its reply already took; the next
+    /// snapshot delivers them, even when the pane is otherwise idle.
+    func testEventsFromAFailedResyncReachTheNextSnapshot() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        let first = try XCTUnwrap(try session.snapshot())
+        XCTAssertThrowsError(try session.replacing(bell: true, clipboard: ["older"]) { throw AkittyError.core("resync failed") })
+        XCTAssertThrowsError(try session.replacing(bell: nil, clipboard: ["oldest"]) { throw AkittyError.core("outer failed") })
+        let next = try XCTUnwrap(try session.snapshot(since: first.revision, base: first), "an idle pane still delivers held events")
+        XCTAssertEqual(next.bell, true)
+        XCTAssertEqual(next.clipboard, ["oldest", "older"])
+        XCTAssertNil(try session.snapshot(since: next.revision, base: next), "held events are delivered once")
+    }
+
+    func testUndecodableBinaryHeadEventsAreRecovered() {
+        let head = Data(#"{"version":1,"ok":true,"data":{"bell":true,"clipboard":["a","b"]}}"#.utf8)
+        let events = TerminalSession.oneShotEvents(head: head)
+        XCTAssertEqual(events.bell, true); XCTAssertEqual(events.clipboard, ["a", "b"])
+        XCTAssertNil(TerminalSession.oneShotEvents(head: Data("not json".utf8)).bell)
+    }
+
     func testBinaryAndJSONSnapshotsAgree() throws {
         let jsonSession = try TerminalSession(cols: 40, rows: 8, headless: true)
         let binarySession = try TerminalSession(cols: 40, rows: 8, headless: true)
