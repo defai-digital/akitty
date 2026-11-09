@@ -183,6 +183,9 @@ recognition or system discovery:
 
 - Confirm that all ten actions appear under AkiTTY in Shortcuts and Spotlight,
   and that List Terminals and Terminal Status answer without activating AkiTTY.
+- Quit AkiTTY uncleanly (Force Quit, or turn off "Close windows when quitting an app"
+  in Desktop & Dock), then ask List Terminals with AkiTTY closed. It must still
+  answer without opening a window; a normal launch afterwards must open one.
 - Invoke each listed phrase with Siri, with the app both closed and running.
   New Terminal must create one window, Open Folder must open the chosen folder,
   New Tab must add a tab, Split Pane must add a pane, and Show Quick Terminal
