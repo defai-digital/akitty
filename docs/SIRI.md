@@ -10,7 +10,7 @@ can meet the minimum deployment requirement, but 27.3-specific integration and
 behavior are outside the current qualification scope. Installing a beta SDK or
 upgrading the OS is not part of the macOS 27.2 setup.
 
-AkiTTY includes seven App Intents and matching App Shortcuts. The shortcuts ship
+AkiTTY includes ten App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. System language, region, device support, and
 Siri settings affect discovery and speech recognition. This functionality is
@@ -23,7 +23,7 @@ and the downloaded release's notes before expecting it in a published build.
    When building from source, use `bash scripts/build-app.sh debug` and open
    `build/Akitty.app`. The packaging script includes the required metadata;
    launching a standalone executable from `swift build` is not the setup path.
-2. Enable Siri in macOS. Open the Shortcuts app and look for AkiTTY's seven
+2. Enable Siri in macOS. Open the Shortcuts app and look for AkiTTY's ten
    actions. You can use these defaults directly or compose a workflow that
    passes a terminal reference from List Terminals to another action.
 3. Try “List terminals in AkiTTY” or “Open a new terminal in AkiTTY.” Use the
@@ -41,10 +41,13 @@ That setting controls the local socket interface used by clients such as
 | Action | Example Siri phrase | Behavior |
 | --- | --- | --- |
 | New Terminal | “Open a new terminal in AkiTTY” | Creates a window with the configured shell and directory; returns its pane reference. |
+| Open Folder | “Open a folder in AkiTTY” | Asks for an existing folder and opens a window there; returns its pane reference. Never runs a command. |
+| New Tab | “New tab in AkiTTY” | Adds a tab to a chosen window, or to the key window when none is chosen. Creates a window when no terminal window exists. The tab inherits the focused pane's directory. |
+| Split Pane | “Split the terminal in AkiTTY” | Splits a chosen pane's tab into two panes; a tab holds at most eight. Returns the new pane reference. |
 | Show Quick Terminal | “Show the quick terminal in AkiTTY” | Shows the persistent quick terminal; repeating the request keeps it visible. |
 | Agent Overview | “Show agents in AkiTTY” | Shows reported activity and input ownership across windows and panes. |
-| List Terminals | “List terminals in AkiTTY” | Returns current panes and speaks a brief list of names, including the total count. |
-| Terminal Status | “Get terminal status in AkiTTY” | Prompts for a pane and reads fresh reported activity, input ownership, and shell readiness. |
+| List Terminals | “List terminals in AkiTTY” | Returns current panes and speaks a brief list of names, including the total count. Runs without bringing AkiTTY forward. |
+| Terminal Status | “Get terminal status in AkiTTY” | Prompts for a pane and reads fresh reported activity, input ownership, and shell readiness. Runs without bringing AkiTTY forward. |
 | Focus Terminal | “Focus a terminal in AkiTTY” | Prompts for a pane and brings its window and tab forward. |
 | Request Command | “Request a command in AkiTTY” | Prompts for a pane and exact command, then opens the native approval sheet. |
 
@@ -93,19 +96,25 @@ governed by that agent's permissions; this integration does not intercept them.
 ## Terminal references and runtime behavior
 
 AkiTTY models live panes as enumerable, searchable `TerminalEntity` values.
-New Terminal and List Terminals return entities. Focus Terminal, Terminal
-Status, and Request Command accept an entity, allowing Shortcuts workflows to
-pass exact pane references between actions. Each pane's AppKit view carries
-its entity identifier. A transferable text representation contains its name,
-reported status, host input ownership, and shell-reported readiness.
+New Terminal, Open Folder, New Tab, and Split Pane return entities. Focus
+Terminal, Terminal Status, Request Command, New Tab, and Split Pane accept an
+entity, allowing Shortcuts workflows to pass exact pane references between
+actions. Each pane's AppKit view carries its entity identifier. A transferable
+text representation contains its name, reported status, host input ownership,
+and shell-reported readiness.
 Terminal Status reads a fresh core snapshot instead of repeating fields from
 a previously returned entity. Full terminal output, environment variables,
 command history, and working-directory fields are not exported or persistently
 indexed by this integration. Program reports remain unverified.
 
-All seven actions require local device authentication and use the stable
-`supportedModes = .foreground(.immediate)` API, bringing AkiTTY forward before
-the action runs. The native package, Rust build, app plist, installer, and
+All ten actions require local device authentication. List Terminals and
+Terminal Status declare the stable `supportedModes = .background` API: each
+reads only bounded metadata, never shows a window or approval sheet, and can
+answer without bringing AkiTTY forward. The other eight actions use
+`.foreground(.immediate)`, bringing AkiTTY forward before they run. A cold
+launch for a background request does not activate the app when no window
+exists; a default launch, a folder opened before launch, or a foreground action
+still does. The native package, Rust build, app plist, installer, and
 metadata extractor all target macOS 27.2. There is one build mode for Siri;
 experimental tool annotations, app skills, and preview packaging are removed.
 No terminal-specific system schema models these operations, so AkiTTY uses
@@ -127,7 +136,7 @@ The implementation follows these steps:
    closed or stale references, and annotate the corresponding AppKit views.
 3. Reuse native command approval and event handling for both system intents and
    existing socket clients; preserve cancellation and uncertain-dispatch handling.
-4. Extract library metadata, merge it into app metadata, validate the seven default
+4. Extract library metadata, merge it into app metadata, validate the ten default
    shortcuts and entity declarations, and train the phrases before signing.
 5. Test pane resolution, startup, visibility, cancellation, denial, and real PTY
    dispatch, then qualify actual Siri recognition on supported devices.
@@ -137,8 +146,10 @@ the compiler's `.swiftconstvalues` files. `build-siri-metadata.py` invokes Apple
 metadata extractor for the library and app and the phrase training processor.
 The provider lives in the executable target because merging static library
 action metadata does not preserve that library's default App Shortcuts.
-Packaging fails if required metadata, foreground modes, or shortcuts are
-missing; `Contents/Resources/Metadata.appintents` is created before code signing.
+Packaging fails if required metadata, shortcuts, or intent modes are missing:
+`ListTerminalsIntent` and `GetTerminalStatusIntent` must declare the background
+encoding, and every other action must stay foreground-immediate.
+`Contents/Resources/Metadata.appintents` is created before code signing.
 The bundle declares English as its development language. The packaging check
 also verifies that phrase training contains actual utterances: without a
 development language, Apple's processor can succeed with empty training data.
@@ -154,9 +165,10 @@ bash scripts/build-app.sh debug
 ```
 
 The full gate covers native intent behavior, real PTY dispatch, installer OS
-boundaries, release metadata, and the Web/Rust suites. Packaging checks all seven
-actions and default shortcuts and nonempty phrase training. Debug and optimized
-Swift builds must produce equivalent intent metadata.
+boundaries, release metadata, and the Web/Rust suites. Packaging checks all ten
+actions, default shortcuts, the read-only background allowlist, and nonempty
+phrase training. Debug and optimized Swift builds must produce equivalent
+intent metadata.
 
 The macOS 27.2 baseline (`905984f`) passed the full gate, app bundle/signature
 checks, and both debug and optimized Swift metadata extraction. The native
@@ -169,12 +181,16 @@ Device qualification still needs the following checks on the installed macOS
 27.2 bundle; calling `perform()` in a unit test does not establish spoken Siri
 recognition or system discovery:
 
-- Confirm that all seven actions appear under AkiTTY in Shortcuts and Spotlight.
+- Confirm that all ten actions appear under AkiTTY in Shortcuts and Spotlight,
+  and that List Terminals and Terminal Status answer without activating AkiTTY.
 - Invoke each listed phrase with Siri, with the app both closed and running.
-  New Terminal must create one window, and Show Quick Terminal must keep the
-  existing quick terminal visible on repeated requests.
+  New Terminal must create one window, Open Folder must open the chosen folder,
+  New Tab must add a tab, Split Pane must add a pane, and Show Quick Terminal
+  must keep the existing quick terminal visible on repeated requests.
 - Select among similarly named panes, focus a background tab and hidden quick
   terminal, close a selected pane, and restart AkiTTY with an old pane reference.
+- Split a tab until it holds eight panes and confirm a ninth reports the limit
+  instead of failing silently.
 - Invoke Terminal Status after a program report or input-ownership change.
   Verify its spoken response distinguishes unverified reports from host control,
   and that List Terminals remains brief when many panes are open.

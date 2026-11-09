@@ -103,10 +103,13 @@ Choose the macOS arm64 ZIP, unzip it, move **Akitty.app** into **Applications**,
 
 ## Siri and Shortcuts
 
-The current source includes seven built-in App Shortcuts for macOS 27.2. Install
+The current source includes ten built-in App Shortcuts for macOS 27.2. Install
 and open the app bundle, enable Siri in macOS, then try these English phrases:
 
 - “Open a new terminal in AkiTTY”
+- “Open a folder in AkiTTY”
+- “New tab in AkiTTY”
+- “Split the terminal in AkiTTY”
 - “Show the quick terminal in AkiTTY”
 - “Show agents in AkiTTY”
 - “List terminals in AkiTTY”
@@ -115,11 +118,13 @@ and open the app bundle, enable Siri in macOS, then try these English phrases:
 - “Request a command in AkiTTY”
 
 The same actions are available in the Shortcuts app without creating a custom
-workflow first. Siri asks for a terminal or command when an action needs one.
-For a command request, try `pwd`, review the exact command and target in AkiTTY,
-then approve or deny it. **Deny is the default.** These actions require local
-device authentication and bring AkiTTY to the foreground. The **Enable Local
-Agent Requests** setting is only needed for socket clients such as `akitty-agent`.
+workflow first. Siri asks for a terminal, folder, or command when an action
+needs one. For a command request, try `pwd`, review the exact command and target
+in AkiTTY, then approve or deny it. **Deny is the default.** All actions require
+local device authentication. List Terminals and Terminal Status read bounded
+metadata and can answer without bringing AkiTTY forward; the other actions
+bring it to the front. The **Enable Local Agent Requests** setting is only
+needed for socket clients such as `akitty-agent`.
 
 The integration uses stable macOS 27.2 APIs. The macOS 27.3 Siri AI preview path
 has been removed, and 27.3-specific behavior is outside the current test scope.

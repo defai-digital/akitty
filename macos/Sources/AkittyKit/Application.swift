@@ -325,6 +325,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private weak var findTarget: TerminalView?
     var panes: [TerminalPane] { tabs.tabViewItems.flatMap { ($0.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? [] } }
     var active: TerminalView? { (window?.firstResponder as? TerminalView) ?? (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
+    /// The selected tab's first pane. `newTab()` selects its tab before returning,
+    /// so a foreground action reads the pane it created even before focus settles.
+    var selectedPane: TerminalView? { (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
     init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
         self.headless = headless
         self.directory = directory
@@ -435,6 +438,18 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         }
         window?.makeFirstResponder(pane.terminal)
         return pane
+    }
+    /// Split the tab holding `terminal` (or the active pane) and return the new
+    /// pane. Unlike the key command, a full tab reports why instead of doing nothing.
+    func splitPane(containing terminal: TerminalView?) throws -> TerminalView {
+        guard let target = terminal ?? active else { throw AkittyError.core("Open an AkiTTY terminal first.") }
+        guard let item = tabs.tabViewItems.first(where: { (($0.view as? NSSplitView)?.arrangedSubviews ?? []).contains { ($0 as? TerminalPane)?.terminal === target } }),
+              let split = item.view as? NSSplitView else {
+            throw AkittyError.core("That terminal is no longer open. Choose a current AkiTTY terminal.")
+        }
+        tabs.selectTabViewItem(item)
+        guard let pane = try addPane(to: split) else { throw AkittyError.core("This tab already has 8 panes.") }
+        return pane.terminal
     }
     /// Restart the focused pane, keeping its tab and index.
     func restartFocusedPane() { if let terminal = active { restart(terminal) } }
@@ -828,6 +843,15 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     func revealQuickTerminalIfNeeded(_ window: TerminalWindow) throws {
         if window === quickTerminal.terminalWindow { try showQuickTerminal() }
     }
+    /// The window a foreground action without a pane reference should use. The
+    /// key window wins; otherwise a regular window beats the hidden quick terminal.
+    func intentWindow() -> TerminalWindow? {
+        let regular = windows.filter { $0 !== quickTerminal.terminalWindow }
+        return regular.first { $0.window?.isKeyWindow == true }
+            ?? windows.first { $0.window?.isKeyWindow == true }
+            ?? regular.first { $0.window?.isMainWindow == true }
+            ?? regular.first ?? windows.first
+    }
     func requestSiriCommand(_ command: String, in terminal: TerminalView) async throws {
         _ = try await agentRequests.request(command, in: terminal, origin: .siri)
     }
@@ -862,8 +886,15 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         // intent delivered before didFinishLaunching also replaces the default.
         let defaultLaunch = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
         do { try createInitialWindowIfNeeded(defaultLaunch: defaultLaunch) } catch { NSAlert(error: error).runModal() }
-        NSApp.activate(ignoringOtherApps: true); updates.start()
+        // A read-only intent can cold-launch without windows; activating would
+        // pull AkiTTY forward for a background request. Foreground intents
+        // activate themselves through showIntentWindow.
+        if Self.shouldActivateAfterLaunch(windowCount: windows.count) { NSApp.activate(ignoringOtherApps: true) }
+        updates.start()
     }
+    /// A default launch or a folder opened before launch owns a window and still
+    /// activates. A background intent launch has no window and stays in place.
+    nonisolated static func shouldActivateAfterLaunch(windowCount: Int) -> Bool { windowCount > 0 }
     public func application(_ sender: NSApplication, open urls: [URL]) {
         let request = folderOpenRequest(from: urls)
         for directory in request.directories { newWindow(directory: directory) }
