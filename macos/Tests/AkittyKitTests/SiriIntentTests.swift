@@ -71,6 +71,12 @@ final class SiriIntentTests: XCTestCase {
         for privateText in ["PRIVATE_OUTPUT", "private-agent", "/private/siri-test", "Verified success"] {
             XCTAssertFalse(entity.summary.contains(privateText))
         }
+        // Asking for status must leave the pane's bell and clipboard request for its own poller.
+        _ = try terminal.session.call("feed", ["text": "\u{7}\u{1b}]52;c;aGk=\u{7}"])
+        _ = try await action.perform()
+        let pending = try XCTUnwrap(try terminal.session.snapshot())
+        XCTAssertEqual(pending.bell, true)
+        XCTAssertEqual(pending.clipboard, ["hi"])
         _ = try terminal.session.call("feed", ["text": "\u{1b}]2;Fresh Pane\u{7}\u{1b}]133;C\u{7}"])
         try terminal.session.reclaimControl()
         let refreshed = try await action.perform()
