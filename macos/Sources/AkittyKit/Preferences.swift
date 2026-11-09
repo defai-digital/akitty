@@ -41,43 +41,43 @@ struct TerminalPreferences: Codable, Equatable {
         let file: URL
         if let supplied { file = supplied }
         else if let configured = ProcessInfo.processInfo.environment["AKITTY_FOLDER_HISTORY_FILE"], !configured.isEmpty {
-            guard configured.hasPrefix("/"), configured.utf8.count <= 4096 else { throw AkittyError.core("Folder history must use a bounded absolute path.") }
+            guard configured.hasPrefix("/"), configured.utf8.count <= 4096 else { throw AkittyError.core("Command history must use a bounded absolute path.") }
             file = URL(fileURLWithPath: configured)
         } else { file = folderHistoryFile }
         let directory = Darwin.open(file.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         if directory < 0, errno == ENOENT { return }
-        guard directory >= 0 else { throw AkittyError.core("Cannot safely open the folder history directory.") }
+        guard directory >= 0 else { throw AkittyError.core("Cannot safely open the command history directory.") }
         defer { Darwin.close(directory) }
         var parent = stat(), existing = stat()
         guard fstat(directory, &parent) == 0, parent.st_uid == getuid(), parent.st_mode & 0o022 == 0 else {
-            throw AkittyError.core("Folder history directory must be owned by you and not writable by others.")
+            throw AkittyError.core("Command history directory must be owned by you and not writable by others.")
         }
         let name = file.lastPathComponent
         if fstatat(directory, name, &existing, AT_SYMLINK_NOFOLLOW) < 0 {
             if errno == ENOENT { return }
-            throw AkittyError.core("Cannot inspect folder history.")
+            throw AkittyError.core("Cannot inspect command history.")
         }
         func safe(_ info: stat) -> Bool {
             info.st_mode & S_IFMT == S_IFREG && info.st_uid == getuid()
                 && info.st_mode & 0o777 == 0o600 && info.st_nlink == 1
         }
-        guard safe(existing) else { throw AkittyError.core("Folder history must be a private regular file without links.") }
+        guard safe(existing) else { throw AkittyError.core("Command history must be a private regular file without links.") }
         let lock = openat(directory, name + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
-        guard lock >= 0 else { throw AkittyError.core("Cannot safely open the folder history lock.") }
+        guard lock >= 0 else { throw AkittyError.core("Cannot safely open the command history lock.") }
         defer { Darwin.close(lock) }
         var info = stat(), range = Darwin.flock()
-        guard fstat(lock, &info) == 0, safe(info) else { throw AkittyError.core("Folder history lock must be a private regular file without links.") }
+        guard fstat(lock, &info) == 0, safe(info) else { throw AkittyError.core("Command history lock must be a private regular file without links.") }
         // zsystem flock uses POSIX fcntl locks, not BSD flock. Never block the Settings UI.
         range.l_type = Int16(F_WRLCK); range.l_whence = Int16(SEEK_SET)
-        guard fcntl(lock, F_SETLK, &range) == 0 else { throw AkittyError.core("Folder history is busy. Try clearing it again.") }
+        guard fcntl(lock, F_SETLK, &range) == 0 else { throw AkittyError.core("Command history is busy. Try clearing it again.") }
         let descriptor = openat(directory, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard descriptor >= 0 else { throw AkittyError.core("Cannot safely open folder history.") }
+        guard descriptor >= 0 else { throw AkittyError.core("Cannot safely open command history.") }
         defer { Darwin.close(descriptor) }
         guard fstat(descriptor, &info) == 0, safe(info),
               fstatat(directory, name, &existing, AT_SYMLINK_NOFOLLOW) == 0,
-              existing.st_dev == info.st_dev, existing.st_ino == info.st_ino else { throw AkittyError.core("Folder history changed while clearing it.") }
+              existing.st_dev == info.st_dev, existing.st_ino == info.st_ino else { throw AkittyError.core("Command history changed while clearing it.") }
         // Open after locking so a shell's compaction cannot leave us truncating an old inode.
-        guard ftruncate(descriptor, 0) == 0 else { throw AkittyError.core("Cannot clear folder history.") }
+        guard ftruncate(descriptor, 0) == 0 else { throw AkittyError.core("Cannot clear command history.") }
     }
     private static func installed(_ name: String) -> Bool { name == "System Monospaced" || NSFont(name: name, size: 12) != nil }
     private static func validShell(_ path: String) -> Bool {
@@ -235,16 +235,16 @@ struct PreferencesDraft {
                     Section("New Terminals") {
                         Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
                         Text("Records command boundaries, exit status and working directories in new terminals. Does not modify startup files. Other shells start normally.").font(.caption).foregroundStyle(.secondary)
-                        Toggle("Folder history on Tab and Up/Down (zsh)", isOn: $state.draft.folderHistory)
+                        Toggle("Command history on Tab and Up/Down (zsh)", isOn: $state.draft.folderHistory)
                             .disabled(!draft.shellIntegration)
                         HStack {
-                            Text("Type the start of a command used in this folder, then Tab lists the most used matches. Commands starting with a space are not saved.").font(.caption).foregroundStyle(.secondary)
+                            Text("Type the start of a command, then Tab lists the five most recent matches, this folder's first. Commands starting with a space are not saved.").font(.caption).foregroundStyle(.secondary)
                             Spacer()
                             Button("Clear History") {
                                 do { try TerminalPreferences.clearFolderHistory(); error = "" }
                                 catch { self.error = error.localizedDescription }
                             }
-                                .help("Delete the saved folder history")
+                                .help("Delete the saved command history")
                                 .accessibilityIdentifier("clear-folder-history")
                         }
                         TextField("Shell", text: $state.draft.shell, prompt: Text("Default login shell"))

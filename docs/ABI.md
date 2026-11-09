@@ -267,7 +267,7 @@ or missing resources fail visibly. Omitting it preserves ordinary login startup.
 The macOS app passes it by default only when the launched shell is bash or zsh.
 See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinction.
 `create.folder_history` (default true) set to false starts that integration with
-`AKITTY_FOLDER_HISTORY=0`, turning off zsh folder history; it has no other effect.
+`AKITTY_FOLDER_HISTORY=0`, turning off the zsh command-history menu; it has no other effect.
 
 Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
 untrusted=true) and `control` (owner, agent, audit_seq). OSC 7 file URIs are decoded
