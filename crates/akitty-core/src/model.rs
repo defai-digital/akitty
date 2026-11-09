@@ -434,6 +434,16 @@ impl Model {
         self.revision = self.revision.saturating_add(1);
         Ok(())
     }
+    /// Unix-millisecond expiry of the chrome status or progress a snapshot still reports.
+    pub(crate) fn chrome_expiry(&self, now_ms: u64) -> Option<u64> {
+        self.chrome.expiry(now_ms)
+    }
+    /// The host last received a status or progress that is no longer visible, so its next poll
+    /// would change only because of the clock. This is the same test `build_snapshot` uses to
+    /// answer a `since` poll that would otherwise be unchanged.
+    pub(crate) fn chrome_stale(&self, now_ms: u64) -> bool {
+        self.reported_transient && !self.chrome.transient_visible(now_ms)
+    }
     pub fn set_program_chrome(&mut self, enabled: bool) {
         self.program_chrome = enabled;
         self.revision = self.revision.saturating_add(1);

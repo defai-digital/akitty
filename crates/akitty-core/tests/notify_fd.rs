@@ -145,3 +145,73 @@ fn host_changes_wake_the_host_but_reads_do_not() {
     session.command("control_release", json!({"lease":lease}));
     assert!(wait_readable(fd, Duration::from_millis(500)), "a release did not wake the host");
 }
+
+#[test]
+fn an_expiring_chrome_status_wakes_the_host_on_time() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    std::thread::sleep(Duration::from_millis(300));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    session.command("chrome", json!({"status":{"text":"Saved","tone":"info","expires":now + 400}}));
+    let shown = session.command("snapshot", json!({"compact":true}));
+    assert_eq!(shown["chrome"]["status"]["text"], "Saved", "{shown}");
+    // Setting chrome wakes the host once; the expiry must wake it again with no output at all.
+    drain_readable(fd);
+    let started = std::time::Instant::now();
+    assert!(wait_readable(fd, Duration::from_millis(900)), "an expired status did not wake the host");
+    let waited = started.elapsed();
+    // Well before the host's 1 s safety tick, and not before the status actually expired.
+    assert!(waited >= Duration::from_millis(250) && waited < Duration::from_millis(800), "woke after {waited:?}");
+    let cleared = session.command("snapshot", json!({"compact":true}));
+    assert!(cleared["chrome"].get("status").is_none(), "{cleared}");
+}
+
+#[test]
+fn a_status_set_and_expired_within_one_idle_poll_still_wakes_the_host() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    std::thread::sleep(Duration::from_millis(300));
+    // Shorter than the worker's 250 ms idle poll: setting it must wake the worker to time it.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    session.command("chrome", json!({"status":{"text":"Brief","tone":"info","expires":now + 120}}));
+    session.command("snapshot", json!({"compact":true}));
+    drain_readable(fd);
+    let started = std::time::Instant::now();
+    assert!(wait_readable(fd, Duration::from_millis(900)), "a brief status did not wake the host");
+    assert!(started.elapsed() < Duration::from_millis(240), "woke after {:?}", started.elapsed());
+}
+
+#[test]
+fn a_far_future_expiry_never_fails_the_engine() {
+    let _serial = serial();
+    let session = Session::new();
+    session.command("chrome", json!({"status":{"text":"Forever","tone":"info","expires":u64::MAX}}));
+    session.command("input", json!({"text":"printf 'STILL_ALIVE\\n'\r"}));
+    wait_for(|| session.command("snapshot", json!({"compact":true}))["lines"].to_string().contains("STILL_ALIVE"));
+    let snapshot = session.command("snapshot", json!({"compact":true}));
+    assert!(snapshot["error"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["chrome"]["status"]["text"], "Forever", "{snapshot}");
+}
+
+#[test]
+fn an_exited_pane_still_clears_a_timed_status_on_time() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    session.command("input", json!({"text":"exit\r"}));
+    wait_for(|| session.command("snapshot", json!({"compact":true}))["exited"] == true);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    session.command("chrome", json!({"status":{"text":"Done","tone":"info","expires":now + 300}}));
+    session.command("snapshot", json!({"compact":true}));
+    drain_readable(fd);
+    let started = std::time::Instant::now();
+    assert!(wait_readable(fd, Duration::from_millis(900)), "an exited pane's status did not wake the host");
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(150) && waited < Duration::from_millis(700), "woke after {waited:?}");
+    assert!(session.command("snapshot", json!({"compact":true}))["chrome"].get("status").is_none());
+    // Input to the exited pane still fails at send.
+    let reply = request(&serde_json::to_vec(&json!({"op":"input","id":session.0,"text":"x"})).unwrap());
+    assert_eq!(reply["ok"], false, "{reply}");
+}
