@@ -1,6 +1,7 @@
 import AppKit
 import AppIntents
 import CoreTransferable
+import UniformTypeIdentifiers
 
 public struct AkittyIntents: AppIntentsPackage {}
 
@@ -101,6 +102,12 @@ extension AkittyApplication {
         NSApp.activate(ignoringOtherApps: true)
         window.window?.makeKeyAndOrderFront(nil)
     }
+    /// A just-created pane's entity. The UI snapshot may not exist yet, so build
+    /// it from whatever the terminal currently reports.
+    func intentEntity(for terminal: TerminalView) throws -> TerminalEntity {
+        guard !terminal.isShutdown else { throw AkittyError.core("The terminal is unavailable.") }
+        return terminalEntity(for: terminal, snapshot: terminal.snapshot)
+    }
 }
 
 public struct NewTerminalIntent: AppIntent {
@@ -118,6 +125,83 @@ public struct NewTerminalIntent: AppIntent {
             throw AkittyError.core("The new terminal is unavailable.")
         }
         return .result(value: entity)
+    }
+}
+
+public struct OpenFolderInTerminalIntent: AppIntent {
+    public init() {}
+    public static let title: LocalizedStringResource = "Open Folder in AkiTTY"
+    public static let description = IntentDescription("Open a new terminal window in an existing folder. Does not run a command.")
+    public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @Parameter(title: "Folder", description: "An existing folder to open in a new terminal window.", supportedContentTypes: [.folder])
+    var folder: IntentFile
+    public static var parameterSummary: some ParameterSummary { Summary("Open \(\.$folder)") }
+    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<TerminalEntity> {
+        try Task.checkCancellation()
+        let app = try AkittyApplication.intentApplication()
+        guard let url = folder.fileURL else { throw AkittyError.core("Choose an existing folder to open in AkiTTY.") }
+        // Shortcuts can hand over a security-scoped folder; hold access while the
+        // shell starts, then release it even when validation fails.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let path = url.standardizedFileURL.path
+        guard url.isFileURL, TerminalWindow.existingDirectory(path) else {
+            throw AkittyError.core("Choose an existing folder to open in AkiTTY.")
+        }
+        let window = try app.createTerminalWindow(directory: path)
+        try app.showIntentWindow(window)
+        guard let terminal = window.selectedPane else { throw AkittyError.core("The new terminal is unavailable.") }
+        return .result(value: try app.intentEntity(for: terminal))
+    }
+}
+
+public struct NewTerminalTabIntent: AppIntent {
+    public init() {}
+    public static let title: LocalizedStringResource = "New AkiTTY Terminal Tab"
+    public static let description = IntentDescription("Open a new tab in an AkiTTY window, inheriting the focused pane's directory. Creates a window when none is open. Does not run a command.")
+    public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @Parameter(title: "Window of", description: "A pane in the window that should receive the new tab.") var terminal: TerminalEntity?
+    public static var parameterSummary: some ParameterSummary { Summary("New tab in \(\.$terminal)") }
+    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<TerminalEntity> {
+        try Task.checkCancellation()
+        let app = try AkittyApplication.intentApplication()
+        let window: TerminalWindow
+        if let terminal { window = try app.resolveIntentTerminal(terminal.id).0; try window.newTab() }
+        else if let existing = app.intentWindow() { window = existing; try window.newTab() }
+        // A new window already opens with its first tab; adding another would leave two.
+        else { window = try app.createTerminalWindow() }
+        try app.showIntentWindow(window)
+        guard let pane = window.selectedPane else { throw AkittyError.core("The new tab is unavailable.") }
+        return .result(value: try app.intentEntity(for: pane))
+    }
+}
+
+public struct SplitTerminalPaneIntent: AppIntent {
+    public init() {}
+    public static let title: LocalizedStringResource = "Split AkiTTY Terminal Pane"
+    public static let description = IntentDescription("Split the terminal pane into a second pane in the same tab. A tab holds at most eight panes. Does not run a command.")
+    public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @Parameter(title: "Pane", description: "The open pane to split. The active pane of the key window is used when omitted.") var terminal: TerminalEntity?
+    public static var parameterSummary: some ParameterSummary { Summary("Split \(\.$terminal)") }
+    @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<TerminalEntity> {
+        try Task.checkCancellation()
+        let app = try AkittyApplication.intentApplication()
+        let resolved: (TerminalWindow, TerminalView)
+        if let terminal {
+            resolved = try app.resolveIntentTerminal(terminal.id)
+        } else {
+            // Siri's own UI may hold key focus, so fall back to the window a paneless action would use.
+            guard let window = (NSApp.keyWindow?.windowController as? TerminalWindow) ?? app.intentWindow(), let active = window.active else {
+                throw AkittyError.core("Open an AkiTTY terminal first.")
+            }
+            resolved = (window, active)
+        }
+        let pane = try resolved.0.splitPane(containing: resolved.1)
+        try app.showIntentWindow(resolved.0)
+        return .result(value: try app.intentEntity(for: pane))
     }
 }
 
@@ -151,8 +235,9 @@ public struct ShowAgentOverviewIntent: AppIntent {
 public struct ListTerminalsIntent: AppIntent {
     public init() {}
     public static let title: LocalizedStringResource = "List AkiTTY Terminals"
-    public static let description = IntentDescription("Find currently open AkiTTY terminal panes and their reported status. Returns current pane references for subsequent actions, without terminal output or command history.")
-    public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let description = IntentDescription("Find currently open AkiTTY terminal panes and their reported status. Returns current pane references for subsequent actions, without terminal output or command history. Runs without bringing AkiTTY forward.")
+    // Read-only: bounded metadata only, so it can answer without a foreground UI.
+    public static var supportedModes: IntentModes { .background }
     public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
     @MainActor public func perform() async throws -> some IntentResult & ReturnsValue<[TerminalEntity]> & ProvidesDialog {
         try Task.checkCancellation()
@@ -164,8 +249,9 @@ public struct ListTerminalsIntent: AppIntent {
 public struct GetTerminalStatusIntent: AppIntent {
     public init() {}
     public static let title: LocalizedStringResource = "Get AkiTTY Terminal Status"
-    public static let description = IntentDescription("Read a current terminal pane's reported activity, host input ownership, and shell-reported readiness. Refreshes the pane reference before responding. Program reports do not verify completion. Does not read terminal output or execute commands.")
-    public static var supportedModes: IntentModes { .foreground(.immediate) }
+    public static let description = IntentDescription("Read a current terminal pane's reported activity, host input ownership, and shell-reported readiness. Refreshes the pane reference before responding. Program reports do not verify completion. Does not read terminal output or execute commands. Runs without bringing AkiTTY forward.")
+    // Read-only: one bounded core snapshot, no window or approval UI.
+    public static var supportedModes: IntentModes { .background }
     public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
     @Parameter(title: "Terminal", description: "The currently open terminal pane to inspect, including a pane referenced from onscreen context.") var terminal: TerminalEntity
     public static var parameterSummary: some ParameterSummary { Summary("Get status of \(\.$terminal)") }

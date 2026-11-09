@@ -14,7 +14,8 @@ spec.loader.exec_module(metadata)
 class SiriMetadataTests(unittest.TestCase):
     def fixture(self):
         return {
-            "actions": {name: {"supportedModes": 2} for name in metadata.INTENTS},
+            "actions": {name: {"supportedModes": metadata.BACKGROUND if name in metadata.BACKGROUND_INTENTS else metadata.FOREGROUND_IMMEDIATE}
+                        for name in metadata.INTENTS},
             "autoShortcuts": [{"actionIdentifier": name, "phraseTemplates": [{"key": "Action in ${applicationName}"}]} for name in sorted(metadata.INTENTS)],
             "entities": {"TerminalEntity": {}},
         }
@@ -42,6 +43,19 @@ class SiriMetadataTests(unittest.TestCase):
             with self.subTest(supportedModes=modes):
                 data = copy.deepcopy(original)
                 data["actions"]["RequestCommandIntent"] = {"supportedModes": modes, "openAppWhenRun": True}
+                with self.assertRaisesRegex(ValueError, "foreground"):
+                    self.validate(data)
+
+    def test_only_read_only_actions_may_run_in_the_background(self):
+        self.assertEqual(len(metadata.INTENTS), 10)
+        self.assertEqual(metadata.BACKGROUND_INTENTS, {"ListTerminalsIntent", "GetTerminalStatusIntent"})
+        self.validate(self.fixture())
+        data = self.fixture(); data["actions"]["ListTerminalsIntent"]["supportedModes"] = metadata.FOREGROUND_IMMEDIATE
+        with self.assertRaisesRegex(ValueError, "background"):
+            self.validate(data)
+        for name in ["RequestCommandIntent", "OpenFolderInTerminalIntent", "SplitTerminalPaneIntent"]:
+            with self.subTest(action=name):
+                data = self.fixture(); data["actions"][name]["supportedModes"] = metadata.BACKGROUND
                 with self.assertRaisesRegex(ValueError, "foreground"):
                     self.validate(data)
 
