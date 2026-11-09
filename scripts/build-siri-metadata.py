@@ -20,8 +20,9 @@ BACKGROUND, FOREGROUND_IMMEDIATE = 1, 2
 def validate_metadata(path):
     data = json.loads(Path(path).read_text())
     actions = data.get("actions", {})
-    if not INTENTS.issubset(actions):
-        raise ValueError("Siri metadata is missing AkiTTY actions")
+    # Exact match: an unlisted action would otherwise skip the foreground check below.
+    if set(actions) != INTENTS:
+        raise ValueError("Siri metadata actions must match the AkiTTY allowlist")
     shortcuts = data.get("autoShortcuts", [])
     if {item.get("actionIdentifier") for item in shortcuts} != INTENTS:
         raise ValueError("Siri metadata is missing default App Shortcuts")

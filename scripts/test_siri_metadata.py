@@ -59,6 +59,11 @@ class SiriMetadataTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "foreground"):
                     self.validate(data)
 
+    def test_unlisted_action_fails_packaging_even_without_a_shortcut(self):
+        data = self.fixture(); data["actions"]["UnlistedIntent"] = {"supportedModes": metadata.BACKGROUND}
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            self.validate(data)
+
     def test_phrase_without_application_name_fails_packaging(self):
         data = self.fixture()
         data["autoShortcuts"][0]["phraseTemplates"] = [{"key": "Run a command"}]
