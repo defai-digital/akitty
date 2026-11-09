@@ -7,9 +7,14 @@ import subprocess
 import tempfile
 
 INTENTS = {
-    "NewTerminalIntent", "ShowQuickTerminalIntent", "ShowAgentOverviewIntent",
-    "ListTerminalsIntent", "GetTerminalStatusIntent", "FocusTerminalIntent", "RequestCommandIntent",
+    "NewTerminalIntent", "OpenFolderInTerminalIntent", "NewTerminalTabIntent", "SplitTerminalPaneIntent",
+    "ShowQuickTerminalIntent", "ShowAgentOverviewIntent", "ListTerminalsIntent", "GetTerminalStatusIntent",
+    "FocusTerminalIntent", "RequestCommandIntent",
 }
+# Read-only actions read bounded metadata and never show a window or approval UI, so they may answer
+# without activating the app. Encodings verified from the stable SDK's extract.actionsdata.
+BACKGROUND_INTENTS = {"ListTerminalsIntent", "GetTerminalStatusIntent"}
+BACKGROUND, FOREGROUND_IMMEDIATE = 1, 2
 
 
 def validate_metadata(path):
@@ -26,9 +31,12 @@ def validate_metadata(path):
             raise ValueError("Each Siri phrase must include the application name")
     if "TerminalEntity" not in data.get("entities", {}):
         raise ValueError("Siri metadata is missing terminal entities")
-    # IntentModes.foreground(.immediate) is encoded as 2 by the stable SDK.
-    # Reject modes that permit background execution before approval is visible.
-    if any(actions[name].get("supportedModes") != 2 for name in INTENTS):
+    # Every action that opens a window or needs approval must foreground before it runs; only the
+    # read-only allowlist runs in the background.
+    for name in sorted(BACKGROUND_INTENTS):
+        if actions[name].get("supportedModes") != BACKGROUND:
+            raise ValueError(name + " must run in the background")
+    if any(actions[name].get("supportedModes") != FOREGROUND_IMMEDIATE for name in INTENTS - BACKGROUND_INTENTS):
         raise ValueError("Terminal actions must run in the foreground")
     return data
 

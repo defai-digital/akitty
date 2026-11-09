@@ -218,4 +218,126 @@ final class SiriIntentTests: XCTestCase {
         XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
         XCTAssertFalse(requests.enabled)
     }
+
+    @MainActor func testOpenFolderIntentRejectsInvalidPathsWithoutAWindow() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-siri-folder-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let file = root.appendingPathComponent("plain.txt")
+        try "".write(to: file, atomically: true, encoding: .utf8)
+        let missing = root.appendingPathComponent("missing", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            NSApp.delegate = previous
+        }
+        for url in [file, missing] {
+            let action = OpenFolderInTerminalIntent()
+            action.folder = IntentFile(fileURL: url)
+            do { _ = try await action.perform(); XCTFail("A non-directory must not open") }
+            catch { XCTAssertTrue(error.localizedDescription.contains("existing folder")) }
+        }
+        XCTAssertTrue(app.windows.isEmpty)
+    }
+
+    @MainActor func testOpenFolderIntentOpensDirectoryAndReturnsItsPane() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-siri-folder-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer {
+            app.windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() }
+            try? FileManager.default.removeItem(at: root)
+            NSApp.delegate = previous
+        }
+        let opened = OpenFolderInTerminalIntent()
+        opened.folder = IntentFile(fileURL: root)
+        let result = try await opened.perform()
+        let window = try XCTUnwrap(app.windows.first)
+        XCTAssertEqual(app.windows.count, 1)
+        XCTAssertEqual(window.directory, root.standardizedFileURL.path)
+        XCTAssertEqual(window.panes.count, 1)
+        XCTAssertEqual(result.value?.id, app.intentID(for: try XCTUnwrap(window.selectedPane)))
+    }
+
+    @MainActor func testNewTabIntentUsesGivenPaneWindowAndCreatesWindowWhenNone() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let window = try app.createTerminalWindow(headless: true)
+        defer {
+            app.windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() }
+            NSApp.delegate = previous
+        }
+        let pane = try XCTUnwrap(window.selectedPane)
+        let action = NewTerminalTabIntent()
+        action.terminal = try app.intentEntity(for: pane)
+        let result = try await action.perform()
+        XCTAssertEqual(window.tabs.numberOfTabViewItems, 2)
+        let created = try XCTUnwrap(result.value)
+        XCTAssertTrue(window.panes.contains { app.intentID(for: $0.terminal) == created.id })
+        XCTAssertEqual(created.id, app.intentID(for: try XCTUnwrap(window.selectedPane)))
+    }
+
+    @MainActor func testNewTabIntentWithoutPaneCreatesWindow() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        defer {
+            app.windows.forEach { $0.panes.forEach { $0.terminal.shutdown() }; $0.window?.close() }
+            NSApp.delegate = previous
+        }
+        XCTAssertTrue(app.windows.isEmpty)
+        let result = try await NewTerminalTabIntent().perform()
+        let window = try XCTUnwrap(app.windows.first)
+        XCTAssertEqual(app.windows.count, 1)
+        XCTAssertEqual(window.tabs.numberOfTabViewItems, 1)
+        XCTAssertEqual(result.value?.id, app.intentID(for: try XCTUnwrap(window.selectedPane)))
+    }
+
+    @MainActor func testSplitPaneIntentAddsPaneAndRejectsANinth() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let window = try app.createTerminalWindow(headless: true)
+        defer {
+            window.panes.forEach { $0.terminal.shutdown() }; window.window?.close()
+            NSApp.delegate = previous
+        }
+        let pane = try XCTUnwrap(window.selectedPane)
+        let split = try XCTUnwrap(window.tabs.selectedTabViewItem?.view as? NSSplitView)
+        let action = SplitTerminalPaneIntent()
+        action.terminal = try app.intentEntity(for: pane)
+        let result = try await action.perform()
+        let created = try XCTUnwrap(result.value)
+        XCTAssertEqual(split.arrangedSubviews.count, 2)
+        XCTAssertTrue(window.panes.contains { app.intentID(for: $0.terminal) == created.id })
+        for _ in 2..<8 { _ = try window.splitPane(containing: pane) }
+        XCTAssertEqual(split.arrangedSubviews.count, 8)
+        let ninth = SplitTerminalPaneIntent()
+        ninth.terminal = try app.intentEntity(for: pane)
+        do { _ = try await ninth.perform(); XCTFail("A ninth pane must fail") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("8 panes")) }
+        XCTAssertEqual(split.arrangedSubviews.count, 8)
+        XCTAssertEqual(window.panes.count, 8)
+    }
+
+    func testReadOnlyIntentsRunInBackgroundAndOthersForeground() {
+        XCTAssertEqual(ListTerminalsIntent.supportedModes, .background)
+        XCTAssertEqual(GetTerminalStatusIntent.supportedModes, .background)
+        for modes in [NewTerminalIntent.supportedModes, OpenFolderInTerminalIntent.supportedModes,
+                      NewTerminalTabIntent.supportedModes, SplitTerminalPaneIntent.supportedModes,
+                      ShowQuickTerminalIntent.supportedModes, ShowAgentOverviewIntent.supportedModes,
+                      FocusTerminalIntent.supportedModes, RequestCommandIntent.supportedModes] {
+            XCTAssertEqual(modes, .foreground(.immediate))
+        }
+    }
+
+    func testLaunchActivatesOnlyWhenAWindowExists() {
+        XCTAssertFalse(AkittyApplication.shouldActivateAfterLaunch(windowCount: 0))
+        XCTAssertTrue(AkittyApplication.shouldActivateAfterLaunch(windowCount: 1))
+        XCTAssertTrue(AkittyApplication.shouldActivateAfterLaunch(windowCount: 3))
+    }
 }
