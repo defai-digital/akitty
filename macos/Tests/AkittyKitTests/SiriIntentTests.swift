@@ -88,6 +88,33 @@ final class SiriIntentTests: XCTestCase {
         catch { XCTAssertTrue(error.localizedDescription.contains("no longer open")) }
     }
 
+    @MainActor func testListingAndQueriesReadFreshMetadataWithoutConsumingEvents() async throws {
+        _ = NSApplication.shared
+        let previous = NSApp.delegate
+        let app = AkittyApplication(); NSApp.delegate = app
+        let window = try app.createTerminalWindow(headless: true)
+        let terminal = try XCTUnwrap(window.active)
+        defer { terminal.shutdown(); window.window?.close(); NSApp.delegate = previous }
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]2;Old Pane\u{7}"])
+        terminal.applySnapshot(.success(try terminal.session.snapshot()))
+        // Hidden panes can lag the core. Shortcuts must resolve the current title and ownership
+        // immediately, without waiting for a UI poll or consuming its pending one-shot events.
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]2;Fresh Pane\u{7}\u{1b}]133;A\u{7}\u{7}\u{1b}]52;c;aGk=\u{7}"])
+        _ = try terminal.session.acquireControl(actor: "listing-test")
+        let listed = try await ListTerminalsIntent().perform()
+        let entity = try XCTUnwrap(listed.value?.first)
+        XCTAssertEqual(entity.name, "Fresh Pane")
+        XCTAssertEqual(entity.inputOwnership, "Agent-controlled input")
+        XCTAssertEqual(entity.shellReadiness, "Shell reports an idle prompt")
+        let named = try await TerminalEntityQuery().entities(matching: "Fresh Pane")
+        XCTAssertEqual(named.map(\.id), [entity.id])
+        let resolved = try await TerminalEntityQuery().entities(for: [entity.id])
+        XCTAssertEqual(resolved.first?.name, "Fresh Pane")
+        let pending = try XCTUnwrap(try terminal.session.snapshot())
+        XCTAssertEqual(pending.bell, true)
+        XCTAssertEqual(pending.clipboard, ["hi"])
+    }
+
     func testSpokenListHandlesEmptySingleAndManyPanesWithoutReadingAllMetadata() {
         XCTAssertEqual(TerminalSpeech.list([]), "No AkiTTY terminal panes are open.")
         let entities = (0..<7).map {
