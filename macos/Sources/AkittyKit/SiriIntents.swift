@@ -62,13 +62,13 @@ extension AkittyApplication {
         return app
     }
     func intentID(for terminal: TerminalView) -> String { "\(intentInstance)/\(terminal.session.id)" }
-    func terminalEntities() -> [TerminalEntity] {
-        windows.flatMap(\.panes).compactMap { pane in
+    func terminalEntities() throws -> [TerminalEntity] {
+        try windows.flatMap(\.panes).compactMap { pane in
             let terminal = pane.terminal
             guard !terminal.isShutdown else { return nil }
             // Titles and program reports are untrusted. Expose bounded metadata,
             // without indexing scrollback, environment variables or commands.
-            return terminalEntity(for: terminal, snapshot: terminal.snapshot)
+            return try terminalEntity(for: terminal, state: terminal.session.shellState())
         }
     }
     func terminalEntity(for terminal: TerminalView, snapshot: Snapshot?) -> TerminalEntity {
@@ -112,11 +112,10 @@ extension AkittyApplication {
         NSApp.activate(ignoringOtherApps: true)
         window.window?.makeKeyAndOrderFront(nil)
     }
-    /// A just-created pane's entity. The UI snapshot may not exist yet, so build
-    /// it from whatever the terminal currently reports.
+    /// A just-created pane's entity. Read the core because its UI snapshot may not exist yet.
     func intentEntity(for terminal: TerminalView) throws -> TerminalEntity {
         guard !terminal.isShutdown else { throw AkittyError.core("The terminal is unavailable.") }
-        return terminalEntity(for: terminal, snapshot: terminal.snapshot)
+        return try terminalEntity(for: terminal, state: terminal.session.shellState())
     }
 }
 
@@ -131,10 +130,10 @@ public struct NewTerminalIntent: AppIntent {
         let app = try AkittyApplication.intentApplication()
         let window = try app.createTerminalWindow()
         try app.showIntentWindow(window)
-        guard let terminal = window.active, let entity = app.terminalEntities().first(where: { $0.id == app.intentID(for: terminal) }) else {
+        guard let terminal = window.active else {
             throw AkittyError.core("The new terminal is unavailable.")
         }
-        return .result(value: entity)
+        return .result(value: try app.intentEntity(for: terminal))
     }
 }
 
