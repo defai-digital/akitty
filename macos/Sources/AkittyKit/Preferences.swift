@@ -24,6 +24,11 @@ struct TerminalPreferences: Codable, Equatable {
     var folderHistory = true
     var quickTerminal = false
     var quickShortcut = 0
+    /// Colour theme and cursor of panes opened without a profile.
+    var theme = TerminalTheme.defaultID
+    var cursorStyle = CursorStyle.outline
+    /// Optional named profiles; New Tab/Window with Profile opens a pane with one of them.
+    var profiles: [TerminalProfile] = []
     /// The system monospace face, then every installed fixed-pitch family, so CJK-optimised monospace fonts are selectable.
     @MainActor static func availableFonts() -> [String] {
         var families = Set<String>()
@@ -92,6 +97,12 @@ struct TerminalPreferences: Codable, Equatable {
             && !isDirectory.boolValue && FileManager.default.isExecutableFile(atPath: path)
     }
     func validated() throws -> Self {
+        try validateProfiles()
+        return try validatedFields()
+    }
+    /// Every check except profiles, so a profile can be validated as the settings it would produce.
+    func validatedFields() throws -> Self {
+        guard TerminalTheme.all.contains(where: { $0.id == theme }) else { throw AkittyError.core("Choose one of the listed colour themes.") }
         guard (0...2).contains(quickShortcut) else { throw AkittyError.core("Choose a valid quick terminal shortcut.") }
         guard Self.installed(fontName), fontSize.isFinite, (9...36).contains(fontSize), (0...20000).contains(scrollback) else { throw AkittyError.core("Choose a supported font, size 9–36, and scrollback 0–20,000.") }
         guard cjkFont.isEmpty || NSFont(name: cjkFont, size: 12) != nil else { throw AkittyError.core("Choose an installed CJK font, or Automatic.") }
@@ -106,8 +117,32 @@ struct TerminalPreferences: Codable, Equatable {
         guard let data = defaults.data(forKey: "terminalPreferences"), var value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
         if let valid = try? value.validated() { return valid }
         // Recover each invalid field independently, preserving other saved settings.
-        let fallback = Self()
+        value = value.recoveringFields(from: Self())
+        // A profile is repaired the same way against the recovered defaults (a font uninstalled since, a folder
+        // removed), then names are made unique and the list bounded, so one bad profile never drops the others.
+        var names = Set<String>()
+        value.profiles = value.profiles.prefix(TerminalProfile.maximumCount).map { profile in
+            var profile = profile
+            let repaired = profile.applied(to: value).recoveringFields(from: value)
+            profile.fontName = repaired.fontName; profile.fontSize = repaired.fontSize; profile.theme = repaired.theme
+            profile.shell = repaired.shell; profile.directory = repaired.directory; profile.scrollback = repaired.scrollback
+            var name = String(profile.trimmedName.prefix(TerminalProfile.maximumNameLength))
+            if name.isEmpty { name = "Profile" }
+            if names.contains(name.lowercased()) { name = (2...).lazy.map { "\(name.prefix(TerminalProfile.maximumNameLength - 4)) \($0)" }.first { !names.contains($0.lowercased()) }! }
+            names.insert(name.lowercased()); profile.name = name
+            return profile
+        }
+        return (try? value.validated()) ?? fallback(keepingProfilesOf: value)
+    }
+    /// Settings that cannot be repaired at all still keep valid profiles when possible.
+    private static func fallback(keepingProfilesOf value: Self) -> Self {
+        var fallback = Self(); fallback.profiles = value.profiles
+        return (try? fallback.validated()) ?? Self()
+    }
+    func recoveringFields(from fallback: Self) -> Self {
+        var value = self
         var isDirectory: ObjCBool = false
+        if !TerminalTheme.all.contains(where: { $0.id == value.theme }) { value.theme = fallback.theme }
         if !(0...2).contains(value.quickShortcut) { value.quickShortcut = fallback.quickShortcut }
         if !Self.installed(value.fontName) { value.fontName = fallback.fontName }
         if !value.cjkFont.isEmpty, NSFont(name: value.cjkFont, size: 12) == nil { value.cjkFont = fallback.cjkFont }
@@ -115,7 +150,7 @@ struct TerminalPreferences: Codable, Equatable {
         if !(0...20000).contains(value.scrollback) { value.scrollback = fallback.scrollback }
         if !Self.validShell(value.shell) { value.shell = fallback.shell }
         if !value.directory.isEmpty, !(value.directory.hasPrefix("/") && FileManager.default.fileExists(atPath: value.directory, isDirectory: &isDirectory) && isDirectory.boolValue) { value.directory = fallback.directory }
-        return (try? value.validated()) ?? fallback
+        return value
     }
     func save(to defaults: UserDefaults = .standard) throws {
         defaults.set(try JSONEncoder().encode(validated()), forKey: "terminalPreferences")
@@ -126,7 +161,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, confirmClipboardWrite, silentMode, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, confirmClipboardWrite, silentMode, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut, theme, cursorStyle, profiles
         /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
         case shellIntegrationDefaultOn
     }
@@ -146,6 +181,10 @@ extension TerminalPreferences {
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
         quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
         quickShortcut = try container.decodeIfPresent(Int.self, forKey: .quickShortcut) ?? 0
+        theme = try container.decodeIfPresent(String.self, forKey: .theme) ?? theme
+        cursorStyle = (try? container.decodeIfPresent(CursorStyle.self, forKey: .cursorStyle)) ?? cursorStyle
+        // A malformed profile list must not reset every other setting.
+        profiles = (try? container.decodeIfPresent([TerminalProfile].self, forKey: .profiles)) ?? []
         if try container.decodeIfPresent(Bool.self, forKey: .shellIntegrationDefaultOn) == true {
             shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? shellIntegration
         }
@@ -170,6 +209,9 @@ extension TerminalPreferences {
         try container.encode(true, forKey: .shellIntegrationDefaultOn)
         try container.encode(quickTerminal, forKey: .quickTerminal)
         try container.encode(quickShortcut, forKey: .quickShortcut)
+        try container.encode(theme, forKey: .theme)
+        try container.encode(cursorStyle, forKey: .cursorStyle)
+        try container.encode(profiles, forKey: .profiles)
     }
 }
 
@@ -195,13 +237,19 @@ struct PreferencesDraft {
     }
 }
 
+enum SettingsTab: Hashable { case appearance, profiles, sessions, keyboard, updates }
+/// Lets the app open Settings on a given tab (Edit Profiles… in the profile menus).
+@MainActor final class SettingsNavigation: ObservableObject { @Published var tab = SettingsTab.appearance }
+
 @MainActor private struct PreferencesView: View {
     @State private var state: PreferencesDraft
     @State private var error = ""
+    @State private var selectedProfile: UUID?
+    @ObservedObject var navigation: SettingsNavigation
     let updater: UpdateController
     let defaults: UserDefaults
-    init(updater: UpdateController, defaults: UserDefaults = .standard) {
-        self.updater = updater; self.defaults = defaults
+    init(updater: UpdateController, defaults: UserDefaults = .standard, navigation: SettingsNavigation) {
+        self.updater = updater; self.defaults = defaults; self.navigation = navigation
         _state = State(initialValue: PreferencesDraft(preferences: .load(from: defaults), automaticChecks: updater.automaticChecks))
     }
     private var draft: TerminalPreferences {
@@ -222,9 +270,77 @@ struct PreferencesDraft {
         let fonts = TerminalPreferences.availableCJKFonts()
         return draft.cjkFont.isEmpty || fonts.contains(draft.cjkFont) ? fonts : fonts + [draft.cjkFont]
     }
+    /// Binds to one profile by id, so deleting another profile never shifts the editor onto the wrong one.
+    private func profileBinding(_ id: UUID) -> Binding<TerminalProfile>? {
+        guard let profile = state.draft.profiles.first(where: { $0.id == id }) else { return nil }
+        return Binding(get: { state.draft.profiles.first { $0.id == id } ?? profile },
+                       set: { value in if let index = state.draft.profiles.firstIndex(where: { $0.id == id }) { state.draft.profiles[index] = value } })
+    }
+    private func fontChoices(including name: String) -> [String] {
+        let fonts = TerminalPreferences.availableFonts()
+        return fonts.contains(name) ? fonts : fonts + [name]
+    }
+    @ViewBuilder private func profileEditor(_ profile: Binding<TerminalProfile>) -> some View {
+        Form {
+            TextField("Name", text: profile.name).accessibilityIdentifier("profile-name")
+            Picker("Font", selection: profile.fontName) { ForEach(fontChoices(including: profile.wrappedValue.fontName), id: \.self) { Text($0) } }
+            Stepper("Font size: \(Int(profile.wrappedValue.fontSize)) pt", value: profile.fontSize, in: 9...36)
+            Picker("Colours", selection: profile.theme) { ForEach(TerminalTheme.all) { Text($0.name).tag($0.id) } }
+                .accessibilityIdentifier("profile-theme")
+            Picker("Cursor", selection: profile.cursorStyle) { ForEach(CursorStyle.allCases, id: \.self) { Text($0.title).tag($0) } }
+            TextField("Shell", text: profile.shell, prompt: Text("Default login shell"))
+            HStack {
+                TextField("Starting directory", text: profile.directory, prompt: Text("Home directory"))
+                Button("Choose…") {
+                    let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+                    if panel.runModal() == .OK { profile.wrappedValue.directory = panel.url?.path ?? "" }
+                }
+            }
+            Stepper("Scrollback: \(profile.wrappedValue.scrollback) lines", value: profile.scrollback, in: 0...20000, step: 1000)
+        }.formStyle(.grouped)
+    }
+    private var profilesTab: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                List(selection: $selectedProfile) {
+                    ForEach(state.draft.profiles) { Text($0.name.isEmpty ? "Untitled" : $0.name).tag($0.id) }
+                }.frame(width: 170).accessibilityIdentifier("profile-list")
+                HStack(spacing: 4) {
+                    Button { addProfile(copying: nil) } label: { Image(systemName: "plus") }
+                        .help("New profile from the current defaults").accessibilityLabel("Add profile").accessibilityIdentifier("add-profile")
+                        .disabled(state.draft.profiles.count >= TerminalProfile.maximumCount)
+                    Button { if let id = selectedProfile { addProfile(copying: id) } } label: { Image(systemName: "plus.square.on.square") }
+                        .help("Duplicate the selected profile").accessibilityLabel("Duplicate profile")
+                        .disabled(selectedProfile == nil || state.draft.profiles.count >= TerminalProfile.maximumCount)
+                    Button {
+                        if let id = selectedProfile { state.draft.profiles.removeAll { $0.id == id }; selectedProfile = state.draft.profiles.first?.id }
+                    } label: { Image(systemName: "minus") }
+                        .help("Delete the selected profile").accessibilityLabel("Delete profile").accessibilityIdentifier("delete-profile")
+                        .disabled(selectedProfile == nil)
+                }
+            }
+            VStack(alignment: .leading) {
+                if let id = selectedProfile, let profile = profileBinding(id) { profileEditor(profile) }
+                else {
+                    Text(state.draft.profiles.isEmpty ? "No profiles yet. Add one to keep different fonts, colours and shells for different projects." : "Select a profile to edit it.")
+                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                Text("Open one with Shell → New Window/Tab with Profile. Tabs and splits keep the profile of the pane they open from. Settings not listed here follow the other tabs.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding()
+            .onAppear { if selectedProfile == nil { selectedProfile = state.draft.profiles.first?.id } }
+    }
+    private func addProfile(copying id: UUID?) {
+        var profile: TerminalProfile
+        if let id, let source = state.draft.profiles.first(where: { $0.id == id }) {
+            profile = source; profile.id = UUID(); profile.name = state.draft.unusedProfileName("\(source.trimmedName) Copy")
+        } else { profile = TerminalProfile(name: state.draft.unusedProfileName(), from: state.draft) }
+        state.draft.profiles.append(profile); selectedProfile = profile.id
+    }
     var body: some View {
         VStack(spacing: 0) {
-            TabView {
+            TabView(selection: $navigation.tab) {
                 Form {
                     Section("Appearance") {
                         Picker("Font", selection: $state.draft.fontName) { ForEach(fontChoices, id: \.self) { Text($0) } }
@@ -235,9 +351,15 @@ struct PreferencesDraft {
                         Text("Chinese, Japanese and Korean text. Automatic follows your system language.").font(.caption).foregroundStyle(.secondary)
                         Stepper("Font size: \(Int(draft.fontSize)) pt", value: $state.draft.fontSize, in: 9...36)
                         Text("Applies to open terminals. ⌘+ and ⌘− adjust an individual pane.").font(.caption).foregroundStyle(.secondary)
+                        Picker("Colours", selection: $state.draft.theme) { ForEach(TerminalTheme.all) { Text($0.name).tag($0.id) } }
+                            .accessibilityIdentifier("default-theme")
+                        Picker("Cursor", selection: $state.draft.cursorStyle) { ForEach(CursorStyle.allCases, id: \.self) { Text($0.title).tag($0) } }
+                        Text("Programs can still change colours while they run. Panes opened with a profile use the profile's choices.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
-                    .tabItem { Text("Appearance") }
+                    .tabItem { Text("Appearance") }.tag(SettingsTab.appearance)
+                profilesTab
+                    .tabItem { Text("Profiles") }.tag(SettingsTab.profiles)
                 Form {
                     Section("Alerts") {
                         Toggle("Silent mode", isOn: $state.draft.silentMode)
@@ -284,7 +406,7 @@ struct PreferencesDraft {
                         Text("Shell, directory and scrollback changes apply to new tabs and splits.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
-                    .tabItem { Text("Sessions") }
+                    .tabItem { Text("Sessions") }.tag(SettingsTab.sessions)
                 Form {
                     Section("Quick Terminal") {
                         Toggle("Enable global quick terminal", isOn: $state.draft.quickTerminal)
@@ -300,7 +422,7 @@ struct PreferencesDraft {
                         Text("Programs can show a status line, progress, and a small mark on their tab while they work. Turning this off ignores their updates.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped)
-                    .tabItem { Text("Keyboard") }
+                    .tabItem { Text("Keyboard") }.tag(SettingsTab.keyboard)
                 Form {
                     Section("Updates") {
                         Toggle("Check for updates automatically", isOn: $state.automaticChecks)
@@ -308,7 +430,7 @@ struct PreferencesDraft {
                         Button("Check for Updates…") { updater.checkForUpdates(nil) }
                     }
                 }.formStyle(.grouped)
-                    .tabItem { Text("Updates") }
+                    .tabItem { Text("Updates") }.tag(SettingsTab.updates)
             }.padding([.top, .horizontal])
             HStack {
                 Text(error).foregroundStyle(.red).font(.caption).accessibilityIdentifier("settings-error")
@@ -324,7 +446,7 @@ struct PreferencesDraft {
                     .disabled(!hasChanges)
                     .accessibilityIdentifier("apply-preferences")
             }.padding()
-        }.frame(width: 560, height: 430)
+        }.frame(width: 640, height: 500)
             .onReceive(NotificationCenter.default.publisher(for: .terminalPreferencesChanged)) { _ in
                 let current = TerminalPreferences.load(from: defaults)
                 state.mergePasteConfirmation(current.confirmPaste)
@@ -334,10 +456,12 @@ struct PreferencesDraft {
 }
 
 @MainActor final class PreferencesWindow: NSWindowController {
+    private let navigation = SettingsNavigation()
+    func select(_ tab: SettingsTab) { navigation.tab = tab }
     init(updater: UpdateController, defaults: UserDefaults = .standard) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 430), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"; window.isReleasedWhenClosed = false
-        window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater, defaults: defaults))
+        window.contentViewController = NSHostingController(rootView: PreferencesView(updater: updater, defaults: defaults, navigation: navigation))
         window.center(); super.init(window: window)
     }
     required init?(coder: NSCoder) { nil }

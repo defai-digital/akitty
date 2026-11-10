@@ -452,6 +452,18 @@ impl Model {
     pub(crate) fn transient_report(&self) -> u64 {
         self.transient_reports
     }
+    /// Replace the host colour theme. `None` fields keep the built-in colour; OSC overrides a
+    /// program set stay in force over the new baseline, as they would over any host theme.
+    pub fn set_theme(&mut self, theme: &Theme) {
+        let palette = &mut self.term.palette;
+        palette.clear_configured();
+        for (index, rgb) in theme.ansi.iter().enumerate().take(16) { palette.configure(index, rgb & 0xffffff); }
+        if let Some(rgb) = theme.foreground { palette.configure(256, rgb & 0xffffff); }
+        if let Some(rgb) = theme.background { palette.configure(257, rgb & 0xffffff); }
+        if let Some(rgb) = theme.cursor { palette.configure(258, rgb & 0xffffff); }
+        self.term.revision = self.term.revision.wrapping_add(1);
+        self.revision = self.revision.saturating_add(1);
+    }
     pub fn set_program_chrome(&mut self, enabled: bool) {
         self.program_chrome = enabled;
         self.revision = self.revision.saturating_add(1);
@@ -720,6 +732,8 @@ impl Model {
             shift = None;
         }
         let content = &self.term;
+        // Blank cells that match the host's clear colour carry nothing beyond `lines`.
+        let base_background = { let rgb = content.palette.base_background(); [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8] };
         let selection = content.screen().selection_range();
         let mut cells = Vec::new();
         let mut text = vec![String::new(); rows];
@@ -771,7 +785,7 @@ impl Model {
                 && !selected
                 && !searched
                 && !active
-                && bg == DEFAULT_BACKGROUND
+                && bg == base_background
                 && cell.link_uri().is_none()
                 && cell.style.underline_color.is_none()
             {
@@ -1037,8 +1051,14 @@ fn expand_cell(cell: &Value) -> Value {
     }
     out
 }
-/// Resolved default background; the host clears to this colour, so matching cells need no entry.
-const DEFAULT_BACKGROUND: [u8; 3] = [8, 10, 13];
+/// A host colour theme. Values are 0xRRGGBB; `ansi` sets the first 16 indexed colours in order.
+#[derive(Clone, Debug, Default)]
+pub struct Theme {
+    pub foreground: Option<u32>,
+    pub background: Option<u32>,
+    pub cursor: Option<u32>,
+    pub ansi: Vec<u32>,
+}
 const MAX_LINKS: usize = 256;
 /// Shift candidates scored per snapshot when detecting a scrolled screen. Candidates come from where the
 /// first few rows' hashes appear in the baseline, so a screen of repeated identical rows can offer many;
@@ -1436,6 +1456,26 @@ mod tests {
         model.size = Size::validate(20, 6).unwrap();
         model.revision += 1;
         assert!(model.snapshot(sent).get("partial").is_none());
+    }
+    #[test]
+    fn host_theme_recolours_defaults_and_keeps_blank_cells_omitted() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed(b"hi\x1b[31mr");
+        model.set_theme(&Theme { foreground: Some(0x112233), background: Some(0xfafafa), cursor: None, ansi: vec![0, 0xaa0000] });
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
+        let cells = snapshot["cells"].as_array().unwrap();
+        assert_eq!(cells[0], json!([0, 0, "h", 0x112233, 0xfafafa, 0]));
+        assert_eq!(cells[2], json!([0, 2, "r", 0xaa0000, 0xfafafa, 0]));
+        assert_eq!(cells.len(), 3, "blank cells on the theme background stay omitted");
+        // A program's OSC 11 still overrides the theme, and those cells are sent explicitly.
+        model.feed(b"\x1b]11;rgb:00/00/00\x07");
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
+        assert!(snapshot["cells"].as_array().unwrap().len() > 3);
+        // Clearing the theme restores the built-in baseline.
+        model.feed(b"\x1b]111\x07");
+        model.set_theme(&Theme::default());
+        let snapshot: Value = serde_json::from_str(&model.snapshot_json(None, true).unwrap()).unwrap();
+        assert_eq!(snapshot["cells"][0], json!([0, 0, "h", 0xdae2ef, 0x080a0d, 0]));
     }
     #[test]
     fn plain_snapshots_omit_optional_fields() {

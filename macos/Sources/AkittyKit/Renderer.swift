@@ -27,6 +27,24 @@ struct Quad {
     var srcU: Float, srcV: Float, srcW: Float, srcH: Float
 }
 
+/// How a pane draws the parts the core leaves to the host: the frame's clear colour and the cursor.
+/// `background` must match the theme background sent to the core, which omits blank cells on it.
+struct RenderAppearance: Equatable, Sendable {
+    var background: [UInt8] = [8, 10, 13]
+    var cursor: [UInt8] = [153, 204, 255]
+    var cursorStyle: CursorStyle = .outline
+    var selection: [UInt8] = [51, 79, 122]
+    static let standard = RenderAppearance()
+    var backgroundColor: CGColor { CGColor(red: CGFloat(background[0]) / 255, green: CGFloat(background[1]) / 255, blue: CGFloat(background[2]) / 255, alpha: 1) }
+    var cursorColor: CGColor { CGColor(red: CGFloat(cursor[0]) / 255, green: CGFloat(cursor[1]) / 255, blue: CGFloat(cursor[2]) / 255, alpha: 1) }
+}
+enum CursorStyle: String, Codable, CaseIterable, Sendable {
+    case outline, block, bar, underline
+    var title: String {
+        switch self { case .outline: "Outline block"; case .block: "Filled block"; case .bar: "Vertical bar"; case .underline: "Underline" }
+    }
+}
+
 @MainActor final class MetalPresenter: NSObject, MTKViewDelegate {
     let view: MTKView
     private let device: MTLDevice
@@ -55,7 +73,7 @@ struct Quad {
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = true
         view.isPaused = true; view.enableSetNeedsDisplay = true
-        view.clearColor = Self.clearColor
+        view.clearColor = Self.clearColor(for: RenderAppearance.standard.backgroundColor)
         let source = """
         #include <metal_stdlib>
         using namespace metal;
@@ -209,16 +227,18 @@ struct Quad {
         next.replace(region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height), mipmapLevel: 0, withBytes: data, bytesPerRow: bitmap.bytesPerRow)
         return next
     }
-    /// The default background as the CPU bitmaps store it (device RGB), so layered frames clear to the same bytes.
-    static let clearColor: MTLClearColor = {
+    /// The theme background; layered frames clear to it, so it must match what the CPU bitmaps fill.
+    var clearColor = MetalPresenter.clearColor(for: RenderAppearance.standard.backgroundColor) { didSet { view.clearColor = clearColor } }
+    /// A colour as the CPU bitmaps store it (device RGB), so layered frames clear to the same bytes.
+    static func clearColor(for color: CGColor) -> MTLClearColor {
         var pixel: [UInt8] = [0, 0, 0, 0]
         pixel.withUnsafeMutableBytes { raw in
             let context = CGContext(data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
                                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-            context?.setFillColor(CGColor(red: 8/255, green: 10/255, blue: 13/255, alpha: 1)); context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+            context?.setFillColor(color); context?.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
         }
         return MTLClearColor(red: Double(pixel[2]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[0]) / 255, alpha: 1)
-    }()
+    }
     /// Largest 2D texture side Metal supports on every Mac AkiTTY runs on; a bigger image cannot be uploaded.
     static let maxTextureSide = 16384
     /// Kitty accepts images up to 8 Mi pixels, so one may be wider or taller than the texture side. Such an image
@@ -260,7 +280,7 @@ struct Quad {
         guard let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor else { return }
         guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { onFailure?("Metal command allocation failed"); return }
         pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = Self.clearColor
+        pass.colorAttachments[0].clearColor = clearColor
         if layered {
             encode(encoder, width: drawable.texture.width, height: drawable.texture.height)
         } else if let texture {
@@ -337,7 +357,7 @@ struct Quad {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear; pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = Self.clearColor
+        pass.colorAttachments[0].clearColor = clearColor
         guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { throw AkittyError.core("Metal command allocation failed") }
         encode(encoder, width: width, height: height)
         encoder.endEncoding()
@@ -437,6 +457,7 @@ final class GridRasterizer: @unchecked Sendable {
     }
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
+        var appearance: RenderAppearance
     }
     /// Lines take their colour from the context at draw time, so the key is colour-free: truecolor gradient output
     /// (one colour per cell) reuses one entry per character instead of flushing the whole cache every few frames.
@@ -448,8 +469,8 @@ final class GridRasterizer: @unchecked Sendable {
     static let maxColors = 4096
     /// Kitty's lowest z layer: images below this draw under non-default cell backgrounds.
     static let underlayZ = -1_073_741_824
-    /// The core's resolved default background, which the frame fill already paints.
-    static let defaultBackground: [UInt8] = [8, 10, 13]
+    /// The built-in default background; a theme replaces it per frame through `RenderAppearance`.
+    static let defaultBackground: [UInt8] = RenderAppearance.standard.background
 
     private var context: CGContext?
     private var layout: Layout?
@@ -484,19 +505,19 @@ final class GridRasterizer: @unchecked Sendable {
     /// frame is a full repaint, as after a size change; the glyph and colour caches are kept, they are small.
     func releaseFrames() { context = nil; layout = nil; layerPasses = nil; lastCursorRow = nil; lastHadImages = false }
 
-    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:]) throws -> CGContext {
-        try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false).context
+    static func make(snapshot: Snapshot, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], appearance: RenderAppearance = .standard) throws -> CGContext {
+        try GridRasterizer().render(snapshot: snapshot, damage: nil, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, images: images, reuse: false, appearance: appearance).context
     }
 
     /// `damage` lists the grid rows whose content changed since the last frame this instance rendered (nil: unknown, so
     /// repaint everything). With `reuse` false the bitmap is not kept, so the caller may hold it while the next frame renders.
-    func render(snapshot: Snapshot, damage: Set<Int>?, scroll: Int = 0, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
+    func render(snapshot: Snapshot, damage: Set<Int>?, scroll: Int = 0, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true, appearance: RenderAppearance = .standard) throws -> Frame {
         if layer == .all { layerPasses = nil }
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         guard width <= 16384, height <= 16384, width * height <= 33_554_432 else {
             throw AkittyError.core("Terminal bitmap exceeds rendering limits")
         }
-        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows)
+        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows, appearance: appearance)
         // Only the all-in-one bitmap draws images, so only it must repaint fully around them.
         let hasImages = layer == .all && !(snapshot.images ?? []).isEmpty
         var rows = damage
@@ -578,7 +599,7 @@ final class GridRasterizer: @unchecked Sendable {
             CGRect(x: Self.margin + CGFloat(cell.col) * cellSize.width, y: gridTop - CGFloat(cell.row + 1) * cellSize.height,
                    width: cellSize.width * (cell.wide ? 2 : 1), height: cellSize.height)
         }
-        let background = CGColor(red: 8/255, green: 10/255, blue: 13/255, alpha: 1)
+        let background = appearance.backgroundColor
 
         if let rows, rows.isEmpty { return Frame(context: context, damage: 0..<0) }
         context.saveGState(); defer { context.restoreGState() }
@@ -627,8 +648,8 @@ final class GridRasterizer: @unchecked Sendable {
         // Images below z = -2^30 are drawn under every non-default cell background; default-background cells were
         // already painted by the fill above, so skipping them leaves those images visible.
         drawImages { $0.z < Self.underlayZ }
-        for cell in fills where cell.selected || cell.search || cell.bg != Self.defaultBackground {
-            let fill: CGColor = if cell.selected { CGColor(red: 0.20, green: 0.31, blue: 0.48, alpha: 1) }
+        for cell in fills where cell.selected || cell.search || cell.bg != appearance.background {
+            let fill: CGColor = if cell.selected { CGColor(red: CGFloat(appearance.selection[0]) / 255, green: CGFloat(appearance.selection[1]) / 255, blue: CGFloat(appearance.selection[2]) / 255, alpha: 1) }
                 else if cell.activeSearch { CGColor(red: 0.62, green: 0.46, blue: 0.12, alpha: 1) }
                 else if cell.search { CGColor(red: 0.40, green: 0.32, blue: 0.10, alpha: 1) }
                 else { color(cell.bg) }
@@ -701,7 +722,14 @@ final class GridRasterizer: @unchecked Sendable {
         drawImages { $0.z >= 0 }
         if layer != .background, snapshot.cursor.visible, rows == nil || rows!.contains(cursorRow) {
             let box = CGRect(x: Self.margin + CGFloat(snapshot.cursor.col) * cellSize.width, y: gridTop - CGFloat(cursorRow + 1) * cellSize.height, width: cellSize.width, height: cellSize.height)
-            context.setStrokeColor(CGColor(red: 0.6, green: 0.8, blue: 1, alpha: 1)); context.setLineWidth(1); context.stroke(box.insetBy(dx: 0.5, dy: 0.5))
+            let cursor = appearance.cursorColor
+            switch appearance.cursorStyle {
+            case .outline: context.setStrokeColor(cursor); context.setLineWidth(1); context.stroke(box.insetBy(dx: 0.5, dy: 0.5))
+            // Drawn over the glyph at partial opacity so the character under the cursor stays readable.
+            case .block: context.setFillColor(cursor.copy(alpha: 0.55) ?? cursor); context.fill(box)
+            case .bar: context.setFillColor(cursor); context.fill(CGRect(x: box.minX, y: box.minY, width: 2, height: box.height))
+            case .underline: context.setFillColor(cursor); context.fill(CGRect(x: box.minX, y: box.minY, width: box.width, height: 2))
+            }
             if !composition.isEmpty {
                 let line = CTLineCreateWithAttributedString(NSAttributedString(string: composition, attributes: [.font: base, .foregroundColor: CGColor(gray: 1, alpha: 1), .underlineStyle: 1]))
                 context.textPosition = CGPoint(x: box.minX, y: box.minY + descent + 2); CTLineDraw(line, context)
@@ -728,11 +756,11 @@ final class GridRasterizer: @unchecked Sendable {
     /// The layered Metal frame: the drawing code and damage tracking of `render`, split into a transparent background
     /// bitmap (cell fills and selection) and a transparent foreground bitmap (glyphs, decorations, cursor) so the GPU can
     /// composite images between them. Images are never drawn here, so an image change needs no text repaint.
-    func renderLayers(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", reuse: Bool = true) throws -> LayeredFrame {
+    func renderLayers(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", reuse: Bool = true, appearance: RenderAppearance = .standard) throws -> LayeredFrame {
         let passes = layerPasses ?? (GridRasterizer(layer: .background, batchesGlyphs: batchesGlyphs), GridRasterizer(layer: .foreground, batchesGlyphs: batchesGlyphs))
         layerPasses = passes
-        let back = try passes.background.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
-        let front = try passes.foreground.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse)
+        let back = try passes.background.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse, appearance: appearance)
+        let front = try passes.foreground.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cellSize, composition: composition, cjkFontName: cjkFontName, reuse: reuse, appearance: appearance)
         // Both layers upload the same rows, so the damage is the span covering both.
         var span: Range<Int>?
         if let a = back.damage, let b = front.damage {

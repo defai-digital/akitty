@@ -32,10 +32,10 @@ import AppIntents
     let status = NSTextField(labelWithString: "Starting shell…")
     /// Directory passed at creation. Nil means the Settings directory.
     let launchDirectory: String?
-    init(headless: Bool = false, directory: String? = nil) throws {
+    init(headless: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
         launchDirectory = directory
         super.init(frame: .zero)
-        terminalStorage = try TerminalView(headless: headless, directory: directory)
+        terminalStorage = try TerminalView(headless: headless, directory: directory, profile: profile)
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         terminal.translatesAutoresizingMaskIntoConstraints = false; status.translatesAutoresizingMaskIntoConstraints = false
@@ -303,6 +303,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// directory when that path still exists, and this folder otherwise. Splits use this
     /// folder. Nil uses the Settings directory.
     let directory: String?
+    /// Profile of the window's first pane. New tabs and splits take the focused pane's profile instead, so a
+    /// window opened with a profile keeps it as it grows.
+    let profile: UUID?
     /// Defaults to the system setting. Tests set this to force the sprite onto frame 0.
     var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshTabs() } }
     /// Tabs (by their split view) whose programs reported work at the last chrome update.
@@ -330,9 +333,10 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// The selected tab's first pane. `newTab()` selects its tab before returning,
     /// so a foreground action reads the pane it created even before focus settles.
     var selectedPane: TerminalView? { (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
-    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil) throws {
+    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
         self.headless = headless
         self.directory = directory
+        self.profile = profile
         self.app = app
         let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "Akitty"; window.minSize = NSSize(width: 400,height: 250); window.center()
@@ -374,10 +378,14 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         window.contentView = content
-        try newTab(); refreshUpdateReminder(app.updates.availableVersion)
+        try newTab(profile: profile); refreshUpdateReminder(app.updates.availableVersion)
     }
     required init?(coder: NSCoder) { nil }
-    func newTab() throws {
+    func newTab() throws { try newTab(profile: inheritedProfile) }
+    /// The focused pane's profile, even when that is the defaults (nil); the window's own profile only without a pane.
+    private var inheritedProfile: UUID? { if let active { return active.profileID }; return profile }
+    /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults).
+    func newTab(profile: UUID?) throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
@@ -386,7 +394,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
         if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
         tabs.selectTabViewItem(item)
-        do { try addPane(to: split, directory: directory) }
+        do { try addPane(to: split, directory: directory, profile: profile) }
         catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
         refreshTabs()
     }
@@ -404,10 +412,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
     @discardableResult
-    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil) throws -> TerminalPane? {
+    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil, profile paneProfile: UUID?? = nil) throws -> TerminalPane? {
         // A restart replaces a pane, so it may briefly hold a ninth before the old one is removed.
         guard index != nil || split.arrangedSubviews.count < 8 else { return nil }
-        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory)
+        // A split takes the profile of the pane it splits from; an explicit profile (even nil, the defaults) wins.
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory, profile: paneProfile ?? inheritedProfile)
         // A restart inserts in place; a new split appends as before.
         if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
         else { split.addArrangedSubview(pane) }
@@ -452,7 +461,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         // Check before selecting, so a refused split leaves the user's tab and focus alone.
         guard split.arrangedSubviews.count < 8 else { throw AkittyError.core("This tab already has 8 panes.") }
         tabs.selectTabViewItem(item)
-        guard let pane = try addPane(to: split) else { throw AkittyError.core("This tab already has 8 panes.") }
+        guard let pane = try addPane(to: split, profile: .some(target.profileID)) else { throw AkittyError.core("This tab already has 8 panes.") }
         return pane.terminal
     }
     /// Restart the focused pane, keeping its tab and index.
@@ -475,7 +484,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.launchDirectory ?? self.directory
         do {
             // Insert before removing: an empty split would close the tab (and window) in between.
-            guard let replacement = try addPane(to: split, directory: directory, at: index) else { return }
+            guard let replacement = try addPane(to: split, directory: directory, at: index, profile: .some(terminal.profileID)) else { return }
             remove(terminal)
             window?.makeFirstResponder(replacement.terminal)
             refreshTabs()
@@ -871,6 +880,15 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     public func applicationWillTerminate(_ notification: Notification) { agentRequests.stop(); quickTerminal.stop() }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
+    /// Delegates that rebuild the profile submenus each time they open, so they always list the saved profiles.
+    private var profileMenus: [ProfileMenu] = []
+    /// Opens a window, or a tab in the key terminal window, whose first pane uses `profile` (nil: defaults).
+    func open(profile: UUID?, asTab: Bool) {
+        do {
+            if asTab, let window = NSApp.keyWindow?.windowController as? TerminalWindow ?? intentWindow() { try window.newTab(profile: profile); window.showWindow(nil) }
+            else { try createTerminalWindow(profile: profile) }
+        } catch { NSAlert(error: error).runModal() }
+    }
     private(set) var agentOverview: AgentOverviewController?
     @objc func showAgentOverview(_ sender: Any?) {
         if agentOverview == nil {
@@ -937,8 +955,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         do { _ = try createTerminalWindow(directory: directory) }
         catch { NSAlert(error: error).runModal() }
     }
-    @discardableResult func createTerminalWindow(directory: String? = nil, headless: Bool = false) throws -> TerminalWindow {
-        let controller = try TerminalWindow(app: self, headless: headless, directory: directory)
+    @discardableResult func createTerminalWindow(directory: String? = nil, headless: Bool = false, profile: UUID? = nil) throws -> TerminalWindow {
+        let controller = try TerminalWindow(app: self, headless: headless, directory: directory, profile: profile)
         windows.append(controller)
         if !launched { openedFolderAtLaunch = true }
         controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
@@ -997,8 +1015,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func selectTab(_ sender: NSMenuItem) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.selectTab(at: sender.tag) }
     @objc private func restartTerminal(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.restartFocusedPane() }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
-    @objc private func settings(_ sender: Any?) {
+    @objc private func settings(_ sender: Any?) { showSettings() }
+    func showSettings(tab: SettingsTab? = nil) {
         if settingsWindow == nil { settingsWindow = PreferencesWindow(updater: updates) }
+        if let tab { settingsWindow?.select(tab) }
         settingsWindow?.showWindow(nil); settingsWindow?.window?.makeKeyAndOrderFront(nil)
     }
     func makeMenu() {
@@ -1022,6 +1042,12 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         let restart = file.addItem(withTitle: "Restart Terminal", action: #selector(restartTerminal(_:)), keyEquivalent: "r")
         restart.keyEquivalentModifierMask = [.command, .shift]; restart.target = self
+        file.addItem(.separator())
+        for (title, kind) in [("New Window with Profile", ProfileMenu.Kind.window), ("New Tab with Profile", .tab)] {
+            let item = file.addItem(withTitle: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: title), owner = ProfileMenu(app: self, kind: kind)
+            submenu.delegate = owner; profileMenus.append(owner); item.submenu = submenu
+        }
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         // Standard editing actions follow the focused responder, including terminal panes, fields and sheets.
         // Routing these through the app's key-window command handler can lose a paste during focus changes.
@@ -1042,3 +1068,26 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
     }
 }
+
+/// Fills a New Window/Tab with Profile submenu from the saved profiles when it opens.
+@MainActor final class ProfileMenu: NSObject, NSMenuDelegate {
+    enum Kind { case window, tab }
+    private weak var app: AkittyApplication?
+    private let kind: Kind
+    init(app: AkittyApplication, kind: Kind) { self.app = app; self.kind = kind }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let defaults = menu.addItem(withTitle: "Default Settings", action: #selector(choose(_:)), keyEquivalent: ""); defaults.target = self
+        let profiles = TerminalPreferences.load().profiles
+        if !profiles.isEmpty { menu.addItem(.separator()) }
+        for profile in profiles {
+            let item = menu.addItem(withTitle: profile.name, action: #selector(choose(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = profile.id
+        }
+        menu.addItem(.separator())
+        let edit = menu.addItem(withTitle: "Edit Profiles…", action: #selector(editProfiles(_:)), keyEquivalent: ""); edit.target = self
+    }
+    @objc private func choose(_ sender: NSMenuItem) { app?.open(profile: sender.representedObject as? UUID, asTab: kind == .tab) }
+    @objc private func editProfiles(_ sender: Any?) { app?.showSettings(tab: .profiles) }
+}
+

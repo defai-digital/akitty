@@ -593,6 +593,10 @@ impl Session {
         self.wake();
         Ok(())
     }
+    pub fn set_theme(&self, theme: &crate::model::Theme) -> Result<(), String> {
+        self.state()?.set_theme(theme);
+        Ok(())
+    }
     pub fn set_program_chrome(&self, enabled: bool) -> Result<(), String> {
         self.state()?.set_program_chrome(enabled);
         Ok(())
