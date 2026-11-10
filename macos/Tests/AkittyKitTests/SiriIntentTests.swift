@@ -237,14 +237,15 @@ final class SiriIntentTests: XCTestCase {
         try terminal.session.input("AKITTY_FOLDER_HISTORY=0; source '\(integration.path)'\r")
         try await waitUntil { try terminal.session.snapshot()?.shell?.ready == true }
         let marker = root.appendingPathComponent("executed")
-        let pending = Task { try await requests.request("printf once >> '\(marker.path)'", in: terminal, origin: .siri) }
+        // File creation and command output are separate observable events.
+        let pending = Task { try await requests.request(": >> '\(marker.path)'; sleep 0.1; printf once >> '\(marker.path)'", in: terminal, origin: .siri) }
         try await waitUntil { window.attachedSheet != nil }
         window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
         let receipt = try await pending.value
         XCTAssertEqual(receipt["accepted"] as? Bool, true)
         XCTAssertEqual(receipt["completion_untrusted"] as? Bool, true)
         XCTAssertEqual(receipt["input_remains_leased"] as? Bool, true)
-        try await waitUntil { FileManager.default.fileExists(atPath: marker.path) }
+        try await waitUntil { (try? String(contentsOf: marker, encoding: .utf8))?.hasPrefix("once") == true }
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "once")
         XCTAssertThrowsError(try terminal.session.input("human"))
         try terminal.session.reclaimControl()
