@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import { OutputQueue } from './output-queue';
 import { createIsolatedTerminal } from './test-helpers';
 import type { Terminal } from './terminal';
@@ -12,6 +13,16 @@ async function terminal(cols = 80, rows = 4): Promise<Terminal> {
 }
 
 describe('cooperative terminal output', () => {
+  test('queued Buffer views retain their accepted bytes when the caller reuses the storage', async () => {
+    const term = await terminal();
+    const storage = Buffer.from('__original__');
+    const input = storage.subarray(2, -2);
+    const completion = term.writeAsync(input);
+    storage.fill(0);
+    await completion;
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('original');
+  });
+
   test('parses FIFO chunks, including UTF-8 and escape sequences split at a boundary', async () => {
     const term = await terminal();
     const input = new TextEncoder().encode('a'.repeat(8191) + '中\x1b[31m界\x1b[0m\r\n');
@@ -119,6 +130,18 @@ describe('cooperative terminal output', () => {
     });
     await expect(term.writeAsync('\x1b]2;reset\x07' + 'x'.repeat(20000))).rejects.toThrow('reset');
     await current;
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('new generation');
+  });
+
+  test('reset from a queued bell cancels old bells while allowing the new generation', async () => {
+    const term = await terminal();
+    let bells = 0, current: Promise<void> | undefined;
+    term.onBell(() => {
+      if (++bells === 1) { term.reset(); current = term.writeAsync('\x07new generation'); }
+    });
+    await expect(term.writeAsync('\x07\x07\x07' + 'x'.repeat(20000))).rejects.toThrow('reset');
+    await current;
+    expect(bells).toBe(2);
     expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe('new generation');
   });
 });
