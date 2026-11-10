@@ -220,7 +220,7 @@ impl Session {
                     // The parser or another engine step panicked with the state held. Publish a
                     // restartable failure instead of letting the dead thread strand the pane.
                     lock_model(&panic_model).error = Some(ENGINE_FAILED.into());
-                    finalize(&panic_model, None, None);
+                    finalize(&panic_model, None, None, None);
                     // Finalize bumped the revision outside the loop, so tell the host explicitly.
                     panic_notify.signal();
                     Err("PTY worker panicked".into())
@@ -263,7 +263,7 @@ impl Session {
                     self.wake();
                 } else {
                     // No worker to finalize a headless session, so publish the exit here.
-                    finalize(&self.model, None, None);
+                    finalize(&self.model, None, None, None);
                 }
                 Err(ENGINE_FAILED.into())
             }
@@ -793,13 +793,17 @@ fn feed_batch(
 
 /// Record final worker state. A clean shutdown keeps an error the host was already shown;
 /// only a real IO failure replaces it.
-fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<&str>) {
+fn finalize(model: &Arc<Mutex<Model>>, exit_code: Option<u32>, io_error: Option<&str>, cleanup_error: Option<&str>) {
     let mut state = lock_model(model);
     state.shell.finish();
     state.exited = true;
     state.exit_code = exit_code;
     if let Some(error) = io_error {
         state.error = Some(error.into());
+    } else if state.error.is_none() {
+        // A delayed OS reap must not hide the actionable engine failure that
+        // stopped the worker. Cleanup errors still surface when no earlier error exists.
+        state.error = cleanup_error.map(str::to_owned);
     }
     state.revision = state.revision.saturating_add(1);
     drop(state);
@@ -1164,16 +1168,12 @@ fn run(
         // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
         drain_to_quiet(fd, &model, &mut output, &mut response_pending, &notify);
     }
-    if let Err(error) = child.finish()
-        && io_error.is_none()
-    {
-        io_error = Some(error);
-    }
-    finalize(&model, child.exit_code(), io_error.as_deref());
+    let cleanup_error = child.finish().err();
+    finalize(&model, child.exit_code(), io_error.as_deref(), cleanup_error.as_deref());
     // `finalize` is the last revision bump; a missed exit would strand the pane's status.
     notify.signal();
     drop(master);
-    if let Some(error) = io_error {
+    if let Some(error) = io_error.or(cleanup_error) {
         Err(error)
     } else {
         Ok(())
@@ -1556,7 +1556,7 @@ mod tests {
         .join();
         assert!(session.model.lock().is_err(), "the panic must poison the lock");
         // The worker's exit path recovers the state instead of stranding the session.
-        finalize(&session.model, Some(0), None);
+        finalize(&session.model, Some(0), None, None);
         let state = lock_model(&session.model);
         assert!(state.exited);
         assert_eq!(state.exit_code, Some(0));
@@ -1590,6 +1590,16 @@ mod tests {
     #[test]
     fn a_poisoned_pty_session_stops_the_worker_and_stays_observable() {
         let session = Session::new(40, 8, Some("/bin/sh".into()), Some("/tmp".into()), false, 5000, None).unwrap();
+        session.input_bytes(b"printf '\\033]2;PID:%s\\007' $$\r".to_vec()).unwrap();
+        let ready_deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+            if let Some(pid) = snapshot["title"].as_str().and_then(|s| s.strip_prefix("PID:")).and_then(|s| s.parse::<i32>().ok()) {
+                assert!(pid > 1); break pid;
+            }
+            assert!(Instant::now() < ready_deadline, "the fixture shell never became ready");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
         poison(&session.model);
         // The PTY session has no worker to finalize until it is told to stop.
         assert_eq!(session.scroll(1).unwrap_err(), ENGINE_FAILED);
@@ -1610,7 +1620,16 @@ mod tests {
                 }
             }
         }
-        session.close().unwrap();
+        if let Err(error) = session.close() {
+            assert_eq!(error, "terminal child did not exit within 1 second; cleanup continues in background");
+        }
+        let cleanup_deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            // SAFETY: signal zero only checks this test-owned child's lifetime.
+            if unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) { break; }
+            assert!(Instant::now() < cleanup_deadline, "the poisoned session's child was not reaped");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -2070,15 +2089,27 @@ mod reply_tests {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         session.model.lock().unwrap().error = Some(REPLY_BACKLOG_ERROR.into());
         // A clean shutdown has no IO failure, so it must not turn a reported error into success.
-        finalize(&session.model, Some(0), None);
+        finalize(&session.model, Some(0), None, None);
         let model = session.model.lock().unwrap();
         assert_eq!(model.error.as_deref(), Some(REPLY_BACKLOG_ERROR));
         assert!(model.exited);
         assert_eq!(model.exit_code, Some(0));
         drop(model);
         // A real IO failure still becomes the error the host reads.
-        finalize(&session.model, Some(1), Some("PTY read failed"));
+        finalize(&session.model, Some(1), Some("PTY read failed"), Some("cleanup delayed"));
         assert_eq!(session.model.lock().unwrap().error.as_deref(), Some("PTY read failed"));
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_the_primary_error_and_is_visible_otherwise() {
+        for earlier in [Some(ENGINE_FAILED), Some(REPLY_BACKLOG_ERROR), None] {
+            let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+            session.model.lock().unwrap().error = earlier.map(str::to_owned);
+            finalize(&session.model, None, None, Some("cleanup delayed"));
+            let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+            assert_eq!(snapshot["error"], earlier.unwrap_or("cleanup delayed"));
+            assert_eq!(snapshot["exited"], true);
+        }
     }
 
     #[test]
