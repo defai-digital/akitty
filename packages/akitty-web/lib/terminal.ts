@@ -157,10 +157,10 @@ export class Terminal implements ITerminalCore {
       if (key === 'fontSize') renderer.setFontSize(this.options.fontSize);
       if (key === 'fontFamily') renderer.setFontFamily(this.options.fontFamily);
       if (key === 'lineHeight') renderer.setLineHeight(this.options.lineHeight);
+      renderer.resize(this.cols, this.rows);
       const terminal = this.wasmTerm;
       this.selectionManager?.clearSelection();
       if (this.isDisposed || this.wasmTerm !== terminal) return;
-      renderer.resize(this.cols, this.rows);
       renderer.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
     }
   }
@@ -297,8 +297,9 @@ export class Terminal implements ITerminalCore {
     terminal.resize(cols, rows); this.cols = cols; this.rows = rows; this.revision++;
     try { this.renderer!.resize(cols, rows); }
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
+    this.settings.cols = cols; this.settings.rows = rows;
     this.selectionManager?.clearSelection();
-    if (this.isDisposed || this.wasmTerm !== terminal) return;
+    if (this.isDisposed || this.wasmTerm !== terminal || this.cols !== cols || this.rows !== rows) return;
     this.resizePaintPending = true; this.finishResize();
   }
   private finishResize(): void {
