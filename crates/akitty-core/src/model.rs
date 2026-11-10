@@ -643,7 +643,8 @@ impl Model {
         let rows = self.size.rows;
         // Pass 1 hashes every row without allocating, to learn which rows differ from the
         // client's copy (the snapshot it was last sent, identified by `since`).
-        let mut hashes = vec![0xcbf2_9ce4_8422_2325_u64; rows];
+        // DECSCNM swaps every cell's colours, so it is part of every row's identity.
+        let mut hashes = vec![mix(0xcbf2_9ce4_8422_2325_u64, u64::from(self.term.modes.reverse_video)); rows];
         // Placeholder cells collected per visible row while hashing, so virtual
         // placements can be decoded into fragments after the pass.
         let mut placeholders: Vec<Vec<placeholder::Cell>> = vec![Vec::new(); rows];
@@ -1401,6 +1402,19 @@ mod tests {
         assert!(json.contains(r#""partial":true"#), "{json}");
         assert!(!json.contains("shift"), "{json}");
     }
+    #[test]
+    fn reverse_video_repaints_every_row_in_a_partial_snapshot() {
+        let mut model = Model::new(Size::validate(20, 3).unwrap(), 100);
+        model.feed(b"hello");
+        let first = model.snapshot(None);
+        model.feed(b"\x1b[?5h");
+        let partial = model.snapshot(first["revision"].as_u64());
+        // Every row changed, so the client must receive the swapped colours.
+        let cells = partial["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 60);
+        assert_eq!(cells[0]["bg"], first["cells"][0]["fg"]);
+    }
+
     #[test]
     fn a_stale_since_resize_or_missing_baseline_gets_a_full_snapshot() {
         let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
