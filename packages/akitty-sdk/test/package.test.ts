@@ -16,10 +16,8 @@ test("packed SDK imports and typechecks in an isolated consumer without native l
       ["pack", "--ignore-scripts", "--pack-destination", directory],
       { cwd: root, stdio: "pipe" },
     );
-    const archive = join(
-      directory,
-      readdirSync(directory).find((name) => name.endsWith(".tgz")),
-    );
+    const archive = readdirSync(directory).find((name) => name.endsWith(".tgz"));
+    assert(archive !== undefined, "npm pack produced no archive");
     writeFileSync(
       join(directory, "package.json"),
       '{"private":true,"type":"module"}',
@@ -32,7 +30,7 @@ test("packed SDK imports and typechecks in an isolated consumer without native l
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
-        archive,
+        join(directory, archive),
       ],
       { cwd: directory, stdio: "pipe" },
     );

@@ -6,37 +6,58 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createCommandHost } from "../dist/host.js";
 import { test } from "node:test";
 import { createSprite, createTerminalClient } from "../dist/index.js";
+import type { Chrome } from "../dist/index.js";
+
+type CreateResult = Readonly<{ id: number }>;
+type NativeSnapshot = Readonly<{
+  title: string;
+  chrome?: Chrome;
+  lines: readonly string[];
+  shell: Readonly<{ ready: boolean }>;
+  control: Readonly<{ agent: boolean; owner: string }>;
+}>;
+type CommandRecord = Readonly<{ id: number; exit_code: number }>;
+
+const ABI_SMOKE = process.env.AKITTY_SDK_ABI_SMOKE;
 
 test(
   "SDK updates, sprite ticks and cleanup pass through the native OSC parser and snapshot",
   {
-    skip: !process.env.AKITTY_SDK_ABI_SMOKE,
+    skip: !ABI_SMOKE,
     timeout: 10000,
   },
   async () => {
-    const child = spawn(process.env.AKITTY_SDK_ABI_SMOKE, [], {
+    assert(ABI_SMOKE);
+    const child = spawn(ABI_SMOKE, [], {
       stdio: ["pipe", "pipe", "inherit"],
     });
+    assert(child.stdout);
+    assert(child.stdin);
     const lines = createInterface({ input: child.stdout })[
       Symbol.asyncIterator
     ]();
-    async function call(request) {
-      child.stdin.write(JSON.stringify(request) + "\n");
+
+    async function nextLine(): Promise<string> {
       const response = await lines.next();
-      assert.equal(response.done, false);
-      const result = JSON.parse(response.value);
-      assert.equal(result.ok, true, result.error);
-      return result.data;
+      if (response.done) throw new Error("native process closed unexpectedly");
+      return response.value;
+    }
+
+    async function call<T = unknown>(request: unknown): Promise<T> {
+      child.stdin!.write(JSON.stringify(request) + "\n");
+      const result = JSON.parse(await nextLine()) as { ok?: unknown; error?: unknown; data?: unknown };
+      assert.equal(result.ok, true, typeof result.error === "string" ? result.error : undefined);
+      return result.data as T;
     }
     try {
-      const { id } = await call({
+      const { id } = await call<CreateResult>({
         op: "create",
         cols: 20,
         rows: 4,
         headless: true,
       });
-      const writes = [];
-      let tick;
+      const writes: string[] = [];
+      let tick: (() => void) | undefined;
       const client = createTerminalClient({
         capabilities: { title: true, chrome: true },
         write: (sequence) => {
@@ -48,9 +69,9 @@ test(
           return () => {};
         },
       });
-      async function feed() {
+      async function feed(): Promise<NativeSnapshot> {
         await call({ op: "feed", id, text: writes.splice(0).join("") });
-        return call({ op: "snapshot", id });
+        return call<NativeSnapshot>({ op: "snapshot", id });
       }
       client.setTitle("SDK test");
       client.setStatus({ text: "Working", tone: "info" });
@@ -68,10 +89,11 @@ test(
         mark: 0,
         sprite,
       });
+      assert(tick !== undefined);
       tick();
       snapshot = await feed();
-      assert.equal(snapshot.chrome.mark, 1);
-      assert.equal(snapshot.chrome.status.text, "Working");
+      assert.equal(snapshot.chrome?.mark, 1);
+      assert.equal(snapshot.chrome?.status?.text, "Working");
       assert.ok(
         snapshot.lines.every((line) => line.trim() === ""),
         "OSC payload leaked into the grid",
@@ -91,24 +113,31 @@ test(
 );
 
 test("trusted SDK host approves and executes once through real native PTY and reads its result", {
-  skip: !process.env.AKITTY_SDK_ABI_SMOKE, timeout: 15000,
+  skip: !ABI_SMOKE, timeout: 15000,
 }, async () => {
-  const child = spawn(process.env.AKITTY_SDK_ABI_SMOKE, [], { stdio: ["pipe", "pipe", "inherit"] })
+  assert(ABI_SMOKE);
+  const child = spawn(ABI_SMOKE, [], { stdio: ["pipe", "pipe", "inherit"] })
+  assert(child.stdout)
+  assert(child.stdin)
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]()
-  async function call(request) {
-    child.stdin.write(JSON.stringify(request) + "\n")
+  async function nextLine(): Promise<string> {
     const line = await lines.next()
-    assert.equal(line.done, false)
-    const response = JSON.parse(line.value)
-    if (!response.ok) throw new Error(response.error)
-    return response.data
+    if (line.done) throw new Error("native process closed unexpectedly")
+    return line.value
   }
-  let id
+  async function call<T = unknown>(request: unknown): Promise<T> {
+    child.stdin!.write(JSON.stringify(request) + "\n")
+    const response = JSON.parse(await nextLine()) as { ok?: unknown; error?: unknown; data?: unknown }
+    if (response.ok !== true) throw new Error(typeof response.error === "string" ? response.error : "native request failed")
+    return response.data as T
+  }
+  let id: number | undefined
   try {
     const resources = fileURLToPath(new URL("../../../macos/Sources/AkittyKit/Resources/shell-integration/", import.meta.url))
-    ;({ id } = await call({ op: "create", cols: 80, rows: 10, shell: "/bin/zsh", cwd: "/tmp", shell_integration_dir: resources, folder_history: false }))
+    const created = await call<CreateResult>({ op: "create", cols: 80, rows: 10, shell: "/bin/zsh", cwd: "/tmp", shell_integration_dir: resources, folder_history: false })
+    id = created.id
     const deadline = Date.now() + 10000
-    while (!(await call({ op: "snapshot", id })).shell.ready) {
+    while (!(await call<NativeSnapshot>({ op: "snapshot", id })).shell.ready) {
       assert.ok(Date.now() < deadline, "integrated prompt did not arrive"); await delay(10)
     }
     let approvals = 0
@@ -116,20 +145,25 @@ test("trusted SDK host approves and executes once through real native PTY and re
       approvals++; assert.equal(request.command, "printf 'HOST-SDK-RESULT\\n'; (exit 7)"); return true
     } })
     const receipt = await host.execute("sdk-agent", "printf 'HOST-SDK-RESULT\\n'; (exit 7)")
-    let record
+    let record: CommandRecord | undefined
     while (!record) {
-      record = (await host.history(receipt.afterCommandId)).commands.find(c => c.exit_code === 7)
+      const history = await host.history(receipt.afterCommandId)
+      const commands = history.commands as readonly CommandRecord[]
+      record = commands.find(c => c.exit_code === 7)
       assert.ok(Date.now() < deadline, "command completion did not arrive")
       if (!record) await delay(10)
     }
     assert.equal(approvals, 1)
     const output = await host.output(record.id)
-    assert.ok(Buffer.from(output.output_base64, "base64").toString().includes("HOST-SDK-RESULT"))
+    const encoded = output.output_base64
+    assert(typeof encoded === "string")
+    assert.ok(Buffer.from(encoded, "base64").toString().includes("HOST-SDK-RESULT"))
     assert.equal(output.untrusted, true)
-    assert.equal((await call({ op: "snapshot", id })).control.agent, true)
+    assert.equal((await call<NativeSnapshot>({ op: "snapshot", id })).control.agent, true)
     await host.release(receipt.lease)
-    assert.equal((await call({ op: "snapshot", id })).control.owner, "human")
-    const events = (await host.audit()).events.map(e => e.event)
+    assert.equal((await call<NativeSnapshot>({ op: "snapshot", id })).control.owner, "human")
+    const audit = await host.audit()
+    const events = (audit.events as readonly { event: string }[]).map(e => e.event)
     assert.ok(events.includes("authorized")); assert.ok(events.includes("dispatched"))
     await call({ op: "close", id }); id = undefined
   } finally {

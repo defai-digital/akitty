@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { compare, options, statistics } from './benchmark-vt.mjs';
+import { compare, options, statistics } from './benchmark-vt.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const nativeBinary = join(root, 'target/release/examples/benchmark');
@@ -14,7 +14,7 @@ test('changing measured inputs prevents publication of a successful report', { s
   const fixture = mkdtempSync(join(tmpdir(), 'akitty-benchmark-change-'));
   try {
     for (const dir of ['scripts', 'benchmarks', 'packages/akitty-web', 'target/release/examples']) mkdirSync(join(fixture, dir), { recursive: true });
-    copyFileSync(join(root, 'scripts/benchmark-vt.mjs'), join(fixture, 'scripts/benchmark-vt.mjs'));
+    copyFileSync(join(root, 'scripts/benchmark-vt.ts'), join(fixture, 'scripts/benchmark-vt.ts'));
     copyFileSync(nativeBinary, join(fixture, 'target/release/examples/benchmark-real'));
     // Mutate after the real native measurement, avoiding a race with WASM compilation or timers.
     writeFileSync(join(fixture, 'target/release/examples/benchmark'), `#!/usr/bin/env node
@@ -29,7 +29,7 @@ process.exit(result.status ?? 1);
     const wasm = readFileSync(join(root, 'packages/akitty-web/akitty-vt.wasm'));
     writeFileSync(join(fixture, 'packages/akitty-web/akitty-vt.wasm'), wasm);
     writeFileSync(join(fixture, 'source.txt'), 'before');
-    const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+    const hash = (bytes: string | NodeJS.ArrayBufferView): string => createHash('sha256').update(bytes).digest('hex');
     writeFileSync(join(fixture, 'packages/akitty-web/wasm-provenance.json'), JSON.stringify({
       sha256: hash(wasm), rust: '1.99.1', inputs: { 'source.txt': hash('before') },
     }));
@@ -39,11 +39,11 @@ process.exit(result.status ?? 1);
       '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '--allow-empty', '-m', 'Fixture']]) {
       const result = spawnSync('git', args, { cwd: fixture, encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
     }
-    writeFileSync(join(fixture, 'run.mjs'), `
-import { benchmark } from './scripts/benchmark-vt.mjs';
+    writeFileSync(join(fixture, 'run.mts'), `
+import { benchmark } from './scripts/benchmark-vt.ts';
 await benchmark(['--samples', '3', '--rounds', '1', '--output', 'result.json']);
 `);
-    const result = spawnSync(process.execPath, ['run.mjs'], { cwd: fixture, encoding: 'utf8', timeout: 30000 });
+    const result = spawnSync(process.execPath, ['run.mts'], { cwd: fixture, encoding: 'utf8', timeout: 30000 });
     assert.equal(readFileSync(join(fixture, 'source.txt'), 'utf8'), 'after');
     assert.notEqual(result.status, 0, 'changed inputs must fail the run');
     assert.match(result.stderr, /changed during benchmark/);
@@ -55,7 +55,8 @@ test('nearest-rank percentiles retain raw samples and do not mutate them', () =>
   const raw = [9e6, 1e6, 4e6, 3e6, 2e6];
   assert.deepEqual(statistics(raw), { samples_ns: raw, p50_ms: 3, p95_ms: 9, p99_ms: 9 });
   assert.deepEqual(raw, [9e6, 1e6, 4e6, 3e6, 2e6]);
-  for (const sample of [[1], [1, 0, 3], [1, NaN, 3], [1, Infinity, 3], new Array(3), [1, , 3]]) assert.throws(() => statistics(sample));
+  const invalid = [[1], [1, 0, 3], [1, NaN, 3], [1, Infinity, 3], new Array(3), [1, , 3]] as readonly unknown[];
+  for (const sample of invalid) assert.throws(() => statistics(sample as number[]));
 });
 test('CLI bounds prevent invalid or unexpectedly large runs', () => {
   assert.deepEqual(options(['--samples', '5', '--rounds', '8']), { samples: 5, rounds: 8 });
@@ -66,7 +67,9 @@ test('CLI bounds prevent invalid or unexpectedly large runs', () => {
 test('state or byte disagreement cannot produce a successful benchmark result', () => {
   const base = { id: 'ascii', bytes_per_sample: 1024, feed_ns: [1e6, 2e6, 3e6], resize_ns: [1e6, 2e6, 3e6], state: { cursor: [0, 0] } };
   const output = compare({ results: [base] }, [base], [{ id: 'ascii' }]);
-  assert.equal(output[0].native.feed.median_mib_per_second, .48828125);
+  const first = output[0];
+  assert(first !== undefined);
+  assert.equal(first.native.feed.median_mib_per_second, .48828125);
   assert.throws(() => compare({ results: [base] }, [{ ...base, state: { cursor: [1, 0] } }], [{ id: 'ascii' }]));
   assert.throws(() => compare({ results: [base] }, [{ ...base, bytes_per_sample: 1 }], [{ id: 'ascii' }]));
   assert.throws(() => compare({ results: [base] }, [base], [{ id: 'ascii' }], 30));

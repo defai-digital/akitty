@@ -35,7 +35,7 @@ Their licenses are collected from the exact locked graph during app packaging.
 
 `cargo test --workspace --locked` covers authored protocol fixtures at every byte
 boundary, deterministic edit/resize stress, native conformance, graphics and PTY
-lifecycle. `scripts/test-vt-wasm.mjs` runs the same fixtures in the actual WASM.
+lifecycle. `scripts/test-vt-wasm.ts` runs the same fixtures in the actual WASM.
 `scripts/verify.sh` also runs Clippy, Web/SDK/feature tests, real-browser tests,
 Swift and ABI checks. It validates both the committed WASM and a fresh Rust build.
 `scripts/check-engine-source.py` rejects obsolete dependencies, source trees,
