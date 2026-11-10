@@ -1352,6 +1352,37 @@ describe('select()', () => {
       term.dispose();
     });
 
+    test('should fire selectionChange when a selection is cleared, and not when none exists', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      if (!container) return;
+      term.open(container!);
+      let count = 0;
+      term.onSelectionChange(() => { count++; });
+
+      term.clearSelection();
+      expect(count).toBe(0);
+      term.select(0, 0, 10);
+      expect(count).toBe(1);
+      term.clearSelection();
+      expect(term.hasSelection()).toBe(false);
+      expect(count).toBe(2);
+      term.clearSelection();
+      expect(count).toBe(2);
+      term.dispose();
+    });
+
+    test('should fire onRender for painted frames', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 5 });
+      if (!container) return;
+      const ranges: { start: number; end: number }[] = [];
+      term.onRender(range => { ranges.push(range); });
+      term.open(container!);
+      term.resize(30, 6);
+      expect(ranges.length).toBeGreaterThan(0);
+      expect(ranges[ranges.length - 1]).toEqual({ start: 0, end: 5 });
+      term.dispose();
+    });
+
     test('should clear selection when clicking outside canvas', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
       // Using shared container from beforeEach

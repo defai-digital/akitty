@@ -415,6 +415,10 @@ impl Filter {
                             pass.push(b'\\');
                             self.state = State::Ground;
                         } else {
+                            // The parser holds this OSC open. An intercepted OSC that
+                            // follows is never forwarded, so cancel the parser's copy
+                            // first or it would swallow all later output.
+                            pass.push(0x18);
                             self.state = State::Esc;
                             continue;
                         }
@@ -597,5 +601,13 @@ mod tests {
         input.extend_from_slice(b"\x1b[31mred");
         let out = passed(filter.feed(&input));
         assert!(out.ends_with(b"\x18\x1b[31mred"));
+    }
+
+    #[test]
+    fn unterminated_forwarded_osc_is_cancelled_before_an_intercepted_one() {
+        let mut filter = Filter::default();
+        let segments = joined([filter.feed(b"\x1b]0;partial\x1b]133;A\x07hello")]);
+        assert_eq!(segments.first(), Some(&(0, b"\x1b]0;partial\x18".to_vec())));
+        assert_eq!(segments.last(), Some(&(0, b"hello".to_vec())));
     }
 }

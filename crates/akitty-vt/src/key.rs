@@ -152,7 +152,10 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
     if key.code == 9 && mods == SHIFT {
         return b"\x1b[Z".to_vec();
     }
-    if options.modify_other_keys == 2 && mods != 0 && key.code < 57344 {
+    // xterm's level 2 leaves Shift+printable text alone; only Space and Return are claimed.
+    let shifted_text = mods == SHIFT && !key.text.is_empty() && key.text != " " && key.code != 13
+        && key.text.chars().all(|ch| !ch.is_control());
+    if options.modify_other_keys == 2 && mods != 0 && !shifted_text && key.code < 57344 {
         return format!("\x1b[27;{modifier};{}~", key.code).into_bytes();
     }
     let keypad = if options.app_keypad {
@@ -174,7 +177,9 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
             53 => Some(29),
             54 => Some(30),
             55 => Some(31),
+            47 => Some(31),
             56 | 63 => Some(127),
+            126 => Some(30),
             _ => None,
         };
         control.map_or_else(|| legacy_text(key), |byte| vec![byte])
@@ -405,6 +410,12 @@ mod tests {
         );
         assert_eq!(text(Key::press(UP, CTRL, ""), options), "\x1b[1;5A");
         assert_eq!(text(Key::press(DELETE, SHIFT, ""), options), "\x1b[3;2~");
+        assert_eq!(encode(&Key::press(47, CTRL, "/"), options), [31]);
+        assert_eq!(encode(&Key::press(96, CTRL | SHIFT, "~"), options), [30]);
+        let other = Options { modify_other_keys: 2, ..options };
+        assert_eq!(text(Key::press(97, SHIFT, "A"), other), "A");
+        assert_eq!(text(Key::press(97, CTRL, "a"), other), "\x1b[27;5;97~");
+        assert_eq!(text(Key::press(32, SHIFT, " "), other), "\x1b[27;2;32~");
         assert_eq!(text(Key::press(9, SHIFT, ""), options), "\x1b[Z");
         assert_eq!(
             text(

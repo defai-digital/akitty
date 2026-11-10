@@ -303,6 +303,7 @@ export class Terminal implements ITerminalCore {
     if (this.isDisposed) return;
     this.renderer!.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
     this.resizePaintPending = false; this.resizeEmitter.fire({ cols: this.cols, rows: this.rows });
+    if (!this.isDisposed) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
   }
   clear(): void { this.write('\x1b[2J\x1b[H'); }
   reset(): void {
@@ -535,10 +536,12 @@ export class Terminal implements ITerminalCore {
       if (!this.isOpen || this.isDisposed || !this.onScreen) return;
       try {
         this.wasmTerm!.update(); this.processTerminalResponses();
-        this.renderer!.render(this.wasmTerm!, this.renderFailed || this.redrawOnShow, this.viewportY, this, this.scrollbarOpacity);
+        const painted = this.renderer!.render(this.wasmTerm!, this.renderFailed || this.redrawOnShow, this.viewportY, this, this.scrollbarOpacity);
         const cursor = this.wasmTerm!.getCursor();
         if (cursor.x !== this.lastCursor.x || cursor.y !== this.lastCursor.y) { this.lastCursor = cursor; this.cursorMoveEmitter.fire(); }
         this.renderFailed = false; this.redrawOnShow = false;
+        // Only painted frames are announced, so idle frames cost nothing.
+        if (painted) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
       } catch (error) { if (!this.renderFailed) console.error('akitty-web: render failed, retrying next frame', error); this.renderFailed = true; }
       if (this.isOpen && !this.isDisposed && this.onScreen) this.animationFrameId = requestAnimationFrame(frame);
     };

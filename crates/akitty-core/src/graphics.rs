@@ -689,6 +689,11 @@ impl Graphics {
         }
         // Transmissions for an existing id replace it entirely: all placements
         // of the old image go first, so a=T re-creates exactly one placement.
+        // Its bytes were already accounted for above; an idless old image left
+        // unplaced must not be swept and released a second time.
+        if let Some(image) = self.images.get_mut(&id) {
+            image.idless = false;
+        }
         self.placements.retain(|placement| placement.image != id);
         self.cascade();
         self.next_generation += 1;
@@ -1681,6 +1686,18 @@ mod tests {
         assert!(graphics.images.contains_key(&2));
         assert!(graphics.handle(b"m=0;", &context()).reply.is_empty());
         assert!(!graphics.images.contains_key(&3));
+    }
+
+    #[test]
+    fn replacing_an_idless_image_by_its_id_releases_its_bytes_once() {
+        let mut graphics = Graphics::default();
+        let main = Context { alt: false, ..context() };
+        graphics.handle(format!("a=T,f=32,s=10,v=10,q=2;{}", encode(&[7; 400])).as_bytes(), &main);
+        let id = *graphics.images.keys().next().unwrap();
+        assert_eq!(graphics.bytes, 400);
+        graphics.handle(format!("a=t,f=32,s=1,v=1,i={id},q=2;{}", encode(&[1, 2, 3, 4])).as_bytes(), &context());
+        assert_eq!(graphics.bytes, 4);
+        assert_eq!(graphics.images.len(), 1);
     }
 
     #[test]

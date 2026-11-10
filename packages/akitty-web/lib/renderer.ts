@@ -110,8 +110,9 @@ export class CanvasRenderer {
     }
     return hash >>> 0;
   }
-  render(buffer: IRenderable, forceAll = false, viewportY = 0, history?: IScrollbackProvider, scrollbarOpacity = 1): void {
-    if (this.closed) return;
+  /** Returns true when the frame painted anything. */
+  render(buffer: IRenderable, forceAll = false, viewportY = 0, history?: IScrollbackProvider, scrollbarOpacity = 1): boolean {
+    if (this.closed) return false;
     const cursor = buffer.getCursor(), dims = buffer.getDimensions();
     if (!this.dprPinned) this.devicePixelRatio = window.devicePixelRatio || 1;
     const previous = this.dimensions;
@@ -136,7 +137,7 @@ export class CanvasRenderer {
     forceAll ||= selectionKey !== this.lastSelection;
     const selectionRows = this.selectionManager?.getDirtySelectionRows();
     if (!forceAll && !anyDirty && !cursorChanged && !selectionRows?.size) {
-      return;
+      return false;
     }
     this.frameLines.length = 0; this.font = ''; this.fill = '';
     const reusable = viewportY === 0 && !selection && !this.hoveredId && !this.hoveredRange;
@@ -197,6 +198,7 @@ export class CanvasRenderer {
     this.lastCursorColor = cursorColor;
     this.lastSelection = selectionKey;
     this.selectionManager?.clearDirtySelectionRows(); buffer.clearDirty();
+    return true;
   }
   private paintRow(cells: TerminalCell[] | null, row: number, cols: number, selection: SelectionCoordinates | null, grapheme: (col: number) => string): void {
     const { width, height, baseline } = this.metrics;

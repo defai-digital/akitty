@@ -311,6 +311,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private var finishedTabs: Set<ObjectIdentifier> = []
     /// Tabs whose bell rang while they were out of view; each keeps a bell mark and a 🔔 title until it is shown.
     private var belledTabs: Set<ObjectIdentifier> = []
+    /// While a tab is detached to reorder it, NSTabView selects a neighbour; that is not the user looking at it.
+    private var reorderingTabs = false
     private var updateReminder: UpdateReminder?
     weak var app: AkittyApplication?
     private var palette: PaletteController?
@@ -516,8 +518,15 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let from = tabs.indexOfTabViewItem(item)
         guard from != NSNotFound, from != index, tabs.tabViewItems.indices.contains(index) else { return }
         let selected = tabs.selectedTabViewItem === item
+        reorderingTabs = true
         tabs.removeTabViewItem(item); tabs.insertTabViewItem(item, at: index)
-        if selected { tabs.selectTabViewItem(item) }
+        reorderingTabs = false
+        if selected {
+            tabs.selectTabViewItem(item)
+            if let pane = (item.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
+                window?.makeFirstResponder(pane.terminal)
+            }
+        }
         refreshTabs()
     }
     /// ⌘1 to ⌘8 select that tab and ⌘9 the last one; an index past the last tab does nothing.
@@ -578,6 +587,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     }
     func windowDidBecomeKey(_ notification: Notification) { acknowledgeSelectedTab() }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        guard !reorderingTabs else { return }
         if window?.isKeyWindow == true, let split = tabViewItem?.view as? NSSplitView {
             finishedTabs.remove(ObjectIdentifier(split)); belledTabs.remove(ObjectIdentifier(split))
         }
