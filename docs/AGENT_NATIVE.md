@@ -46,7 +46,8 @@ retain their normal lifecycle. Protocol details are in [ABI.md](ABI.md).
    "$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent" list
    ```
 
-3. Choose the opaque `pane` value, then request the complete shell command:
+3. Choose the opaque `pane` value (`<launch-id>/<number>`, copied exactly as
+   printed), then request the complete shell command:
 
    ```sh
    "$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent" request '<pane-id>' 'git status'
@@ -69,7 +70,9 @@ The same agent's normal subprocesses and file tools remain outside this path.
 
 List pages contain at most 16 panes. If `next_offset` is an integer, use
 `akitty-agent list <offset>` to fetch the next page. Pane identifiers are scoped
-to the running app instance and become invalid after restart. `--socket <path>`
+to the running app instance and become invalid after restart. A request for a
+closed pane, or an identifier from an earlier launch, fails with a message to run
+`list` again; older builds printed `\/` inside identifiers, which is still accepted. `--socket <path>`
 before the subcommand selects a different local test/instance endpoint.
 
 ## Local request protocol and trust boundary
