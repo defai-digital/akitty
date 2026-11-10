@@ -29,7 +29,10 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   sends only new rows; snapshots serialize outside the model lock and animation
   frames are shared rather than copied. Filter-buffer copies and per-slice event
   draining were reduced after 1.3.5 (about 20% more feed throughput). Scrolled
-  frames still repaint the whole bitmap; a bitmap scroll remains to evaluate.
+  frames now reuse opaque text bitmap pixels when device-pixel geometry aligns. Coalesced scrolls relocate
+  pending damage; exposed rows, cursor damage and complex/decorated text rows are redrawn. Images,
+  composition, cropped grids and fractional geometry retain the full repaint fallback. Moved pixel rows
+  still upload to Metal; this optimizes CPU raster work rather than eliminating the GPU upload.
 - The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
   up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
 - The PTY worker signals a host-notification pipe whenever it advances the model, so an

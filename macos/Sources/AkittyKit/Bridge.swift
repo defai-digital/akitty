@@ -427,6 +427,25 @@ public struct Snapshot: Codable, Sendable {
         guard cells.contains(where: \.selected) else { return }
         cells = cells.map { $0.clearingSelection() }
     }
+    /// Cells are ordered by row on both transports. Locate row boundaries without
+    /// scanning all retained cells for a small update.
+    private static func cellIndex(_ cells: [Cell], row: Int) -> Int {
+        var low = 0, high = cells.count
+        while low < high {
+            let middle = low + (high - low) / 2
+            if cells[middle].row < row { low = middle + 1 } else { high = middle }
+        }
+        return low
+    }
+    func cells(in rows: Set<Int>) -> [Cell] {
+        var selected: [Cell] = []
+        for row in rows.sorted() {
+            let start = Self.cellIndex(cells, row: row)
+            let end = Self.cellIndex(cells, row: row + 1)
+            selected.append(contentsOf: cells[start..<end])
+        }
+        return selected
+    }
     /// This snapshot with a partial one applied: shift held rows up by `shift`, replace dirty rows, keep the rest.
     func applying(_ partial: Snapshot) -> Snapshot? {
         guard let dirty = partial.dirty, partial.cols == cols, partial.rows == rows, lines.count == rows,
@@ -451,14 +470,22 @@ public struct Snapshot: Codable, Sendable {
             }
         }
         for (slot, row) in dirty.enumerated() { newLines[row] = partial.lines[slot] }
-        // Both sides are ordered by row, so merging keeps the order without a sort.
-        var merged: [Cell] = []
-        merged.reserveCapacity(held.count + partial.cells.count)
-        var kept = held.lazy.filter { !changed.contains($0.row) }.makeIterator(), incoming = partial.cells.makeIterator()
-        var nextKept = kept.next(), nextIncoming = incoming.next()
-        while nextKept != nil || nextIncoming != nil {
-            if let k = nextKept, nextIncoming == nil || k.row < nextIncoming!.row { merged.append(k); nextKept = kept.next() }
-            else if let i = nextIncoming { merged.append(i); nextIncoming = incoming.next() }
+        // Copy unchanged spans in bulk instead of testing a Set and advancing two
+        // iterators for every retained cell. Metadata-only updates share the array.
+        var merged = held
+        if !changed.isEmpty {
+            merged = []
+            merged.reserveCapacity(held.count + partial.cells.count)
+            var kept = 0
+            for row in changed.sorted() {
+                let start = Self.cellIndex(held, row: row)
+                merged.append(contentsOf: held[kept..<start])
+                let incomingStart = Self.cellIndex(partial.cells, row: row)
+                let incomingEnd = Self.cellIndex(partial.cells, row: row + 1)
+                merged.append(contentsOf: partial.cells[incomingStart..<incomingEnd])
+                kept = Self.cellIndex(held, row: row + 1)
+            }
+            merged.append(contentsOf: held[kept...])
         }
         result.cells = merged
         result.lines = newLines

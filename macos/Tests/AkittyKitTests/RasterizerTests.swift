@@ -59,34 +59,69 @@ final class RasterizerTests: XCTestCase {
     }
 
     func testIncrementalFramesMatchFullRepaint() throws {
+        for (scale, font) in [(CGFloat(1), "Menlo"), (2, "Menlo"), (3, "Menlo"), (2, "Courier New")] {
+            try checkIncrementalFrames(scale: scale, font: font)
+        }
+    }
+
+    private func checkIncrementalFrames(scale: CGFloat, font: String) throws {
         let session = try TerminalSession(cols: cols, rows: rows, headless: true)
         defer { try? session.close() }
         let incremental = GridRasterizer()
         var rng = Lcg(state: 42)
         var held: Snapshot?
-        var damage: Set<Int>? = nil
-        var rendered = 0, partialFrames = 0, scrolled = 0
+        var damage = GridDamage()
+        var rendered = 0, partialFrames = 0, scrolled = 0, reusedScrolls = 0
         for step in 0..<150 {
-            _ = try session.call("feed", ["text": edit(&rng)])
+            let input = edit(&rng)
+            _ = try session.call("feed", ["text": input])
             if let next = try session.snapshot(since: held?.revision, base: held) {
-                // Mirrors TerminalView.applySnapshot: a scrolled partial moved held rows, so it repaints fully.
-                if next.partial == true, next.shift == nil, let dirty = next.dirty { damage?.formUnion(dirty) } else { damage = nil }
+                damage.merge(next)
                 if next.shift != nil { scrolled += 1 }
                 held = next
             }
             // Skip some frames, like a busy main thread coalescing redraws: damage must accumulate across them.
             guard step % 3 != 1, let snapshot = held else { continue }
             let composition = step % 11 == 0 ? "ab" : ""
-            let frame = try incremental.render(snapshot: snapshot, damage: damage, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: composition)
-            damage = []
-            let full = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: composition)
-            XCTAssertEqual(bytes(frame.context), bytes(full), "step \(step) differs from a full repaint")
+            let requestedScroll = damage.scroll
+            let frame = try incremental.render(snapshot: snapshot, damage: damage.rows, scroll: requestedScroll, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: composition)
+            damage = GridDamage(rows: [])
+            let full = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: font, fontSize: 13, cellSize: cell, composition: composition)
+            let actual = bytes(frame.context), expected = bytes(full)
+            if actual != expected {
+                let different = actual.indices.filter { actual[$0] != expected[$0] }
+                let pixelRows = Set(different.map { $0 / full.bytesPerRow }).sorted()
+                XCTFail("\(font) @\(scale)x step \(step), scroll \(requestedScroll)/\(frame.scrolledRows), pixel rows \(pixelRows), input \(input.debugDescription)")
+            }
             rendered += 1
             if frame.damage != nil { partialFrames += 1 }
+            if frame.scrolledRows > 0 { reusedScrolls += 1 }
         }
         XCTAssertGreaterThan(rendered, 50)
         XCTAssertGreaterThan(partialFrames, 20, "most frames should have been incremental")
         XCTAssertGreaterThan(scrolled, 0, "the run must scroll so the shifted-partial repaint path is covered")
+        XCTAssertGreaterThan(reusedScrolls, 0, "the bitmap scroll path must be exercised")
+    }
+
+    func testScrollFallbacksMatchFullRepaints() throws {
+        let session = try TerminalSession(cols: cols, rows: rows, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": (0..<rows).map { "\u{1b}[\($0 + 1);1Hline \($0)" }.joined()])
+        for (scale, height, marked) in [(CGFloat(2), size.height, ""), (1.25, size.height, ""), (2, size.height - 9, ""), (2, size.height, "IME")] {
+            let rasterizer = GridRasterizer()
+            let bounds = CGSize(width: size.width, height: height)
+            var held = try XCTUnwrap(try session.snapshot())
+            _ = try rasterizer.render(snapshot: held, damage: nil, size: bounds, scale: scale, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: marked)
+            _ = try session.call("feed", ["text": "\u{1b}[\(rows);1H\r\nnew line \(scale)"])
+            held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
+            let frame = try rasterizer.render(snapshot: held, damage: Set(held.dirty ?? []), scroll: held.shift ?? 1, size: bounds, scale: scale, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: marked)
+            let full = try GridRasterizer.make(snapshot: held, size: bounds, scale: scale, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: marked)
+            XCTAssertEqual(bytes(frame.context), bytes(full), "scale \(scale), height \(height), marked \(marked)")
+            if scale == 2 && height == size.height && marked.isEmpty {
+                XCTAssertEqual(frame.scrolledRows, 1)
+                XCTAssertEqual(frame.damage, 16..<Int((GridRasterizer.margin + CGFloat(rows) * cell.height) * scale), "the GPU must receive moved rows too")
+            } else { XCTAssertEqual(frame.scrolledRows, 0) }
+        }
     }
 
     func testDamageCoversTheChangedAndCursorRows() throws {

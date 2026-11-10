@@ -111,6 +111,8 @@ export class AkittyTerminal {
   private readonly replyBytes: ByteBuffer;
   private readonly eventBytes: ByteBuffer;
   private handleEvent?: (event: EngineEvent) => void;
+  private readonly pendingEvents: { event: EngineEvent; handler?: (event: EngineEvent) => void }[] = [];
+  private dispatchingEvents = false;
   private cellPool: TerminalCell[] = [];
   private rowViews: TerminalCell[][] = [];
   private rowParsed = new Uint8Array();
@@ -166,12 +168,14 @@ export class AkittyTerminal {
       const chunk = bytes.subarray(from, from + this.writeBytes.capacity);
       new Uint8Array(this.exports.memory.buffer, pointer, chunk.length).set(chunk);
       if (!this.exports.akitty_vt_write(this.handle, pointer, chunk.length, now())) throw new Error('AkiTTY VT rejected output');
+      // External callbacks may read, resize or dispose the terminal, or throw.
+      // Publish the new state before handing control back to them.
+      this.invalidate();
+      const alternate = this.isAlternateScreen();
+      if (alternate !== this.alternate) { this.full = true; this.alternate = alternate; }
       this.drainEvents();
       if (!this.handle) return;
     }
-    this.invalidate();
-    const alternate = this.isAlternateScreen();
-    if (alternate !== this.alternate) { this.full = true; this.alternate = alternate; }
   }
   resize(cols: number, rows: number): void {
     if (!this.handle) return;
@@ -184,6 +188,7 @@ export class AkittyTerminal {
     this.exports.akitty_vt_destroy(this.handle); this.handle = 0;
     for (const buffer of [this.writeBytes, this.viewportBytes, this.historyBytes, this.textBytes, this.replyBytes, this.eventBytes]) buffer.dispose();
     this.cellPool = []; this.rowViews = []; this.rowParsed = new Uint8Array(); this.viewportValid = false;
+    this.pendingEvents.length = 0;
   }
   update(): DirtyState {
     if (!this.handle) return DirtyState.NONE;
@@ -198,13 +203,30 @@ export class AkittyTerminal {
   private drainEvents(): void {
     if (!this.handle || !this.field(17)) return;
     const pointer = this.eventBytes.reserve(8192);
+    const handler = this.handleEvent;
+    // Drain before dispatch: a reentrant write must not consume this write's
+    // remaining events through a different callback or reuse its event buffer.
     while (this.handle) {
       const length = this.exports.akitty_vt_event(this.handle, pointer, this.eventBytes.capacity);
       if (!length) break;
       const bytes = new Uint8Array(this.exports.memory.buffer, pointer, length);
-      if (bytes[0] === 1) this.handleEvent?.({ type: 'title', title: text.decode(bytes.subarray(1)) });
-      else if (bytes[0] === 2) this.handleEvent?.({ type: 'bell', count: new DataView(bytes.buffer, bytes.byteOffset + 1, 4).getUint32(0, true) });
+      if (bytes[0] === 1) this.pendingEvents.push({ handler, event: { type: 'title', title: text.decode(bytes.subarray(1)) } });
+      else if (bytes[0] === 2) this.pendingEvents.push({ handler, event: { type: 'bell', count: new DataView(bytes.buffer, bytes.byteOffset + 1, 4).getUint32(0, true) } });
     }
+    if (this.dispatchingEvents) return;
+    this.dispatchingEvents = true;
+    let consumed = 0, failed = false, failure: unknown;
+    try {
+      while (this.handle && consumed < this.pendingEvents.length) {
+        const next = this.pendingEvents[consumed++];
+        try { next.handler?.(next.event); }
+        catch (error) { if (!failed) { failed = true; failure = error; } }
+      }
+    } finally {
+      this.pendingEvents.splice(0, consumed);
+      this.dispatchingEvents = false;
+    }
+    if (failed) throw failure;
   }
   getDimensions(): { cols: number; rows: number } { return { cols: this._cols, rows: this._rows }; }
   getCursor(): RenderStateCursor {
@@ -243,13 +265,27 @@ export class AkittyTerminal {
     const color = view.getUint32(offset + 16, true); target.underline_color = color === 0xffffffff ? undefined : color;
   }
   getLineView(row: number): TerminalCell[] | null {
-    if (!Number.isInteger(row) || row < 0 || row >= this._rows || !this.loadViewport()) return null;
+    if (!this.handle || !Number.isInteger(row) || row < 0 || row >= this._rows) return null;
+    if (!this.rowParsed[row] && !this.loadViewport()) return null;
     if (!this.rowParsed[row]) {
       const view = new DataView(this.exports.memory.buffer, this.viewportBytes.pointer, this.viewportBytes.capacity);
       for (let col = 0; col < this._cols; col++) this.decodeCell(view, (row * this._cols + col) * CELL_BYTES, this.cellPool[row * this._cols + col]);
       this.rowParsed[row] = 1;
     }
     return this.rowViews[row];
+  }
+  /** Fetch sparse render damage without materializing an entire viewport. */
+  prepareRows(rows: ReadonlySet<number>): void {
+    if (!this.handle || this.viewportValid || rows.size > Math.max(1, Math.floor(this._rows / 4))) return;
+    const size = this._cols * CELL_BYTES;
+    const pointer = this.historyBytes.reserve(size);
+    for (const row of rows) {
+      if (!Number.isInteger(row) || row < 0 || row >= this._rows || this.rowParsed[row]) continue;
+      if (this.exports.akitty_vt_line(this.handle, row, pointer, size) !== size) continue;
+      const view = new DataView(this.exports.memory.buffer, pointer, size);
+      for (let col = 0; col < this._cols; col++) this.decodeCell(view, col * CELL_BYTES, this.cellPool[row * this._cols + col]);
+      this.rowParsed[row] = 1;
+    }
   }
   getBufferField(alternate: boolean, field: number): number {
     return this.handle ? this.exports.akitty_vt_buffer_get(this.handle, Number(alternate), field) >>> 0 : 0;

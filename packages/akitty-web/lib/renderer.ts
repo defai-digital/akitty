@@ -6,6 +6,7 @@ import type { TerminalCell } from './types';
 import type { SelectionCoordinates, SelectionManager } from './selection-manager';
 export interface IRenderable {
   getLine(row: number): TerminalCell[] | null; getLineView?(row: number): TerminalCell[] | null;
+  prepareRows?(rows: ReadonlySet<number>): void;
   getCursor(): { x: number; y: number; visible: boolean }; getDimensions(): { cols: number; rows: number };
   isRowDirty(row: number): boolean; isDirty?(): boolean; needsFullRedraw?(): boolean; clearDirty(): void;
   getGraphemeString?(row: number, col: number): string;
@@ -141,8 +142,16 @@ export class CanvasRenderer {
     const reusable = viewportY === 0 && !selection && !this.hoveredId && !this.hoveredRange;
     let hashes: (number | undefined)[] | undefined;
     let shift = 0;
+    const retainHashes = !forceAll && this.drawnRows.length === dims.rows;
+    if (!forceAll) {
+      const needed = new Set(dirtyRows);
+      if (cursorChanged) { needed.add(this.lastCursor.y); needed.add(shownCursor.y); }
+      for (const row of selectionRows ?? []) needed.add(row);
+      // A transition back to row reuse needs a complete hash baseline.
+      if (!reusable || retainHashes) buffer.prepareRows?.(needed);
+    }
     if (reusable) {
-      hashes = Array.from({ length: dims.rows }, (_, row) => this.rowHash(buffer, row));
+      hashes = Array.from({ length: dims.rows }, (_, row) => retainHashes && !dirtyRows.has(row) ? this.drawnRows[row] : this.rowHash(buffer, row));
       const differences = hashes.filter((hash, row) => hash !== this.drawnRows[row]).length;
       const opaque = !/rgba|transparent|hsla/i.test(this.theme.background) && !/^#[a-f0-9]{4}(?:[a-f0-9]{4})?$/i.test(this.theme.background);
       if (!forceAll && differences > dims.rows / 2 && opaque && Number.isInteger(this.metrics.height * this.devicePixelRatio) && this.drawnRows.length === dims.rows) {
@@ -195,11 +204,16 @@ export class CanvasRenderer {
     this.setFill(this.theme.background); this.ctx.fillRect(0, row * height, cols * width, height);
     if (!cells) return;
     const selected = (col: number): boolean => !!selection && inRange(col, row, selection.startCol, selection.startRow, selection.endCol, selection.endRow);
-    for (let col = 0; col < Math.min(cols, cells.length); col++) {
-      const cell = cells[col], reverse = !!(cell.flags & CellFlags.INVERSE);
-      const foreground = css(cell.fg_r, cell.fg_g, cell.fg_b), background = css(cell.bg_r, cell.bg_g, cell.bg_b);
-      const bg = selected(col) ? this.theme.selectionBackground : reverse ? foreground : background;
-      this.setFill(bg); this.ctx.fillRect(col * width, row * height, width, height);
+    const backgroundAt = (col: number): string => {
+      const cell = cells[col];
+      return selected(col) ? this.theme.selectionBackground : cell.flags & CellFlags.INVERSE
+        ? css(cell.fg_r, cell.fg_g, cell.fg_b) : css(cell.bg_r, cell.bg_g, cell.bg_b);
+    };
+    const count = Math.min(cols, cells.length);
+    for (let col = 0; col < count;) {
+      const start = col, bg = backgroundAt(col++);
+      while (col < count && backgroundAt(col) === bg) col++;
+      this.setFill(bg); this.ctx.fillRect(start * width, row * height, (col - start) * width, height);
     }
     for (let col = 0; col < Math.min(cols, cells.length); col++) {
       const cell = cells[col];

@@ -127,6 +127,63 @@ describe('AkittyTerminal lazy row parsing', () => {
 });
 
 describe('AkittyTerminal write path', () => {
+  test('event callbacks observe the new viewport even when they throw', async () => {
+    const term = await makeWasm(10, 2);
+    try {
+      term.write('old');
+      expect(rowText(term.getLineView(0))).toBe('old');
+      expect(() => term.write('\rnew\x1b]2;title\x07', () => {
+        expect(rowText(term.getLineView(0))).toBe('new');
+        throw new Error('listener failed');
+      })).toThrow('listener failed');
+      expect(rowText(term.getLineView(0))).toBe('new');
+      term.clearDirty();
+      expect(() => term.write('\x1b[?1049h\x1b]2;alternate\x07', () => { throw new Error('alternate'); })).toThrow('alternate');
+      expect(term.needsFullRedraw()).toBe(true);
+      expect(rowText(term.getLineView(0))).toBe('');
+    } finally { term.free(); }
+  });
+
+  test('reentrant writes cannot consume the outer write event batch', async () => {
+    const term = await makeWasm();
+    const seen: string[] = [];
+    try {
+      term.write('\x1b]2;first\x07\x07\x1b]2;last\x07', event => {
+        seen.push(event.type === 'title' ? event.title : 'bell');
+        if (event.type === 'title' && event.title === 'first') term.write('nested\x1b]2;inner\x07', inner => {
+          if (inner.type === 'title') seen.push(inner.title);
+        });
+      });
+      expect(seen).toEqual(['first', 'bell', 'last', 'inner']);
+      expect(rowText(term.getLineView(0))).toBe('nested');
+    } finally { term.free(); }
+  });
+
+  test('a throwing callback does not drop the rest of its event batch', async () => {
+    const term = await makeWasm();
+    const seen: string[] = [];
+    try {
+      expect(() => term.write('\x1b]2;first\x07\x1b]2;last\x07', event => {
+        if (event.type === 'title') seen.push(event.title);
+        if (seen.length === 1) throw new Error('first callback failed');
+      })).toThrow('first callback failed');
+      expect(seen).toEqual(['first', 'last']);
+      term.write('\x1b]2;next\x07', event => { if (event.type === 'title') seen.push(event.title); });
+      expect(seen).toEqual(['first', 'last', 'next']);
+    } finally { term.free(); }
+  });
+
+  test('disposing from a callback stops the remaining callbacks', async () => {
+    const term = await makeWasm();
+    const seen: string[] = [];
+    term.write('\x1b]2;first\x07\x1b]2;last\x07', event => {
+      if (event.type === 'title') seen.push(event.title);
+      term.free();
+    });
+    expect(seen).toEqual(['first']);
+    expect(term.isFreed).toBe(true);
+  });
+
   test('reuses one wasm buffer across writes', async () => {
     const term = await makeWasm();
     const allocs = countCalls(term, 'akitty_vt_alloc');
@@ -234,6 +291,36 @@ function makeRenderer(options: ConstructorParameters<typeof CanvasRenderer>[1] =
 }
 
 describe('CanvasRenderer work skipping', () => {
+  test('uniform row backgrounds are painted in runs', () => {
+    const { renderer, counts } = makeRenderer();
+    const { renderable } = makeRenderable(200, 4, ['hello']);
+    renderer.render(renderable, true, 0);
+    // One row clear and one background run per row, plus the cursor overlay.
+    expect(counts.fillRect).toBeLessThanOrEqual(10);
+    renderer.dispose();
+  });
+
+  test('a single dirty row avoids full viewport export and clean-row decoding', async () => {
+    const term = await makeWasm(200, 50);
+    const { renderer } = makeRenderer();
+    try {
+      term.write('a'.repeat(9999) + '\x1b[H');
+      renderer.render(term, true, 0);
+      const viewport = countCalls(term, 'akitty_vt_viewport');
+      const rows = countCalls(term, 'akitty_vt_line');
+      const reads = vi.spyOn(term, 'getLineView');
+      term.write('\x1b[Hx');
+      renderer.render(term, false, 0);
+      expect(viewport.count()).toBe(0);
+      expect(rows.count()).toBe(1);
+      expect(reads).toHaveBeenCalledTimes(1);
+      expect(rowText(term.getLineView(0))).toBe('x' + 'a'.repeat(199));
+      // Reading a row not prepared by the renderer still loads a coherent viewport.
+      expect(rowText(term.getLineView(1))).toBe('a'.repeat(200));
+      expect(viewport.count()).toBe(1);
+    } finally { renderer.dispose(); term.free(); }
+  });
+
   test('blank cells are not drawn', async () => {
     const { renderer, counts } = makeRenderer();
     const { renderable } = makeRenderable(40, 10, ['hi there']);

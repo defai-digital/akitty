@@ -426,6 +426,8 @@ final class GridRasterizer: @unchecked Sendable {
         let context: CGContext
         /// Bitmap pixel rows (top-down, as stored) that changed since the previous frame, or nil when everything may have.
         let damage: Range<Int>?
+        /// Upward bitmap shift in grid rows; zero means the ordinary repaint path.
+        var scrolledRows = 0
     }
     /// The layered Metal frame: same damage tracking, but the text is split into two transparent bitmaps.
     struct LayeredFrame {
@@ -488,7 +490,7 @@ final class GridRasterizer: @unchecked Sendable {
 
     /// `damage` lists the grid rows whose content changed since the last frame this instance rendered (nil: unknown, so
     /// repaint everything). With `reuse` false the bitmap is not kept, so the caller may hold it while the next frame renders.
-    func render(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
+    func render(snapshot: Snapshot, damage: Set<Int>?, scroll: Int = 0, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat, cellSize: CGSize, composition: String, cjkFontName: String = "", images: [UInt32: CGImage] = [:], reuse: Bool = true) throws -> Frame {
         if layer == .all { layerPasses = nil }
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         guard width <= 16384, height <= 16384, width * height <= 33_554_432 else {
@@ -526,6 +528,36 @@ final class GridRasterizer: @unchecked Sendable {
         let base = self.base!
         if reuse { self.context = context; layout = wanted } else { self.context = nil; layout = nil }
 
+        var scrolledRows = 0
+        if scroll != 0 {
+            let rowPixels = cellSize.height * scale, top = Self.margin * scale
+            let bottom = top + CGFloat(snapshot.rows) * rowPixels
+            // Integer device-pixel translations preserve glyph antialiasing. Cropped
+            // grids, images, composition and non-retained frames repaint in full.
+            if var dirty = rows, layer == .all, scroll > 0, scroll < snapshot.rows,
+               !hasImages, !lastHadImages, composition.isEmpty, lastComposition.isEmpty, scale > 0,
+               rowPixels > 0, rowPixels.rounded() == rowPixels, top.rounded() == top,
+               size.height * scale == CGFloat(height), bottom <= CGFloat(height),
+               let data = context.data {
+                dirty.formUnion(snapshot.rows - scroll..<snapshot.rows)
+                // Fitted glyphs and stroked decorations may round their fractional
+                // positions differently at another row. Redraw those rows exactly.
+                for cell in snapshot.cells where cell.italic || cell.underline || cell.strike == true
+                    || cell.text.utf8.count != 1 || !(0x20...0x7e).contains(cell.text.utf8.first ?? 0) {
+                    dirty.insert(cell.row)
+                }
+                if dirty.count < snapshot.rows {
+                    let start = Int(top) * context.bytesPerRow
+                    let delta = scroll * Int(rowPixels) * context.bytesPerRow
+                    let count = (snapshot.rows - scroll) * Int(rowPixels) * context.bytesPerRow
+                    memmove(data + start, data + start + delta, count)
+                    rows = dirty
+                    lastCursorRow = lastCursorRow.flatMap { $0 >= scroll ? $0 - scroll : nil }
+                    scrolledRows = scroll
+                } else { rows = nil }
+            } else { rows = nil }
+        }
+
         let cursorRow = snapshot.cursor.row
         if var set = rows {
             // The cursor and any composition text are drawn over the row, so both its old and new rows need repainting.
@@ -557,7 +589,7 @@ final class GridRasterizer: @unchecked Sendable {
         if let rows {
             context.clip(to: rows.map(band))
             context.fill(rows.map(band))
-            cells = snapshot.cells.filter { rows.contains($0.row) }
+            cells = snapshot.cells(in: rows)
         } else {
             context.fill(CGRect(origin: .zero, size: size))
             cells = snapshot.cells
@@ -685,7 +717,12 @@ final class GridRasterizer: @unchecked Sendable {
             let lower = min(height, max(0, top))
             pixels = lower..<min(height, max(lower, bottom))
         } else if rows != nil { pixels = 0..<0 }
-        return Frame(context: context, damage: pixels)
+        // Moving pixels changes every grid row in the GPU texture even though the
+        // CPU raster only repainted exposed rows and cursor damage.
+        if scrolledRows > 0 {
+            pixels = Int(Self.margin * scale)..<Int((Self.margin + CGFloat(snapshot.rows) * cellSize.height) * scale)
+        }
+        return Frame(context: context, damage: pixels, scrolledRows: scrolledRows)
     }
 
     /// The layered Metal frame: the drawing code and damage tracking of `render`, split into a transparent background
