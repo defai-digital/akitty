@@ -771,6 +771,35 @@ describe('SelectionManager', () => {
       term.dispose();
     });
 
+    test('a plain click neither copies the clicked character nor leaves it highlighted', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      term.write('Hello World\r\n');
+      const selMgr = (term as any).selectionManager;
+      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
+      const copied: string[] = [];
+      const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+      let changes = 0;
+      const subscription = term.onSelectionChange(() => changes++);
+      try {
+        canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }));
+        await Promise.resolve();
+
+        expect(copied).toEqual([]);
+        expect(changes).toBe(0);
+        expect(term.hasSelection()).toBe(false);
+        expect(selMgr.getSelectionCoords()).toBeNull();
+      } finally {
+        subscription.dispose();
+        if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard); else delete (navigator as any).clipboard;
+        term.dispose();
+      }
+    });
+
     test('repeated dispose() is safe and keeps the manager inert', async () => {
       if (!container) return;
 

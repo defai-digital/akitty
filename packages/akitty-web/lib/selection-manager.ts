@@ -60,6 +60,9 @@ export class SelectionManager {
     this.listen(document, 'mouseup', () => {
       if (!this.isSelecting) return;
       this.isSelecting = false; this.autoScroll(0);
+      // A click without a drag starts and ends on one cell. That is no selection, so it must
+      // not replace the clipboard or stay highlighted.
+      if (!this.hasSelection()) { this.clearSelection(); return; }
       const selection = this.getSelection();
       if (selection) { void this.copy(selection); this.changes.fire(); }
     });
