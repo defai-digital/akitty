@@ -30,5 +30,8 @@ Object.assign(window, { fixture: {
     }
     return { red, blue, white, width: canvas.width, height: canvas.height }
   },
-  lines() { return Array.from({ length: terminal.rows }, (_, row) => terminal.buffer.active.getLine(row)?.translateToString(true) ?? '') },
+  lines() {
+    const buffer = terminal.buffer.active
+    return Array.from({ length: terminal.rows }, (_, row) => buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? '')
+  },
 } })

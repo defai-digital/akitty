@@ -52,6 +52,11 @@ Native and browser platform behavior and performance require separate qualificat
   visible software fallback. No GTK/OpenGL code is carried over.
   The rasterizer keeps its bitmap and glyph cache between frames and repaints only the rows the core marked dirty
   (plus the old and new cursor rows); a new size, font or scale, any image, or an unknown change repaints everything.
+  Ordered cell arrays let partial snapshots copy unchanged spans in bulk and let the rasterizer locate dirty rows
+  with binary searches rather than scanning every retained cell. Metadata-only updates share the retained cell array.
+  Integer-pixel text scrolls move retained bitmap rows and repaint exposed rows, cursor damage and complex or
+  decorated text. Coalesced updates relocate their pending dirty rows too. Images, composition, cropped grids
+  and fractional geometry retain the full repaint path. Metal receives the moved pixel rows as well.
   The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
   frames are always full.
   Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside

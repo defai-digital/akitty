@@ -4,6 +4,37 @@ import XCTest
 /// The negotiated binary cell block must decode to exactly the same `Snapshot` as the JSON cells,
 /// and a damaged block must fail cleanly so the caller can fall back.
 final class CellTransportTests: XCTestCase {
+    func testSparseAndScrolledMergesMatchFullSnapshotsAfterEveryUpdate() throws {
+        for binary in [false, true] {
+            let session = try TerminalSession(cols: 24, rows: 8, headless: true)
+            defer { try? session.close() }
+            _ = try session.call("feed", ["text": (0..<8).map { "\u{1b}[\($0 + 1);1Hrow \($0) 界 e\u{301}" }.joined()])
+            var held = try XCTUnwrap(try session.snapshot(since: nil, base: nil, binary: binary))
+            for step in 0..<60 {
+                let text: String
+                switch step % 5 {
+                case 0: text = "\u{1b}]2;metadata \(step)\u{7}"
+                case 1: text = "\u{1b}[2;1H\u{1b}[2K\u{1b}[7;1H\u{1b}[31mchanged \(step)\u{1b}[0m"
+                case 2: text = "\u{1b}[8;1H\r\nscroll \(step)"
+                case 3: text = "\u{1b}[1;1H界 e\u{301}\u{1b}[4;1H\u{1b}[2K"
+                default: text = "\u{1b}[3;1H\u{1b}[2K\u{1b}[8;1Htail \(step)"
+                }
+                _ = try session.call("feed", ["text": text])
+                held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held, binary: binary))
+                let full = try XCTUnwrap(try session.snapshot(since: nil, base: nil, binary: binary))
+                XCTAssertEqual(fingerprint(held), fingerprint(full), "step \(step), binary \(binary)")
+                XCTAssertEqual(held.lines, full.lines)
+                let chosen: Set<Int> = [0, 2, 6]
+                let selected = held.cells(in: chosen)
+                var selectedSnapshot = held
+                selectedSnapshot.cells = selected
+                var expectedSnapshot = held
+                expectedSnapshot.cells = held.cells.filter { chosen.contains($0.row) }
+                XCTAssertEqual(fingerprint(selectedSnapshot), fingerprint(expectedSnapshot))
+            }
+        }
+    }
+
     private func fingerprint(_ snapshot: Snapshot) -> [String] {
         snapshot.cells.map { cell in
             [String(cell.row), String(cell.col), cell.text, String(describing: cell.fg), String(describing: cell.bg),

@@ -12,6 +12,8 @@ struct TerminalPreferences: Codable, Equatable {
     var scrollback = 5000
     var optionAsAlt = false
     var confirmPaste = true
+    /// Mute terminal bells and explicit error sounds while retaining visual notifications.
+    var silentMode = false
     /// Programs may update chrome only when this preference is enabled.
     var programChrome = true
     /// On by default; terminals whose shell is not bash or zsh start as ordinary login shells.
@@ -122,7 +124,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, silentMode, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
         /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
         case shellIntegrationDefaultOn
     }
@@ -137,6 +139,7 @@ extension TerminalPreferences {
         scrollback = try container.decodeIfPresent(Int.self, forKey: .scrollback) ?? scrollback
         optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? optionAsAlt
         confirmPaste = try container.decodeIfPresent(Bool.self, forKey: .confirmPaste) ?? true
+        silentMode = try container.decodeIfPresent(Bool.self, forKey: .silentMode) ?? false
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
         quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
         quickShortcut = try container.decodeIfPresent(Int.self, forKey: .quickShortcut) ?? 0
@@ -156,6 +159,7 @@ extension TerminalPreferences {
         try container.encode(scrollback, forKey: .scrollback)
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
         try container.encode(confirmPaste, forKey: .confirmPaste)
+        try container.encode(silentMode, forKey: .silentMode)
         try container.encode(programChrome, forKey: .programChrome)
         try container.encode(shellIntegration, forKey: .shellIntegration)
         try container.encode(folderHistory, forKey: .folderHistory)
@@ -227,6 +231,11 @@ struct PreferencesDraft {
                 }.formStyle(.grouped)
                     .tabItem { Text("Appearance") }
                 Form {
+                    Section("Alerts") {
+                        Toggle("Silent mode", isOn: $state.draft.silentMode)
+                            .accessibilityIdentifier("silent-mode")
+                        Text("Mute terminal bells and error sounds. Visual alerts and messages remain. Applies to open terminals.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Section("Clipboard") {
                         Toggle("Confirm multiline and control-character pastes", isOn: $state.draft.confirmPaste)
                             .accessibilityIdentifier("confirm-paste")
