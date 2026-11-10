@@ -144,6 +144,30 @@ test('resetting from an output callback preserves the replacement viewport', asy
   expect(errors).toEqual([])
 })
 
+test('selection callbacks can replace or dispose a resetting terminal', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const result = await page.evaluate(async () => {
+    const f = (window as any).fixture, t = f.terminal
+    t.write('selected'); t.select(0, 0, 3)
+    let nested: unknown
+    const subscription = t.onSelectionChange(() => {
+      subscription.dispose(); t.reset(); t.write('replacement'); nested = t.wasmTerm
+    })
+    t.reset()
+    const preserved = t.wasmTerm === nested, lines = f.lines()
+    t.select(0, 0, 3)
+    t.onSelectionChange(() => t.dispose())
+    t.reset()
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    return { preserved, lines, disposed: t.wasmTerm === undefined }
+  })
+  expect(result.preserved).toBe(true)
+  expect(result.lines[0]).toBe('replacement')
+  expect(result.disposed).toBe(true)
+  expect(errors).toEqual([])
+})
+
 test('ordinary clicks preserve the clipboard while explicit one-cell selections remain copyable', async ({ page }) => {
   await page.evaluate(async () => {
     const f = (window as any).fixture

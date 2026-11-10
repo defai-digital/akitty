@@ -846,6 +846,60 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    for (const operation of ['reset', 'resize', 'font'] as const) {
+      test(`${operation} stops when clearing selection disposes the terminal`, async () => {
+        const term = await createIsolatedTerminal();
+        term.open(container); term.write('selected'); term.select(0, 0, 3);
+        term.onSelectionChange(() => { term.dispose(); });
+        expect(() => {
+          if (operation === 'reset') term.reset();
+          else if (operation === 'resize') term.resize(40, 10);
+          else term.options.fontSize = 18;
+        }).not.toThrow();
+        expect(term.wasmTerm).toBeUndefined();
+      });
+    }
+
+    test('reset preserves the terminal created by a selection listener', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container); term.write('selected'); term.select(0, 0, 3);
+      let nested: typeof term.wasmTerm;
+      const subscription = term.onSelectionChange(() => {
+        subscription.dispose(); term.reset(); term.write('replacement'); nested = term.wasmTerm;
+      });
+      term.reset();
+      expect(term.wasmTerm).toBe(nested);
+      term.selectAll();
+      expect(term.getSelection().trim()).toBe('replacement');
+      term.dispose();
+    });
+
+    for (const operation of ['resize', 'font'] as const) {
+      test(`${operation} does not paint a replacement created by its selection listener`, async () => {
+        const term = await createIsolatedTerminal();
+        term.open(container); term.write('selected'); term.select(0, 0, 3);
+        const render = vi.spyOn((term as any).renderer, 'render');
+        const subscription = term.onSelectionChange(() => {
+          subscription.dispose(); term.reset(); term.write('replacement'); render.mockClear();
+        });
+        if (operation === 'resize') term.resize(40, 10);
+        else term.options.fontSize = 18;
+        expect(render).not.toHaveBeenCalled();
+        term.selectAll(); expect(term.getSelection().trim()).toBe('replacement');
+        term.dispose();
+      });
+    }
+
+    test('typing stops when its selection listener disposes the terminal', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container); term.write('selected'); term.select(0, 0, 3);
+      const sent: string[] = [];
+      term.onData(data => sent.push(data));
+      term.onSelectionChange(() => { term.dispose(); });
+      expect(() => term.input('typed', true)).not.toThrow();
+      expect(sent).toEqual([]);
+    });
+
     test('disposed terminals reject addons before activation', async () => {
       const term = await createIsolatedTerminal();
       term.dispose();
