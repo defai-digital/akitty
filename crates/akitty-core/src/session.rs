@@ -477,7 +477,10 @@ impl Session {
         if model.exited || !model.shell.ready || model.control.dirty {
             model.control.dispatch_failed(); return Err("command requires an unedited integrated shell prompt".into());
         }
-        if let Err(error) = self.enqueue_input(format!("{command}\r").into_bytes()) {
+        // Ctrl-U first: keys typed while the previous command ran reach the new prompt
+        // as typeahead after 133;A cleared `dirty`, and must not prefix this command.
+        // bash, zsh (emacs and vi insert) and the tty's VKILL all erase to line start.
+        if let Err(error) = self.enqueue_input(format!("\x15{command}\r").into_bytes()) {
             model.control.dispatch_failed(); return Err(error);
         }
         model.shell.ready = false; model.control.dirty = true; model.revision += 1;
@@ -1372,6 +1375,18 @@ mod tests {
         assert!(events.contains(&"dispatched"), "{audit}");
         assert!(events.contains(&"dispatch_failed"), "{audit}");
         assert!(!events.contains(&"shell_completion_observed_untrusted"), "{audit}");
+    }
+
+    #[test]
+    fn injected_commands_clear_typeahead_from_the_prompt_first() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        session.commands = Some(tx);
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
+        session.command_execute(lease, authorization, "echo hi".into()).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Command::Input(bytes)) if bytes == b"\x15echo hi\r"));
     }
 
     #[test]

@@ -152,9 +152,12 @@ export class SelectionManager {
     this.damage(); this.selectionStart = this.anchor(start); this.selectionEnd = this.anchor(end); this.explicitSelection = true; this.damage(); this.changes.fire();
   }
   clearSelection(): void {
+    const had = this.range() !== null;
     this.damage(); this.selectionStart = null; this.selectionEnd = null; this.explicitSelection = false; this.isSelecting = false; this.autoScroll(0);
+    // Every path that removes a visible selection (API, typing, resize, reset) reports it.
+    if (had && !this.closed) this.changes.fire();
   }
-  deselect(): void { this.clearSelection(); this.changes.fire(); }
+  deselect(): void { this.clearSelection(); }
   selectAll(): void { this.selectLines(0, this.wasmTerm.rows - 1); }
   select(column: number, row: number, length: number): void {
     if (![column, row, length].every(Number.isFinite)) throw new RangeError('Selection coordinates and length must be finite');

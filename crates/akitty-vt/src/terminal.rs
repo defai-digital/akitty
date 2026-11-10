@@ -755,6 +755,8 @@ impl Terminal {
         let blank = Cell::blank(self.style.bg);
         self.screen_mut().rows[pos.row].generation =
             self.screen().rows[pos.row].generation.wrapping_add(1);
+        // ICH, DCH and ECH edit in place; the next print must not wrap first.
+        self.screen_mut().cursor.pending_wrap = false;
         let cells = &mut self.screen_mut().rows[pos.row].cells;
         if erase_only {
             self.erase(pos.row, pos.col..pos.col + count);
@@ -840,13 +842,19 @@ impl Terminal {
             (None, b'H' | b'f') => self.goto(n - 1, c.count(1) - 1, true),
             (None, b'I') => self.tab(n, false),
             (None, b'Z') => self.tab(n, true),
-            (None, b'J') => self.erase_display(c.value(0, 0), emit),
-            (None, b'K') => match c.value(0, 0) {
-                0 => self.erase(pos.row, pos.col..self.cols()),
-                1 => self.erase(pos.row, 0..pos.col + 1),
-                2 => self.erase(pos.row, 0..self.cols()),
-                _ => {}
-            },
+            (None, b'J') => {
+                self.erase_display(c.value(0, 0), emit);
+                self.screen_mut().cursor.pending_wrap = false;
+            }
+            (None, b'K') => {
+                match c.value(0, 0) {
+                    0 => self.erase(pos.row, pos.col..self.cols()),
+                    1 => self.erase(pos.row, 0..pos.col + 1),
+                    2 => self.erase(pos.row, 0..self.cols()),
+                    _ => {}
+                }
+                self.screen_mut().cursor.pending_wrap = false;
+            }
             (None, b'@') => self.edit_chars(n, true, false),
             (None, b'P') => self.edit_chars(n, false, false),
             (None, b'X') => self.edit_chars(n, false, true),
@@ -859,6 +867,8 @@ impl Terminal {
                         false,
                         emit,
                     );
+                    // IL and DL return the cursor to the left margin (VT510, xterm).
+                    self.goto(pos.row, 0, false);
                 }
             }
             (None, b'S' | b'T') => self.scroll(
@@ -1751,5 +1761,38 @@ mod tests {
         assert_eq!(events, vec![Event::Reply(b"\x1b]52;c;\x07".to_vec())]);
         let events = feed(&mut term, b"\x1b]52;c;aGVsbG8=\x07");
         assert_eq!(events, vec![Event::Clipboard("hello".into())]);
+    }
+
+    #[test]
+    fn line_and_character_edits_reset_the_cursor_like_xterm() {
+        let mut term = Terminal::new(5, 3, 10).unwrap();
+        // IL and DL return to the left margin and drop a pending wrap.
+        feed(&mut term, b"abcde[L");
+        assert_eq!(term.cursor(), Position { row: 0, col: 0 });
+        assert!(!term.screen().cursor.pending_wrap);
+        feed(&mut term, b"[2;4H[M");
+        assert_eq!(term.cursor(), Position { row: 1, col: 0 });
+        // Edits at the last column keep the next print on the same row.
+        for edit in [&b"[@"[..], b"[P", b"[X", b"[K", b"[J"] {
+            let mut term = Terminal::new(5, 3, 10).unwrap();
+            feed(&mut term, b"abcde");
+            assert!(term.screen().cursor.pending_wrap);
+            feed(&mut term, edit);
+            feed(&mut term, b"Z");
+            assert_eq!(term.cursor().row, 0, "{edit:?}");
+            assert_eq!(term.screen().rows[0].cells[4].ch, 'Z', "{edit:?}");
+        }
+    }
+
+    #[test]
+    fn shrinking_rows_keeps_the_cursor_on_its_line() {
+        let mut term = Terminal::new(5, 5, 10).unwrap();
+        feed(&mut term, b"1\r\n2\r\n3\r\n4\r\n5\x1b[2;1H");
+        term.resize(5, 3, |_| {}).unwrap();
+        let pos = term.cursor();
+        assert_eq!(term.screen().rows[pos.row].cells[0].ch, '2');
+        feed(&mut term, b"X");
+        assert_eq!(term.screen().rows[pos.row].cells[0].ch, 'X');
+        assert!(term.screen().rows.iter().any(|row| row.cells[0].ch == '3'));
     }
 }
