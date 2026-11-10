@@ -159,6 +159,22 @@ describe('AkittyTerminal write path', () => {
     } finally { term.free(); }
   });
 
+  test('a reentrant write keeps later chunks of the outer write on the outer callback', async () => {
+    const term = await makeWasm();
+    const outer: string[] = [], inner: string[] = [];
+    try {
+      // Over one write chunk (1 MiB), so the second title is parsed after the nested write returns.
+      const data = '\x1b]2;first\x07' + 'x'.repeat((1 << 20) + 1) + '\x1b]2;second\x07';
+      term.write(data, event => {
+        if (event.type !== 'title') return;
+        outer.push(event.title);
+        if (event.title === 'first') term.write('\x1b]2;nested\x07', nested => { if (nested.type === 'title') inner.push(nested.title); });
+      });
+      expect(outer).toEqual(['first', 'second']);
+      expect(inner).toEqual(['nested']);
+    } finally { term.free(); }
+  });
+
   test('a throwing callback does not drop the rest of its event batch', async () => {
     const term = await makeWasm();
     const seen: string[] = [];

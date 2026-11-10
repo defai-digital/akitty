@@ -173,7 +173,9 @@ export class AkittyTerminal {
       this.invalidate();
       const alternate = this.isAlternateScreen();
       if (alternate !== this.alternate) { this.full = true; this.alternate = alternate; }
-      this.drainEvents();
+      // A callback may start a nested write, which replaces `handleEvent`;
+      // this write's later chunks still belong to its own callback.
+      this.drainEvents(onEvent);
       if (!this.handle) return;
     }
   }
@@ -200,10 +202,9 @@ export class AkittyTerminal {
   isRowDirty(row: number): boolean { return !!this.handle && Number.isInteger(row) && row >= 0 && row < this._rows && !!this.exports.akitty_vt_dirty(this.handle, row); }
   clearDirty(): void { if (this.handle) { this.exports.akitty_vt_clean(this.handle); this.full = false; } }
   markClean(): void { this.clearDirty(); }
-  private drainEvents(): void {
+  private drainEvents(handler = this.handleEvent): void {
     if (!this.handle || !this.field(17)) return;
     const pointer = this.eventBytes.reserve(8192);
-    const handler = this.handleEvent;
     // Drain before dispatch: a reentrant write must not consume this write's
     // remaining events through a different callback or reuse its event buffer.
     while (this.handle) {
