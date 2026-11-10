@@ -214,6 +214,8 @@ test('dragging from a wide spacer copies and highlights the whole glyph', async 
   await page.mouse.move(points.start.x, points.start.y)
   await page.mouse.down()
   await page.mouse.move(points.end.x, points.end.y)
+  // Hold across multiple auto-scroll ticks at the scrollback boundary.
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 150)))
   await page.mouse.up()
   expect(await page.evaluate(() => (window as any).fixture.terminal.getSelection())).toBe('中b')
   await expect.poll(() => page.evaluate(() => {

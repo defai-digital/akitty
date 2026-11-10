@@ -176,7 +176,10 @@ export class SelectionManager {
     if (!direction || !this.isSelecting || this.closed) return;
     this.scrolling = setInterval(() => {
       if (!this.isSelecting || this.closed) { this.autoScroll(0); return; }
+      const viewport = this.viewport();
+      // A clamped scroll must not replace the user's drag endpoint.
       this.damage(); this.terminal.scrollLines(direction * 2);
+      if (this.viewport() === viewport) return;
       const row = direction < 0 ? 0 : this.wasmTerm.rows - 1;
       this.selectionEnd = this.anchor({ col: direction < 0 ? 0 : this.wasmTerm.cols - 1, absoluteRow: this.absolute(row) }); this.damage();
     }, 50);
