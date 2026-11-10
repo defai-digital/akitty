@@ -89,6 +89,9 @@ and notarization, then installs it into `~/Applications`.
 Click **+** or press **⌘T** for a new terminal tab. Open **Settings… (⌘,)** to
 choose your font, shell and starting directory.
 
+To mute terminal bells and error sounds, enable **Settings → Sessions → Silent mode**.
+The choice is saved and applies to open terminals; visual bell indicators and error messages remain visible.
+
 Updates appear as a quiet reminder in the title bar. Use **AkiTTY → Check for
 Updates…** to check manually; you choose when to install and restart. Automatic
 checks can be changed in Settings.
@@ -273,7 +276,7 @@ for implementation details.
   in the focused pane's reported directory when that path still exists, and in the opened
   folder otherwise. Splits start in the opened folder.
 - Native **Settings… (⌘,)** for font/size, a separate CJK font, shell, starting directory, scrollback,
-  Option-as-Alt and update checks. Appearance changes apply to open terminals;
+  Option-as-Alt, Silent mode and update checks. Appearance and sound changes apply to open terminals;
   shell, directory and scrollback changes apply to new terminals. Any installed fixed-pitch font can be chosen.
 - Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.

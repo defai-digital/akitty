@@ -32,7 +32,11 @@ private let hiddenPollInterval: Double = 0.25
     /// Whether the last frame went through the layered Metal path.
     private var lastLayered = false
     /// Grid rows changed since the last raster started; nil means unknown (repaint everything).
-    private var pendingDamage: Set<Int>? = nil
+    private var gridDamage = GridDamage()
+    private var pendingDamage: Set<Int>? {
+        get { gridDamage.rows }
+        set { gridDamage = GridDamage(rows: newValue) }
+    }
     private var pollInFlight = false
     private var rasterInFlight = false
     private var rasterPending = false
@@ -71,6 +75,8 @@ private let hiddenPollInterval: Double = 0.25
     private var clipboardPromptOpen = false
     private var lastBell = Date.distantPast
     private var lastErrorBeep: TimeInterval = -.infinity
+    /// Sound sink shared by terminal bells and explicit error alerts.
+    var playAlertSound: () -> Void = { NSSound.beep() }
     private var lastGrid: (Int, Int) = (0, 0)
     /// Key codes whose press went out as a Kitty escape, so only those get a release.
     private var kittyDown: [UInt16: KittyKeyInput] = [:]
@@ -398,8 +404,7 @@ private let hiddenPollInterval: Double = 0.25
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
                 if next.bell == true { ringBell(); onBell?() }
-                // A scrolled partial moved every held row, so only a full repaint is correct.
-                if next.partial == true, next.shift == nil, let dirty = next.dirty { pendingDamage?.formUnion(dirty) } else { pendingDamage = nil }
+                gridDamage.merge(next)
                 redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
                 updateAccessibility(previous: previous, next: next)
             }
@@ -459,6 +464,9 @@ private let hiddenPollInterval: Double = 0.25
         // images (and the software fallback) keep the single bitmap.
         let layered = presenter != nil && !(snapshot.images ?? []).isEmpty
         var damage = pendingDamage
+        let scroll = layered ? 0 : gridDamage.scroll
+        // Image layers retain the full repaint fallback until their scrolls are qualified.
+        if layered && gridDamage.scroll > 0 { damage = nil }
         // The other path's retained bitmaps went stale while it was idle.
         if layered != lastLayered { damage = nil; lastLayered = layered }
         let rasterizer = self.rasterizer, images = layered ? [:] : imageStore.images
@@ -486,7 +494,7 @@ private let hiddenPollInterval: Double = 0.25
                 }
                 return
             }
-            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse) }
+            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, scroll: scroll, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false
@@ -519,16 +527,16 @@ private let hiddenPollInterval: Double = 0.25
     }
     /// One beep per second at most, so a program that rings in a loop cannot make noise continuously.
     private func ringBell() {
-        guard Date().timeIntervalSince(lastBell) >= 1 else { return }
-        lastBell = Date(); NSSound.beep()
+        guard !preferences.silentMode, Date().timeIntervalSince(lastBell) >= 1 else { return }
+        lastBell = Date(); playAlertSound()
     }
     /// Reports a failure. The beep is rate-limited like the bell: a snapshot that keeps failing (an oversized
     /// screen, too many image fragments) fails on every display-rate poll and must not beep continuously.
     private func show(_ error: Error) {
         publishStatus(error.localizedDescription, force: true)
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastErrorBeep >= 1 else { return }
-        lastErrorBeep = now; NSSound.beep()
+        guard !preferences.silentMode, now - lastErrorBeep >= 1 else { return }
+        lastErrorBeep = now; playAlertSound()
     }
     public func send(_ text: String, paste: Bool = false) {
         guard !stopped else { return }

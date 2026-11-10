@@ -11,6 +11,7 @@ import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { mouseReport } from './mouse';
+import { OutputQueue } from './output-queue';
 import type { IBufferRange, IDisposable, IEvent, IKeyEvent, ITerminalAddon, ITerminalCore, ITerminalOptions, ITheme, IUnicodeVersionProvider } from './interfaces';
 import type { ILink, ILinkProvider, TerminalCell, TerminalConfig } from './types';
 
@@ -73,6 +74,7 @@ export class Terminal implements ITerminalCore {
   private visibilityObserver?: IntersectionObserver;
   private lastCursor = { x: 0, y: 0 };
   private syncTimer?: ReturnType<typeof setTimeout>;
+  private readonly outputQueue = new OutputQueue(bytes => this.writeNow(bytes));
   viewportY = 0;
   private targetViewportY = 0;
   private alternateWheelRemainder = 0;
@@ -222,6 +224,17 @@ export class Terminal implements ITerminalCore {
   }
   write(data: string | Uint8Array, callback?: () => void): void {
     this.assertOpen();
+    if (this.outputQueue.pending) throw new Error('Asynchronous output is pending; await writeAsync() before calling write()');
+    this.writeNow(data);
+    if (callback) setTimeout(callback, 0);
+  }
+  /** Bounded FIFO output that yields between parsing turns. Resolves after parsing. */
+  writeAsync(data: string | Uint8Array): Promise<void> {
+    try { this.assertOpen(); return this.outputQueue.enqueue(data); }
+    catch (error) { return Promise.reject(error); }
+  }
+  private writeNow(data: string | Uint8Array): void {
+    this.assertOpen();
     if (this.options.convertEol) {
       if (typeof data === 'string') data = data.replace(/\n/g, '\r\n');
       else {
@@ -237,7 +250,6 @@ export class Terminal implements ITerminalCore {
       this.notifyBufferChangeIfSwitched(alternate); this.processTerminalResponses(); this.scheduleSync();
       this.linkDetector?.invalidateCache(); this.scrollToBottom();
     }
-    if (callback) setTimeout(callback, 0);
   }
   private readonly engineEvent = (event: EngineEvent): void => {
     if (event.type === 'title') this.applyTitle(event.title);
@@ -288,6 +300,7 @@ export class Terminal implements ITerminalCore {
     const replacement = this.engine!.createTerminal(this.cols, this.rows, this.config());
     try { this.selectionManager?.setTerminal(replacement); } catch (error) { replacement.free(); throw error; }
     this.wasmTerm = replacement; previous.free();
+    this.outputQueue.cancel(new Error('Terminal was reset before queued output completed'));
     this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
@@ -525,6 +538,7 @@ export class Terminal implements ITerminalCore {
   }
   private cleanupComponents(): unknown[] {
     const failures: unknown[] = [], release = (action: () => void): void => { try { action(); } catch (error) { failures.push(error); } };
+    release(() => this.isDisposed ? this.outputQueue.close() : this.outputQueue.cancel(new Error('Terminal is not open')));
     if (this.animationFrameId !== undefined) cancelAnimationFrame(this.animationFrameId); this.animationFrameId = undefined;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     release(() => this.handleMouseLeave(new Event('mouseleave')));

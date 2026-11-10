@@ -7,6 +7,29 @@ test.beforeEach(async ({ page }) => {
   await page.waitForFunction(() => 'fixture' in window)
 })
 
+test('large asynchronous output yields while preserving UTF-8, replies and final canvas state', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const result = await page.evaluate(async () => {
+    const f = (window as any).fixture
+    f.input.length = 0
+    let turns = 0
+    const timer = setInterval(() => { turns++ }, 0)
+    try {
+      const pattern = '\x1b[?1049h\x1b[H\x1b[2Jalternate 中\x1b[?1049lmain\r\n'
+      await f.terminal.writeAsync(pattern.repeat(12000))
+      await f.terminal.writeAsync('\x1b[2J\x1b[H\x1b[?25lASYNC_DONE 中 e\u0301\x1b[6n')
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      return { turns, lines: f.lines(), input: f.input.join(''), pixels: f.pixels() }
+    } finally { clearInterval(timer) }
+  })
+  expect(result.turns).toBeGreaterThan(0)
+  expect(result.lines[0]).toBe('ASYNC_DONE 中 é')
+  expect(result.input).toMatch(/^\x1b\[1;\d+R$/)
+  expect(result.pixels.white).toBeGreaterThan(30)
+  expect(errors).toEqual([])
+})
+
 test('ANSI backgrounds, Unicode glyphs and erase reach the actual canvas', async ({ page }, info) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))

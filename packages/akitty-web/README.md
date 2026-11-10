@@ -84,6 +84,18 @@ term.onData((data) => {
 `@ax-code/akitty-web/akitty-vt.wasm` is also exported for hosts that need to serve the wasm file themselves.
 Addons (such as `lib/addons/fit.ts`) follow the xterm.js addon interface.
 
+For bulk PTY output, use `await term.writeAsync(chunk)` to let input and drawing run between parsing turns.
+Each terminal admits at most 8 MiB of queued UTF-8 data and 1,024 pending writes; a write exceeding either
+bound rejects without accepting any of its data. Await completion before admitting more output to apply
+backpressure to the host transport. Accepted byte arrays are copied, so the host may reuse its receive buffer.
+Completion means the bytes were parsed, not that they were painted. Parsing uses 8 KiB chunks with a 4 ms
+cooperative turn budget; one parser call can exceed that budget on slow hardware or expensive input.
+
+`write()` remains synchronous. While asynchronous output is pending, `write()`/`writeln()` reject attempts
+to overtake it; use `writeAsync()` consistently or await all queued output first. Reset, disposal or a parsing
+error rejects outstanding asynchronous writes. Reset permits a new output generation afterward.
+After a parsing failure, reset or resynchronize the terminal before retrying; a prefix may already have been parsed.
+
 Notable behavior:
 
 - `lineHeight` sets the row height as a multiple of the glyph height.
@@ -91,6 +103,10 @@ Notable behavior:
 - A terminal whose container is off-screen (hidden tab or pane, per `IntersectionObserver`) stops drawing but keeps
   parsing output, then redraws fully when shown again. Without `IntersectionObserver` it always draws.
 - A frame that throws is logged once and the next frame is a full redraw; the render loop keeps running.
+- Sparse screen updates fetch only the rows needed for damage and cursor repair. Clean-row hashes and adjacent
+  background fills are reused or batched; full redraws and large changes retain the bulk viewport path.
+- Output callbacks observe current viewport data. Events from reentrant writes follow the already queued events;
+  callback errors are rethrown after the batch is dispatched, and disposal stops further callbacks.
 
 ## Reading terminals from agents
 

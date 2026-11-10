@@ -1,3 +1,11 @@
 # Unreleased changes
 
 Changes after AkiTTY 1.3.11; these are not yet part of a published release.
+
+- Add Settings → Sessions → Silent mode to mute terminal bells and explicit error sounds in open and future panes while keeping visual notifications. The choice persists across restarts.
+
+- Reuse native text bitmap pixels during eligible scrolls, including coalesced updates. Redraw exposed rows, cursor damage and complex or decorated text; preserve full repaint fallbacks and upload moved rows to Metal.
+- Add bounded Web `writeAsync()` output with cooperative parsing, FIFO completion and reset/disposal cancellation. Hosts can await it for backpressure; existing synchronous writes retain their behavior when the queue is empty.
+
+- Reduce native incremental snapshot merging and dirty-row rasterization work by copying unchanged cell spans in bulk and locating changed rows directly. Metadata-only snapshots reuse retained cells.
+- Web rendering fetches sparse row damage without exporting the whole viewport, reuses clean-row hashes and batches adjacent background fills. Output callbacks see current viewport data; reentrant callbacks retain event order and callback failures do not discard later events in the batch.
