@@ -83,6 +83,19 @@ private struct CommandEnvelope: Codable { let version: Int; let commands: [Comma
 
 public enum ClipboardPolicy {
     public static let maximumBytes = 65536
+    /// One short line for a clipboard-write prompt: whitespace runs and control characters collapse to a space.
+    public static func writePreview(_ text: String, limit: Int = 120) -> String {
+        var preview = "", pendingSpace = false, count = 0
+        for character in text {
+            if character.isWhitespace || character.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+                pendingSpace = !preview.isEmpty; continue
+            }
+            if count >= limit { return preview + "…" }
+            if pendingSpace { preview.append(" "); count += 1; pendingSpace = false }
+            preview.append(character); count += 1
+        }
+        return preview
+    }
     public static func acceptsText(_ text: String) -> Bool { text.utf8.count <= maximumBytes && !text.contains("\0") }
     public static func needsPasteConfirmation(_ text: String) -> Bool {
         // Any control scalar (C0 incl. ESC/CR/LF, DEL, C1) except ordinary tab is dangerous in a paste.

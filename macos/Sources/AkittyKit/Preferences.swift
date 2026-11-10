@@ -12,6 +12,8 @@ struct TerminalPreferences: Codable, Equatable {
     var scrollback = 5000
     var optionAsAlt = false
     var confirmPaste = true
+    /// Ask before a program replaces the clipboard with OSC 52; Always Allow in that prompt turns it off.
+    var confirmClipboardWrite = true
     /// Mute terminal bells and explicit error sounds while retaining visual notifications.
     var silentMode = false
     /// Programs may update chrome only when this preference is enabled.
@@ -124,7 +126,7 @@ extension Notification.Name { static let terminalPreferencesChanged = Notificati
 
 extension TerminalPreferences {
     private enum CodingKeys: String, CodingKey {
-        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, silentMode, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
+        case fontName, cjkFont, fontSize, shell, directory, scrollback, optionAsAlt, confirmPaste, confirmClipboardWrite, silentMode, programChrome, shellIntegration, folderHistory, quickTerminal, quickShortcut
         /// Present once shell integration defaulted on; earlier saves stored the old default (off), not a user choice.
         case shellIntegrationDefaultOn
     }
@@ -139,6 +141,7 @@ extension TerminalPreferences {
         scrollback = try container.decodeIfPresent(Int.self, forKey: .scrollback) ?? scrollback
         optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? optionAsAlt
         confirmPaste = try container.decodeIfPresent(Bool.self, forKey: .confirmPaste) ?? true
+        confirmClipboardWrite = try container.decodeIfPresent(Bool.self, forKey: .confirmClipboardWrite) ?? true
         silentMode = try container.decodeIfPresent(Bool.self, forKey: .silentMode) ?? false
         // Missing on preferences saved before this switch existed. Default on so current sessions keep program chrome.
         quickTerminal = try container.decodeIfPresent(Bool.self, forKey: .quickTerminal) ?? false
@@ -159,6 +162,7 @@ extension TerminalPreferences {
         try container.encode(scrollback, forKey: .scrollback)
         try container.encode(optionAsAlt, forKey: .optionAsAlt)
         try container.encode(confirmPaste, forKey: .confirmPaste)
+        try container.encode(confirmClipboardWrite, forKey: .confirmClipboardWrite)
         try container.encode(silentMode, forKey: .silentMode)
         try container.encode(programChrome, forKey: .programChrome)
         try container.encode(shellIntegration, forKey: .shellIntegration)
@@ -184,6 +188,10 @@ struct PreferencesDraft {
         // A choice made in a terminal updates an open Settings window without discarding other draft edits.
         if draft.confirmPaste == saved.confirmPaste { draft.confirmPaste = enabled }
         saved.confirmPaste = enabled
+    }
+    mutating func mergeClipboardWriteConfirmation(_ enabled: Bool) {
+        if draft.confirmClipboardWrite == saved.confirmClipboardWrite { draft.confirmClipboardWrite = enabled }
+        saved.confirmClipboardWrite = enabled
     }
 }
 
@@ -240,6 +248,9 @@ struct PreferencesDraft {
                         Toggle("Confirm multiline and control-character pastes", isOn: $state.draft.confirmPaste)
                             .accessibilityIdentifier("confirm-paste")
                         Text("Applies to open terminals. Turn this on to restore confirmation after choosing Don't ask again.").font(.caption).foregroundStyle(.secondary)
+                        Toggle("Ask before programs copy to the clipboard", isOn: $state.draft.confirmClipboardWrite)
+                            .accessibilityIdentifier("confirm-clipboard-write")
+                        Text("Programs copy with OSC 52. When off, copies happen silently and the status bar notes them. Programs can never read the clipboard.").font(.caption).foregroundStyle(.secondary)
                     }
                     Section("New Terminals") {
                         Toggle("Shell integration (bash and zsh)", isOn: $state.draft.shellIntegration)
@@ -315,7 +326,9 @@ struct PreferencesDraft {
             }.padding()
         }.frame(width: 560, height: 430)
             .onReceive(NotificationCenter.default.publisher(for: .terminalPreferencesChanged)) { _ in
-                state.mergePasteConfirmation(TerminalPreferences.load(from: defaults).confirmPaste)
+                let current = TerminalPreferences.load(from: defaults)
+                state.mergePasteConfirmation(current.confirmPaste)
+                state.mergeClipboardWriteConfirmation(current.confirmClipboardWrite)
             }
     }
 }
