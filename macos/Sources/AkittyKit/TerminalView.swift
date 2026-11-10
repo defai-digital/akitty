@@ -510,6 +510,9 @@ private let hiddenPollInterval: Double = 0.25
                     guard let self else { return }
                     self.rasterInFlight = false
                     guard !self.stopped else { return }
+                    // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
+                    // presenting it would flash the new background behind them. Repaint fully instead.
+                    guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                     do {
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
@@ -528,6 +531,7 @@ private let hiddenPollInterval: Double = 0.25
                 guard let self else { return }
                 self.rasterInFlight = false
                 guard !self.stopped else { return }
+                guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                 do {
                     let frame = try result.get()
                     if size == self.bounds.size, self.window != nil {

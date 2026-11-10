@@ -151,4 +151,39 @@ final class ProfileTests: XCTestCase {
         try controller.newTab()
         XCTAssertNil(controller.selectedPane?.profileID, "a defaults pane does not fall back to the window's profile")
     }
+
+    func testOneMalformedSavedProfileDoesNotDropTheOthers() throws {
+        let json = #"{"profiles":[{"name":"Good","fontSize":15},{"name":"Bad","fontSize":"twenty"},{"name":"Also good","theme":"high-contrast"}]}"#
+        let decoded = try JSONDecoder().decode(TerminalPreferences.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.profiles.map(\.name), ["Good", "Also good"])
+    }
+
+    func testGeneratedProfileNamesStayWithinTheLimit() throws {
+        var settings = TerminalPreferences()
+        let long = String(repeating: "n", count: TerminalProfile.maximumNameLength)
+        settings.profiles = [TerminalProfile(name: long, from: settings)]
+        let copy = settings.unusedProfileName(long + " Copy")
+        XCTAssertLessThanOrEqual(copy.count, TerminalProfile.maximumNameLength)
+        XCTAssertNotEqual(copy.lowercased(), long.lowercased())
+        settings.profiles.append(TerminalProfile(name: copy, from: settings))
+        XCTAssertNoThrow(try settings.validated(), "a duplicated long-named profile can still be applied")
+    }
+
+    func testThemeAppearanceCarriesItsForegroundForComposedText() {
+        XCTAssertEqual(TerminalTheme.named("akitty-light").appearance(cursorStyle: .outline).foreground, [0x1f, 0x23, 0x28])
+        XCTAssertEqual(TerminalTheme.named("akitty-dark").appearance(cursorStyle: .outline).foreground, RenderAppearance.standard.foreground)
+    }
+
+    @MainActor func testTabChosenWithAProfileDoesNotCopyTheFocusedFolder() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(), opened = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        let controller = try TerminalWindow(app: app, headless: true, directory: opened)
+        let window = try XCTUnwrap(controller.window)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; window.close() }
+        try controller.newTab()
+        XCTAssertEqual(controller.panes.last?.launchDirectory, opened, "⌘T keeps following the window's folder")
+        try controller.newTab(profile: UUID(), copyDirectory: false)
+        XCTAssertNil(controller.panes.first { $0.terminal === controller.selectedPane }?.launchDirectory,
+                     "a profile tab starts in the profile's folder, not the focused pane's")
+    }
 }

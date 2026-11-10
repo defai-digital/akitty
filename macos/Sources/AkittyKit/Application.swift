@@ -381,20 +381,21 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         try newTab(profile: profile); refreshUpdateReminder(app.updates.availableVersion)
     }
     required init?(coder: NSCoder) { nil }
-    func newTab() throws { try newTab(profile: inheritedProfile) }
+    func newTab() throws { try newTab(profile: inheritedProfile, copyDirectory: true) }
     /// The focused pane's profile, even when that is the defaults (nil); the window's own profile only without a pane.
     private var inheritedProfile: UUID? { if let active { return active.profileID }; return profile }
-    /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults).
-    func newTab(profile: UUID?) throws {
+    /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults). A tab chosen from New Tab with Profile
+    /// passes `copyDirectory: false`, so it starts in the profile's (or Settings') folder rather than the focused pane's.
+    func newTab(profile: UUID?, copyDirectory: Bool = true) throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
-        let directory = directoryForNewTab()
+        let directory = copyDirectory ? directoryForNewTab() : nil
         let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? NSNotFound
         let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
         if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
         tabs.selectTabViewItem(item)
-        do { try addPane(to: split, directory: directory, profile: profile) }
+        do { try addPane(to: split, directory: directory, profile: profile, useWindowDirectory: copyDirectory) }
         catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
         refreshTabs()
     }
@@ -412,11 +413,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
     @discardableResult
-    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil, profile paneProfile: UUID?? = nil) throws -> TerminalPane? {
+    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil, profile paneProfile: UUID?? = nil, useWindowDirectory: Bool = true) throws -> TerminalPane? {
         // A restart replaces a pane, so it may briefly hold a ninth before the old one is removed.
         guard index != nil || split.arrangedSubviews.count < 8 else { return nil }
         // A split takes the profile of the pane it splits from; an explicit profile (even nil, the defaults) wins.
-        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? directory, profile: paneProfile ?? inheritedProfile)
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? (useWindowDirectory ? directory : nil), profile: paneProfile ?? inheritedProfile)
         // A restart inserts in place; a new split appends as before.
         if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
         else { split.addArrangedSubview(pane) }
@@ -885,7 +886,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// Opens a window, or a tab in the key terminal window, whose first pane uses `profile` (nil: defaults).
     func open(profile: UUID?, asTab: Bool) {
         do {
-            if asTab, let window = NSApp.keyWindow?.windowController as? TerminalWindow ?? intentWindow() { try window.newTab(profile: profile); window.showWindow(nil) }
+            if asTab, let window = NSApp.keyWindow?.windowController as? TerminalWindow ?? intentWindow() { try window.newTab(profile: profile, copyDirectory: false); window.showWindow(nil) }
             else { try createTerminalWindow(profile: profile) }
         } catch { NSAlert(error: error).runModal() }
     }

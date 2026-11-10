@@ -42,6 +42,7 @@ struct TerminalTheme: Identifiable, Equatable, Sendable {
         if let background { appearance.background = bytes(background) }
         if let cursor { appearance.cursor = bytes(cursor) }
         if let selection { appearance.selection = bytes(selection) }
+        if let foreground { appearance.foreground = bytes(foreground) }
         appearance.cursorStyle = cursorStyle
         return appearance
     }
@@ -104,10 +105,16 @@ extension TerminalPreferences {
     /// The settings a pane opened with `profile` uses. A profile deleted since falls back to the defaults.
     func effective(profile id: UUID?) -> TerminalPreferences { profile(id)?.applied(to: self) ?? self }
     /// A name not yet used by another profile: "Profile", "Profile 2", …
+    /// The result always fits the name limit, so a copy of a long-named profile can still be applied.
     func unusedProfileName(_ base: String = "Profile") -> String {
         let taken = Set(profiles.map { $0.trimmedName.lowercased() })
+        let limit = TerminalProfile.maximumNameLength
+        let base = String(base.prefix(limit)).trimmingCharacters(in: .whitespaces)
         if !taken.contains(base.lowercased()) { return base }
-        return (2...).lazy.map { "\(base) \($0)" }.first { !taken.contains($0.lowercased()) }!
+        return (2...).lazy.map { number in
+            let suffix = " \(number)"
+            return String(base.prefix(limit - suffix.count)).trimmingCharacters(in: .whitespaces) + suffix
+        }.first { !taken.contains($0.lowercased()) }!
     }
     func validateProfiles() throws {
         guard profiles.count <= TerminalProfile.maximumCount else { throw AkittyError.core("Keep at most \(TerminalProfile.maximumCount) profiles.") }

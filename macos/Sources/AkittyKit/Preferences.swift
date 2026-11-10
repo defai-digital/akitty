@@ -184,7 +184,7 @@ extension TerminalPreferences {
         theme = try container.decodeIfPresent(String.self, forKey: .theme) ?? theme
         cursorStyle = (try? container.decodeIfPresent(CursorStyle.self, forKey: .cursorStyle)) ?? cursorStyle
         // A malformed profile list must not reset every other setting.
-        profiles = (try? container.decodeIfPresent([TerminalProfile].self, forKey: .profiles)) ?? []
+        profiles = ((try? container.decodeIfPresent([LossyProfile].self, forKey: .profiles)) ?? []).compactMap(\.profile)
         if try container.decodeIfPresent(Bool.self, forKey: .shellIntegrationDefaultOn) == true {
             shellIntegration = try container.decodeIfPresent(Bool.self, forKey: .shellIntegration) ?? shellIntegration
         }
@@ -465,4 +465,10 @@ enum SettingsTab: Hashable { case appearance, profiles, sessions, keyboard, upda
         window.center(); super.init(window: window)
     }
     required init?(coder: NSCoder) { nil }
+}
+
+/// Decodes one saved profile without failing the list: a malformed entry becomes nil instead of dropping every profile.
+private struct LossyProfile: Decodable {
+    let profile: TerminalProfile?
+    init(from decoder: Decoder) throws { profile = try? TerminalProfile(from: decoder) }
 }

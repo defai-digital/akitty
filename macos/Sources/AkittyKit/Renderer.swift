@@ -34,6 +34,8 @@ struct RenderAppearance: Equatable, Sendable {
     var cursor: [UInt8] = [153, 204, 255]
     var cursorStyle: CursorStyle = .outline
     var selection: [UInt8] = [51, 79, 122]
+    /// Uncommitted IME text, drawn by the host rather than the core.
+    var foreground: [UInt8] = [0xda, 0xe2, 0xef]
     static let standard = RenderAppearance()
     var backgroundColor: CGColor { CGColor(red: CGFloat(background[0]) / 255, green: CGFloat(background[1]) / 255, blue: CGFloat(background[2]) / 255, alpha: 1) }
     var cursorColor: CGColor { CGColor(red: CGFloat(cursor[0]) / 255, green: CGFloat(cursor[1]) / 255, blue: CGFloat(cursor[2]) / 255, alpha: 1) }
@@ -731,7 +733,7 @@ final class GridRasterizer: @unchecked Sendable {
             case .underline: context.setFillColor(cursor); context.fill(CGRect(x: box.minX, y: box.minY, width: box.width, height: 2))
             }
             if !composition.isEmpty {
-                let line = CTLineCreateWithAttributedString(NSAttributedString(string: composition, attributes: [.font: base, .foregroundColor: CGColor(gray: 1, alpha: 1), .underlineStyle: 1]))
+                let line = CTLineCreateWithAttributedString(NSAttributedString(string: composition, attributes: [.font: base, .foregroundColor: CGColor(red: CGFloat(appearance.foreground[0]) / 255, green: CGFloat(appearance.foreground[1]) / 255, blue: CGFloat(appearance.foreground[2]) / 255, alpha: 1), .underlineStyle: 1]))
                 context.textPosition = CGPoint(x: box.minX, y: box.minY + descent + 2); CTLineDraw(line, context)
             }
         }
