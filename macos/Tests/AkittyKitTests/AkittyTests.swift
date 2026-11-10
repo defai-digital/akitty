@@ -1084,9 +1084,10 @@ final class AkittyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let terminal = try TerminalView(headless: false, forceSoftware: true, directory: directory.path)
         defer { terminal.shutdown() }
-        try terminal.session.input("pwd -P > akitty-cwd.txt\r")
+        // Exercise the empty-file interval before the shell publishes its working directory.
+        try terminal.session.input(": > akitty-cwd.txt; sleep 0.1; pwd -P > akitty-cwd.txt\r")
         let marker = directory.appendingPathComponent("akitty-cwd.txt")
-        for _ in 0..<100 where !FileManager.default.fileExists(atPath: marker.path) { try await Task.sleep(nanoseconds: 50_000_000) }
+        for _ in 0..<100 where (try? String(contentsOf: marker, encoding: .utf8))?.hasSuffix("\n") != true { try await Task.sleep(nanoseconds: 50_000_000) }
         let reported = try String(contentsOf: marker, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         // Both sides go through the same symlink normalization (the temp folder sits under the /var -> /private/var link).
         XCTAssertEqual(URL(fileURLWithPath: reported).resolvingSymlinksInPath(), directory.resolvingSymlinksInPath())

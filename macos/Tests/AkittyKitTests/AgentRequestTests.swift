@@ -87,7 +87,8 @@ final class AgentRequestTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
         let pane = (((object["data"] as! [String: Any])["panes"] as! [[String: Any]])[0]["pane"] as! String)
         let marker = root.appendingPathComponent("executed.txt")
-        let command = "printf 'MANAGED_ONCE' >> '\(marker.path)'; sleep 5"
+        // Keep the marker empty briefly to exercise redirection creating it before printf writes.
+        let command = ": >> '\(marker.path)'; sleep 0.1; printf 'MANAGED_ONCE' >> '\(marker.path)'; sleep 5"
         let data = try JSONSerialization.data(withJSONObject: ["version": 1, "op": "request", "pane": pane, "command": command])
         let pending = Task.detached { try LocalSocket.request(data, path: path) }
         try await waitUntil { window.attachedSheet != nil }
@@ -96,7 +97,7 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertEqual(receipt["ok"] as? Bool, true)
         XCTAssertEqual((receipt["data"] as? [String: Any])?["input_remains_leased"] as? Bool, true)
         XCTAssertThrowsError(try terminal.session.input("human", paste: false))
-        try await waitUntil { FileManager.default.fileExists(atPath: marker.path) }
+        try await waitUntil { (try? String(contentsOf: marker, encoding: .utf8))?.hasPrefix("MANAGED_ONCE") == true }
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "MANAGED_ONCE", "execution is established by a file effect, not terminal text")
         try terminal.session.reclaimControl()
         XCTAssertEqual(try terminal.session.snapshot()?.exited, false)
