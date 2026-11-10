@@ -15,3 +15,5 @@ Changes after AkiTTY 1.3.14; these are not yet part of a published release.
 - macOS: switching apps or windows now sends focus-out/in reports and releases held Kitty keys, so modifiers no longer get stuck after Cmd-Tab.
 - macOS: dragging a tab no longer clears another tab's bell or finished mark or sends it focus events.
 - macOS: paste errors no longer stay stuck in the status line, and minimized windows refresh at the hidden rate.
+- macOS: Home and End follow application cursor mode, and Shift, Option and Control on Home, End, Page Up/Down, Insert, Delete and the function keys send xterm modifier sequences (for example `CSI 1;5H`, `CSI 5;2~`) instead of being dropped.
+- macOS: a window ordered out after being shown (such as a hidden quick terminal) refreshes at the hidden rate.

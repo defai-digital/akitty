@@ -275,11 +275,15 @@ private let hiddenPollInterval: Double = 0.25
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
     /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
     /// updates; it just does not need a snapshot per display refresh.
+    /// The last window this pane was seen on screen in; distinguishes ordered-out windows from never-shown ones.
+    private weak var shownWindow: NSWindow?
     private var paneVisible: Bool {
         guard let window, !isHiddenOrHasHiddenAncestor, NSApp?.isHidden != true, !window.isMiniaturized else { return false }
         // A window that was never ordered front reports no occlusion state; only a shown window the display
-        // system says is covered counts as hidden, so an unshown host keeps its display link.
-        return !window.isVisible || window.occlusionState.contains(.visible)
+        // system says is covered counts as hidden, so an unshown host keeps its display link. Once a window
+        // has been on screen, ordering it out (a hidden quick terminal) hides its panes too.
+        if window.isVisible { shownWindow = window; return window.occlusionState.contains(.visible) }
+        return shownWindow !== window
     }
     /// Hidden panes poll four times a second instead of at the display rate.
     nonisolated static func pollDue(hidden: Bool, sinceLast: Double) -> Bool { !hidden || sinceLast >= hiddenPollInterval }
@@ -660,7 +664,10 @@ private let hiddenPollInterval: Double = 0.25
             let mask = (modifiers.contains(.shift) ? 1 : 0) + (modifiers.contains(.option) ? 2 : 0) + (modifiers.contains(.control) ? 4 : 0)
             send(mask > 0 ? "\u{1b}[1;\(mask + 1)\(code)" : "\u{1b}\(app ? "O" : "[")\(code)"); return
         }
-        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}", 117: "\u{1b}[3~", 115: "\u{1b}[H", 119: "\u{1b}[F", 116: "\u{1b}[5~", 121: "\u{1b}[6~", 122: "\u{1b}OP", 120: "\u{1b}OQ", 99: "\u{1b}OR", 118: "\u{1b}OS", 114: "\u{1b}[2~", 105: "\u{1b}[25~", 107: "\u{1b}[26~", 113: "\u{1b}[28~", 106: "\u{1b}[29~", 64: "\u{1b}[31~", 79: "\u{1b}[32~", 80: "\u{1b}[33~", 90: "\u{1b}[34~", 96: "\u{1b}[15~", 97: "\u{1b}[17~", 98: "\u{1b}[18~", 100: "\u{1b}[19~", 101: "\u{1b}[20~", 109: "\u{1b}[21~", 103: "\u{1b}[23~", 111: "\u{1b}[24~"]
+        if !hasMarkedText(), let text = Self.legacyEditingKey(keyCode: event.keyCode, modifiers: event.modifierFlags, appCursor: app) {
+            send(text); return
+        }
+        let special: [UInt16: String] = [36: "\r", 76: "\r", 48: "\t", 51: "\u{7f}", 53: "\u{1b}"]
         if !hasMarkedText(), let text = special[event.keyCode] {
             let sequence = event.keyCode == 48 && event.modifierFlags.contains(.shift) ? "\u{1b}[Z" : text
             send(preferences.optionAsAlt && event.modifierFlags.contains(.option) ? "\u{1b}" + sequence : sequence); return
@@ -669,6 +676,19 @@ private let hiddenPollInterval: Double = 0.25
             send("\u{1b}" + text); return
         }
         interpretKeyEvents([event])
+    }
+    /// xterm encoding for editing and function keys: Shift, Option and Control add a modifier
+    /// parameter (`CSI 1;5H`, `CSI 5;2~`), and Home/End follow application cursor mode.
+    nonisolated static func legacyEditingKey(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, appCursor: Bool) -> String? {
+        let tilde: [UInt16: Int] = [114: 2, 117: 3, 116: 5, 121: 6, 96: 15, 97: 17, 98: 18, 100: 19, 101: 20, 109: 21, 103: 23, 111: 24,
+                                    105: 25, 107: 26, 113: 28, 106: 29, 64: 31, 79: 32, 80: 33, 90: 34]
+        let letter: [UInt16: Character] = [115: "H", 119: "F", 122: "P", 120: "Q", 99: "R", 118: "S"]
+        let mask = (modifiers.contains(.shift) ? 1 : 0) + (modifiers.contains(.option) ? 2 : 0) + (modifiers.contains(.control) ? 4 : 0)
+        if let number = tilde[keyCode] { return mask > 0 ? "\u{1b}[\(number);\(mask + 1)~" : "\u{1b}[\(number)~" }
+        guard let final = letter[keyCode] else { return nil }
+        if mask > 0 { return "\u{1b}[1;\(mask + 1)\(final)" }
+        // F1-F4 are always SS3; Home and End use it only in application cursor mode.
+        return keyCode == 115 || keyCode == 119 ? "\u{1b}\(appCursor ? "O" : "[")\(final)" : "\u{1b}O\(final)"
     }
     public override func doCommand(by selector: Selector) {
         switch selector {
