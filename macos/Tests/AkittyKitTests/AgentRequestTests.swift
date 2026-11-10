@@ -49,13 +49,19 @@ final class AgentRequestTests: XCTestCase {
         let cliObject = try JSONSerialization.jsonObject(with: cli.0) as! [String: Any]
         let cliPanes = (cliObject["data"] as! [String: Any])["panes"] as! [[String: Any]]
         XCTAssertEqual(cliPanes.first?["pane"] as? String, pane)
+        // The printed value must be copyable as-is: no JSON `\/` escape inside the pane ID (issue #26).
+        XCTAssertTrue(String(decoding: cli.0, as: UTF8.self).contains("\"pane\":\"\(pane)\""))
         for request: [String: Any] in [["version": 1, "op": "command_authorize"], ["version": 1, "op": "control_reclaim"],
             ["version": true, "op": "list"], ["version": 1, "op": "list", "actor": "Codex"],
             ["version": 1, "op": "request", "pane": "old/1", "command": "echo bad"]] {
             let result = try await send(request); XCTAssertEqual(result["ok"] as? Bool, false)
         }
+        let stale = try await send(["version": 1, "op": "request", "pane": "old/1", "command": "echo bad"])
+        XCTAssertTrue((stale["error"] as? String)?.contains("Run list again") == true)
         _ = try terminal.session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
-        let request = Task { try await send(["version": 1, "op": "request", "pane": pane, "command": "echo secret-value"]) }
+        // A hand-copied escaped ID with stray whitespace still reaches the approval sheet.
+        let copied = " " + pane.replacingOccurrences(of: "/", with: "\\/") + "\n"
+        let request = Task { try await send(["version": 1, "op": "request", "pane": copied, "command": "echo secret-value"]) }
         try await waitUntil { window.attachedSheet != nil }
         let sheet = try XCTUnwrap(window.attachedSheet)
         XCTAssertEqual(sheet.defaultButtonCell?.title, "Deny")
