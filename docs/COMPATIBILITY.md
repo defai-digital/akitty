@@ -17,12 +17,13 @@ Refer to a release tag and its successful CI run when assessing a published bina
 | Vim, Neovim, tmux and SSH workflows | Protocol fixtures cover constituent behaviors | No complete application/version/platform qualification matrix is claimed. Record actual versions and observed workflows before marking these qualified. |
 | Local command request, approval, denial and reclaim | [Native request tests](../macos/Tests/AkittyKitTests/AgentRequestTests.swift), [reproducible demo](AGENT_DEMO.md) | The receipt establishes queued input. Shell/program reports are untrusted; the demo checks one separate expected file effect. Ordinary agent subprocesses are outside this path. |
 | Program identity/status and event timeline | OSC 7501/771 and local recorder tests; [native contract](AGENT_NATIVE.md) | Program labels are self-reported. Retained event metadata is bounded, locally editable and incomplete. |
-| Session continuity | Quick-terminal toggle and lifecycle tests | Hiding the quick terminal retains its live PTY. App-restart restoration, remote reattachment and a persistent PTY server are separate, unimplemented capabilities. |
+| Session continuity | Quick-terminal toggle and lifecycle tests; [window-layout tests](../macos/Tests/AkittyKitTests/WindowLayoutTests.swift) | Hiding the quick terminal retains its live PTY. Named layouts (windows, tabs, splits and each pane's starting folder) can be saved and reopened from Shell → Window Layouts; processes and scrollback are not restored. App-restart restoration, remote reattachment and a persistent PTY server remain unimplemented. |
 | Parser/grid/reflow performance | [Native/WASM benchmark](../benchmarks/README.md) with raw samples and state equivalence | Excludes PTY, font rendering, key-to-paint latency, idle power and long-term memory behavior. No competitor ranking is inferred. |
 
 ## Recording an external qualification
 
 Record the AkiTTY commit/artifact, OS, application versions, terminal dimensions, font, shell/configuration,
 exact input bytes, expected output and observed result. Include failed or skipped cases and a reproducer.
-Separate layout/scrollback restoration, continued process execution and remote disconnect/reattach checks.
+Separate automatic app-restart restoration, live-process and scrollback continuation, and remote disconnect/reattach checks.
+Named layout restore is covered; whether a saved pane's shell can still run its original program is not.
 An engine ownership decision is architectural context; quality and performance need their own observations.
