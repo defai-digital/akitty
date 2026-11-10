@@ -158,6 +158,11 @@ private let hiddenPollInterval: Double = 0.25
         // Un-occluding or un-hiding must not wait for the safety tick.
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didUnhideNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didMiniaturizeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didDeminiaturizeNotification, object: nil)
+        // Switching apps or windows changes focus without changing the first responder.
+        NotificationCenter.default.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didResignKeyNotification, object: nil)
         setAccessibilityIdentifier("akitty-terminal")
     }
     required init?(coder: NSCoder) { nil }
@@ -218,6 +223,14 @@ private let hiddenPollInterval: Double = 0.25
     public override func viewDidHide() { super.viewDidHide(); updatePolling() }
     public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll() }
     /// App un-hide or window occlusion change: resume the display link and refresh at once.
+    @objc private func windowKeyChanged(_ note: Notification) {
+        guard !stopped, let window, note.object as? NSWindow === window, window.firstResponder === self else { return }
+        if note.name == NSWindow.didResignKeyNotification {
+            // Key-ups for held keys go to whatever took focus; release them now so none stay stuck.
+            releaseHeldKittyKeys()
+            if snapshot?.focus_reporting == true { send("\u{1b}[O") }
+        } else if snapshot?.focus_reporting == true { send("\u{1b}[I") }
+    }
     @objc private func visibilityChanged(_ note: Notification) {
         guard !stopped else { return }
         if let changed = note.object as? NSWindow, changed !== window { return }
@@ -263,7 +276,7 @@ private let hiddenPollInterval: Double = 0.25
     /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
     /// updates; it just does not need a snapshot per display refresh.
     private var paneVisible: Bool {
-        guard let window, !isHiddenOrHasHiddenAncestor, NSApp?.isHidden != true else { return false }
+        guard let window, !isHiddenOrHasHiddenAncestor, NSApp?.isHidden != true, !window.isMiniaturized else { return false }
         // A window that was never ordered front reports no occlusion state; only a shown window the display
         // system says is covered counts as hidden, so an unshown host keeps its display link.
         return !window.isVisible || window.occlusionState.contains(.visible)
@@ -635,7 +648,9 @@ private let hiddenPollInterval: Double = 0.25
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
         if event.modifierFlags.contains(.control), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
-            if value >= 64 && value <= 127 { send(String(UnicodeScalar(value & 0x1f)!)); return }
+            // Ctrl+Backspace (DEL) is ^H, as in xterm and kitty; 0x7F & 0x1F would be ^_ (undo in readline).
+            if value == 127 { send("\u{8}"); return }
+            if value >= 64 && value <= 126 { send(String(UnicodeScalar(value & 0x1f)!)); return }
             if scalar == " " { send("\0"); return }
         }
         let app = snapshot?.app_cursor == true
@@ -796,16 +811,23 @@ private let hiddenPollInterval: Double = 0.25
         let delta = event.scrollingDeltaY
         // A trackpad may report a non-finite delta; Int() would trap on it.
         guard delta.isFinite, delta != 0 else { return }
-        if reportMouse(event, button: delta > 0 ? 64 : 65) { return }
-        if snapshot?.alternate == true && !event.modifierFlags.contains(.option) {
-            let arrow = delta > 0 ? "A" : "B"
-            send("\u{1b}\(snapshot?.app_cursor == true ? "O" : "[")\(arrow)"); return
-        }
         // A line wheel already counts lines; a precision trackpad reports points, so whole lines accumulate and
         // the fraction carries to the next event instead of turning a 3-point nudge into three lines.
         let lines = event.hasPreciseScrollingDeltas
             ? Self.scrollLines(delta: delta, cellHeight: cellSize.height, remainder: &scrollRemainder)
             : (delta > 0 ? max(1, Int(min(delta, 1000))) : min(-1, Int(max(delta, -1000))))
+        // Programs receive one wheel report or arrow per scrolled line, not one per event:
+        // a trackpad swipe sends dozens of sub-line events.
+        let steps = min(abs(lines), 10)
+        if snapshot?.mouse_mode == true && !event.modifierFlags.contains(.option) {
+            for _ in 0..<steps { _ = reportMouse(event, button: lines > 0 ? 64 : 65) }
+            return
+        }
+        if snapshot?.alternate == true && !event.modifierFlags.contains(.option) {
+            let arrow = "\u{1b}\(snapshot?.app_cursor == true ? "O" : "[")\(lines > 0 ? "A" : "B")"
+            if steps > 0 { send(String(repeating: arrow, count: steps)) }
+            return
+        }
         guard lines != 0 else { return }
         do { _ = try session.call("scroll", ["lines": lines]); poll() } catch { show(error) }
     }
@@ -841,19 +863,19 @@ private let hiddenPollInterval: Double = 0.25
     }
     @objc public func paste(_ sender: Any?) {
         guard !stopped else { return }
-        guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { onStatus?("Paste requires plain text up to 64 KiB"); return }
+        guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { publishStatus("Paste requires plain text up to 64 KiB", force: true); return }
         paste(text)
     }
     /// Sends validated clipboard text. Confirmation defaults on and can be disabled by a saved user choice.
     func paste(_ text: String) {
         guard !stopped, ClipboardPolicy.acceptsText(text) else { return }
         if let sheet = window?.attachedSheet {
-            onStatus?("Finish the current dialog before pasting.")
+            publishStatus("Finish the current dialog before pasting.", force: true)
             sheet.makeKeyAndOrderFront(nil)
             return
         }
         if preferences.confirmPaste && ClipboardPolicy.needsPasteConfirmation(text) {
-            guard let window else { onStatus?("Paste requires confirmation, but the terminal is not in a window"); return }
+            guard let window else { publishStatus("Paste requires confirmation, but the terminal is not in a window", force: true); return }
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"
             alert.informativeText = "This text may execute commands in the terminal."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Paste")

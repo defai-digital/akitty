@@ -1783,4 +1783,16 @@ mod tests {
             assert_eq!(term.screen().rows[0].cells[4].ch, 'Z', "{edit:?}");
         }
     }
+
+    #[test]
+    fn shrinking_rows_keeps_the_cursor_on_its_line() {
+        let mut term = Terminal::new(5, 5, 10).unwrap();
+        feed(&mut term, b"1\r\n2\r\n3\r\n4\r\n5\x1b[2;1H");
+        term.resize(5, 3, |_| {}).unwrap();
+        let pos = term.cursor();
+        assert_eq!(term.screen().rows[pos.row].cells[0].ch, '2');
+        feed(&mut term, b"X");
+        assert_eq!(term.screen().rows[pos.row].cells[0].ch, 'X');
+        assert!(term.screen().rows.iter().any(|row| row.cells[0].ch == '3'));
+    }
 }

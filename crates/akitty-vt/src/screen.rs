@@ -499,6 +499,10 @@ impl Screen {
         {
             all.pop();
         }
+        // The cursor's own line never goes to history: when occupied rows below it
+        // no longer fit, those rows are dropped instead of moving the cursor onto
+        // a different line.
+        all.truncate(cursor_global + rows);
         while all.len() < rows {
             let row = self.blank(Color::Background);
             all.push(row);
