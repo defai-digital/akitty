@@ -340,15 +340,21 @@ export class Terminal implements ITerminalCore {
   hasFocusEvents(): boolean { this.assertOpen(); return this.wasmTerm!.hasFocusEvents(); }
   hasMouseTracking(): boolean { this.assertOpen(); return this.wasmTerm!.hasMouseTracking(); }
   scrollLines(amount: number): void {
-    if (!Number.isFinite(amount)) throw new RangeError('scrollLines amount must be finite'); this.assertOpen(); this.setViewport(this.viewportY - amount);
+    if (!Number.isFinite(amount)) throw new RangeError('scrollLines amount must be finite'); this.assertOpen(); this.jumpViewport(this.viewportY - amount);
   }
   scrollPages(amount: number): void {
     if (!Number.isFinite(amount)) throw new RangeError('scrollPages amount must be finite');
     this.scrollLines(clamp(amount * this.rows, -Number.MAX_VALUE, Number.MAX_VALUE));
   }
-  scrollToTop(): void { this.setViewport(this.getScrollbackLength()); }
-  scrollToBottom(): void { this.setViewport(0); }
-  scrollToLine(line: number): void { if (!Number.isFinite(line)) throw new RangeError('scrollToLine line must be finite'); this.setViewport(this.getScrollbackLength() - line); }
+  scrollToTop(): void { this.jumpViewport(this.getScrollbackLength()); }
+  scrollToBottom(): void { this.jumpViewport(0); }
+  scrollToLine(line: number): void { if (!Number.isFinite(line)) throw new RangeError('scrollToLine line must be finite'); this.jumpViewport(this.getScrollbackLength() - line); }
+  /** A direct scroll replaces any smooth scroll in flight, so the animation cannot pull the viewport back. */
+  private jumpViewport(value: number): void {
+    if (this.scrollAnimationFrame !== undefined) { cancelAnimationFrame(this.scrollAnimationFrame); this.scrollAnimationFrame = undefined; }
+    this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
+    this.setViewport(this.targetViewportY);
+  }
   private setViewport(value: number): void {
     const target = clamp(value, 0, this.getScrollbackLength());
     if (target === this.viewportY) return;
@@ -429,7 +435,9 @@ export class Terminal implements ITerminalCore {
       return;
     }
     const lines = event.deltaMode === 1 ? event.deltaY : event.deltaMode === 2 ? event.deltaY * this.rows : event.deltaY / (this.renderer?.getMetrics().height ?? 20);
-    if (lines) this.smoothScrollTo(this.viewportY - lines);
+    // Ticks that arrive mid-animation extend the pending target, so none of their distance is lost.
+    const from = this.scrollAnimationFrame !== undefined ? this.targetViewportY : this.viewportY;
+    if (lines) this.smoothScrollTo(from - lines);
   };
   private mouseModifiers(event: MouseEvent): number { return (event.shiftKey ? 4 : 0) | (event.altKey ? 8 : 0) | (event.ctrlKey ? 16 : 0); }
   private pointer(event: MouseEvent): { x: number; y: number } {
@@ -463,7 +471,7 @@ export class Terminal implements ITerminalCore {
     this.hoverRequest++;
     if (this.dragging) {
       const rect = this.canvas.getBoundingClientRect();
-      this.setViewport(this.dragging.viewport - (event.clientY - this.dragging.y) * this.getScrollbackLength() / Math.max(1, rect.height)); return;
+      this.jumpViewport(this.dragging.viewport - (event.clientY - this.dragging.y) * this.getScrollbackLength() / Math.max(1, rect.height)); return;
     }
     if (this.wasmTerm.hasMouseTracking() && !event.shiftKey && (this.wasmTerm.getMode(1003) || this.wasmTerm.getMode(1002) && event.buttons)) {
       const { x, y } = this.pointer(event);
