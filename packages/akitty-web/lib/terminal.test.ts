@@ -882,8 +882,10 @@ describe('Terminal', () => {
         const subscription = term.onSelectionChange(() => {
           subscription.dispose(); term.reset(); term.write('replacement'); render.mockClear();
         });
-        if (operation === 'resize') term.resize(40, 10);
-        else term.options.fontSize = 18;
+        if (operation === 'resize') {
+          term.resize(40, 10);
+          expect([term.options.cols, term.options.rows]).toEqual([40, 10]);
+        } else term.options.fontSize = 18;
         expect(render).not.toHaveBeenCalled();
         term.selectAll(); expect(term.getSelection().trim()).toBe('replacement');
         term.dispose();
