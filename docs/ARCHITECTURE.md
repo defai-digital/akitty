@@ -66,7 +66,9 @@ Native and browser platform behavior and performance require separate qualificat
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
-  user approval; images are unsupported, so confirmation never decodes images.
+  user approval by default; the prompt's Always allow choice (restorable in
+  Settings) lets later writes through with a status-bar note. Images are
+  unsupported, so confirmation never decodes images.
 - TypeScript ranks native commands through bundled JavaScriptCore code. Swift is
   the command authority. No Node runtime, shell bridge, dynamic plugin loading,
   AX TUI native renderer, or arbitrary user JavaScript is included.
