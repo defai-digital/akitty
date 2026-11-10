@@ -118,6 +118,32 @@ test('hidden synchronized output flushes title and replies on the host deadline'
   expect((await page.evaluate(() => (window as any).fixture.lines()))[0]).toBe('hidden')
 })
 
+test('resetting from an output callback preserves the replacement viewport', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const result = await page.evaluate(async () => {
+    const f = (window as any).fixture
+    let restored = 0
+    f.terminal.onBell(() => {
+      f.terminal.reset()
+      f.terminal.write(Array.from({ length: 24 }, (_, row) => `restored ${row}\r\n`).join(''))
+      f.terminal.scrollToTop()
+      restored = f.terminal.getViewportY()
+    })
+    await f.write('\x07')
+    const t = f.terminal, viewport = t.getViewportY()
+    return { restored, viewport, history: t.getScrollbackLength(),
+      top: t.buffer.active.getLine(t.buffer.active.baseY - Math.floor(viewport))?.translateToString(true),
+      white: f.pixels().white }
+  })
+  expect(result.restored).toBeGreaterThan(0)
+  expect(result.viewport).toBe(result.restored)
+  expect(result.viewport).toBe(result.history)
+  expect(result.top).toBe('restored 0')
+  expect(result.white).toBeGreaterThan(30)
+  expect(errors).toEqual([])
+})
+
 test('ordinary clicks preserve the clipboard while explicit one-cell selections remain copyable', async ({ page }) => {
   await page.evaluate(async () => {
     const f = (window as any).fixture

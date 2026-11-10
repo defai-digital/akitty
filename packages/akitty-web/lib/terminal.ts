@@ -243,13 +243,17 @@ export class Terminal implements ITerminalCore {
         data = new Uint8Array(output);
       }
     }
-    const alternate = this.wasmTerm!.isAlternateScreen();
-    this.wasmTerm!.write(data, this.engineEvent);
+    const terminal = this.wasmTerm!, alternate = terminal.isAlternateScreen();
+    terminal.write(data, this.engineEvent);
+    // Each event boundary can reset or dispose the terminal. An old write must
+    // never publish buffer changes, replies or viewport updates for its replacement.
+    if (this.isDisposed || this.wasmTerm !== terminal) return;
     this.revision++;
-    if (!this.isDisposed) {
-      this.notifyBufferChangeIfSwitched(alternate); this.processTerminalResponses(); this.scheduleSync();
-      this.linkDetector?.invalidateCache(); this.scrollToBottom();
-    }
+    this.notifyBufferChangeIfSwitched(alternate);
+    if (this.isDisposed || this.wasmTerm !== terminal) return;
+    this.processTerminalResponses();
+    if (this.isDisposed || this.wasmTerm !== terminal) return;
+    this.scheduleSync(); this.linkDetector?.invalidateCache(); this.scrollToBottom();
   }
   private readonly engineEvent = (event: EngineEvent): void => {
     if (event.type === 'title') this.applyTitle(event.title);

@@ -656,6 +656,46 @@ describe('Terminal', () => {
       } finally { term.dispose(); }
     });
 
+    for (const origin of ['bell', 'title', 'buffer change', 'reply']) {
+      test(`an old write cannot scroll a replacement terminal created by its ${origin} listener`, async () => {
+        const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
+        term.open(container);
+        let restoredViewport = 0, replaced = false;
+        const restore = () => {
+          if (replaced) return;
+          replaced = true; term.reset();
+          term.write(Array.from({ length: 15 }, (_, row) => `new ${row}\r\n`).join(''));
+          term.scrollToTop(); restoredViewport = term.getViewportY();
+        };
+        const input = origin === 'bell' ? '\x07' : origin === 'title' ? '\x1b]2;reset\x07'
+          : origin === 'buffer change' ? '\x1b[?1049h' : '\x1b[6n';
+        if (origin === 'bell') term.onBell(restore);
+        else if (origin === 'title') term.onTitleChange(title => { if (title === 'reset') restore(); });
+        else if (origin === 'buffer change') term.buffer.onBufferChange(restore);
+        else term.onData(restore);
+        try {
+          term.write(input);
+          expect(replaced).toBe(true);
+          expect(restoredViewport).toBeGreaterThan(0);
+          expect(term.getViewportY()).toBe(restoredViewport);
+        } finally { term.dispose(); }
+      });
+    }
+
+    test('reset from a title listener reports the replacement buffer only once', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      try {
+        term.write('\x1b[?1049h');
+        const changes: string[] = [];
+        term.buffer.onBufferChange(buffer => changes.push(buffer.type));
+        term.onTitleChange(title => { if (title === 'reset') term.reset(); });
+        term.write('\x1b]2;reset\x07');
+        expect(term.buffer.active.type).toBe('normal');
+        expect(changes).toEqual(['normal']);
+      } finally { term.dispose(); }
+    });
+
     test('a viewport clamp listener can dispose the terminal during resize', async () => {
       const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
       term.open(container);
