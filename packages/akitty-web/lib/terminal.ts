@@ -157,7 +157,10 @@ export class Terminal implements ITerminalCore {
       if (key === 'fontSize') renderer.setFontSize(this.options.fontSize);
       if (key === 'fontFamily') renderer.setFontFamily(this.options.fontFamily);
       if (key === 'lineHeight') renderer.setLineHeight(this.options.lineHeight);
-      this.selectionManager?.clearSelection(); renderer.resize(this.cols, this.rows);
+      const terminal = this.wasmTerm;
+      this.selectionManager?.clearSelection();
+      if (this.isDisposed || this.wasmTerm !== terminal) return;
+      renderer.resize(this.cols, this.rows);
       renderer.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
     }
   }
@@ -220,7 +223,9 @@ export class Terminal implements ITerminalCore {
   }
   private emitInput(data: string): void {
     if (this.isDisposed || this.options.disableStdin) return;
-    this.selectionManager?.clearSelection(); this.dataEmitter.fire(data);
+    const terminal = this.wasmTerm;
+    this.selectionManager?.clearSelection();
+    if (!this.isDisposed && this.wasmTerm === terminal) this.dataEmitter.fire(data);
   }
   write(data: string | Uint8Array, callback?: () => void): void {
     this.assertOpen();
@@ -288,10 +293,12 @@ export class Terminal implements ITerminalCore {
     this.assertOpen(); Terminal.validate(cols, rows);
     if (cols === this.cols && rows === this.rows) { if (this.resizePaintPending) this.finishResize(); return; }
     const previous = { cols: this.cols, rows: this.rows };
-    this.wasmTerm!.resize(cols, rows); this.cols = cols; this.rows = rows; this.revision++;
+    const terminal = this.wasmTerm!;
+    terminal.resize(cols, rows); this.cols = cols; this.rows = rows; this.revision++;
     try { this.renderer!.resize(cols, rows); }
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
     this.selectionManager?.clearSelection();
+    if (this.isDisposed || this.wasmTerm !== terminal) return;
     this.resizePaintPending = true; this.finishResize();
   }
   private finishResize(): void {
@@ -310,14 +317,21 @@ export class Terminal implements ITerminalCore {
     this.assertOpen();
     const previous = this.wasmTerm!, alternate = previous.isAlternateScreen();
     const replacement = this.engine!.createTerminal(this.cols, this.rows, this.config());
-    try { this.selectionManager?.setTerminal(replacement); } catch (error) { replacement.free(); throw error; }
+    // Commit ownership before selection notifications can reenter reset/dispose.
     this.wasmTerm = replacement; previous.free();
     this.outputQueue.cancel(new Error('Terminal was reset before queued output completed'));
     this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
-    this.linkDetector?.invalidateCache(); this.handleMouseLeave(); this.renderer?.clear();
-    this.revision++; this.notifyBufferChangeIfSwitched(alternate); this.scrollEmitter.fire(0); this.applyTitle('');
+    this.linkDetector?.invalidateCache(); this.renderer?.clear(); this.revision++;
+    this.selectionManager?.setTerminal(replacement);
+    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    this.handleMouseLeave();
+    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    this.notifyBufferChangeIfSwitched(alternate);
+    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    this.scrollEmitter.fire(0);
+    if (!this.isDisposed && this.wasmTerm === replacement) this.applyTitle('');
   }
   private notifyBufferChangeIfSwitched(previous: boolean): void {
     if (this.wasmTerm && previous !== this.wasmTerm.isAlternateScreen()) {

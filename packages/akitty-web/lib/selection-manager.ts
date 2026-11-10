@@ -175,7 +175,7 @@ export class SelectionManager {
     const end = Math.max(0, Math.min(rows - 1, Math.floor(Math.max(first, last))));
     this.selectRange({ col: 0, absoluteRow: this.absolute(start) }, { col: cols - 1, absoluteRow: this.absolute(end) });
   }
-  setTerminal(engine: AkittyTerminal): void { this.clearSelection(); this.mouseDownTarget = null; this.wasmTerm = engine; }
+  setTerminal(engine: AkittyTerminal): void { this.wasmTerm = engine; this.mouseDownTarget = null; this.clearSelection(); }
   focus(): void { this.renderer.getCanvas().parentElement?.focus(); }
   getDirtySelectionRows(): Set<number> { return this.dirtySelectionRows; }
   clearDirtySelectionRows(): void { this.dirtySelectionRows.clear(); }
