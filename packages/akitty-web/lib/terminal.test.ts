@@ -627,6 +627,68 @@ describe('Terminal', () => {
   });
 
   describe('Lifecycle recovery', () => {
+    test('widening a scrolled terminal keeps the viewport inside the reflowed history', async () => {
+      const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
+      term.open(container);
+      try {
+        term.write('abcdefghij'.repeat(20));
+        term.scrollToTop();
+        const previous = term.getViewportY();
+        const scrolls: number[] = [];
+        term.onScroll(value => scrolls.push(value));
+        term.resize(100, 3);
+        expect(term.getScrollbackLength()).toBeLessThan(previous);
+        expect(term.getViewportY()).toBe(term.getScrollbackLength());
+        expect(scrolls).toEqual([term.getViewportY()]);
+      } finally { term.dispose(); }
+    });
+
+    test('reset from a bell listener stops the remaining bells from the old terminal', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container);
+      let bells = 0;
+      term.onBell(() => { if (++bells === 1) term.reset(); });
+      try {
+        term.write('\x07\x07\x07');
+        expect(bells).toBe(1);
+        term.write('\x07');
+        expect(bells).toBe(2);
+      } finally { term.dispose(); }
+    });
+
+    test('a viewport clamp listener can dispose the terminal during resize', async () => {
+      const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
+      term.open(container);
+      try {
+        term.write('abcdefghij'.repeat(20));
+        term.scrollToTop();
+        term.onScroll(() => term.dispose());
+        expect(() => term.resize(100, 3)).not.toThrow();
+        expect(term.wasmTerm).toBeUndefined();
+      } finally { term.dispose(); }
+    });
+
+    test('resize preserves an in-range viewport and stops a wheel target outside the new history', async () => {
+      const term = await createIsolatedTerminal({ cols: 10, rows: 3, smoothScrollDuration: 100 });
+      term.open(container);
+      try {
+        term.write('abcdefghij'.repeat(100));
+        container.dispatchEvent(new WheelEvent('wheel', { deltaY: -30, deltaMode: 1 }));
+        const previous = term.getViewportY();
+        expect(previous).toBeGreaterThan(0);
+        const scrolls: number[] = [];
+        term.onScroll(value => scrolls.push(value));
+        term.resize(100, 3);
+        expect(term.getScrollbackLength()).toBeGreaterThan(previous);
+        expect(term.getScrollbackLength()).toBeLessThan(30);
+        expect(term.getViewportY()).toBe(previous);
+        await new Promise(resolve => setTimeout(resolve, 80));
+        expect(term.getViewportY()).toBe(previous);
+        expect(scrolls).toEqual([]);
+        expect((term as any).scrollAnimationFrame).toBeUndefined();
+      } finally { term.dispose(); }
+    });
+
     test('open can recover after WASM creation fails', async () => {
       const term = await createIsolatedTerminal();
       const engine = (term as any).engine;

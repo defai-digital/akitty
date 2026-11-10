@@ -31,7 +31,9 @@ export class OutputQueue {
     if (data.length > available || this.writes.length >= OutputQueue.MAX_WRITES) {
       return Promise.reject(new RangeError('Terminal output queue is full; await earlier writes'));
     }
-    const bytes = typeof data === 'string' ? encoder.encode(data) : data.slice();
+    // Buffer.slice() and some Uint8Array subclasses return shared views. Take
+    // an owned copy so callers can reuse their storage as soon as we accept it.
+    const bytes = typeof data === 'string' ? encoder.encode(data) : new Uint8Array(data);
     if (bytes.length > available) return Promise.reject(new RangeError('Terminal output queue is full; await earlier writes'));
     const completion = new Promise<void>((resolve, reject) => {
       this.writes.push({ bytes, offset: 0, resolve, reject });

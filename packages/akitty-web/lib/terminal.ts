@@ -253,7 +253,10 @@ export class Terminal implements ITerminalCore {
   }
   private readonly engineEvent = (event: EngineEvent): void => {
     if (event.type === 'title') this.applyTitle(event.title);
-    else for (let i = 0; i < event.count && !this.isDisposed; i++) this.bellEmitter.fire();
+    else {
+      const terminal = this.wasmTerm;
+      for (let i = 0; i < event.count && !this.isDisposed && this.wasmTerm === terminal; i++) this.bellEmitter.fire();
+    }
   };
   private scheduleSync(): void {
     clearTimeout(this.syncTimer); this.syncTimer = undefined;
@@ -290,6 +293,10 @@ export class Terminal implements ITerminalCore {
   private finishResize(): void {
     this.settings.cols = this.cols; this.settings.rows = this.rows;
     this.linkDetector?.invalidateCache();
+    // Reflow can consume history. Clamp before painting and discard any wheel
+    // animation whose target belonged to the previous grid.
+    this.jumpViewport(this.viewportY);
+    if (this.isDisposed) return;
     this.renderer!.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
     this.resizePaintPending = false; this.resizeEmitter.fire({ cols: this.cols, rows: this.rows });
   }
