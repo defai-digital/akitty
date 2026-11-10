@@ -115,6 +115,19 @@ enum Request {
     },
     /// When `enabled` is false, `OSC 771` no longer changes the document.
     ProgramChrome { id: u64, enabled: bool },
+    /// Host colour theme (a profile's colours). Omitted fields use the built-in colours. Blank
+    /// cells on the theme background are omitted from snapshots, so the host clears to it.
+    Theme {
+        id: u64,
+        #[serde(default)]
+        foreground: Option<u32>,
+        #[serde(default)]
+        background: Option<u32>,
+        #[serde(default)]
+        cursor: Option<u32>,
+        #[serde(default)]
+        ansi: Vec<u32>,
+    },
     /// Read end of a pipe the core writes when the model revision advances. The core owns both
     /// ends and closes them on `close`; the host must stop reading before closing the session.
     NotifyFd { id: u64 },
@@ -282,6 +295,7 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 | Request::Find { id, .. }
                 | Request::Chrome { id, .. }
                 | Request::ProgramChrome { id, .. }
+                | Request::Theme { id, .. }
                 | Request::NotifyFd { id } => *id,
                 _ => unreachable!(),
             };
@@ -351,6 +365,15 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                 Request::ProgramChrome { enabled, .. } => {
                     session.set_program_chrome(enabled)?;
                     Ok(json!({}))
+                }
+                Request::Theme { foreground, background, cursor, ansi, .. } => {
+                    if ansi.len() > 16 {
+                        Err("a theme sets at most 16 ansi colours".into())
+                    } else if [foreground, background, cursor].into_iter().flatten().chain(ansi.iter().copied()).any(|rgb| rgb > 0xffffff) {
+                        Err("theme colours must be 0xRRGGBB".into())
+                    } else {
+                        session.set_theme(&model::Theme { foreground, background, cursor, ansi }).map(|()| json!({}))
+                    }
                 }
                 Request::NotifyFd { .. } => session.notify_fd(),
                 _ => unreachable!(),

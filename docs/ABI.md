@@ -64,6 +64,7 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | cell_size | id, width, height | Cell size in pixels (1–256 by 1–512), used for graphics placement and size reports |
 | chrome | id; optional clear, status, mark, progress, sprite | Replace the session chrome document. Applies even when program chrome is off |
 | program_chrome | id, enabled | When false, `OSC 771` no longer changes the document |
+| theme | id; optional foreground, background, cursor (0xRRGGBB), ansi (up to 16 colours) | Host colour theme, the baseline OSC 104/110–112 reset to; omitted colours use the built-in defaults, and an empty request restores them. Program OSC 4/10/11/12 overrides still apply over it. Blank cells on the theme background are omitted from snapshots, so the host clears its frame to that background |
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
 sessions and 5,000 scrollback lines per session. Input/reply queues are bounded:

@@ -1402,3 +1402,22 @@ fn shell_metadata_overflow_is_rejected_without_leaking_into_grid() {
     assert_eq!(snapshot["shell"]["rejected"], 1);
     assert!(snapshot["lines"][0].as_str().unwrap().starts_with("SAFE"));
 }
+
+#[test]
+fn host_theme_recolours_the_session_and_rejects_invalid_colours() {
+    let t = Terminal::new(10, 2);
+    t.feed("a");
+    call(json!({"op": "theme", "id": t.0, "foreground": 0x102030, "background": 0xf0f0f0, "ansi": [0, 0xaa0000]}));
+    let cell = &t.snapshot()["cells"][0];
+    assert_eq!(cell[3], 0x102030);
+    assert_eq!(cell[4], 0xf0f0f0);
+    for bad in [
+        json!({"op": "theme", "id": t.0, "background": 0x1000000}),
+        json!({"op": "theme", "id": t.0, "ansi": vec![0; 17]}),
+        json!({"op": "theme", "id": t.0, "palette": [1]}),
+    ] {
+        assert_eq!(response(bad)["ok"], false);
+    }
+    call(json!({"op": "theme", "id": t.0}));
+    assert_eq!(t.snapshot()["cells"][0][4], 0x080a0d, "an empty theme restores the built-in colours");
+}
