@@ -97,6 +97,9 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(ClipboardPolicy.acceptsText("\0"))
         XCTAssertFalse(ClipboardPolicy.acceptsText(String(repeating:"a",count:65537)))
         XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("hello"))
+        XCTAssertEqual(ClipboardPolicy.writePreview("  a\n\n\tb\u{1b}c  "), "a b c")
+        XCTAssertEqual(ClipboardPolicy.writePreview(String(repeating: "x", count: 200), limit: 5), "xxxxx…")
+        XCTAssertEqual(ClipboardPolicy.writePreview("\n\n"), "")
         XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("a\tb"))
         XCTAssertFalse(ClipboardPolicy.needsPasteConfirmation("\t"))
         for value in ["a\nb", "a\rb", "\u{1b}[201~", "\u{7f}"] { XCTAssertTrue(ClipboardPolicy.needsPasteConfirmation(value)) }

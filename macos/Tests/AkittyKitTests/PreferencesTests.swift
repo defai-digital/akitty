@@ -9,6 +9,15 @@ final class PreferencesTests: XCTestCase {
         var preferences = TerminalPreferences(); preferences.confirmPaste = false
         XCTAssertFalse(try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(preferences)).confirmPaste)
     }
+    func testClipboardWriteConfirmationDefaultsOnAndRoundTrips() throws {
+        XCTAssertTrue(try JSONDecoder().decode(TerminalPreferences.self, from: Data("{}".utf8)).confirmClipboardWrite)
+        var preferences = TerminalPreferences(); preferences.confirmClipboardWrite = false
+        XCTAssertFalse(try JSONDecoder().decode(TerminalPreferences.self, from: JSONEncoder().encode(preferences)).confirmClipboardWrite)
+        var state = PreferencesDraft(preferences: TerminalPreferences(), automaticChecks: false)
+        state.mergeClipboardWriteConfirmation(false)
+        XCTAssertFalse(state.draft.confirmClipboardWrite)
+        XCTAssertFalse(state.hasChanges)
+    }
     func testExternalPasteChoiceRefreshesSettingsWithoutDiscardingDraftEdits() {
         var state = PreferencesDraft(preferences: TerminalPreferences(), automaticChecks: false)
         state.draft.fontSize = 18

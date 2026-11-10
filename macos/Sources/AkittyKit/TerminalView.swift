@@ -915,20 +915,46 @@ private let hiddenPollInterval: Double = 0.25
         } else { send(text, paste: true) }
     }
     private func showClipboardRequest() {
-        guard !stopped, !clipboardPromptOpen, !pendingClipboard.isEmpty, let window, window.attachedSheet == nil else { return }
+        guard !stopped, !clipboardPromptOpen, !pendingClipboard.isEmpty else { return }
+        if !preferences.confirmClipboardWrite {
+            guard let text = pendingClipboard.popLast() else { return }
+            pendingClipboard.removeAll()
+            if ClipboardPolicy.acceptsText(text) { writeClipboard(text) }
+            return
+        }
+        guard let window, window.attachedSheet == nil else { return }
         let text = pendingClipboard.removeFirst()
         guard ClipboardPolicy.acceptsText(text) else { showClipboardRequest(); return }
         clipboardPromptOpen = true
-        let alert = NSAlert(); alert.messageText = "Allow this terminal to replace the clipboard?"
-        alert.informativeText = "\(snapshot?.title ?? "Akitty") requests a plain-text clipboard write (\(text.utf8.count) bytes).\n\n\(String(text.prefix(300)))"
-        alert.addButton(withTitle: "Deny"); alert.addButton(withTitle: "Allow Once")
+        let alert = NSAlert(); alert.messageText = "Allow a program to copy to the clipboard?"
+        let characters = text.count, preview = ClipboardPolicy.writePreview(text)
+        alert.informativeText = "A program in this terminal wants to copy \(characters) \(characters == 1 ? "character" : "characters")"
+            + (preview.isEmpty ? "." : ":\n\n\u{201C}\(preview)\u{201D}")
+        alert.addButton(withTitle: "Allow"); alert.addButton(withTitle: "Deny")
+        alert.buttons[1].keyEquivalent = "\u{1b}"
+        alert.showsSuppressionButton = true
+        let suppression = alert.suppressionButton
+        suppression?.title = "Always allow (change in Settings)"
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
-            if response == .alertSecondButtonReturn && !self.stopped {
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+            self.clipboardPromptOpen = false
+            if response == .alertFirstButtonReturn && !self.stopped {
+                if suppression?.state == .on {
+                    var saved = TerminalPreferences.load(from: self.preferenceDefaults)
+                    saved.confirmClipboardWrite = false
+                    do { try saved.save(to: self.preferenceDefaults) }
+                    catch { self.show(error) }
+                    self.preferences.confirmClipboardWrite = false
+                }
+                self.writeClipboard(text)
             }
-            self.clipboardPromptOpen = false; self.showClipboardRequest()
+            self.showClipboardRequest()
         }
+    }
+    private func writeClipboard(_ text: String) {
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+        let characters = text.count
+        publishStatus("Copied \(characters) \(characters == 1 ? "character" : "characters") to the clipboard", force: true)
     }
     public func changeFont(_ delta: CGFloat?) { fontSize = delta.map { min(36,max(9,fontSize + $0)) } ?? preferences.fontSize; resizeTerminal(); redraw() }
     public override func isAccessibilityElement() -> Bool { true }
