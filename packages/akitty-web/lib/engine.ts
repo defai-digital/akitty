@@ -173,6 +173,9 @@ export class AkittyTerminal {
       this.invalidate();
       const alternate = this.isAlternateScreen();
       if (alternate !== this.alternate) { this.full = true; this.alternate = alternate; }
+      // A nested write can replace the remembered callback. Each subsequent chunk
+      // still delivers its event batch to this write's callback.
+      this.handleEvent = onEvent;
       this.drainEvents();
       if (!this.handle) return;
     }
