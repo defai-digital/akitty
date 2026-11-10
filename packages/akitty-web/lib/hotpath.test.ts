@@ -159,19 +159,21 @@ describe('AkittyTerminal write path', () => {
     } finally { term.free(); }
   });
 
-  test('a reentrant write keeps later chunks of the outer write on the outer callback', async () => {
+  test('reentrant writes keep later chunks attached to their original callback', async () => {
     const term = await makeWasm();
-    const outer: string[] = [], inner: string[] = [];
+    const outer: string[] = [], nested: string[] = [];
     try {
-      // Over one write chunk (1 MiB), so the second title is parsed after the nested write returns.
-      const data = '\x1b]2;first\x07' + 'x'.repeat((1 << 20) + 1) + '\x1b]2;second\x07';
-      term.write(data, event => {
+      // The second title is parsed in the next bounded WASM write. A nested write
+      // from the first title must not take ownership of that later outer event.
+      term.write('\x1b]2;first\x07' + '\0'.repeat(1 << 20) + '\x1b]2;last\x07', event => {
         if (event.type !== 'title') return;
         outer.push(event.title);
-        if (event.title === 'first') term.write('\x1b]2;nested\x07', nested => { if (nested.type === 'title') inner.push(nested.title); });
+        if (event.title === 'first') term.write('\x1b]2;inner\x07', inner => {
+          if (inner.type === 'title') nested.push(inner.title);
+        });
       });
-      expect(outer).toEqual(['first', 'second']);
-      expect(inner).toEqual(['nested']);
+      expect(outer).toEqual(['first', 'last']);
+      expect(nested).toEqual(['inner']);
     } finally { term.free(); }
   });
 

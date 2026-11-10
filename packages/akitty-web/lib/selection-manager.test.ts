@@ -80,6 +80,68 @@ describe('SelectionManager', () => {
     }
   });
 
+  test('a click without dragging neither selects a character nor copies it', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.open(container!);
+    const manager = (term as any).selectionManager;
+    const copied: string[] = [];
+    manager.copy = async (value: string) => { copied.push(value); };
+    try {
+      term.write('ABC');
+      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
+      canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+      document.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }));
+      expect(copied).toEqual([]);
+      expect(term.getSelection()).toBe('');
+      expect(term.hasSelection()).toBe(false);
+      expect(term.getSelectionPosition()).toBeUndefined();
+    } finally { term.dispose(); }
+  });
+
+  test('the selection API includes a single cell', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.open(container!);
+    try {
+      term.write('ABC');
+      term.select(0, 0, 1);
+      expect(term.getSelection()).toBe('A');
+      expect(term.hasSelection()).toBe(true);
+      expect(term.getSelectionPosition()).toEqual({ start: { x: 0, y: 0 }, end: { x: 0, y: 0 } });
+    } finally { term.dispose(); }
+  });
+
+  test('zero and negative selection lengths clear the held range', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.open(container!);
+    try {
+      term.write('ABC');
+      for (const length of [0, -1, 0.5]) {
+        term.select(0, 0, 2);
+        term.select(1, 0, length);
+        expect(term.getSelection()).toBe('');
+        expect(term.hasSelection()).toBe(false);
+        expect(term.getSelectionPosition()).toBeUndefined();
+      }
+    } finally { term.dispose(); }
+  });
+
+  test('non-finite selection arguments fail without replacing the held range', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.open(container!);
+    try {
+      term.write('ABC'); term.select(0, 0, 2);
+      for (const value of [NaN, Infinity, -Infinity]) {
+        for (const args of [[value, 0, 1], [0, value, 1], [0, 0, value]]) {
+          expect(() => term.select(args[0], args[1], args[2])).toThrow(RangeError);
+          expect(term.getSelection()).toBe('AB');
+        }
+        expect(() => term.selectLines(value, 0)).toThrow(RangeError);
+        expect(() => term.selectLines(0, value)).toThrow(RangeError);
+        expect(term.getSelection()).toBe('AB');
+      }
+    } finally { term.dispose(); }
+  });
+
   test('auto-scroll preserves the drag endpoint at both retained-buffer boundaries', async () => {
     for (const [history, direction] of [[false, -1], [true, -1], [true, 1]] as const) {
       const term = await createIsolatedTerminal({ cols: 8, rows: 3, scrollback: 20 });
@@ -191,13 +253,13 @@ describe('SelectionManager', () => {
       term.dispose();
     });
 
-    test('hasSelection returns false for single cell selection', async () => {
+    test('hasSelection returns false for an uncommitted single-cell anchor', async () => {
       if (!container) return;
 
       const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
       term.open(container);
 
-      // Same start and end = no real selection
+      // A mouse-down anchor at one cell is not an explicit API range
       setSelectionAbsolute(term, 5, 0, 5, 0);
 
       const selMgr = (term as any).selectionManager;
@@ -769,35 +831,6 @@ describe('SelectionManager', () => {
       expect(selMgr.hasSelection()).toBe(false);
 
       term.dispose();
-    });
-
-    test('a plain click neither copies the clicked character nor leaves it highlighted', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      term.open(container);
-      term.write('Hello World\r\n');
-      const selMgr = (term as any).selectionManager;
-      const canvas = (term as any).renderer.getCanvas() as HTMLCanvasElement;
-      const copied: string[] = [];
-      const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
-      let changes = 0;
-      const subscription = term.onSelectionChange(() => changes++);
-      try {
-        canvas.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
-        document.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }));
-        await Promise.resolve();
-
-        expect(copied).toEqual([]);
-        expect(changes).toBe(0);
-        expect(term.hasSelection()).toBe(false);
-        expect(selMgr.getSelectionCoords()).toBeNull();
-      } finally {
-        subscription.dispose();
-        if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard); else delete (navigator as any).clipboard;
-        term.dispose();
-      }
     });
 
     test('repeated dispose() is safe and keeps the manager inert', async () => {

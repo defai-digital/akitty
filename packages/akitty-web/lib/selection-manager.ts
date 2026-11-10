@@ -12,6 +12,8 @@ export class SelectionManager {
   private selectionStart: Point | null = null;
   private selectionEnd: Point | null = null;
   private isSelecting = false;
+  // API and word selections may span one cell; a mouse-down anchor alone is empty.
+  private explicitSelection = false;
   private mouseDownTarget: EventTarget | null = null;
   private readonly dirtySelectionRows = new Set<number>();
   private readonly changes = new EventEmitter<void>();
@@ -60,9 +62,6 @@ export class SelectionManager {
     this.listen(document, 'mouseup', () => {
       if (!this.isSelecting) return;
       this.isSelecting = false; this.autoScroll(0);
-      // A click without a drag starts and ends on one cell. That is no selection, so it must
-      // not replace the clipboard or stay highlighted.
-      if (!this.hasSelection()) { this.clearSelection(); return; }
       const selection = this.getSelection();
       if (selection) { void this.copy(selection); this.changes.fire(); }
     });
@@ -99,6 +98,7 @@ export class SelectionManager {
   private range(): [Point, Point] | null {
     if (!this.selectionStart || !this.selectionEnd) return null;
     if (!this.resolve(this.selectionStart) || !this.resolve(this.selectionEnd)) return null;
+    if (!this.explicitSelection && compare(this.selectionStart, this.selectionEnd) === 0) return null;
     return compare(this.selectionStart, this.selectionEnd) <= 0 ? [this.selectionStart, this.selectionEnd] : [this.selectionEnd, this.selectionStart];
   }
   getSelectionCoords(): SelectionCoordinates | null {
@@ -142,21 +142,23 @@ export class SelectionManager {
     }
     return text;
   }
-  hasSelection(): boolean { const range = this.range(); return range !== null && compare(range[0], range[1]) !== 0; }
+  hasSelection(): boolean { return this.range() !== null; }
   private damage(): void {
     const coords = this.getSelectionCoords();
     if (coords) for (let row = coords.startRow; row <= coords.endRow; row++) this.dirtySelectionRows.add(row);
   }
   private move(end: Point): void { this.damage(); this.selectionEnd = end; this.damage(); }
   private selectRange(start: Point, end: Point): void {
-    this.damage(); this.selectionStart = this.anchor(start); this.selectionEnd = this.anchor(end); this.damage(); this.changes.fire();
+    this.damage(); this.selectionStart = this.anchor(start); this.selectionEnd = this.anchor(end); this.explicitSelection = true; this.damage(); this.changes.fire();
   }
   clearSelection(): void {
-    this.damage(); this.selectionStart = null; this.selectionEnd = null; this.isSelecting = false; this.autoScroll(0);
+    this.damage(); this.selectionStart = null; this.selectionEnd = null; this.explicitSelection = false; this.isSelecting = false; this.autoScroll(0);
   }
   deselect(): void { this.clearSelection(); this.changes.fire(); }
   selectAll(): void { this.selectLines(0, this.wasmTerm.rows - 1); }
   select(column: number, row: number, length: number): void {
+    if (![column, row, length].every(Number.isFinite)) throw new RangeError('Selection coordinates and length must be finite');
+    if (Math.floor(length) <= 0) { this.clearSelection(); return; }
     const { cols, rows } = this.wasmTerm.getDimensions();
     row = Math.max(0, Math.min(rows - 1, Math.floor(row))); column = Math.max(0, Math.min(cols - 1, Math.floor(column)));
     const extent = Math.min(row * cols + column + Math.max(1, Math.floor(length)) - 1, rows * cols - 1);
@@ -164,6 +166,7 @@ export class SelectionManager {
       { col: extent % cols, absoluteRow: this.absolute(Math.floor(extent / cols)) });
   }
   selectLines(first: number, last: number): void {
+    if (![first, last].every(Number.isFinite)) throw new RangeError('Selection rows must be finite');
     const { cols, rows } = this.wasmTerm.getDimensions();
     const start = Math.max(0, Math.min(rows - 1, Math.floor(Math.min(first, last))));
     const end = Math.max(0, Math.min(rows - 1, Math.floor(Math.max(first, last))));

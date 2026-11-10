@@ -118,6 +118,32 @@ test('hidden synchronized output flushes title and replies on the host deadline'
   expect((await page.evaluate(() => (window as any).fixture.lines()))[0]).toBe('hidden')
 })
 
+test('ordinary clicks preserve the clipboard while explicit one-cell selections remain copyable', async ({ page }) => {
+  await page.evaluate(async () => {
+    const f = (window as any).fixture
+    f.copied = []
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (value: string) => { f.copied.push(value) },
+    } })
+    await f.write('ABC')
+  })
+  const canvas = await page.locator('canvas').boundingBox()
+  if (!canvas) throw new Error('missing canvas')
+  await page.mouse.click(canvas.x + canvas.width / 64, canvas.y + canvas.height / 16)
+  expect(await page.evaluate(() => {
+    const f = (window as any).fixture
+    return { text: f.terminal.getSelection(), selected: f.terminal.hasSelection(),
+      range: f.terminal.getSelectionPosition() ?? null, copied: f.copied }
+  })).toEqual({ text: '', selected: false, range: null, copied: [] })
+  await page.evaluate(() => (window as any).fixture.terminal.select(0, 0, 1))
+  expect(await page.evaluate(() => {
+    const t = (window as any).fixture.terminal
+    return { text: t.getSelection(), selected: t.hasSelection() }
+  })).toEqual({ text: 'A', selected: true })
+  await page.evaluate(() => (window as any).fixture.terminal.select(0, 0, 0))
+  expect(await page.evaluate(() => (window as any).fixture.terminal.hasSelection())).toBe(false)
+})
+
 test('SGR mouse down, drag and release preserve modifiers', async ({ page }) => {
   await page.evaluate(() => {
     const f = (window as any).fixture
