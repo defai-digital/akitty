@@ -690,6 +690,35 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('a direct scroll stops a running smooth scroll from pulling the viewport back', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
+      term.open(container);
+      try {
+        term.write('line\r\n'.repeat(40));
+        (term as any).smoothScrollTo(30);
+        expect((term as any).scrollAnimationFrame).toBeDefined();
+        term.scrollToBottom();
+        expect(term.getViewportY()).toBe(0);
+        // Let any frame the wheel animation left behind run.
+        await new Promise(resolve => setTimeout(resolve, 80));
+        expect(term.getViewportY()).toBe(0);
+        expect((term as any).targetViewportY).toBe(0);
+        expect((term as any).scrollAnimationFrame).toBeUndefined();
+      } finally { term.dispose(); }
+    });
+
+    test('quick wheel ticks during a smooth scroll add up instead of losing distance', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
+      term.open(container);
+      try {
+        term.write('line\r\n'.repeat(100));
+        const wheel = { deltaY: -30, deltaMode: 1, shiftKey: false, preventDefault() {}, stopPropagation() {} } as unknown as WheelEvent;
+        (term as any).handleWheel(wheel);
+        (term as any).handleWheel(wheel);
+        expect((term as any).targetViewportY).toBe(60);
+      } finally { term.dispose(); }
+    });
+
     test('dispose clears active link hover even if the hover callback throws', async () => {
       const term = await createIsolatedTerminal();
       term.open(container);
