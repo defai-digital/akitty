@@ -89,23 +89,24 @@ command; `truncated` reports clipping and evicted ids return errors. History met
 and output explicitly report `untrusted:true`. The shell child's exit code in a
 snapshot remains distinct from each observed command's exit status.
 
-zsh integration also keeps a per-folder command history, so a long command used often
-can be recalled from a few typed letters. Pressing Tab at the end of a typed prefix lists
-the five best distinct commands run in the current folder that start with it, ranked by
-frequency and recency (each run scores 4 within an hour, 2 within a day, 1/2 within a week,
-1/4 after). Up/Down choose (the line previews the choice), Enter keeps it on the line without
+zsh integration also keeps a shared command history across folders, windows and sessions.
+Pressing Tab at the end of a typed prefix lists the five most recent distinct commands that
+start with it: those run in this folder first (by its logical or physical path), then matches
+from other folders, newest first within each. Prefix matching is case-sensitive; filtering and
+deduplication happen before the five-result limit. Record order breaks timestamp ties.
+Up/Down choose (the line previews the choice), Enter keeps it on the line without
 running it, Esc restores the prefix, Tab inside the list completes as usual, and any other
 key closes the list and is typed. Up/Down on a typed prefix step through the same matches.
 With no match, each key runs the widget it was bound to after the user's startup files
-(compinit, fzf-tab, history search). A folder reached through a symlink shares the history of
-its real path.
+(compinit, fzf-tab, history search). Up/Down outside the menu can cycle through up to twenty
+recent matches. Existing stored commands are reused; native `.zsh_history` is not imported.
 
 A line is saved only when zsh itself keeps it in history: the user's `zshaddhistory`
 hooks run once and decide first; memory-only lines (hook status 2) are not persisted.
 Hook names and ordering remain visible to native registration, so `add-zsh-hook` can
 remove and deduplicate them. Replaced arrays and redefined functions take effect at
 the next prompt; autoloaded hooks load under their original names before wrapping.
-If a hook cannot load, folder persistence waits until its decision can be observed.
+If a hook cannot load, history persistence waits until its decision can be observed.
 Lines starting with a space, matching `HISTORY_IGNORE`, spanning
 several lines or over 1 KiB are skipped. Entries go to the owner-only file
 `~/Library/Application Support/Akitty/folder-history` (`AKITTY_FOLDER_HISTORY_FILE`
@@ -117,7 +118,8 @@ Safe nonblocking opens are required (available in macOS's zsh 5.9); older shells
 native history and keys with an explicit warning rather than using unsafe storage.
 Settings turns the feature off for
 new terminals (the core's `create.folder_history`, which sets `AKITTY_FOLDER_HISTORY=0`) and
-clears the file under the same lock, reporting unsafe paths or a busy writer. bash has no folder history: `bind -x` cannot hand Tab back to Readline
+clears the file under the same lock, reporting unsafe paths or a busy writer. The legacy folder-history
+file name, environment variables and preference keys remain compatible. bash has no shared history menu: `bind -x` cannot hand Tab back to Readline
 completion, and macOS bash 3.2 cannot edit the line from a key binding at all.
 
 Every program in the PTY can forge these notifications. They support navigation

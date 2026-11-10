@@ -264,7 +264,7 @@ for implementation details.
 - Native windows, tabs and split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
 - Bash/zsh shell integration records bounded command observations without editing
-  startup files. zsh also offers [folder command history](#folder-command-history) on Tab and Up/Down.
+  startup files. zsh also offers [command history](#command-history) on Tab and Up/Down.
   A persistent quick terminal has an opt-in global shortcut; hiding
   it preserves its shell. File drops insert shell-quoted paths, and text drops use
   the clipboard confirmation policy.
@@ -319,25 +319,29 @@ The [compatibility matrix](docs/COMPATIBILITY.md), [quality plan](docs/QUALITY_I
 [Native/WASM benchmark](benchmarks/README.md) and [agent approval demo](docs/AGENT_DEMO.md)
 separate implemented behavior, reproducible evidence and remaining qualification.
 
-## Folder command history
+<a id="folder-command-history"></a>
 
-In an integrated zsh 5.9+ terminal, type a command prefix and press **Tab** to show up to five
-commands used in that folder, ranked by frequency and recency. **Up/Down** previews a match;
-**Enter** keeps it on the editable command line, and a second Enter runs it. **Esc** restores
-the prefix, and Tab returns to ordinary completion. Up/Down on a typed prefix also recalls
-matches directly. Keys keep their existing behavior when no folder match is available.
-Symlinked paths share matches with their physical directory.
+## Command history
 
-Turn **Folder history on Tab and Up/Down (zsh)** off in **Settings…** for new terminals,
+In an integrated zsh 5.9+ terminal, type a command prefix and press **Tab** to show the five
+most recent distinct matches, those run in the current folder first (a symlinked path counts as
+its physical folder), then matches from other folders, windows and sessions, newest first within
+each. Matching is case-sensitive and filters the full retained history before taking five results.
+**Up/Down** previews a match; **Enter** keeps it on the editable command line, and a second Enter
+runs it. **Esc** restores the prefix, and Tab returns to ordinary completion. Up/Down on a typed
+prefix also recalls matches directly. Keys keep their existing behavior when nothing matches.
+
+Turn **Command history on Tab and Up/Down (zsh)** off in **Settings…** for new terminals,
 or start a shell with `AKITTY_FOLDER_HISTORY=0`. **Clear History** in Settings empties the
 shared store. It defaults to `~/Library/Application Support/Akitty/folder-history`;
-`AKITTY_FOLDER_HISTORY_FILE` can select a private file at an absolute path.
+`AKITTY_FOLDER_HISTORY_FILE` can select a private file at an absolute path. The existing file,
+environment variables and saved preference remain compatible; native `.zsh_history` is not imported.
 
 The store is private and limited to 512 KiB; matching reads at most 3,000 recent records.
 Leading-whitespace, multiline, oversized and `HISTORY_IGNORE` commands are skipped.
 History hooks can reject persistence, including memory-only entries (status 2), and can be
 added, removed or redefined through normal zsh registration. Older zsh builds without safe
-nonblocking file opens keep their native history and keys and report that folder history is unavailable.
+nonblocking file opens keep their native history and keys and report that command history is unavailable.
 
 ## Windows and Linux
 

@@ -80,6 +80,26 @@ describe('SelectionManager', () => {
     }
   });
 
+  test('auto-scroll preserves the drag endpoint at both retained-buffer boundaries', async () => {
+    for (const [history, direction] of [[false, -1], [true, -1], [true, 1]] as const) {
+      const term = await createIsolatedTerminal({ cols: 8, rows: 3, scrollback: 20 });
+      term.open(container!);
+      try {
+        term.write(history ? 'a中bc\r\na中bc\r\na中bc\r\na中bc\r\na中bc' : 'a中bc');
+        if (direction < 0) term.scrollToTop();
+        const base = term.wasmTerm!.getScrollbackLength() - term.getViewportY();
+        const row = direction < 0 ? 0 : 2;
+        setSelectionAbsolute(term, 2, base + row, 3, base + row);
+        const manager = (term as any).selectionManager;
+        const before = manager.getSelection();
+        expect(before).toBe('中b');
+        manager.isSelecting = true; manager.autoScroll(direction);
+        await new Promise(resolve => setTimeout(resolve, 120));
+        expect(manager.getSelection()).toBe(before);
+      } finally { term.dispose(); }
+    }
+  });
+
   test('selection follows retained row identity when bounded history evicts rows', async () => {
     const term = await createIsolatedTerminal({ cols: 8, rows: 2, scrollback: 2 });
     term.open(container!);
