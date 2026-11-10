@@ -27,16 +27,16 @@ add-zsh-hook preexec __akitty_preexec
 # B is part of the prompt, not printed ahead of user/framework prompt hooks.
 setopt prompt_percent
 PS1="${PS1}"$'%{\e]133;B\a%}'
-# Folder history: commands zsh keeps in history are also saved with the folder they ran in, so a long command used
-# often can be found again from a few typed letters. Tab at the end of a typed prefix lists the five best matches run
-# in this folder, ranked by frequency and recency; Up/Down choose (the line previews the choice), Enter keeps it on the
-# line, Esc restores the prefix, Tab completes as usual and any other key closes the list and is typed. Up/Down on a
-# typed prefix step through the same matches. Without a match every key does what it did before.
+# Command history: commands zsh keeps in history are also saved in a shared store. Tab at the end of a typed prefix
+# lists the five most recent distinct matches, those run in this folder first, then those from other folders; Up/Down
+# choose (the line previews the choice), Enter keeps it on the line, Esc restores the prefix, Tab completes as usual and
+# any other key closes the list and is typed. Up/Down on a typed prefix step through the same matches. Without a match
+# every key does what it did before.
 # AKITTY_FOLDER_HISTORY=0 turns this off.
 [[ ${AKITTY_FOLDER_HISTORY-} != 0 ]] || return
 zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null
 if ! zmodload -F zsh/system b:zsystem b:sysopen 2>/dev/null || ! zmodload -F zsh/stat b:zstat 2>/dev/null; then
-    print -u2 -r -- 'AkiTTY folder history unavailable: safe file locking modules are missing.'
+    print -u2 -r -- 'AkiTTY command history unavailable: safe file locking modules are missing.'
     return
 fi
 # zsh 5.8 lacks nonblocking opens. Keep its normal history and keys rather than risk blocking on a replaced file.
@@ -45,16 +45,17 @@ if ! () {
     sysopen -r -o nofollow,nonblock,cloexec -u descriptor /dev/null 2>/dev/null || return 1
     exec {descriptor}<&-
 }; then
-    print -u2 -r -- 'AkiTTY folder history unavailable: safe nonblocking file opens are missing.'
+    print -u2 -r -- 'AkiTTY command history unavailable: safe nonblocking file opens are missing.'
     return
 fi
 typeset -g __akitty_folder_file=${AKITTY_FOLDER_HISTORY_FILE:-$HOME/Library/Application Support/Akitty/folder-history}
+# Keep the existing storage format, configuration and preference keys so saved commands remain available.
 typeset -ga __akitty_folder_menu __akitty_folder_cycle
 typeset -g __akitty_folder_original __akitty_folder_keymap __akitty_folder_shown
 typeset -gi __akitty_folder_selected __akitty_folder_warned=0 __akitty_folder_named_result=0 __akitty_folder_hooks_ready=1
 function __akitty_folder_warning() {
     if (( ! __akitty_folder_warned )); then
-        print -u2 -r -- "AkiTTY folder history unavailable: $1"
+        print -u2 -r -- "AkiTTY command history unavailable: $1"
         __akitty_folder_warned=1
     fi
     return 1
@@ -156,12 +157,13 @@ function __akitty_folder_addhistory() {
 }
 function __akitty_folder_store() {
     emulate -L zsh
-    local command=${1%$'\n'} physical=${PWD:A}
+    local command=${1%$'\n'} logical=$PWD physical=${PWD:A}
     [[ ${AKITTY_FOLDER_HISTORY-} != 0 && $command == [^[:space:]]* && $command != *[$'\n\r']* ]] || return 1
     () { local LC_ALL=C; (( ${#command} <= 1024 )); } || return 1
     [[ -z ${HISTORY_IGNORE-} || $command != ${~HISTORY_IGNORE} ]] || return 1
-    [[ $PWD$physical != *[$'\t\n\r']* ]] || return 1
-    __akitty_folder_locked __akitty_folder_append "${EPOCHSECONDS:-0}"$'\t'"$PWD"$'\t'"$physical"$'\t'"$command"
+    # A path with tab/CR/LF cannot be written into a tab-separated record; keep the command with empty path columns.
+    [[ $logical$physical != *[$'\t\n\r']* ]] || logical= physical=
+    __akitty_folder_locked __akitty_folder_append "${EPOCHSECONDS:-0}"$'\t'"$logical"$'\t'"$physical"$'\t'"$command"
 }
 # Hooks the user adds after startup join those run in front of the saved line.
 function __akitty_folder_wrap_hook() {
@@ -186,39 +188,39 @@ function __akitty_folder_adopt_hooks() {
     done
     zshaddhistory_functions=("${(@)zshaddhistory_functions:#__akitty_folder_addhistory}" __akitty_folder_addhistory)
 }
-# Sets reply to at most $1 distinct commands run in this folder (by either its logical or physical path) that extend
-# the line, best first: each run scores 4 within an hour, 2 within a day, 1/2 within a week and 1/4 after, and ties
-# go to the latest run.
+# Sets reply to at most $1 distinct commands that extend the line, newest first: those recorded in this folder (by its
+# logical or physical path) before those from other folders. Record order gives recency, so clock changes and equal
+# timestamps do not matter.
 function __akitty_folder_matches() {
     reply=()
     [[ ${AKITTY_FOLDER_HISTORY-} != 0 && -n $BUFFER && $CURSOR == $#BUFFER && -r $__akitty_folder_file ]] || return 1
-    local -a lines fields ranked
-    local -A score latest
-    local line command physical=${PWD:A}
-    local -i now=${EPOCHSECONDS:-0} age
+    local -a lines fields
+    local -A seen
+    local line command pass physical=${PWD:A}
+    local -i i same
     __akitty_folder_locked __akitty_folder_read || return 1
     lines=("${reply[@]}"); reply=()
-    for line in "${lines[@]}"; do
-        (( ${#line} <= 16384 )) || continue
-        fields=("${(@ps:\t:)line}")
-        (( $#fields >= 4 && ${#fields[1]} <= 12 )) && [[ $fields[1] == <-> ]] || continue
-        [[ $fields[2] == $PWD || $fields[3] == $physical ]] || continue
-        command=${(pj:\t:)fields[4,-1]}
-        [[ $command != $BUFFER && ${command[1,$#BUFFER]} == $BUFFER ]] || continue
-        # Command text is only ever a hash key here, never part of an arithmetic expression.
-        age=$(( now - $fields[1] ))
-        score[$command]=$(( ${score[$command]:-0} + (age < 3600 ? 16 : age < 86400 ? 8 : age < 604800 ? 2 : 1) ))
-        (( $fields[1] < ${latest[$command]:-0} )) || latest[$command]=$fields[1]
-    done
-    for command in ${(k)score}; do ranked+=("${(l:12::0:)score[$command]}${(l:12::0:)latest[$command]}$command"); done
-    for line in ${(O)ranked[@]}; do
-        reply+=("${line:24}")
-        (( $#reply < $1 )) || break
+    # Two newest-first passes: this folder's records, then the rest. A command run here counts as here.
+    for pass in here elsewhere; do
+        for (( i = $#lines; i >= 1; i-- )); do
+            line=$lines[i]
+            (( ${#line} <= 16384 )) || continue
+            fields=("${(@ps:\t:)line}")
+            (( $#fields >= 4 )) || continue
+            same=0; [[ $fields[2] == "$PWD" || $fields[3] == "$physical" ]] && same=1
+            if [[ $pass == here ]]; then (( same )) || continue; else (( same )) && continue; fi
+            command=${(pj:\t:)fields[4,-1]}
+            [[ $command != $BUFFER && ${command[1,$#BUFFER]} == $BUFFER ]] || continue
+            [[ -z ${seen[$command]-} ]] || continue
+            seen[$command]=1
+            reply+=("$command")
+            (( $#reply < $1 )) || return 0
+        done
     done
     (( $#reply ))
 }
 function __akitty_folder_show() {
-    local list='Folder history: Up/Down choose, Enter keep, Esc cancel, Tab complete'
+    local list='Command history: Up/Down choose, Enter keep, Esc cancel, Tab complete'
     local -i i width=$(( COLUMNS > 8 ? COLUMNS - 4 : 4 ))
     for (( i = 1; i <= $#__akitty_folder_menu; i++ )); do
         (( i == __akitty_folder_selected )) && list+=$'\n> ' || list+=$'\n  '
@@ -250,8 +252,8 @@ function __akitty_folder_menu_accept() { __akitty_folder_close; }
 function __akitty_folder_menu_cancel() { BUFFER=$__akitty_folder_original; CURSOR=$#BUFFER; __akitty_folder_close; }
 function __akitty_folder_menu_complete() { __akitty_folder_menu_cancel; zle $__akitty_tab_widget; }
 function __akitty_folder_menu_other() { __akitty_folder_close; zle -U "$KEYS"; }
-# Up/Down on a typed prefix step through the folder's matches; consecutive presses continue from the shown match,
-# Down past the first restores the prefix, and anything else runs the key's previous widget.
+# Up/Down on a typed prefix step through the same matches (this folder's first); consecutive presses continue from the
+# shown match, Down past the first restores the prefix, and anything else runs the key's previous widget.
 function __akitty_folder_arrow() {
     emulate -L zsh
     local fallback=$1; shift

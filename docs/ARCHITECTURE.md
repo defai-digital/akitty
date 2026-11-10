@@ -197,12 +197,17 @@ Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per
 parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
 The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses the opened folder. Settings supplies the directory when no folder was opened and the shell has not reported one.
 
-## zsh folder command history
+## zsh command history
 
 The bundled zsh integration stores accepted single-line commands with a timestamp and both the logical and
-physical working directory. Tab offers five prefix matches, while Up/Down can cycle through up to twenty;
-ranking combines frequency with recency. Suggestions only edit the command line. Enter from the suggestion
-menu keeps a choice for review before a second Enter executes it. Existing widgets handle keys with no match.
+physical working directory in the existing shared store. Queries scan records newest first and rank this
+folder's records (by its logical or physical path) before other folders', each newest first; they filter by a
+case-sensitive prefix and deduplicate commands before applying the result limit. Paths containing tab, CR or LF
+are stored empty so the command is still kept. Tab offers the five latest distinct matches, while Up/Down can
+cycle through up to twenty. Record order resolves equal timestamps without frequency weighting. Legacy storage,
+environment variables and preference keys remain compatible; native `.zsh_history` is not imported. Suggestions
+only edit the command line. Enter from the suggestion menu keeps a choice for review before a second Enter
+executes it. Existing widgets handle keys with no match.
 
 Readers, appends, compaction and Settings' Clear History share a POSIX lock. Files and locks must be private,
 owned regular files without links; the directory must be owned and not writable by others. Reads are bounded

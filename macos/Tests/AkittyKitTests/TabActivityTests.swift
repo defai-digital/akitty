@@ -70,7 +70,10 @@ final class TabActivityTests: XCTestCase {
         try working(reporting, mark: 0)
         // Only the second pane's program status reports work, so its sprite must win.
         _ = try reporting.terminal.session.call("feed", ["text": "\u{1b}]7501;state=working\u{7}"])
-        try await waitUntil(controller) { controller.tabChips[0].activity != .none }
+        // Wait for both independent pane snapshots, not the first pane's intermediate busy indicator.
+        try await waitUntil(controller) {
+            chromeBusy.terminal.snapshot?.chrome != nil && reporting.terminal.snapshot?.program_status?.active?.state == "working"
+        }
         XCTAssertEqual(controller.tabChips[0].activity, .working(pixels: frame0, width: 1, height: 1))
     }
 
