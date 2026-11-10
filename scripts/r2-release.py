@@ -31,6 +31,39 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def worker_module():
+    """Bundle the TypeScript gateway into the JavaScript module Cloudflare serves."""
+    esbuild = ROOT / "node_modules/.bin/esbuild"
+    require(
+        esbuild.is_file(),
+        "esbuild is required to bundle distribution/worker.ts; "
+        "run npm ci --ignore-scripts in the repository root",
+    )
+    try:
+        return subprocess.check_output(
+            [
+                str(esbuild),
+                "distribution/worker.ts",
+                "--bundle",
+                "--format=esm",
+                "--target=es2022",
+                "--platform=neutral",
+            ],
+            cwd=ROOT,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            "Cannot bundle distribution/worker.ts with esbuild"
+            + (": " + detail if detail else "")
+        ) from None
+    except OSError:
+        raise RuntimeError(
+            "Cannot run esbuild to bundle distribution/worker.ts"
+        ) from None
+
+
 def credential():
     token = os.environ.get("CLOUDFLARE_API_TOKEN")
     if token is None:
@@ -117,6 +150,7 @@ class Cloudflare:
     def gateway(self, deploy):
         before = self.inspect()
         if deploy:
+            worker = worker_module()
             if not before["bucket"]:
                 self.api(
                     f"/accounts/{self.account}/r2/buckets", "POST", {"name": BUCKET}
@@ -135,7 +169,7 @@ class Cloudflare:
                 (
                     "worker.mjs",
                     "application/javascript+module",
-                    (ROOT / "distribution/worker.mjs").read_bytes(),
+                    worker,
                 ),
             ]:
                 parts.append(

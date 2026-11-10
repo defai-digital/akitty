@@ -1,5 +1,5 @@
 //! Authored protocol fixtures are executed against native Rust and the actual
-//! browser WASM binary (scripts/test-vt-wasm.mjs), including byte segmentation.
+//! browser WASM binary (scripts/test-vt-wasm.ts), including byte segmentation.
 use akitty_vt::{Event, Terminal};
 use serde_json::Value;
 
