@@ -278,6 +278,11 @@ for implementation details.
 - Native **Settings… (⌘,)** for font/size, a separate CJK font, shell, starting directory, scrollback,
   Option-as-Alt, Silent mode and update checks. Appearance and sound changes apply to open terminals;
   shell, directory and scrollback changes apply to new terminals. Any installed fixed-pitch font can be chosen.
+- Colour themes (AkiTTY Dark, AkiTTY Light, Solarized Dark, High Contrast) and cursor styles (outline, filled
+  block, bar, underline) in **Settings → Appearance**. Optional named **profiles** (**Settings → Profiles**) keep a
+  font, size, theme, cursor, shell, starting directory and scrollback together; open one with **Shell → New
+  Window/Tab with Profile**. Tabs and splits keep the profile of the pane they open from, and without profiles
+  nothing changes. Programs can still change colours with OSC 4/10/11 while they run.
 - Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.
 - CoreText text rasterization and Metal presentation, with visible software

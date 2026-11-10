@@ -10,7 +10,7 @@
     "Cargo.toml": "86caa950ee8fbe9def048336c43b0fc076dc126a440ef909b49fa304d268e4a0",
     "crates/akitty-vt/Cargo.toml": "16c6833e8fed57d9a291ad2be1160a67754841960ece98b89ba5605f059012ad",
     "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",
-    "crates/akitty-vt/src/cell.rs": "7feb5b5662c52e1434bf4811293e7022e7c4d44aad5428277ae0b4b0143bd062",
+    "crates/akitty-vt/src/cell.rs": "0eff9dea14876bac4105674e09fb5fcad25e7bbebe66281f501998030c87e46a",
     "crates/akitty-vt/src/key.rs": "6764faf42f76fea8bf7ec11d147d0ed4e2b5b8c83e8485558ff381b0c9e4d3c3",
     "crates/akitty-vt/src/lib.rs": "50019f82dc48b8c44b966b0197e3b1f526160b81da9b20beb282ce75eeca49f7",
     "crates/akitty-vt/src/parser.rs": "d78ed2cd722a71b138472309d76c5b9439d6189b90763c4c0a5cc46acbd3cdb1",

@@ -88,6 +88,10 @@ private let hiddenPollInterval: Double = 0.25
     private var fontSize: CGFloat = 14
     private var preferences = TerminalPreferences()
     private let preferenceDefaults: UserDefaults
+    /// The profile this pane was opened with. Settings changes re-apply it; a deleted profile falls back to defaults.
+    let profileID: UUID?
+    /// The colours and cursor the rasterizer draws with, from the effective theme.
+    var renderAppearance: RenderAppearance { TerminalTheme.named(preferences.theme).appearance(cursorStyle: preferences.cursorStyle) }
     private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
     private var fontLayout: (name: String, size: CGFloat, font: NSFont, cell: CGSize) {
         if let cachedFont, cachedFont.name == preferences.fontName, cachedFont.size == fontSize { return cachedFont }
@@ -114,10 +118,14 @@ private let hiddenPollInterval: Double = 0.25
     public override var acceptsFirstResponder: Bool { true }
     public override var isFlipped: Bool { true }
     /// `directory` overrides the Settings starting directory for this terminal only (a folder opened from Finder, Dock or `open -a`).
-    public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil) throws {
-        var initial = TerminalPreferences.load()
+    /// `profile` names a saved profile whose settings replace the defaults for this pane; nil uses Settings.
+    convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
+        var initial = TerminalPreferences.load().effective(profile: profile)
         if let directory { initial.directory = directory }
-        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial)
+        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial, profile: profile)
+    }
+    public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil) throws {
+        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, directory: directory, profile: nil)
     }
     /// The bundled integration directory when the shell the core will launch is bash or zsh and its wrapper is bundled.
     /// Integration is on by default, so any other shell (or a build without the resources) starts as an ordinary login
@@ -130,15 +138,15 @@ private let hiddenPollInterval: Double = 0.25
               FileManager.default.fileExists(atPath: directory.appendingPathComponent(wrapper).path) else { return nil }
         return directory.path
     }
-    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard) throws {
-        preferenceDefaults = defaults
+    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard, profile: UUID? = nil) throws {
+        preferenceDefaults = defaults; profileID = profile
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
         let integrationDirectory = initial.shellIntegration && !headless
             ? Self.integrationDirectory(shell: initial.shell, resources: Bundle.main.resourceURL) : nil
         sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory, folderHistory: initial.folderHistory)
         preferences = initial; fontSize = initial.fontSize
-        try syncProgramChrome()
+        try syncCoreSettings()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
         registerForDraggedTypes([.fileURL, .string])
         wantsLayer = true
@@ -146,6 +154,7 @@ private let hiddenPollInterval: Double = 0.25
             let renderer = try MetalPresenter(forceFailure: forceSoftware || ProcessInfo.processInfo.environment["AKITTY_FORCE_METAL_UNAVAILABLE"] == "1", forceShaderFailure: forceShaderFailure)
             renderer.onFailure = { [weak self] message in self?.renderFailed(message) }
             presenter = renderer
+            renderer.clearColor = MetalPresenter.clearColor(for: renderAppearance.backgroundColor)
             renderer.view.autoresizingMask = [.width, .height]
             renderer.view.frame = bounds
             addSubview(renderer.view)
@@ -174,11 +183,11 @@ private let hiddenPollInterval: Double = 0.25
     @objc private func preferencesChanged() {
         // A stopped terminal has no session behind it; a late notification must not surface an error.
         guard !stopped else { return }
-        let next = TerminalPreferences.load(from: preferenceDefaults)
+        let next = TerminalPreferences.load(from: preferenceDefaults).effective(profile: profileID)
         // Pane zoom is local. Only an explicit change to the saved font size replaces it.
         if next.fontSize != preferences.fontSize { fontSize = next.fontSize }
         preferences = next
-        do { try syncProgramChrome() } catch { show(error) }
+        do { try syncCoreSettings() } catch { show(error) }
         // Fonts changed, so cell metrics and CJK glyphs may differ; repaint every row.
         pendingDamage = nil
         resizeTerminal(); redraw()
@@ -387,11 +396,14 @@ private let hiddenPollInterval: Double = 0.25
     func applyPreferences(_ next: TerminalPreferences) {
         guard !stopped else { return }
         preferences = next; fontSize = next.fontSize
-        do { try syncProgramChrome() } catch { show(error) }
+        do { try syncCoreSettings() } catch { show(error) }
         resizeTerminal(); redraw()
     }
-    private func syncProgramChrome() throws {
+    /// Session settings the core owns: the program-chrome switch and the colour theme.
+    private func syncCoreSettings() throws {
         _ = try session.call("program_chrome", ["enabled": preferences.programChrome])
+        _ = try session.call("theme", TerminalTheme.named(preferences.theme).request)
+        presenter?.clearColor = MetalPresenter.clearColor(for: renderAppearance.backgroundColor)
     }
     func applySnapshot(_ result: Result<Snapshot?, Error>) {
         do {
@@ -486,18 +498,21 @@ private let hiddenPollInterval: Double = 0.25
         if layered && gridDamage.scroll > 0 { damage = nil }
         // The other path's retained bitmaps went stale while it was idle.
         if layered != lastLayered { damage = nil; lastLayered = layered }
-        let rasterizer = self.rasterizer, images = layered ? [:] : imageStore.images
+        let rasterizer = self.rasterizer, images = layered ? [:] : imageStore.images, appearance = renderAppearance
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
         let reuse = presenter != nil
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
         rasterQueue.async { [weak self] in
             if layered {
-                let result = Result { try rasterizer.renderLayers(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName) }
+                let result = Result { try rasterizer.renderLayers(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, appearance: appearance) }
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.rasterInFlight = false
                     guard !self.stopped else { return }
+                    // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
+                    // presenting it would flash the new background behind them. Repaint fully instead.
+                    guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                     do {
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
@@ -511,11 +526,12 @@ private let hiddenPollInterval: Double = 0.25
                 }
                 return
             }
-            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, scroll: scroll, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse) }
+            let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, scroll: scroll, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse, appearance: appearance) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false
                 guard !self.stopped else { return }
+                guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                 do {
                     let frame = try result.get()
                     if size == self.bounds.size, self.window != nil {
@@ -536,7 +552,7 @@ private let hiddenPollInterval: Double = 0.25
     }
     public override func draw(_ dirtyRect: NSRect) {
         guard presenter == nil else { return }
-        NSColor(calibratedRed: 8/255, green: 10/255, blue: 13/255, alpha: 1).setFill(); bounds.fill()
+        NSColor(cgColor: renderAppearance.backgroundColor)?.setFill(); bounds.fill()
         if let image = bitmap?.makeImage(), let context = NSGraphicsContext.current?.cgContext {
             context.saveGState(); context.translateBy(x: 0, y: bounds.height); context.scaleBy(x: 1, y: -1)
             context.draw(image, in: bounds); context.restoreGState()

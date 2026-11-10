@@ -199,6 +199,15 @@ impl Palette {
     pub fn reset(&mut self) {
         self.overrides.fill(None);
     }
+    /// Drop the host theme so the built-in colours become the reset baseline again.
+    pub fn clear_configured(&mut self) {
+        self.configured.fill(None);
+    }
+    /// The host theme's default background, ignoring temporary OSC 11 overrides: the colour a
+    /// host clears its frame to.
+    pub fn base_background(&self) -> u32 {
+        self.configured[257].unwrap_or(self.background)
+    }
     pub fn indexed(index: u8) -> u32 {
         const ANSI: [u32; 16] = [
             0x161a21, 0xed646d, 0x8fca8d, 0xe5c07b, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xcbd5e1,
