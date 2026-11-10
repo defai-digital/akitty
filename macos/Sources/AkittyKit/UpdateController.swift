@@ -53,8 +53,8 @@ import os
     init(version: String, updater: UpdateController) {
         super.init(nibName: nil, bundle: nil)
         let button = NSButton(title: "Update Available: \(version)", target: updater, action: #selector(UpdateController.checkForUpdates(_:)))
-        button.bezelStyle = .rounded; button.bezelColor = .controlAccentColor; button.contentTintColor = .white
-        button.image = NSImage(systemSymbolName: "shippingbox.fill", accessibilityDescription: nil); button.imagePosition = .imageLeading
+        button.bezelStyle = .rounded; button.bezelColor = .systemGreen; button.contentTintColor = .white
+        button.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil); button.imagePosition = .imageLeading
         button.font = .systemFont(ofSize: 11, weight: .semibold)
         button.toolTip = "Review the update and choose when to install"
         button.setAccessibilityIdentifier("update-reminder")

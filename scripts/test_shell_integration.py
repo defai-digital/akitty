@@ -297,7 +297,7 @@ class ShellIntegrationTests(unittest.TestCase):
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
 
     @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
-    def test_zsh_tab_and_arrows_offer_this_folders_commands(self):
+    def test_zsh_tab_and_arrows_offer_this_folders_commands_first(self):
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
             home = pathlib.Path(directory)
             (home / 'link').symlink_to(home / 'project')
@@ -309,28 +309,92 @@ class ShellIntegrationTests(unittest.TestCase):
                 (home / 'project/pwned').unlink()
                 output.clear(); send('echo cod\t')
                 menu = output.decode(errors='replace')
-                self.assertIn('Folder history:', menu)
-                self.assertLess(menu.index('echo code-often'), menu.index('echo code-recent'), 'used more often ranks first')
+                self.assertIn('Command history:', menu)
+                self.assertLess(menu.index('echo code-recent'), menu.index('echo code-often'), 'newest first')
+                self.assertLess(menu.index('echo code-often'), menu.index('echo code-elsewhere'),
+                                'this folder before other folders')
                 self.assertEqual(menu.count('echo code-often'), 1, 'each command once')
-                self.assertNotIn('code-elsewhere', menu, 'only commands run in this folder')
                 self.assertFalse((home / 'project/pwned').exists(), 'matching never evaluates saved command text')
                 send('\x1b[B'); send('\x1b[B'); send('\r')
-                self.assertIn('code-recent', self.ran(send, output, ''), 'Down twice then Enter keeps the second match')
+                self.assertIn('code-often', self.ran(send, output, ''), 'Down twice then Enter keeps the second match')
                 send('echo cod\t'); send('\x1b', 0.8)
                 self.assertIn('codX', self.ran(send, output, 'X'), 'Esc restores the typed prefix')
                 send('echo cod\t')
                 self.assertIn('codY', self.ran(send, output, 'Y'), 'another key closes the list and is typed')
                 send('echo cod\t'); send('\x03', 0.8)
                 self.assertIn('after-break', self.ran(send, output, 'echo after-break'), 'Ctrl-C leaves keys working')
-                self.assertIn('build-often', self.ran(send, output, 'echo bui\x1b[A'), 'Up on a prefix takes the best match')
-                self.assertIn('build-recent', self.ran(send, output, 'echo bui\x1b[A\x1b[A'), 'Up again takes the next')
+                self.assertIn('build-recent', self.ran(send, output, 'echo bui\x1b[A'), 'Up on a prefix takes the latest match')
+                self.assertIn('build-often', self.ran(send, output, 'echo bui\x1b[A\x1b[A'), 'Up again takes the next')
                 self.assertIn('buiZ', self.ran(send, output, 'echo bui\x1b[A\x1b[BZ'), 'Down past the first restores the prefix')
                 output.clear(); send('zzz\t')
-                self.assertNotIn('Folder history:', output.decode(errors='replace'), 'Tab without a match completes as before')
+                self.assertNotIn('Command history:', output.decode(errors='replace'), 'Tab without a match completes as before')
                 send('\x15cd ../link\r')
                 output.clear(); send('echo cod\t')
-                self.assertIn('echo code-often', output.decode(errors='replace'), 'a symlinked path shares the folder history')
+                out = output.decode(errors='replace')
+                self.assertLess(out.index('echo code-recent'), out.index('echo code-elsewhere'),
+                                'a symlinked path matches its physical folder first')
                 send('\x1b', 0.8)
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'history storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_history_filters_before_taking_five_latest_distinct_commands(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-global-history-') as directory:
+            home = pathlib.Path(directory)
+            # Legacy records from different folders, all in the same second: append order breaks ties.
+            marker = home / 'must-not-execute'
+            literal = f'printf [$(touch {marker})]'
+            commands = [literal, literal] + ['git oldest'] * 8 + ['git second', 'git third', 'git fourth', 'git fifth',
+                        'git sixth', 'git third', 'git', 'Git wrong-case', 'echo git unrelated']
+            commands += ['echo later-unrelated'] * 6
+            history = home / 'folder-history'
+            # The first two timestamps are malformed: records are read by order, so they still match.
+            history.write_text(''.join(f'{"x" if i < 2 else "100"}\t/folder-{i}\t/physical-{i}\t{command}\n'
+                                       for i, command in enumerate(commands)))
+            history.chmod(0o600)
+            result = self.folder_call(home, "BUFFER=git; CURSOR=$#BUFFER; __akitty_folder_matches 5; print -rl -- \"${reply[@]}\"")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ['git third', 'git sixth', 'git fifth', 'git fourth', 'git second'])
+            result = self.folder_call(home, f'BUFFER={shlex.quote("printf [")}; CURSOR=$#BUFFER; __akitty_folder_matches 5; '
+                                      'print -rl -- "${reply[@]}"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), [literal], 'prefix and command text remain literal during matching and deduplication')
+            self.assertFalse(marker.exists(), 'matching never evaluates saved command text')
+            for prefix, cursor in [('missing', 7), ('', 0), ('git', 1)]:
+                with self.subTest(prefix=prefix, cursor=cursor):
+                    result = self.folder_call(home, f'BUFFER={shlex.quote(prefix)}; CURSOR={cursor}; __akitty_folder_matches 5; result=$?; '
+                                              'print -r -- "$result:${#reply}"')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), '1:0')
+
+    @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
+    def test_zsh_history_ranks_this_folder_then_others_and_records_paths(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-global-history-') as directory:
+            home = pathlib.Path(directory)
+            (home / 'here').mkdir()
+            odd = home / 'odd\tname'
+            odd.mkdir()
+            here = str(home / 'here')
+            here_physical = os.path.realpath(here)
+            other = '/elsewhere'
+            history = home / 'folder-history'
+            history.write_text(f'100\t{here}\t{here_physical}\tgit here-old\n'
+                               f'100\t{other}\t{other}\tgit other-new\n'
+                               f'100\t{other}\t{other}\tgit shared\n'
+                               f'100\t{here}\t{here_physical}\tgit shared\n')
+            history.chmod(0o600)
+            result = self.folder_call(home, f'cd {shlex.quote(here)}; BUFFER=git; CURSOR=$#BUFFER; '
+                                      '__akitty_folder_matches 5; print -rl -- "${reply[@]}"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ['git shared', 'git here-old', 'git other-new'])
+            result = self.folder_call(home, f'cd {shlex.quote(here)}; __akitty_folder_store "echo stored"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.folder_call(home, f'cd {shlex.quote(str(odd))}; __akitty_folder_store "echo odd"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stored, odd_record = (home / 'folder-history').read_text().splitlines()[-2:]
+            stored, odd_record = stored.split('\t'), odd_record.split('\t')
+            self.assertEqual(stored[1], here, 'the logical path is recorded')
+            self.assertEqual(stored[2], here_physical, 'the physical path is recorded')
+            self.assertEqual(stored[3], 'echo stored')
+            self.assertEqual(odd_record[1:], ['', '', 'echo odd'], 'unwritable paths are stored empty, keeping the command')
 
     def test_zsh_folder_history_switch_turns_it_off(self):
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-folder-') as directory:
@@ -338,7 +402,7 @@ class ShellIntegrationTests(unittest.TestCase):
             with self.zsh_pty(home, AKITTY_FOLDER_HISTORY='0') as (send, output):
                 send('echo code-one\r')
                 output.clear(); send('echo cod\t')
-                self.assertNotIn('Folder history:', output.decode(errors='replace'))
+                self.assertNotIn('Command history:', output.decode(errors='replace'))
                 self.assertFalse((home / 'Library/Application Support/Akitty').exists(), 'nothing is written when off')
 
     @unittest.skipUnless(ZSH_SAFE_OPEN, 'folder storage requires safe nonblocking opens (zsh 5.9+)')
