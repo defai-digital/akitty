@@ -4,10 +4,16 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "engines": {"node": ">=22"},
-  "scripts": {
-    "build": "tsc --noEmit && esbuild typescript/src/palette.ts --bundle --format=iife --global-name=AkittyFeatures --target=safari17 --outfile=macos/Sources/AkittyKit/Resources/features.js",
-    "test": "node --test typescript/test/*.test.mjs distribution/*.test.mjs"
+  "engines": {
+    "node": ">=22.18"
   },
-  "devDependencies": {"typescript": "5.9.3", "esbuild": "0.25.12"}
+  "scripts": {
+    "build": "tsc --noEmit && tsc -p tsconfig.node.json && esbuild typescript/src/palette.ts --bundle --format=iife --global-name=AkittyFeatures --target=safari17 --outfile=macos/Sources/AkittyKit/Resources/features.js",
+    "test": "node --test typescript/test/*.test.ts distribution/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "esbuild": "0.25.12",
+    "typescript": "7.1.0-beta"
+  }
 }

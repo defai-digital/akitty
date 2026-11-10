@@ -17,7 +17,7 @@
     "crates/akitty-vt/src/screen.rs": "97f589179f03410cee91b0b2329af3fecd07655cd63ce5d6f1254a77f38a902b",
     "crates/akitty-vt/src/terminal.rs": "e105c3916d271339b75627f51114925de18becc86ef1143642d863fbe19dbeec",
     "crates/akitty-vt/src/wasm.rs": "1de3ee9b7619f9fc2a606be528a76be13a8e28a19097e33ca236b57db99f45d5",
-    "crates/akitty-vt/tests/contracts.rs": "7aa72517a5bf5812d783c750fcbeb9e43cec18624b7ad750a97af8b7a4b9c0fb",
+    "crates/akitty-vt/tests/contracts.rs": "e800419e66994496b9184320c787697bba94db31ecb7c243e51d7893c2fa869f",
     "scripts/build-vt-wasm.sh": "c0c8a5b7f8d245819faae89a9bcb085ede3eff51eb944ad6c3f29f2c8c745665",
     "scripts/rust-toolchain.sh": "d9ec70363f76822a54c9b9398ce298985fec8171283ffa337ca5dfe8ebb74507"
   }

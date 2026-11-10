@@ -1,22 +1,63 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
+type WasmApi = {
+  readonly memory: WebAssembly.Memory;
+  akitty_vt_abi_version(): number;
+  akitty_vt_create(cols: number, rows: number, history: number): number;
+  akitty_vt_alloc(length: number): number;
+  akitty_vt_write(id: number, pointer: number, length: number, now: number): number;
+  akitty_vt_line(id: number, row: number, pointer: number, capacity: number): number;
+  akitty_vt_text(id: number, row: number, col: number, offset: number, pointer: number, capacity: number): number;
+  akitty_vt_get(id: number, field: number): number;
+  akitty_vt_replies(id: number, pointer: number, capacity: number): number;
+  akitty_vt_tick(id: number, now: number): number;
+  akitty_vt_resize(id: number, cols: number, rows: number): number;
+  akitty_vt_color(id: number, index: number, value: number): void;
+  akitty_vt_clean(id: number): void;
+  akitty_vt_dirty(id: number, field: number): number;
+  akitty_vt_destroy(id: number): number;
+  akitty_vt_free(pointer: number, length: number): number;
+  akitty_vt_key(id: number, row: number, col: number, modifiers: number, action: number, options: number, pointer: number, offset: number, keyPointer: number, capacity: number): number;
+  akitty_vt_buffer_get(id: number, buffer: number, row: number): number;
+  akitty_vt_buffer_line(id: number, buffer: number, row: number, pointer: number, capacity: number): number;
+  akitty_vt_buffer_text(id: number, buffer: number, row: number, col: number, pointer: number, capacity: number): number;
+  akitty_vt_buffer_wrapped(id: number, buffer: number, row: number): number;
+  akitty_vt_deadline(id: number): number;
+  akitty_vt_row_id(id: number, row: number): bigint;
+  akitty_vt_find_row(id: number, row: bigint): number;
+  akitty_vt_wrap_padding(id: number, row: number): number;
+};
+
+type Fixture = {
+  readonly name: string;
+  readonly input: string;
+  readonly cols: number;
+  readonly rows: number;
+  readonly history_limit: number;
+  readonly lines: readonly string[];
+  readonly cursor: readonly number[];
+  readonly history: number;
+  readonly replies: string;
+};
+
 const wasmPath = process.argv[2] ?? new URL('../build/akitty-vt.wasm', import.meta.url);
-const module = await WebAssembly.compile(await readFile(wasmPath));
+const module = await WebAssembly.compile((await readFile(wasmPath)) as unknown as BufferSource);
 assert.deepEqual(WebAssembly.Module.imports(module), [], 'portable VT must require no OS imports');
-const { exports: api } = await WebAssembly.instantiate(module);
+const instance = await WebAssembly.instantiate(module);
+const api = instance.exports as unknown as WasmApi;
 assert.equal(api.akitty_vt_abi_version(), 1);
 const id = api.akitty_vt_create(12, 3, 10);
 assert.ok(id);
 const length = 4096;
 const pointer = api.akitty_vt_alloc(length);
 assert.ok(pointer);
-const write = (text, now = 0) => {
+const write = (text: string, now = 0): void => {
   const bytes = new TextEncoder().encode(text);
   new Uint8Array(api.memory.buffer, pointer, bytes.length).set(bytes);
   assert.equal(api.akitty_vt_write(id, pointer, bytes.length, now), 1);
 };
-const line = (row) => {
+const line = (row: number): string => {
   const size = api.akitty_vt_line(id, row, pointer, length);
   const data = new DataView(api.memory.buffer, pointer, size);
   return Array.from({ length: size / 32 }, (_, col) => data.getUint32(col * 32 + 20, true) === 0 ? '' : String.fromCodePoint(data.getUint32(col * 32, true) || 32)).join('');
@@ -61,11 +102,12 @@ assert.equal(api.akitty_vt_free(pointer, length - 1), 0);
 assert.equal(api.akitty_vt_free(pointer, length), 1);
 assert.equal(api.akitty_vt_free(pointer, length), 0);
 const keyPointer = api.akitty_vt_alloc(length);
-for (const [code, expected] of [[9, '\t'], [13, '\r'], [27, '\x1b'], [127, '\x7f'], [57414, '\r']]) {
+const controlKeys: readonly (readonly [number, string])[] = [[9, '\t'], [13, '\r'], [27, '\x1b'], [127, '\x7f'], [57414, '\r']];
+for (const [code, expected] of controlKeys) {
   const count = api.akitty_vt_key(code, 0, 0, 4, 1, 1024, keyPointer, 0, keyPointer, length);
   assert.equal(new TextDecoder().decode(new Uint8Array(api.memory.buffer, keyPointer, count)), expected, `Ctrl key ${code}`);
 }
-for (const [code, modifiers, action, options, expected] of [
+const enhanced: readonly (readonly [number, number, number, number, string])[] = [
   [57350, 0, 3, 2, '\x1b[1;1:3D'],
   [57350, 0, 2, 2, '\x1b[1;1:2D'],
   [57366, 4, 1, 1, '\x1b[13;5~'],
@@ -74,14 +116,15 @@ for (const [code, modifiers, action, options, expected] of [
   [13, 1, 3, 3, ''],
   [57414, 0, 1, 1, '\r'],
   [57441, 1, 1, 10, '\x1b[57441;2u'],
-]) {
+];
+for (const [code, modifiers, action, options, expected] of enhanced) {
   const count = api.akitty_vt_key(code, 0, 0, modifiers, action, options, keyPointer, 0, keyPointer, length);
   assert.equal(new TextDecoder().decode(new Uint8Array(api.memory.buffer, keyPointer, count)), expected, `enhanced key ${code}`);
 }
 assert.equal(api.akitty_vt_free(keyPointer, length), 1);
 
 
-const fixtures = JSON.parse(await readFile(new URL('../crates/akitty-vt/tests/fixtures/streams.json', import.meta.url), 'utf8'));
+const fixtures = JSON.parse(await readFile(new URL('../crates/akitty-vt/tests/fixtures/streams.json', import.meta.url), 'utf8')) as readonly Fixture[];
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const scratch = api.akitty_vt_alloc(length);
@@ -94,7 +137,7 @@ for (const fixture of fixtures) {
       new Uint8Array(api.memory.buffer, scratch, chunk.length).set(chunk);
       assert.equal(api.akitty_vt_write(terminal, scratch, chunk.length, 0), 1);
     }
-    const lines = [];
+    const lines: string[] = [];
     for (let row = 0; row < fixture.rows; row++) {
       const count = api.akitty_vt_line(terminal, row, scratch, length);
       const view = new DataView(api.memory.buffer, scratch, count);
@@ -117,7 +160,7 @@ for (const fixture of fixtures) {
   }
 }
 // Explicit buffer inspection must preserve the active screen and pending events.
-const feedTerminal = (handle, input) => {
+const feedTerminal = (handle: number, input: string): void => {
   const bytes = encoder.encode(input);
   new Uint8Array(api.memory.buffer, scratch, bytes.length).set(bytes);
   assert.equal(api.akitty_vt_write(handle, scratch, bytes.length, 0), 1);

@@ -1,8 +1,21 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import worker, { keyFor, rangeFor, ifMatch, ifNoneMatch } from "./worker.mjs"
+import worker, { keyFor, rangeFor, ifMatch, ifNoneMatch } from "./worker.ts"
+import type { ByteRange, Env, GetOptions, ReleaseMetadata } from "./worker.ts"
+
+function makeMetadata(contentType: string): ReleaseMetadata {
+  return {
+    size: 3,
+    etag: "identity",
+    httpEtag: '"identity"',
+    writeHttpMetadata: (headers) => headers.set("Content-Type", contentType),
+  }
+}
+
+const rangeOf = (options: GetOptions | null): ByteRange | undefined => options?.range
+
 test("gateway only exposes this product's public keys", () => {
-  const key = path => keyFor(new URL("https://download.automatosx.com" + path))
+  const key = (path: string) => keyFor(new URL("https://download.automatosx.com" + path))
   assert.equal(key("/akitty/appcast.xml"), "appcast.xml")
   assert.equal(key("/akitty/install"), "install")
   assert.equal(key("/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"), "releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip")
@@ -30,9 +43,9 @@ test("range units are case-insensitive and unsupported units are ignored", () =>
   assert.equal(rangeFor("BYTES=0-1,3-4", 10), undefined) // valid multi-range, ignored
 })
 test("body reads are bound to metadata; mutable feeds never cache", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/xml") }
+  const metadata = makeMetadata("application/xml")
   const request = new Request("https://download.automatosx.com/akitty/appcast.xml")
-  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { assert.equal(opts.onlyIf.etagMatches, "identity"); return { body: "abc" } } } }
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { assert.equal(options?.onlyIf?.etagMatches, "identity"); return { body: "abc" } } } }
   const response = await worker.fetch(request, env)
   assert.equal(await response.text(), "abc"); assert.equal(response.headers.get("Cache-Control"), "no-store")
   env.RELEASES.get = async () => ({})
@@ -41,7 +54,7 @@ test("body reads are bound to metadata; mutable feeds never cache", async () => 
 })
 test("If-None-Match uses the RFC weak comparison function", () => {
   assert.equal(ifNoneMatch('"id"garbage', '"id"'), false)
-  assert.equal(ifNoneMatch('"other, \"id\"', '"id"'), false)
+  assert.equal(ifNoneMatch('"other, \"id"', '"id"'), false)
   assert.equal(ifNoneMatch(undefined, '"id"'), false)
   assert.equal(ifNoneMatch("", '"id"'), false)
   assert.equal(ifNoneMatch("*", '"id"'), true)
@@ -79,9 +92,9 @@ test("If-Match uses the RFC strong comparison function", () => {
   assert.equal(ifMatch("garbage", '"id"'), false)
 })
 test("If-None-Match answers 304 without fetching the body for GET and HEAD", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/xml") }
+  const metadata = makeMetadata("application/xml")
   let fetches = 0
-  const env = { RELEASES: { head: async () => metadata, get: async () => { fetches++; return { body: "abc" } } } }
+  const env: Env = { RELEASES: { head: async () => metadata, get: async () => { fetches++; return { body: "abc" } } } }
   const url = "https://download.automatosx.com/akitty/appcast.xml"
   for (const value of ["*", '"identity"', 'W/"identity"', '"other", W/"identity"', 'W/"other", "identity"']) {
     fetches = 0
@@ -103,9 +116,9 @@ test("If-None-Match answers 304 without fetching the body for GET and HEAD", asy
   assert.equal(fetches, 0)
 })
 test("If-Match answers 412 before If-None-Match and Range without fetching the body", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/xml") }
+  const metadata = makeMetadata("application/xml")
   let fetches = 0
-  const env = { RELEASES: { head: async () => metadata, get: async () => { fetches++; return { body: "abc" } } } }
+  const env: Env = { RELEASES: { head: async () => metadata, get: async () => { fetches++; return { body: "abc" } } } }
   const url = "https://download.automatosx.com/akitty/appcast.xml"
   // If-None-Match and Range are sent too: a failed If-Match must win over both.
   for (const method of ["GET", "HEAD"]) {
@@ -136,34 +149,35 @@ test("If-Match answers 412 before If-None-Match and Range without fetching the b
   assert.equal(fetches, 0)
 })
 test("Range units are case-insensitive at the endpoint", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
+  const metadata = makeMetadata("application/zip")
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
-  let seen = null
-  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
-  for (const [value, contentRange, range] of [
+  let seen: GetOptions | null = null
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
+  const cases: readonly (readonly [string, string, ByteRange])[] = [
     ["Bytes=0-1", "bytes 0-1/3", { offset: 0, length: 2 }],
     ["BYTES=0-1", "bytes 0-1/3", { offset: 0, length: 2 }],
     ["bYtEs=1-", "bytes 1-2/3", { offset: 1, length: 2 }],
-  ]) {
+  ]
+  for (const [value, contentRange, range] of cases) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
     assert.equal(response.status, 206, value)
     assert.equal(response.headers.get("Content-Range"), contentRange, value)
-    assert.deepEqual(seen.range, range, value)
+    assert.deepEqual(rangeOf(seen), range, value)
   }
 })
 test("unsupported Range units are ignored and serve the full representation", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
+  const metadata = makeMetadata("application/zip")
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
-  let seen = null
-  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
+  let seen: GetOptions | null = null
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
   for (const value of ["items=0-1", "ITEMS=0-1", "frames=0-1", "garbage"]) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
     assert.equal(response.status, 200, `Range: ${value}`)
     assert.equal(response.headers.get("Content-Range"), null, `Range: ${value}`)
     assert.equal(response.headers.get("Content-Length"), "3", `Range: ${value}`)
-    assert.equal(seen.range, undefined, `range not forwarded for ${value}`)
+    assert.equal(rangeOf(seen), undefined, `range not forwarded for ${value}`)
     assert.equal(await response.text(), "abc", `Range: ${value}`)
   }
   seen = null
@@ -173,17 +187,17 @@ test("unsupported Range units are ignored and serve the full representation", as
   assert.equal(seen, null)
 })
 test("valid multi-range requests are ignored and serve the full representation", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
+  const metadata = makeMetadata("application/zip")
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
-  let seen = null
-  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
+  let seen: GetOptions | null = null
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
   for (const value of ["bytes=0-1,4-5", "BYTES=0-1,3-4", "bytes=0-1, 4-5", "bytes=-2,1-"]) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
     assert.equal(response.status, 200, `Range: ${value}`)
     assert.equal(response.headers.get("Content-Range"), null, `Range: ${value}`)
     assert.equal(response.headers.get("Content-Length"), "3", `Range: ${value}`)
-    assert.equal(seen.range, undefined, `range not forwarded for ${value}`)
+    assert.equal(rangeOf(seen), undefined, `range not forwarded for ${value}`)
     assert.equal(await response.text(), "abc", `Range: ${value}`)
   }
   seen = null
@@ -193,10 +207,10 @@ test("valid multi-range requests are ignored and serve the full representation",
   assert.equal(seen, null)
 })
 test("malformed and unsatisfiable byte ranges stay 416 at the endpoint", async () => {
-  const metadata = { size: 3, etag: "identity", httpEtag: '"identity"', writeHttpMetadata: h => h.set("Content-Type", "application/zip") }
+  const metadata = makeMetadata("application/zip")
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
-  let seen = null
-  const env = { RELEASES: { head: async () => metadata, get: async (_key, opts) => { seen = opts; return { body: "abc" } } } }
+  let seen: GetOptions | null = null
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
   for (const value of ["bytes=3-", "bytes=4-2", "bytes=-", "bytes=0-1,", "bytes=0-1,abc", "bytes=-0", "bytes=abc-def", "Bytes=9-"]) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)

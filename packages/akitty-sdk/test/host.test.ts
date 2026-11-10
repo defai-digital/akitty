@@ -1,10 +1,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { createCommandHost } from "../dist/host.js"
+import type { ApprovalRequest, HostRequest } from "../dist/host.js"
 
-function fixture(approve = async () => true) {
-  const calls = []
-  const request = async (r) => {
+function fixture(approve: (request: ApprovalRequest) => Promise<boolean> = async () => true) {
+  const calls: HostRequest[] = []
+  const request = async (r: HostRequest) => {
     calls.push(r)
     switch (r.op) {
       case "control_acquire": return { lease: 3 }
@@ -23,16 +24,22 @@ test("host binds exact approved command and directory without releasing on shell
   const receipt = await host.execute("coding-agent", "echo hi")
   assert.deepEqual(receipt, { lease: 3, afterCommandId: 8, completionUntrusted: true })
   assert.deepEqual(calls.map(r => r.op), ["control_acquire", "shell_state", "command_authorize", "command_execute"])
-  assert.equal(calls[2].expected_cwd, "/tmp")
+  const authorize = calls[2]
+  assert(authorize !== undefined)
+  assert.equal(authorize.expected_cwd, "/tmp")
   await host.release(receipt.lease)
-  assert.equal(calls.at(-1).op, "control_release")
+  const released = calls.at(-1)
+  assert(released !== undefined)
+  assert.equal(released.op, "control_release")
 })
 test("denial and policy failure never authorize or dispatch and release ownership", async () => {
   for (const approve of [async () => false, async () => { throw new Error("policy offline") }]) {
     const { calls, host } = fixture(approve)
     await assert.rejects(host.execute("agent", "echo hi"))
-    assert.ok(!calls.some(r => ["command_authorize", "command_execute"].includes(r.op)))
-    assert.equal(calls.at(-1).op, "control_release")
+    assert.ok(!calls.some(r => r.op === "command_authorize" || r.op === "command_execute"))
+    const released = calls.at(-1)
+    assert(released !== undefined)
+    assert.equal(released.op, "control_release")
   }
 })
 test("host rejects multiline input before acquiring a lease", async () => {
@@ -43,7 +50,7 @@ test("host rejects multiline input before acquiring a lease", async () => {
 
 test("unknown dispatch outcome preserves ownership and never retries", async () => {
   for (const malformed of [false, true]) {
-    const calls = []
+    const calls: unknown[] = []
     const host = createCommandHost({ session: 1, approve: async () => true, request: async r => {
       calls.push(r.op)
       if (r.op === "control_acquire") return { lease: 3 }
@@ -68,13 +75,13 @@ test("invisible command formatting is rejected before authority acquisition", as
 })
 
 test("host approval reads shell state without consuming pending terminal events", async () => {
-  const calls = []
+  const calls: unknown[] = []
   let pendingBell = true
   const host = createCommandHost({ session: 1, approve: async () => true, request: async r => {
     calls.push(r.op)
     if (r.op === "control_acquire") return { lease: 3 }
     if (r.op === "snapshot") pendingBell = false
-    if (["shell_state", "snapshot"].includes(r.op)) return { shell: { ready: true, cwd: null } }
+    if (r.op === "shell_state" || r.op === "snapshot") return { shell: { ready: true, cwd: null } }
     if (r.op === "command_authorize") return { authorization: 4 }
     if (r.op === "command_execute") return { accepted: true, after_command_id: 8, completion_untrusted: true }
     return {}

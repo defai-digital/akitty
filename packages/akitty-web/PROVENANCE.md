@@ -40,7 +40,7 @@ From the repository root, run:
 bash packages/akitty-web/scripts/build-wasm.sh
 python3 scripts/vt-provenance.py --write
 python3 scripts/check-engine-source.py
-node scripts/test-vt-wasm.mjs packages/akitty-web/akitty-vt.wasm
+node scripts/test-vt-wasm.ts packages/akitty-web/akitty-vt.wasm
 ```
 
 Rust 1.99.1 is pinned. Use its `wasm32-unknown-unknown` target, or matching Rust
