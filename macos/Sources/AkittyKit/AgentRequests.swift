@@ -212,14 +212,22 @@ import AgentIPC
                      "execution": "request_requires_human_approval", "ordinary_agent_operations": "observation_only"]
                 }, "next_offset": offset + 16 < panes.count ? offset + 16 : NSNull(), "total_panes": panes.count]
             } else if operation == "request", Set(input.keys) == ["version", "op", "pane", "command"],
-                      let pane = input["pane"] as? String, let command = input["command"] as? String,
-                      let terminal = panes.first(where: { paneID($0) == pane }) {
+                      let supplied = input["pane"] as? String, let command = input["command"] as? String {
+                // An ID copied by hand from older list output can still carry JSON's `\/` escape (issue #26).
+                let pane = supplied.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\\/", with: "/")
+                guard let terminal = panes.first(where: { paneID($0) == pane }) else {
+                    throw AkittyError.core(pane.hasPrefix(instance + "/")
+                        ? "Pane \(pane) is no longer open. Run list again and use a current pane value."
+                        : "Pane identifier is from another AkiTTY launch or was copied incorrectly. Run list again and use a current pane value.")
+                }
                 result = try await request(command, in: terminal, origin: .localProcess(peer))
-            } else { throw AkittyError.core("Unsupported request, unknown fields, or stale pane identifier.") }
-            return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys])
+            } else if operation == "request" || operation == "list" {
+                throw AkittyError.core("Unknown or missing fields for \(operation). See akitty-agent usage.")
+            } else { throw AkittyError.core("Unsupported request operation.") }
+            return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys, .withoutEscapingSlashes])
         } catch {
             collectAll()
-            return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])) ?? Data()
+            return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription], options: [.withoutEscapingSlashes])) ?? Data()
         }
     }
     // The injected monotonic clock lets tests cross the deadline without racing AppKit's timer.
