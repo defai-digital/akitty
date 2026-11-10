@@ -386,18 +386,86 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     private var inheritedProfile: UUID? { if let active { return active.profileID }; return profile }
     /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults). A tab chosen from New Tab with Profile
     /// passes `copyDirectory: false`, so it starts in the profile's (or Settings') folder rather than the focused pane's.
-    func newTab(profile: UUID?, copyDirectory: Bool = true) throws {
+    /// A restored layout passes its saved folder as `directory`; nil there falls back to this window's folder.
+    func newTab(profile: UUID?, copyDirectory: Bool = true, directory savedDirectory: String?? = nil) throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
-        let directory = copyDirectory ? directoryForNewTab() : nil
+        let directory = savedDirectory ?? (copyDirectory ? directoryForNewTab() : nil)
+        let useWindowDirectory = savedDirectory != nil || copyDirectory
         let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? NSNotFound
         let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
         if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
         tabs.selectTabViewItem(item)
-        do { try addPane(to: split, directory: directory, profile: profile, useWindowDirectory: copyDirectory) }
+        do { try addPane(to: split, directory: directory, profile: profile, useWindowDirectory: useWindowDirectory) }
         catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
         refreshTabs()
+    }
+    /// Records this window's tabs, panes, split shares and starting folders for a named layout. The shell's
+    /// reported directory wins while it still exists; otherwise the folder the pane started with is kept.
+    func captureLayout() -> WindowLayout.Window {
+        let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? 0
+        let captured = tabs.tabViewItems.map { item -> WindowLayout.Tab in
+            let panes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
+            return WindowLayout.Tab(panes: panes.map { pane in
+                let reported = (try? pane.terminal.session.shellState())?.shell?.cwd
+                let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.launchDirectory ?? self.directory ?? ""
+                return WindowLayout.Pane(directory: directory, profile: pane.terminal.profileID)
+            }, fractions: fractions(of: panes))
+        }
+        let frame = window?.frame ?? NSRect(x: 0, y: 0, width: 1000, height: 650)
+        return WindowLayout.Window(frame: [Double(frame.minX), Double(frame.minY), Double(frame.width), Double(frame.height)], selectedTab: selected, tabs: captured)
+    }
+    /// Each pane's width over the split's total. Before AppKit lays out a headless window every width is zero,
+    /// so equal shares keep a captured layout usable.
+    private func fractions(of panes: [TerminalPane]) -> [Double] {
+        guard !panes.isEmpty else { return [] }
+        let widths = panes.map { max(0, Double($0.frame.width)) }
+        let total = widths.reduce(0, +)
+        guard total > 0 else { return Array(repeating: 1 / Double(panes.count), count: panes.count) }
+        return widths.map { $0 / total }
+    }
+    /// Builds a new window from a saved layout. The window opens in the first pane's folder (or the Settings
+    /// folder), then every other pane and tab starts in its own saved folder. Processes are intentionally new.
+    static func restored(app: AkittyApplication, headless: Bool = false, layout: WindowLayout.Window) throws -> TerminalWindow {
+        let layoutTabs = layout.tabs.isEmpty ? [WindowLayout.Tab()] : layout.tabs
+        let first = layoutTabs.first?.panes.first
+        let controller = try TerminalWindow(app: app, headless: headless, directory: first.flatMap { restoringDirectory($0.directory) }, profile: first?.profile)
+        if let firstTab = layoutTabs.first, let split = controller.tabs.tabViewItems.first?.view as? NSSplitView {
+            for pane in firstTab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile)) }
+        }
+        for tab in layoutTabs.dropFirst() {
+            let lead = tab.panes.first
+            try controller.newTab(profile: lead?.profile, copyDirectory: false, directory: .some(lead.flatMap { restoringDirectory($0.directory) }))
+            if let split = controller.tabs.selectedTabViewItem?.view as? NSSplitView {
+                for pane in tab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile)) }
+            }
+        }
+        controller.selectTab(at: layout.selectedTab)
+        controller.window?.setFrame(WindowLayoutGeometry.restoredFrame(layout.frame), display: false)
+        // addPane queues its own equal-width layout, so saved shares must be applied after those blocks run.
+        DispatchQueue.main.async { [weak controller] in controller?.applyFractions(layoutTabs) }
+        return controller
+    }
+    /// A saved folder is reused only while it is still an existing absolute directory; otherwise the window default applies.
+    private static func restoringDirectory(_ path: String) -> String? {
+        existingDirectory(path) ? path : nil
+    }
+    private func applyFractions(_ layoutTabs: [WindowLayout.Tab]) {
+        window?.layoutIfNeeded()
+        for (item, tab) in zip(tabs.tabViewItems, layoutTabs) {
+            guard let split = item.view as? NSSplitView else { continue }
+            let count = split.arrangedSubviews.count
+            guard count > 1 else { continue }
+            let shares = tab.fractions.count == count ? tab.fractions : Array(repeating: 1 / Double(count), count: count)
+            let total = shares.reduce(0, +)
+            guard total > 0 else { continue }
+            var position: CGFloat = 0
+            for index in 0..<(count - 1) {
+                position += CGFloat(shares[index] / total)
+                split.setPosition(split.bounds.width * position, ofDividerAt: index)
+            }
+        }
     }
     /// The focused pane's current directory, copied at the moment the tab is created.
     /// A missing or non-directory report falls back to the folder this window was opened with.
@@ -828,10 +896,11 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     return request
 }
 
-@MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate {
+@MainActor public final class AkittyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private(set) var windows: [TerminalWindow] = []
     let intentInstance = UUID().uuidString
     private var eventMenuItem: NSMenuItem?
+    private var windowLayoutsMenu: NSMenu?
     private lazy var agentRequests: AgentRequests = {
         let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
         requests.onFailure = { [weak self] message in self?.eventMenuItem?.title = "Agent Event Timeline (recording warning)…"; self?.eventMenuItem?.toolTip = message }
@@ -963,6 +1032,24 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
         return controller
     }
+    /// The windows a layout may capture: every regular window, never the quick terminal.
+    private var regularWindows: [TerminalWindow] { windows.filter { $0 !== quickTerminal.terminalWindow } }
+    /// Saves the current regular windows in window order. Processes and scrollback are not included.
+    func saveLayout(named name: String) throws {
+        guard WindowLayoutStore.validatedName(name) != nil else { throw WindowLayoutError.invalidName }
+        let captured = regularWindows.map { $0.captureLayout() }
+        guard !captured.isEmpty else { throw WindowLayoutError.noWindows }
+        WindowLayoutStore.upsert(WindowLayout(name: name, windows: captured))
+    }
+    /// Opens every window in the layout as a new window, leaving open windows alone.
+    /// `headless` lets tests exercise restoration without starting real shells.
+    func openLayout(_ layout: WindowLayout, headless: Bool = false) throws {
+        for saved in layout.windows {
+            let controller = try TerminalWindow.restored(app: self, headless: headless, layout: saved)
+            windows.append(controller)
+            controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        }
+    }
     fileprivate func remove(_ controller: TerminalWindow) { quickTerminal.closed(controller); windows.removeAll { $0 === controller } }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -1022,6 +1109,85 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if let tab { settingsWindow?.select(tab) }
         settingsWindow?.showWindow(nil); settingsWindow?.window?.makeKeyAndOrderFront(nil)
     }
+    private var alertHost: NSWindow? { NSApp.keyWindow ?? windows.first?.window }
+    /// Rebuilt every time the submenu opens so it always reflects the store, including layouts saved or deleted here.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === windowLayoutsMenu else { return }
+        menu.removeAllItems(); menu.autoenablesItems = false
+        let save = menu.addItem(withTitle: "Save Windows as Layout…", action: #selector(saveLayoutFromMenu(_:)), keyEquivalent: "")
+        save.target = self; save.isEnabled = !regularWindows.isEmpty
+        menu.addItem(.separator())
+        let layouts = WindowLayoutStore.load()
+        if layouts.isEmpty {
+            menu.addItem(withTitle: "No Saved Layouts", action: nil, keyEquivalent: "").isEnabled = false
+        } else {
+            for layout in layouts {
+                let item = menu.addItem(withTitle: layout.name, action: #selector(openSavedLayout(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = layout.name
+            }
+        }
+        menu.addItem(.separator())
+        let delete = menu.addItem(withTitle: "Delete Layout", action: nil, keyEquivalent: "")
+        let deleteMenu = NSMenu(title: "Delete Layout")
+        if layouts.isEmpty {
+            deleteMenu.addItem(withTitle: "No Saved Layouts", action: nil, keyEquivalent: "").isEnabled = false
+        } else {
+            for layout in layouts {
+                let item = deleteMenu.addItem(withTitle: layout.name, action: #selector(deleteSavedLayout(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = layout.name
+            }
+        }
+        delete.submenu = deleteMenu
+    }
+    @objc private func saveLayoutFromMenu(_ sender: Any?) {
+        guard !regularWindows.isEmpty, let window = alertHost else { return }
+        let alert = NSAlert()
+        alert.messageText = "Save Windows as Layout"
+        alert.informativeText = "Save every open window, tab and split with each pane's starting folder. Running processes and scrollback are not saved."
+        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = nextLayoutName()
+        alert.accessoryView = field; alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self, field] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            self.confirmSaveLayout(named: field.stringValue, in: window)
+        }
+    }
+    private func confirmSaveLayout(named rawName: String, in window: NSWindow) {
+        guard let name = WindowLayoutStore.validatedName(rawName) else { NSAlert(error: WindowLayoutError.invalidName).runModal(); return }
+        let exists = WindowLayoutStore.load().contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        guard exists else { persistLayout(named: name); return }
+        let alert = NSAlert(); alert.messageText = "Replace “\(name)”?"
+        alert.informativeText = "A saved layout with this name already exists."
+        alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in if response == .alertFirstButtonReturn { self?.persistLayout(named: name) } }
+    }
+    private func persistLayout(named name: String) {
+        do { try saveLayout(named: name) } catch { NSAlert(error: error).runModal() }
+    }
+    /// The first unused "Layout N", so the prefilled name does not immediately ask to replace an existing one.
+    private func nextLayoutName() -> String {
+        let names = Set(WindowLayoutStore.load().map { $0.name.lowercased() })
+        var number = 1
+        while names.contains("layout \(number)") { number += 1 }
+        return "Layout \(number)"
+    }
+    @objc private func openSavedLayout(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let layout = WindowLayoutStore.load().first(where: { $0.name == name }) else { return }
+        do { try openLayout(layout) } catch { NSAlert(error: error).runModal() }
+    }
+    @objc private func deleteSavedLayout(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        let alert = NSAlert(); alert.messageText = "Delete “\(name)”?"
+        alert.informativeText = "The saved layout is removed. Open windows are not affected."
+        alert.addButton(withTitle: "Delete"); alert.addButton(withTitle: "Cancel")
+        if let window = alertHost {
+            alert.beginSheetModal(for: window) { response in if response == .alertFirstButtonReturn { WindowLayoutStore.delete(named: name) } }
+        } else if alert.runModal() == .alertFirstButtonReturn {
+            WindowLayoutStore.delete(named: name)
+        }
+    }
     func makeMenu() {
         let bar = NSMenu(); NSApp.mainMenu = bar
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(); let submenu = NSMenu(title: title); item.submenu = submenu; bar.addItem(item); return submenu }
@@ -1043,6 +1209,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         let restart = file.addItem(withTitle: "Restart Terminal", action: #selector(restartTerminal(_:)), keyEquivalent: "r")
         restart.keyEquivalentModifierMask = [.command, .shift]; restart.target = self
+        let layouts = NSMenuItem(title: "Window Layouts", action: nil, keyEquivalent: "")
+        let layoutsMenu = NSMenu(title: "Window Layouts"); layoutsMenu.delegate = self
+        layouts.submenu = layoutsMenu; file.addItem(layouts); windowLayoutsMenu = layoutsMenu
         file.addItem(.separator())
         for (title, kind) in [("New Window with Profile", ProfileMenu.Kind.window), ("New Tab with Profile", .tab)] {
             let item = file.addItem(withTitle: title, action: nil, keyEquivalent: "")
