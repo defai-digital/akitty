@@ -17,3 +17,4 @@ Changes after AkiTTY 1.3.14; these are not yet part of a published release.
 - macOS: paste errors no longer stay stuck in the status line, and minimized windows refresh at the hidden rate.
 - macOS: Home and End follow application cursor mode, and Shift, Option and Control on Home, End, Page Up/Down, Insert, Delete and the function keys send xterm modifier sequences (for example `CSI 1;5H`, `CSI 5;2~`) instead of being dropped.
 - macOS: a window ordered out after being shown (such as a hidden quick terminal) refreshes at the hidden rate.
+- Agent-injected commands start with Ctrl-U, so text typed while the previous command ran can no longer be prepended to the injected command at the new prompt.
