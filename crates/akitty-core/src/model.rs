@@ -243,6 +243,9 @@ pub struct Model {
     /// Whether the last snapshot reported status text or progress, so an expiry
     /// can refresh a client that polls with `since` equal to the revision.
     reported_transient: bool,
+    /// Counts snapshots that delivered a visible status or progress, so a worker that already
+    /// announced one expiry can tell a later, separately delivered status from the same one.
+    transient_reports: u64,
     /// Whether the last snapshot reported a running animation, so a finite
     /// animation parking on its loop count refreshes a `since`-equal poll.
     reported_animating: bool,
@@ -296,6 +299,7 @@ impl Model {
             program_status: ProgramStatuses::default(),
             program_chrome: true,
             reported_transient: false,
+            transient_reports: 0,
             reported_animating: false,
             cell_px: (0, 0),
             in_alt: false,
@@ -444,6 +448,10 @@ impl Model {
     pub(crate) fn chrome_stale(&self, now_ms: u64) -> bool {
         self.reported_transient && !self.chrome.transient_visible(now_ms)
     }
+    /// Identifies the latest snapshot that delivered a visible status or progress.
+    pub(crate) fn transient_report(&self) -> u64 {
+        self.transient_reports
+    }
     pub fn set_program_chrome(&mut self, enabled: bool) {
         self.program_chrome = enabled;
         self.revision = self.revision.saturating_add(1);
@@ -564,6 +572,7 @@ impl Model {
     /// after the build stay queued for the next snapshot.
     pub(crate) fn commit_snapshot(&mut self, commit: SnapshotCommit) {
         self.reported_transient = commit.transient;
+        if commit.transient { self.transient_reports = self.transient_reports.wrapping_add(1); }
         self.reported_animating = commit.reported_animating;
         self.clipboard.drain(..commit.clipboard.min(self.clipboard.len()));
         self.bells_sent = commit.bells;

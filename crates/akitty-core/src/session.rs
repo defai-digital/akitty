@@ -227,7 +227,7 @@ impl Session {
                 });
                 // Exit, failure or panic: the PTY and command channel are gone, but a timed status
                 // on the finished pane still needs a clock until the session closes.
-                keep_chrome_time(&panic_model, &clock_wake, &panic_notify, &clock_stop, false);
+                keep_chrome_time(&panic_model, &clock_wake, &panic_notify, &clock_stop, None);
                 result
             })
             .map_err(|e| e.to_string())?;
@@ -685,13 +685,13 @@ fn queue_parser_replies(
 /// feed cannot reset the backlog between the expiry and the drop decision. Returns the next
 /// deadline the worker must poll for, so a synchronized update or a timed chrome status
 /// expires on time instead of at the idle timeout or the host's safety tick.
-/// `chrome_signalled` records that the host was already woken for the current stale status.
+/// `chrome_signalled` names the delivered status the host was already woken for, if it is stale.
 fn expire_and_queue(
     model: &Arc<Mutex<Model>>,
     output: &mut VecDeque<(Vec<u8>, usize, bool)>,
     response_pending: &mut usize,
     notify: &Wake,
-    chrome_signalled: &mut bool,
+    chrome_signalled: &mut Option<u64>,
 ) -> Option<Instant> {
     let mut state = lock_model(model);
     let before = state.revision;
@@ -710,11 +710,13 @@ fn expire_and_queue(
 /// A timed status leaves the next snapshot without any output or revision change, so the host
 /// is woken once while it still shows a status that has gone. This compares against what the
 /// host last received rather than an expiry the worker saw earlier, so a status that was set
-/// and expired between two passes is still announced.
-fn chrome_tick(state: &Model, signalled: &mut bool) -> (bool, Option<Instant>) {
+/// and expired between two passes is still announced. `signalled` names the delivered status the
+/// host was woken for, so a second status delivered and expired before the worker's next pass
+/// is announced too instead of being taken for the first.
+fn chrome_tick(state: &Model, signalled: &mut Option<u64>) -> (bool, Option<Instant>) {
     let now_ms = chrome::now_ms();
-    let stale = state.chrome_stale(now_ms);
-    let due = stale && !*signalled;
+    let stale = state.chrome_stale(now_ms).then(|| state.transient_report());
+    let due = stale.is_some() && stale != *signalled;
     *signalled = stale;
     (due, chrome_deadline(state.chrome_expiry(now_ms), now_ms))
 }
@@ -729,7 +731,7 @@ fn chrome_deadline(expiry: Option<u64>, now_ms: u64) -> Option<Instant> {
 /// After exit the worker is the session's only clock. Keep announcing a timed status the host
 /// still shows until it expires, including one the host sets on the exited pane; close ends the
 /// wait through the worker wake.
-fn keep_chrome_time(model: &Arc<Mutex<Model>>, wake: &Wake, notify: &Wake, stop: &AtomicBool, mut signalled: bool) {
+fn keep_chrome_time(model: &Arc<Mutex<Model>>, wake: &Wake, notify: &Wake, stop: &AtomicBool, mut signalled: Option<u64>) {
     while !stop.load(Ordering::SeqCst) {
         let (due, next) = chrome_tick(&lock_model(model), &mut signalled);
         if due { notify.signal(); }
@@ -1051,7 +1053,7 @@ fn run(
     let mut response_pending = 0usize;
     let mut io_error = None;
     let mut last_wait = Instant::now();
-    let mut chrome_signalled = false;
+    let mut chrome_signalled = None;
     while !stop.load(Ordering::SeqCst) {
         let deadline = expire_and_queue(&model, &mut output, &mut response_pending, &notify, &mut chrome_signalled);
         let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
@@ -1800,6 +1802,28 @@ mod tests {
         // A buffer that cannot hold the image, or an id that names nothing, reads nothing.
         assert_eq!(session.read_image(1, &mut [0u8; 7]), 0);
         assert_eq!(session.read_image(9, &mut shown), 0);
+    }
+
+    #[test]
+    fn a_second_status_expiring_before_the_next_worker_pass_still_wakes_the_host() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let show = |text: &str| {
+            let expires = chrome::now_ms() + 30;
+            let input = serde_json::from_value(json!({"status":{"text":text,"tone":"info","expires":expires}})).unwrap();
+            session.set_chrome(input).unwrap();
+            let shown: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+            assert!(shown.to_string().contains(text), "the host received {text}: {shown}");
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        };
+        let mut signalled = None;
+        show("first");
+        assert!(chrome_tick(&lock_model(&session.model), &mut signalled).0, "the first expiry wakes the host");
+        assert!(!chrome_tick(&lock_model(&session.model), &mut signalled).0, "one wake per delivered status");
+        // The host clears the first status, then receives and outlives a second one, all before
+        // the worker's next pass.
+        session.snapshot(None, true, false).unwrap();
+        show("second");
+        assert!(chrome_tick(&lock_model(&session.model), &mut signalled).0, "the second expiry must wake the host too");
     }
 
     #[test]
