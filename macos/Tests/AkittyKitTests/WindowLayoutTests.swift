@@ -190,6 +190,20 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertEqual(tab.fractions.reduce(0, +), 1, accuracy: 0.0001)
     }
 
+    @MainActor func testRestoringTheNinthTabDoesNotSelectTheLastTab() throws {
+        _ = NSApplication.shared
+        let saved = WindowLayout.Window(selectedTab: 8, tabs: Array(repeating:
+            WindowLayout.Tab(panes: [WindowLayout.Pane(directory: "/usr")], fractions: [1]), count: 10))
+        let controller = try TerminalWindow.restored(app: AkittyApplication(), headless: true, layout: saved)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        XCTAssertEqual(controller.tabs.numberOfTabViewItems, 10)
+        XCTAssertTrue(controller.tabs.selectedTabViewItem === controller.tabs.tabViewItems[8],
+                      "a saved tab index is literal, while Command-9 remains the last-tab shortcut")
+        controller.selectTab(at: 8)
+        XCTAssertTrue(controller.tabs.selectedTabViewItem === controller.tabs.tabViewItems[9],
+                      "the keyboard shortcut still selects the last tab")
+    }
+
     @MainActor func testSavingWithoutARegularWindowReportsWhy() throws {
         _ = NSApplication.shared
         let app = AkittyApplication()

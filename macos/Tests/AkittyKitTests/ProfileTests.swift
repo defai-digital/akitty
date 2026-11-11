@@ -186,4 +186,41 @@ final class ProfileTests: XCTestCase {
         XCTAssertNil(controller.panes.first { $0.terminal === controller.selectedPane }?.launchDirectory,
                      "a profile tab starts in the profile's folder, not the focused pane's")
     }
+    @MainActor func testNewTabKeepsTheFocusedPanesStartingFolderWithoutShellReports() throws {
+        _ = NSApplication.shared
+        let base = TerminalPreferences.load().directory
+        let expected = base.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : base
+        let opened = expected == "/usr" ? "/bin" : "/usr"
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: opened)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        try controller.newTab(profile: nil, copyDirectory: false)
+        let focused = try XCTUnwrap(controller.selectedPane)
+        controller.window?.makeFirstResponder(focused)
+        XCTAssertEqual(focused.startingDirectory, expected)
+        try controller.newTab()
+        XCTAssertEqual(controller.selectedPane?.startingDirectory, expected,
+                       "a new tab follows the focused pane's starting folder when OSC 7 is unavailable")
+    }
+
+    @MainActor func testRestartKeepsThePanesStartingFolderWithoutShellReports() async throws {
+        _ = NSApplication.shared
+        let base = TerminalPreferences.load().directory
+        let expected = base.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : base
+        let opened = expected == "/usr" ? "/bin" : "/usr"
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: opened)
+        let window = try XCTUnwrap(controller.window)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; window.close() }
+        try controller.newTab(profile: nil, copyDirectory: false)
+        let original = try XCTUnwrap(controller.selectedPane)
+        window.makeFirstResponder(original)
+        controller.restartFocusedPane()
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        for _ in 0..<100 where controller.selectedPane === original { try await Task.sleep(nanoseconds: 10_000_000) }
+        let replacement = try XCTUnwrap(controller.selectedPane)
+        XCTAssertFalse(replacement === original)
+        XCTAssertEqual(replacement.startingDirectory, expected,
+                       "restarting a defaults or profile tab must not replace its folder with the window's")
+    }
+
 }
