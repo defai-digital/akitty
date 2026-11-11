@@ -299,9 +299,9 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// different tab; the drag follows the tab, not the chip.
     private weak var draggedTab: NSTabViewItem?
     private let headless: Bool
-    /// Folder this window was opened with. A new tab uses the focused pane's reported
-    /// directory when that path still exists, and this folder otherwise. Splits use this
-    /// folder. Nil uses the Settings directory.
+    /// Folder this window was opened with. The first tab and splits use this folder.
+    /// Later tabs follow the focused pane's reported directory or its starting folder.
+    /// Nil uses the Settings directory.
     let directory: String?
     /// Profile of the window's first pane. New tabs and splits take the focused pane's profile instead, so a
     /// window opened with a profile keeps it as it grows.
@@ -441,7 +441,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
                 for pane in tab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile)) }
             }
         }
-        controller.selectTab(at: layout.selectedTab)
+        // Saved indices are literal; selectTab(at:) reserves 8 for the Command-9 last-tab shortcut.
+        controller.tabs.selectTabViewItem(at: min(max(0, layout.selectedTab), controller.tabs.numberOfTabViewItems - 1))
         controller.window?.setFrame(WindowLayoutGeometry.restoredFrame(layout.frame), display: false)
         // addPane queues its own equal-width layout, so saved shares must be applied after those blocks run.
         DispatchQueue.main.async { [weak controller] in controller?.applyFractions(layoutTabs) }
@@ -468,12 +469,12 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         }
     }
     /// The focused pane's current directory, copied at the moment the tab is created.
-    /// A missing or non-directory report falls back to the folder this window was opened with.
+    /// A missing or non-directory report falls back to where that pane started, including profile tabs.
     private func directoryForNewTab() -> String? {
         guard let terminal = active else { return directory }
         let reported = (try? terminal.session.shellState())?.shell?.cwd
         if let reported, Self.existingDirectory(reported) { return reported }
-        return directory
+        return terminal.startingDirectory
     }
     /// True when `path` is an absolute directory the new shell can start in.
     static func existingDirectory(_ path: String) -> Bool {
@@ -550,7 +551,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
               let index = split.arrangedSubviews.firstIndex(of: pane) else { return }
         // A failed session may no longer report, so fall back to where this pane started.
         let reported = (try? terminal.session.shellState())?.shell?.cwd
-        let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.launchDirectory ?? self.directory
+        let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? terminal.startingDirectory
         do {
             // Insert before removing: an empty split would close the tab (and window) in between.
             guard let replacement = try addPane(to: split, directory: directory, at: index, profile: .some(terminal.profileID)) else { return }
