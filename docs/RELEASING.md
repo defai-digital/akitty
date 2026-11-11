@@ -61,3 +61,11 @@ review/install UI. Existing live-session confirmation still applies before termi
 References: [Sparkle setup](https://sparkle-project.org/documentation/),
 [gentle reminders](https://sparkle-project.org/documentation/gentle-reminders/),
 [Cloudflare R2 API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/).
+
+## SDK package
+
+`@defai-digital/akitty-sdk` is versioned and published separately from the app, to
+GitHub Packages. After `package.json` and `SDK_VERSION` carry the new version on
+`main`, push a tag `sdk-vX.Y.Z` at that commit. `.github/workflows/publish-sdk.yml`
+refuses a tag that does not match both versions or is not on `main`, runs the SDK
+tests, then publishes with the workflow's `GITHUB_TOKEN`. AkiTTY Web is not published.
