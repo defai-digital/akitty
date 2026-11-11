@@ -1143,7 +1143,9 @@ final class AkittyTests: XCTestCase {
         }
         // Drop the window and the view without `shutdown()`: neither the display link nor its run loop may keep the view alive.
         window = nil
-        for _ in 0..<100 where released != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        // A leak never ends; in-flight main-queue work and autoreleased window contents only delay the release,
+        // which can take over a second on a loaded CI runner. Allow 5 s, and stop as soon as the view is gone.
+        for _ in 0..<500 where released != nil { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertNil(released, "a running display link does not keep its view alive")
     }
 

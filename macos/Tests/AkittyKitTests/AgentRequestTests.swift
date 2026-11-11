@@ -248,7 +248,9 @@ final class AgentRequestTests: XCTestCase {
         try LocalSocket.writeFrame(request, to: fd)
         try await waitUntil { window.attachedSheet != nil }
         Darwin.close(fd)
-        try await waitUntil { try window.attachedSheet == nil && terminal.session.snapshot()?.control?.agent == false }
+        // The sheet and lease go away before the request finishes unwinding; wait for it, or the next
+        // request is refused as "awaiting approval" instead of reaching the sheet.
+        try await waitUntil { try window.attachedSheet == nil && terminal.session.snapshot()?.control?.agent == false && !service.hasActiveRequest }
         service.cooldownInterval = 60
         let pending = Task.detached { try LocalSocket.request(request, path: path) }
         try await waitUntil { window.attachedSheet != nil }
@@ -257,10 +259,12 @@ final class AgentRequestTests: XCTestCase {
             let reply = try JSONSerialization.jsonObject(with: try await pending.value) as! [String: Any]
             XCTAssertEqual(reply["ok"] as? Bool, false)
         } catch { XCTAssertTrue(error.localizedDescription.contains("Dispatch outcome may be unknown")) }
-        try await waitUntil { try window.attachedSheet == nil && terminal.session.snapshot()?.control?.agent == false }
+        // Disabling closes the socket, so the caller's reply can arrive before the request unwinds and arms the
+        // cooldown. Wait for that, or the retry is refused as "awaiting approval" rather than "rate limited".
+        try await waitUntil { try window.attachedSheet == nil && terminal.session.snapshot()?.control?.agent == false && !service.hasActiveRequest }
         try service.setEnabled(true)
         let limited = try await Task.detached { try LocalSocket.request(request, path: path) }.value
-        XCTAssertTrue(String(decoding: limited, as: UTF8.self).contains("rate limited"))
+        XCTAssertTrue(String(decoding: limited, as: UTF8.self).contains("rate limited"), String(decoding: limited, as: UTF8.self))
         XCTAssertNil(window.attachedSheet)
         XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
     }
