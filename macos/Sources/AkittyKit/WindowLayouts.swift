@@ -168,8 +168,11 @@ extension WindowLayout.Tab {
         let count = value.panes.count
         // A saved share list that no longer matches the panes (or holds only zeroes) becomes equal shares.
         let shares = fractions.count == count ? fractions.map { $0.isFinite && $0 > 0 ? $0 : 0 } : []
-        let total = shares.reduce(0, +)
-        value.fractions = total > 0 ? shares.map { $0 / total } : Array(repeating: 1 / Double(count), count: count)
+        // Scale before summing so even finite saved weights cannot overflow their total.
+        let largest = shares.max() ?? 0
+        let scaled = largest > 0 ? shares.map { $0 / largest } : []
+        let total = scaled.reduce(0, +)
+        value.fractions = total > 0 ? scaled.map { $0 / total } : Array(repeating: 1 / Double(count), count: count)
         return value
     }
 }

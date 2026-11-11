@@ -409,7 +409,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             let panes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
             return WindowLayout.Tab(panes: panes.map { pane in
                 let reported = (try? pane.terminal.session.shellState())?.shell?.cwd
-                let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.launchDirectory ?? self.directory ?? ""
+                let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.terminal.startingDirectory
                 return WindowLayout.Pane(directory: directory, profile: pane.terminal.profileID)
             }, fractions: fractions(of: panes))
         }
