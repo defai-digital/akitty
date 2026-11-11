@@ -1,8 +1,16 @@
 {
-  "name": "@ax-code/akitty-sdk",
+  "name": "@defai-digital/akitty-sdk",
   "version": "0.3.0",
   "description": "Typed terminal title and AkiTTY program chrome client over OSC",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/defai-digital/akitty.git",
+    "directory": "packages/akitty-sdk"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.18"

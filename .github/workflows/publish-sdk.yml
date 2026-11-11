@@ -1,0 +1,48 @@
+name: Publish SDK
+# Pushing a tag sdk-vX.Y.Z publishes packages/akitty-sdk at that version to GitHub Packages.
+on:
+  push:
+    tags: ['sdk-v*']
+permissions:
+  contents: read
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Publish @defai-digital/akitty-sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: packages/akitty-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          registry-url: https://npm.pkg.github.com
+          scope: '@defai-digital'
+      - name: Check the tag matches package.json and SDK_VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          [ "$TAG" = "sdk-v$version" ] || { echo "::error::tag $TAG does not match package.json version $version"; exit 1; }
+          grep -q "SDK_VERSION = \"$version\"" src/index.ts || { echo "::error::SDK_VERSION in src/index.ts is not $version"; exit 1; }
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag is not on main"; exit 1; }
+      - run: npm ci --ignore-scripts
+      - name: Build and test
+        run: npm test
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

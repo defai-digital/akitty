@@ -317,7 +317,7 @@ the embedding host registers the tools, and WebMCP needs a supporting browser.
 These tools grant neither command execution nor input ownership. The native
 approval service is not inherited by Web or AX Code Desktop's PTY host.
 
-**Program integration:** [`@ax-code/akitty-sdk`](packages/akitty-sdk/README.md) is a
+**Program integration:** [`@defai-digital/akitty-sdk`](packages/akitty-sdk/README.md) is a
 lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
