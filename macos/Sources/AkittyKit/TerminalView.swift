@@ -20,6 +20,7 @@ private let hiddenPollInterval: Double = 0.25
     public var onTitle: ((String) -> Void)?
     /// The program rang the bell (`BEL`); called once per snapshot that carries it.
     public var onBell: (() -> Void)?
+    /// Chrome or program-status changes can alter the tab's activity badge.
     var onChrome: ((ChromeDocument?) -> Void)?
     private var presenter: MetalPresenter?
     private var bitmap: CGContext?
@@ -428,10 +429,10 @@ private let hiddenPollInterval: Double = 0.25
                 else if next.control?.agent == true { publishStatus("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
                 else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { publishStatus(presentation) }
                 else { publishStatus("\(next.cols) cols × \(next.rows) rows") }
-                // A busy frame arrives at up to 60 Hz and usually repeats the same title and chrome; only
+                // A busy frame arrives at up to 60 Hz and usually repeats the same title and activity; only
                 // changes reach the tab strip, which rebuilds chips and the window title on every call.
                 if previous?.title != next.title { onTitle?(next.title) }
-                if previous?.chrome != next.chrome { onChrome?(next.chrome) }
+                if previous?.chrome != next.chrome || previous?.program_status != next.program_status { onChrome?(next.chrome) }
                 // Clipboard replacement is latest-request-wins while another
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }

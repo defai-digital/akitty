@@ -77,6 +77,34 @@ final class TabActivityTests: XCTestCase {
         XCTAssertEqual(controller.tabChips[0].activity, .working(pixels: frame0, width: 1, height: 1))
     }
 
+    @MainActor func testProgramStatusChangesRefreshTheTabWithoutChromeOrTitleChanges() throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        controller.reduceMotion = false
+        controller.perform(.split)
+        let first = controller.panes[0], reporting = controller.panes[1]
+        let firstFrame = Data([0xAA, 0xBB, 0xCC, 0xFF])
+        _ = try first.terminal.session.call("chrome", [
+            "progress": "indeterminate",
+            "sprite": ["w": 1, "h": 1, "frames": [firstFrame.base64EncodedString()]]
+        ])
+        try working(reporting, mark: 0)
+        // Settle both chrome documents before any program-status report, forcing the ordering CI exposed.
+        first.terminal.applySnapshot(.success(try first.terminal.session.snapshot()))
+        reporting.terminal.applySnapshot(.success(try reporting.terminal.session.snapshot()))
+        XCTAssertEqual(controller.tabChips[0].activity, .working(pixels: firstFrame, width: 1, height: 1))
+        let chrome = reporting.terminal.snapshot?.chrome, title = reporting.terminal.snapshot?.title
+        for (report, expected) in [("state=working", TabActivity.working(pixels: frame0, width: 1, height: 1)),
+                                   ("state=blocked:kind=permission", .blocked), ("state=error", .reportedError), ("state=done", .reportedDone)] {
+            _ = try reporting.terminal.session.call("feed", ["text": "\u{1b}]7501;\(report)\u{7}"])
+            reporting.terminal.applySnapshot(.success(try reporting.terminal.session.snapshot()))
+            XCTAssertEqual(reporting.terminal.snapshot?.chrome, chrome)
+            XCTAssertEqual(reporting.terminal.snapshot?.title, title)
+            XCTAssertEqual(controller.tabChips[0].activity, expected, report)
+        }
+    }
+
     @MainActor func testWorkThatEndsOutOfViewKeepsADotUntilTheTabIsShown() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
