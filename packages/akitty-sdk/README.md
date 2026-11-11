@@ -73,7 +73,7 @@ are frozen. The package exports compiled ESM and explicit `.d.ts` declarations.
 Its one runtime dependency is [Zod](https://zod.dev), pinned exactly; there are no
 native binaries.
 
-## Schemas
+## Schemas (SDK 0.3.0)
 
 Validation is defined as Zod schemas, which the package exports so a program or
 host can check a document before handing it to the client, or validate OSC 771
