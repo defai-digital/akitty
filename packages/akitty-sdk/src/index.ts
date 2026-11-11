@@ -22,7 +22,7 @@ export {
   StatusSchema,
 } from "./schema.js";
 
-export const SDK_VERSION = "0.2.2";
+export const SDK_VERSION = "0.3.0";
 export const CHROME_CLEAR_SEQUENCE = '\x1b]771;{"clear":true}\x07';
 
 export type Status = Readonly<{
