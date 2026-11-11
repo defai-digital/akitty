@@ -392,7 +392,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
         let directory = savedDirectory ?? (copyDirectory ? directoryForNewTab() : nil)
-        let useWindowDirectory = savedDirectory != nil || copyDirectory
+        // Ordinary tabs already resolved their source pane's folder; a missing one uses the profile defaults.
+        let useWindowDirectory = savedDirectory != nil
         let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? NSNotFound
         let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
         if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
@@ -474,7 +475,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         guard let terminal = active else { return directory }
         let reported = (try? terminal.session.shellState())?.shell?.cwd
         if let reported, Self.existingDirectory(reported) { return reported }
-        return terminal.startingDirectory
+        return Self.existingDirectory(terminal.startingDirectory) ? terminal.startingDirectory : nil
     }
     /// True when `path` is an absolute directory the new shell can start in.
     static func existingDirectory(_ path: String) -> Bool {
@@ -486,7 +487,8 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         // A restart replaces a pane, so it may briefly hold a ninth before the old one is removed.
         guard index != nil || split.arrangedSubviews.count < 8 else { return nil }
         // A split takes the profile of the pane it splits from; an explicit profile (even nil, the defaults) wins.
-        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? (useWindowDirectory ? directory : nil), profile: paneProfile ?? inheritedProfile)
+        let inheritedDirectory = useWindowDirectory ? directory.flatMap { Self.existingDirectory($0) ? $0 : nil } : nil
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? inheritedDirectory, profile: paneProfile ?? inheritedProfile)
         // A restart inserts in place; a new split appends as before.
         if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
         else { split.addArrangedSubview(pane) }
@@ -551,10 +553,11 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
               let index = split.arrangedSubviews.firstIndex(of: pane) else { return }
         // A failed session may no longer report, so fall back to where this pane started.
         let reported = (try? terminal.session.shellState())?.shell?.cwd
-        let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? terminal.startingDirectory
+        let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil }
+            ?? (Self.existingDirectory(terminal.startingDirectory) ? terminal.startingDirectory : nil)
         do {
             // Insert before removing: an empty split would close the tab (and window) in between.
-            guard let replacement = try addPane(to: split, directory: directory, at: index, profile: .some(terminal.profileID)) else { return }
+            guard let replacement = try addPane(to: split, directory: directory, at: index, profile: .some(terminal.profileID), useWindowDirectory: false) else { return }
             remove(terminal)
             window?.makeFirstResponder(replacement.terminal)
             refreshTabs()

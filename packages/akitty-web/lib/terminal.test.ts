@@ -1063,6 +1063,24 @@ describe('Terminal', () => {
       expect(() => term.dispose()).not.toThrow();
     });
 
+    test('an addon that closes its terminal during activation is disposed once', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container!);
+      let disposals = 0;
+      const marker = document.createElement('span');
+      term.loadAddon({
+        activate() { document.body.appendChild(marker); term.dispose(); },
+        dispose() { disposals++; marker.remove(); },
+      });
+      try {
+        expect(disposals).toBe(1);
+        expect(marker.isConnected).toBe(false);
+        expect(term.wasmTerm).toBeUndefined();
+        term.dispose();
+        expect(disposals).toBe(1);
+      } finally { marker.remove(); term.dispose(); }
+    });
+
     test('dispose() calls addon dispose', async () => {
       const term = await createIsolatedTerminal();
       term.open(container!);

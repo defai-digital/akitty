@@ -223,4 +223,54 @@ final class ProfileTests: XCTestCase {
                        "restarting a defaults or profile tab must not replace its folder with the window's")
     }
 
+    @MainActor func testNewTabRecoversWhenItsStartingFolderWasDeleted() throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-removed-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let base = TerminalPreferences.load().directory
+        let expected = base.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : base
+        let opened = expected == "/usr" ? "/bin" : "/usr"
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: opened)
+        try controller.newTab(profile: nil, copyDirectory: false, directory: .some(folder.path))
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        try FileManager.default.removeItem(at: folder)
+        try controller.newTab()
+        let replacement = try XCTUnwrap(controller.selectedPane)
+        XCTAssertEqual(replacement.startingDirectory, expected, "do not substitute the window's unrelated folder")
+        XCTAssertTrue(TerminalWindow.existingDirectory(replacement.startingDirectory),
+                      "a missing launch folder falls back to the validated profile or Settings folder")
+    }
+
+    @MainActor func testSplitRecoversWhenTheWindowFolderWasDeleted() throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-removed-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: folder.path)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close() }
+        try FileManager.default.removeItem(at: folder)
+        let split = try controller.splitPane(containing: controller.selectedPane)
+        XCTAssertNotEqual(split.startingDirectory, folder.path)
+        XCTAssertTrue(TerminalWindow.existingDirectory(split.startingDirectory))
+    }
+
+    @MainActor func testRestartRecoversWhenItsStartingFolderWasDeleted() async throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-removed-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true, directory: folder.path)
+        let window = try XCTUnwrap(controller.window), original = try XCTUnwrap(controller.selectedPane)
+        defer { controller.panes.forEach { $0.terminal.shutdown() }; window.close() }
+        try FileManager.default.removeItem(at: folder)
+        controller.restartFocusedPane()
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        for _ in 0..<100 where controller.selectedPane === original { try await Task.sleep(nanoseconds: 10_000_000) }
+        let replacement = try XCTUnwrap(controller.selectedPane)
+        XCTAssertFalse(replacement === original)
+        XCTAssertNotEqual(replacement.startingDirectory, folder.path)
+        XCTAssertTrue(TerminalWindow.existingDirectory(replacement.startingDirectory))
+    }
 }

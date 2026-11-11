@@ -32,9 +32,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.17</string>
+	<string>1.3.18</string>
 	<key>CFBundleVersion</key>
-	<string>10317</string>
+	<string>10318</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>27.2</string>
 	<key>NSHighResolutionCapable</key>

@@ -344,7 +344,11 @@ export class Terminal implements ITerminalCore {
   focus(): void { if (this.isOpen && !this.isDisposed) (this.textarea ?? this.element)?.focus(); }
   blur(): void { this.textarea?.blur(); this.element?.blur(); }
   loadAddon(addon: ITerminalAddon): void {
-    if (this.isDisposed) throw new Error('Terminal has been disposed'); addon.activate(this); this.addons.push(addon);
+    if (this.isDisposed) throw new Error('Terminal has been disposed');
+    addon.activate(this);
+    // Activation is host code and can close the terminal before ownership transfers.
+    if (this.isDisposed) addon.dispose();
+    else this.addons.push(addon);
   }
   getSelection(): string { return this.selectionManager?.getSelection() ?? ''; }
   hasSelection(): boolean { return this.selectionManager?.hasSelection() ?? false; }
