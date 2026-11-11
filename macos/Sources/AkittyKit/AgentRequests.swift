@@ -16,6 +16,8 @@ import AgentIPC
     private weak var pendingWindow: NSWindow?
     private weak var pendingSheet: NSWindow?
     private var activeRequest: UUID?
+    /// Whether a request is still unwinding; its cooldown is armed only once this turns false.
+    var hasActiveRequest: Bool { activeRequest != nil }
     private var pendingLocalRequest = false
     private var stopped = false
     private var timeline: NSWindowController?

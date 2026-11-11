@@ -101,8 +101,9 @@ case "${TEST_MV_BLOCK:-}" in
     case "${2:-}" in
       */.akitty-backup.*/Akitty.app)
         : > "$TEST_READY"
-        sleep 30
-        echo "mv shim: blocked backup move interrupted" >&2; exit 143 ;;
+        # exec, not a child: a group signal racing a fork could orphan the sleep, which would keep the
+        # test's output pipe open for 30 s. The exec'd sleep is this process, so the signal always ends it.
+        exec sleep 30 >/dev/null 2>&1 ;;
     esac
     ;;
 esac
@@ -127,7 +128,7 @@ printf 'rm %s\n' "$*" >> "$TEST_LOG"
 if [ "${TEST_RM_BLOCK:-}" = "backup" ]; then
   for arg in "$@"; do
     case "$arg" in
-      */.akitty-backup.*) : > "$TEST_READY"; sleep 30; exit 143 ;;
+      */.akitty-backup.*) : > "$TEST_READY"; exec sleep 30 >/dev/null 2>&1 ;;  # exec: see the mv shim
     esac
   done
 fi
