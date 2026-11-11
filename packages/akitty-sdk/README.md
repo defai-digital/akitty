@@ -1,6 +1,6 @@
 # AkiTTY terminal SDK
 
-`@ax-code/akitty-sdk` is a dependency-free TypeScript/JavaScript client for programs
+`@ax-code/akitty-sdk` is a TypeScript/JavaScript client for programs
 running **inside** a terminal, including AX Code TUI. It emits standard OSC 2/1
 titles and AkiTTY's existing OSC 771 program chrome protocol. It does not load the
 native library, create sessions, decode video, or render a terminal.
@@ -69,8 +69,29 @@ inherited environment marker. It never grants Kitty graphics capability.
   application's title or status. Hosts need a separate best-effort crash reset.
 
 Invalid inputs throw `RangeError` before writing. Public state and nested values
-are frozen. The package exports compiled ESM and explicit `.d.ts` declarations;
-there are no runtime dependencies or native binaries.
+are frozen. The package exports compiled ESM and explicit `.d.ts` declarations.
+Its one runtime dependency is [Zod](https://zod.dev), pinned exactly; there are no
+native binaries.
+
+## Schemas
+
+Validation is defined as Zod schemas, which the package exports so a program or
+host can check a document before handing it to the client, or validate OSC 771
+JSON it received:
+
+- Main entry: `StatusSchema`, `MarkSchema`, `ProgressSchema`, `SpriteSchema`,
+  `ChromeSchema` (a full document) and `ChromePatchSchema` (`null` removes a field).
+- `/host` entry: `ShellStateSchema` and `DispatchReceiptSchema` for host responses.
+
+```ts
+import { ChromeSchema } from "@ax-code/akitty-sdk"
+const result = ChromeSchema.safeParse(JSON.parse(payload))
+if (!result.success) console.error(result.error.issues)
+```
+
+Parsing returns the same normalized, frozen values the client sends: status text
+has controls removed and is cut to 128 characters. The client still throws
+`RangeError` with the first problem; the Zod error is its `cause`.
 
 ## Build and verify
 

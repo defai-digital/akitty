@@ -143,7 +143,7 @@ For AkiTTY-specific workflows, the agent or an adapter must opt in:
 | Goal | Integration path |
 | --- | --- |
 | Report work, waiting, completion or errors | Emit OSC 7501 program status through the terminal output stream. |
-| Show a tab sprite, activity mark and pane status/progress | Use OSC 771 directly or the dependency-free [TypeScript/JavaScript SDK](packages/akitty-sdk/README.md). |
+| Show a tab sprite, activity mark and pane status/progress | Use OSC 771 directly or the [TypeScript/JavaScript SDK](packages/akitty-sdk/README.md). |
 | Ask to run a command in a native terminal pane | Invoke the bundled `akitty-agent` client after the user enables local requests. Every command needs human approval. |
 | Embed terminal control in your own application | Use the [trusted host API](docs/AGENT_WORKFLOWS.md#host-control-and-approval) and supply caller authentication and approval policy. |
 
