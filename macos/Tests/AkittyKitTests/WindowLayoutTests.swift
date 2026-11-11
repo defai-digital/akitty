@@ -167,6 +167,29 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertEqual(restored.panes.map(\.launchDirectory), [nil, nil])
     }
 
+    @MainActor func testCaptureKeepsEachPanesStartingFolderWithoutShellReports() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let startingDirectory = TerminalPreferences.load().directory
+        let expected = startingDirectory.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : startingDirectory
+        let windowDirectory = expected == "/usr" ? "/bin" : "/usr"
+        let original = try TerminalWindow(app: app, headless: true, directory: windowDirectory)
+        defer { original.panes.forEach { $0.terminal.shutdown() }; original.window?.close() }
+        try original.newTab(profile: nil, copyDirectory: false)
+        let captured = original.captureLayout()
+        XCTAssertEqual(captured.tabs[0].panes[0].directory, windowDirectory)
+        XCTAssertEqual(captured.tabs[1].panes[0].directory, expected,
+                       "without OSC 7, a defaults tab must keep its own starting folder instead of the window's")
+    }
+
+    func testSplitSharesRemainNormalizedWhenTheirSumWouldOverflow() {
+        let tab = WindowLayout.Tab(panes: [WindowLayout.Pane(), WindowLayout.Pane()],
+                                   fractions: [Double.greatestFiniteMagnitude, Double.greatestFiniteMagnitude / 2]).clamped()
+        XCTAssertEqual(tab.fractions[0], 2.0 / 3, accuracy: 0.0001)
+        XCTAssertEqual(tab.fractions[1], 1.0 / 3, accuracy: 0.0001)
+        XCTAssertEqual(tab.fractions.reduce(0, +), 1, accuracy: 0.0001)
+    }
+
     @MainActor func testSavingWithoutARegularWindowReportsWhy() throws {
         _ = NSApplication.shared
         let app = AkittyApplication()

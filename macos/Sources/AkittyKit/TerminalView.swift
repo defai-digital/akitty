@@ -90,6 +90,8 @@ private let hiddenPollInterval: Double = 0.25
     private let preferenceDefaults: UserDefaults
     /// The profile this pane was opened with. Settings changes re-apply it; a deleted profile falls back to defaults.
     let profileID: UUID?
+    /// The resolved starting folder stays with this session even if its profile or Settings later change.
+    let startingDirectory: String
     /// The colours and cursor the rasterizer draws with, from the effective theme.
     var renderAppearance: RenderAppearance { TerminalTheme.named(preferences.theme).appearance(cursorStyle: preferences.cursorStyle) }
     private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
@@ -140,6 +142,7 @@ private let hiddenPollInterval: Double = 0.25
     }
     init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard, profile: UUID? = nil) throws {
         preferenceDefaults = defaults; profileID = profile
+        startingDirectory = initial.directory.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : initial.directory
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
         let integrationDirectory = initial.shellIntegration && !headless
