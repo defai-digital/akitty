@@ -31,6 +31,9 @@ test("packed SDK imports and typechecks in an isolated consumer without native l
         "--no-audit",
         "--no-fund",
         join(directory, archive),
+        // Offline: supply the pinned runtime dependency from this checkout, as the
+        // registry metadata npm would otherwise fetch is not in a fresh CI cache.
+        join(root, "node_modules/zod"),
       ],
       { cwd: directory, stdio: "pipe" },
     );
