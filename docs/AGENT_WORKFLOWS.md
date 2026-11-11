@@ -131,7 +131,7 @@ updates through SSH and multiplexers unless the host explicitly opts in.
 ## Host control and approval
 
 Native embedders use `AgentCommandHost` or `TerminalView.runAgentCommand` (native
-confirmation sheet). JavaScript hosts import `@ax-code/akitty-sdk/host` and supply
+confirmation sheet). JavaScript hosts import `@defai-digital/akitty-sdk/host` and supply
 an authenticated transport to the native ABI (or a host enforcing the same contract).
 This interface is separate from the stdout/status SDK and read-only Web tools.
 

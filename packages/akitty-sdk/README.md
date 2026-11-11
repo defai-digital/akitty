@@ -1,6 +1,6 @@
 # AkiTTY terminal SDK
 
-`@ax-code/akitty-sdk` is a TypeScript/JavaScript client for programs
+`@defai-digital/akitty-sdk` is a TypeScript/JavaScript client for programs
 running **inside** a terminal, including AX Code TUI. It emits standard OSC 2/1
 titles and AkiTTY's existing OSC 771 program chrome protocol. It does not load the
 native library, create sessions, decode video, or render a terminal.
@@ -10,10 +10,26 @@ Web is a separate implementation; its identity alone does not establish OSC 771
 support. Kitty graphics and ASCII/text animations in the terminal grid remain
 with the application's existing renderer and graphics capability probes.
 
+## Install
+
+The package is published to GitHub Packages, which needs a token even to read.
+Point the `@defai-digital` scope at it in the consumer's `.npmrc`, with a token that
+has `read:packages` (in GitHub Actions, the workflow's `GITHUB_TOKEN` with
+`packages: read`):
+
+```ini
+@defai-digital:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+```sh
+npm install @defai-digital/akitty-sdk
+```
+
 ## Use
 
 ```ts
-import { createSprite, createTerminalClient, detectCapabilities } from "@ax-code/akitty-sdk"
+import { createSprite, createTerminalClient, detectCapabilities } from "@defai-digital/akitty-sdk"
 
 const client = createTerminalClient({
   capabilities: detectCapabilities(process.env, process.stdout.isTTY === true),
@@ -84,7 +100,7 @@ JSON it received:
 - `/host` entry: `ShellStateSchema` and `DispatchReceiptSchema` for host responses.
 
 ```ts
-import { ChromeSchema } from "@ax-code/akitty-sdk"
+import { ChromeSchema } from "@defai-digital/akitty-sdk"
 const result = ChromeSchema.safeParse(JSON.parse(payload))
 if (!result.success) console.error(result.error.issues)
 ```
@@ -101,6 +117,11 @@ npm test
 npm pack
 ```
 
+Publishing: bump `version` in `package.json` and `SDK_VERSION` in `src/index.ts`,
+merge to `main`, then push a tag `sdk-vX.Y.Z` at that commit. The `Publish SDK`
+workflow checks that the tag, both versions and `main` agree, runs the tests and
+publishes to GitHub Packages. A version can be published only once.
+
 Tests include an isolated packed consumer with declaration checks. The repository's
 `scripts/verify.sh` also feeds actual SDK output through the native C ABI/parser,
 checks snapshots and cleanup, and verifies that OSC payloads never enter the grid.
@@ -113,10 +134,10 @@ show its own tab sprite/activity and background completion indicator, with text
 and progress in the pane status line. Ordinary CLIs must integrate it explicitly.
 It does not prove a command's execution or result.
 
-A separate `@ax-code/akitty-sdk/host` entry is for trusted embedding hosts:
+A separate `@defai-digital/akitty-sdk/host` entry is for trusted embedding hosts:
 
 ```ts
-import { createCommandHost } from "@ax-code/akitty-sdk/host"
+import { createCommandHost } from "@defai-digital/akitty-sdk/host"
 
 const host = createCommandHost({
   session: sessionId,

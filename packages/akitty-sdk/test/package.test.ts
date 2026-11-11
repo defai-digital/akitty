@@ -40,8 +40,8 @@ test("packed SDK imports and typechecks in an isolated consumer without native l
     writeFileSync(
       join(directory, "consumer.mts"),
       `
-import { createTerminalClient, createSprite, type Status } from "@ax-code/akitty-sdk"
-import { createCommandHost } from "@ax-code/akitty-sdk/host"
+import { createTerminalClient, createSprite, type Status } from "@defai-digital/akitty-sdk"
+import { createCommandHost } from "@defai-digital/akitty-sdk/host"
 const host = createCommandHost({ session: 1, request: async () => ({}), approve: async () => false })
 if (typeof host.execute !== "function") throw new Error("Host entry unavailable")
 const writes: string[] = []
