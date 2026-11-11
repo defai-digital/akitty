@@ -1,3 +1,5 @@
+import { DispatchReceiptSchema, HostIdentifierSchema, HostResponseSchema, parse, ShellStateSchema } from "./schema.js"
+
 /** Trusted embedding-host API. Never expose this transport to terminal programs or read-only WebMCP tools. */
 export type HostRequest = Readonly<Record<string, unknown>>
 export type HostTransport = (request: HostRequest) => Promise<unknown>
@@ -8,6 +10,8 @@ export type ApprovalRequest = Readonly<{
   /** Untrusted shell metadata, for display and exact binding only. */
   cwd: string | null
 }>
+export { DispatchReceiptSchema, ShellStateSchema } from "./schema.js"
+
 export type DispatchReceipt = Readonly<{
   lease: number
   afterCommandId: number
@@ -15,12 +19,10 @@ export type DispatchReceipt = Readonly<{
 }>
 
 function object(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RangeError("invalid host response")
-  return value as Record<string, unknown>
+  return parse(HostResponseSchema, value, "invalid host response")
 }
 function identifier(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new RangeError("invalid host identifier")
-  return value
+  return parse(HostIdentifierSchema, value, "invalid host identifier")
 }
 function bounded(value: string, limit: number, name: string): void {
   if (typeof value !== "string" || !value.trim() || new TextEncoder().encode(value).length > limit || /[\x00-\x1f\x7f-\x9f]/u.test(value)) {
@@ -47,10 +49,7 @@ export function createCommandHost(options: Readonly<{
       const lease = identifier((await call("control_acquire", { actor })).lease)
       let dispatchAttempted = false
       try {
-        const state = await call("shell_state")
-        const shell = object(state.shell)
-        if (shell.ready !== true || !(shell.cwd === null || typeof shell.cwd === "string")) throw new RangeError("integrated shell prompt required")
-        const cwd = shell.cwd
+        const cwd = parse(ShellStateSchema, await call("shell_state"), "integrated shell prompt required").shell.cwd
         const approval = Object.freeze({ session, actor, command, cwd })
         if (await options.approve(approval) !== true) {
           await call("command_deny", { lease })
@@ -58,8 +57,7 @@ export function createCommandHost(options: Readonly<{
         }
         const authorization = identifier((await call("command_authorize", { lease, command, expected_cwd: cwd })).authorization)
         dispatchAttempted = true
-        const receipt = await call("command_execute", { lease, authorization, command })
-        if (receipt.accepted !== true || receipt.completion_untrusted !== true) throw new RangeError("invalid dispatch receipt")
+        const receipt = parse(DispatchReceiptSchema, await call("command_execute", { lease, authorization, command }), "invalid dispatch receipt")
         return Object.freeze({ lease, afterCommandId: identifier(receipt.after_command_id), completionUntrusted: true as const })
       } catch (error) {
         if (dispatchAttempted) throw new Error("dispatch outcome is unknown; inspect the terminal and reclaim control; do not retry automatically", { cause: error })

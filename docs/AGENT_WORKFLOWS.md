@@ -13,7 +13,7 @@ The native app's distinctive workflow is **per-program tab identity**: an integr
 program supplies a small sprite, activity and progress, and a background completion
 dot remains until that tab is viewed. Status text and progress appear in the pane;
 the tab shows the activity mark/sprite and completion indicator. This uses the
-existing stdout writer, OSC 771, and the zero-dependency SDK's main entry. Programs
+existing stdout writer, OSC 771, and the SDK's main entry (its only dependency is Zod). Programs
 must integrate it; ordinary CLI applications are unchanged. No status-bar Python
 script needs installing. Presentation is not proof a command ran or succeeded.
 

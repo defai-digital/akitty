@@ -1,3 +1,27 @@
+import type { output as ZodOutput, ZodType } from "zod";
+import {
+  ChromePatchSchema,
+  ChromePatchSchema as ChromePatchSchemaType,
+  ChromeSchema as ChromeSchemaType,
+  MarkSchema as MarkSchemaType,
+  ProgressSchema as ProgressSchemaType,
+  SpriteSchema as SpriteSchemaType,
+  StatusSchema as StatusSchemaType,
+  parse,
+  sanitizeText,
+  SpriteAnimationSchema,
+  SpriteSchema,
+} from "./schema.js";
+
+export {
+  ChromePatchSchema,
+  ChromeSchema,
+  MarkSchema,
+  ProgressSchema,
+  SpriteSchema,
+  StatusSchema,
+} from "./schema.js";
+
 export const SDK_VERSION = "0.2.2";
 export const CHROME_CLEAR_SEQUENCE = '\x1b]771;{"clear":true}\x07';
 
@@ -65,23 +89,7 @@ export function detectCapabilities(
 
 function text(value: string, replace: string): string {
   if (typeof value !== "string") throw new RangeError("text must be a string");
-  let result = "";
-  let count = 0;
-  for (const char of value) {
-    if (/[\x00-\x1f\x7f-\x9f]/.test(char)) {
-      if (!replace) continue;
-      result += replace;
-    } else result += char;
-    if (++count === 128) break;
-  }
-  return result;
-}
-
-function fields(value: object, allowed: readonly string[]) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new RangeError("expected an object");
-  if (Object.keys(value).some((key) => !allowed.includes(key)))
-    throw new RangeError("unknown field");
+  return sanitizeText(value, replace);
 }
 
 function dimension(value: number) {
@@ -90,39 +98,7 @@ function dimension(value: number) {
 }
 
 function validateSprite(sprite: Sprite): Sprite {
-  fields(sprite, ["w", "h", "frames"]);
-  dimension(sprite.w);
-  dimension(sprite.h);
-  if (
-    !Array.isArray(sprite.frames) ||
-    sprite.frames.length < 1 ||
-    sprite.frames.length > 4
-  ) {
-    throw new RangeError("sprite needs 1..4 frames");
-  }
-  const length = sprite.w * sprite.h * 4;
-  const frames = Array.from(sprite.frames, (frame) => {
-    if (
-      typeof frame !== "string" ||
-      frame.length !== 4 * Math.ceil(length / 3)
-    ) {
-      throw new RangeError("sprite frame does not match dimensions");
-    }
-    let decoded: string;
-    try {
-      decoded = atob(frame);
-    } catch {
-      throw new RangeError("sprite frame must be standard base64 RGBA");
-    }
-    if (decoded.length !== length || btoa(decoded) !== frame)
-      throw new RangeError("sprite frame must be standard base64 RGBA");
-    return frame;
-  });
-  return Object.freeze({
-    w: sprite.w,
-    h: sprite.h,
-    frames: Object.freeze(frames),
-  });
+  return parse(SpriteSchema, sprite);
 }
 
 /** Copy bounded RGBA8 frames into an immutable inline sprite; no native or image decoder dependency. */
@@ -153,52 +129,13 @@ export function titleSequence(title: string): string {
 }
 
 function normalize(patch: ChromePatch, previous: Chrome = {}): Chrome {
-  fields(patch, ["status", "mark", "progress", "sprite"]);
-  const next = { ...previous };
+  const clean = parse(ChromePatchSchema, patch);
+  const next: { -readonly [K in keyof Chrome]: Chrome[K] } = { ...previous };
   for (const key of ["status", "mark", "progress", "sprite"] as const) {
-    if (patch[key] === null) delete next[key];
+    const value = clean[key];
+    if (value === null) delete next[key];
+    else if (value !== undefined) (next as Record<string, unknown>)[key] = value;
   }
-  if (patch.status != null) {
-    fields(patch.status, ["text", "tone", "expires"]);
-    const { tone, expires } = patch.status;
-    if (!["info", "warn", "error"].includes(tone))
-      throw new RangeError("invalid status tone");
-    if (
-      expires !== undefined &&
-      (!Number.isSafeInteger(expires) || expires < 0)
-    )
-      throw new RangeError("expires must be Unix milliseconds");
-    next.status = Object.freeze({
-      text: text(patch.status.text, ""),
-      tone,
-      ...(expires === undefined ? {} : { expires }),
-    });
-  }
-  if (patch.mark != null) {
-    const mark = patch.mark;
-    if (
-      !(typeof mark === "number"
-        ? Number.isInteger(mark) && mark >= 0 && mark <= 3
-        : ["idle", "busy", "error"].includes(mark))
-    ) {
-      throw new RangeError("invalid chrome mark");
-    }
-    next.mark = mark;
-  }
-  if (patch.progress != null) {
-    const progress = patch.progress;
-    if (
-      progress !== "indeterminate" &&
-      (typeof progress !== "number" ||
-        !Number.isFinite(progress) ||
-        progress < 0 ||
-        progress > 1)
-    ) {
-      throw new RangeError("progress must be 0..1 or indeterminate");
-    }
-    next.progress = progress;
-  }
-  if (patch.sprite != null) next.sprite = validateSprite(patch.sprite);
   return Object.freeze(next);
 }
 
@@ -290,14 +227,7 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
     setMark: (mark: Mark | null) => updateChrome({ mark }),
     setSprite: (sprite: Sprite | null) => updateChrome({ sprite }),
     playSprite(input: Readonly<{ sprite: Sprite; intervalMs: number }>) {
-      fields(input, ["sprite", "intervalMs"]);
-      const { intervalMs } = input;
-      if (
-        !Number.isInteger(intervalMs) ||
-        intervalMs < 50 ||
-        intervalMs > 60_000
-      )
-        throw new RangeError("sprite interval must be 50..60000 ms");
+      const { intervalMs } = parse(SpriteAnimationSchema, input);
       const sprite = validateSprite(input.sprite);
       // Commit the first frame before releasing the previous scheduler: a
       // rejected or throwing replacement write must leave the old animation
@@ -360,3 +290,16 @@ export function createTerminalClient(options: ClientOptions): TerminalClient {
     },
   });
 }
+
+// Compile-time guard: the published types and the runtime schemas must describe the same shapes.
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Output<T extends ZodType> = ZodOutput<T>;
+const schemasMatchTypes: [
+  Same<Output<typeof StatusSchemaType>, Status>,
+  Same<Output<typeof MarkSchemaType>, Mark>,
+  Same<Output<typeof ProgressSchemaType>, Progress>,
+  Same<Output<typeof SpriteSchemaType>, Sprite>,
+  Same<Output<typeof ChromeSchemaType>, Chrome>,
+  Same<Output<typeof ChromePatchSchemaType>, ChromePatch>,
+] = [true, true, true, true, true, true];
+void schemasMatchTypes;

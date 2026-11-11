@@ -30,5 +30,8 @@
   "devDependencies": {
     "@types/node": "22.20.5",
     "typescript": "7.1.0-beta"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
   }
 }
