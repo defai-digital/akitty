@@ -202,7 +202,7 @@ normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There
 
 Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per existing folder (a file uses its
 parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
-The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses that pane's starting folder. Restarting a pane uses the same fallback. A tab explicitly opened with a profile starts in the profile's folder (or Settings for the default profile), and retains that folder as its fallback even inside a window opened in another folder.
+The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses that pane's starting folder. Restarting a pane uses the same fallback. A tab explicitly opened with a profile starts in the profile's folder (or Settings for the default profile), and retains that folder as its fallback even inside a window opened in another folder. When a remembered folder has been deleted, new tabs, splits and restarted panes use the profile's or Settings' validated starting folder instead.
 
 ## zsh command history
 
