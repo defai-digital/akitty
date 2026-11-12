@@ -74,8 +74,15 @@ public final class TerminalTools: @unchecked Sendable {
             let reply = try await request.send(payload, path: path)
             try Task.checkCancellation()
             let value = try JSONDecoder().decode(Value.self, from: reply)
-            guard let object = value.objectValue, object["version"] == .int(1), case let .bool(ok)? = object["ok"] else {
-                throw AgentIPCError.failure("Invalid local receipt. Dispatch outcome may be unknown; inspect the terminal and do not automatically retry.")
+            let invalidReceipt = AgentIPCError.failure("Invalid local receipt. Dispatch outcome may be unknown; inspect the terminal and do not automatically retry.")
+            guard let object = value.objectValue, object["version"] == .int(1), case let .bool(ok)? = object["ok"] else { throw invalidReceipt }
+            if ok {
+                guard let data = object["data"]?.objectValue else { throw invalidReceipt }
+                // A success envelope alone does not establish the native dispatch contract.
+                if params.name == "request_command" {
+                    guard data["accepted"]?.boolValue == true, data["completion_untrusted"]?.boolValue == true,
+                          data["input_remains_leased"]?.boolValue == true else { throw invalidReceipt }
+                }
             }
             let result: Value = params.name == "request_command"
                 ? .object(["local_response": value, "automatic_retry_allowed": false, "completion": "unverified"])

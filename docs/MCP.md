@@ -12,7 +12,7 @@ read-only WebMCP adapter is separate and does not expose native macOS panes.
 
 ## Setup
 
-Use a build containing this feature. AkiTTY 1.3.20 and earlier do not include it.
+Use AkiTTY 1.3.21 or later. AkiTTY 1.3.20 and earlier do not include this feature.
 The companion is bundled with the macOS app; no Node or Python runtime is needed.
 
 1. Launch AkiTTY and choose **Akitty → Enable Local Agent Requests**. This grant
@@ -100,7 +100,9 @@ result is the existing `{version, ok, data/error}` local envelope. For
 
 This example omits additional native receipt fields. `accepted` means the input
 was queued once; it does **not** establish exit status, completion, or success.
-Native rejection and transport errors use MCP `isError: true`. Transport failures
+Native rejection and transport errors use MCP `isError: true`. A successful command
+receipt must explicitly confirm accepted input, unverified completion, and retained
+input ownership; missing, mistyped, or contradictory fields are errors. Transport failures
 may have an unknown dispatch outcome; inspect the terminal before another
 request. Never retry automatically. Invalid tool arguments return a protocol
 error before any socket request.
@@ -148,6 +150,11 @@ malformed/oversized messages, schema rejection, and concurrent response framing.
 ```sh
 bash scripts/verify.sh
 ```
+
+To run the native integration test against a built or downloaded companion, set
+`AKITTY_MCP_TEST_CLI` to its absolute executable path and filter to
+`MCPIntegrationTests/testStdioApproveDenyCancelAndEOFUseNativeAuthority`. The default
+uses the companion built with the test suite.
 
 For an optional live agent check, with Grok/Muse installed and already signed in:
 

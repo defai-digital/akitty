@@ -35,7 +35,8 @@ final class MCPIntegrationTests: XCTestCase {
         try await waitUntil { try terminal.session.snapshot()?.shell?.ready == true }
 
         let process = Process(), input = Pipe(), output = Pipe()
-        process.executableURL = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("akitty-agent")
+        process.executableURL = ProcessInfo.processInfo.environment["AKITTY_MCP_TEST_CLI"].map { URL(fileURLWithPath: $0) }
+            ?? Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("akitty-agent")
         process.arguments = ["--socket", path, "mcp"]
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
