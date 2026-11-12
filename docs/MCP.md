@@ -18,18 +18,18 @@ The companion is bundled with the macOS app; no Node or Python runtime is needed
 1. Launch AkiTTY and choose **Akitty → Enable Local Agent Requests**. This grant
    is off again on every app launch.
 2. Configure your agent to launch the bundled companion with the `mcp` argument.
-   For example, these commands register it in the current project's settings:
+   For Grok, this command registers it in the current project's settings:
 
    ```sh
    grok mcp add --scope project akitty -- "$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent" mcp
-   muse mcp add akitty --project -- "$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent" mcp
    ```
 
    Use `/Applications/Akitty.app/Contents/MacOS/akitty-agent` for a system-wide
    installation. Review any project MCP configuration before trusting it. Restart
    or reconnect the agent after adding a server, as required by that client.
 
-   Other clients can use a stdio configuration like this, replacing the command
+   Configure other clients through their supported stdio MCP settings. For clients
+   using a JSON server map, use an entry like this, replacing the command
    with the **absolute path** to your installed companion:
 
    ```json
