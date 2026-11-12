@@ -92,6 +92,32 @@ final class TerminalToolsTests: XCTestCase {
         XCTAssertEqual(total, 1)
     }
 
+    func testMalformedSuccessReceiptsAreErrorsAndNeverRetried() async throws {
+        let replies = [
+            "{\"version\":1,\"ok\":true}",
+            "{\"version\":1,\"ok\":true,\"data\":null}",
+            "{\"version\":1,\"ok\":true,\"data\":{}}",
+            "{\"version\":1,\"ok\":true,\"data\":{\"accepted\":false,\"completion_untrusted\":true,\"input_remains_leased\":true}}",
+            "{\"version\":1,\"ok\":true,\"data\":{\"accepted\":true,\"completion_untrusted\":false,\"input_remains_leased\":true}}",
+            "{\"version\":1,\"ok\":true,\"data\":{\"accepted\":true,\"completion_untrusted\":true,\"input_remains_leased\":false}}",
+            "{\"version\":1,\"ok\":true,\"data\":{\"accepted\":1,\"completion_untrusted\":true,\"input_remains_leased\":true}}"
+        ]
+        for reply in replies {
+            let root = try socketDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+            let path = root.appendingPathComponent("requests.sock").path
+            let server = LocalRequestServer(path: path), count = Counter()
+            try server.start { _, _ in await count.increment(); return Data(reply.utf8) }
+            defer { server.stop() }
+            let tools = TerminalTools(path: path); defer { tools.stop() }
+            let result = try await tools.call(.init(name: "request_command", arguments: ["pane": "x", "command": "pwd"]))
+            XCTAssertEqual(result.isError, true, reply)
+            XCTAssertEqual(result.structuredContent?.objectValue?["completion"], "unverified")
+            XCTAssertEqual(result.structuredContent?.objectValue?["automatic_retry_allowed"], false)
+            let attempts = await count.value
+            XCTAssertEqual(attempts, 1, "malformed receipts must not resend input")
+        }
+    }
+
     func testCancellationBusyAndShutdownDisconnectWithoutRetry() async throws {
         let root = try socketDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("requests.sock").path
