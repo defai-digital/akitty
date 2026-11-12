@@ -1396,6 +1396,17 @@ impl Graphics {
         self.cascade();
     }
 
+    /// Alternate-screen resize drops rows instead of retaining history. Keep
+    /// image anchors with the rows that survive, and discard anchors outside them.
+    pub fn resize_alternate(&mut self, lines: i32, rows: usize) {
+        self.placements.retain_mut(|placement| {
+            if !placement.alt || !placement.anchored() { return true; }
+            placement.line -= lines;
+            placement.line < rows as i32 && placement.line + placement.rows as i32 > 0
+        });
+        self.cascade();
+    }
+
     /// Full reset (RIS): images, placements, pending transfers and numbers.
     pub fn reset(&mut self) {
         self.images.clear();
