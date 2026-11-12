@@ -156,13 +156,14 @@ impl ApcFilter {
                         } else if byte == b'[' {
                             // CSI strings may be the cell size request; watch for it.
                             self.state = ApcState::Csi16(2);
-                        } else {
+                        } else if byte != 0x1b {
                             pass.push(0x1b);
-                            if byte != 0x1b {
-                                pass.push(byte);
-                                self.state = ApcState::Ground;
-                            }
+                            pass.push(byte);
+                            self.state = ApcState::Ground;
                         }
+                        // A redundant ESC replaces the pending one. Forwarding
+                        // the first would leak a lone ESC into the pass stream
+                        // whenever the following sequence is stripped here.
                     }
                     ApcState::Csi16(count) => {
                         if byte == CSI16[count as usize] {
@@ -1387,6 +1388,14 @@ impl Graphics {
         self.cascade();
     }
 
+    /// Removes main placements anchored on rows that no longer exist after a
+    /// resize discarded viewport rows below the cursor. History placements
+    /// (negative lines) and alternate-screen placements are untouched.
+    pub fn delete_below_row(&mut self, rows: usize) {
+        self.placements.retain(|p| p.alt || !p.anchored() || p.line < rows as i32);
+        self.cascade();
+    }
+
     /// Full reset (RIS): images, placements, pending transfers and numbers.
     pub fn reset(&mut self) {
         self.images.clear();
@@ -1574,7 +1583,7 @@ mod tests {
         };
         let whole = collect(&[stream]);
         assert_eq!(whole.1, vec![b"i=1;QQ==".to_vec()]);
-        assert_eq!(whole.0, b"ab\x1b[1mcd\x1b\x1b[0m\x1b[116t\x1b[16;2t\x1b[18tef");
+        assert_eq!(whole.0, b"ab\x1b[1mcd\x1b[0m\x1b[116t\x1b[16;2t\x1b[18tef");
         assert_eq!(whole.2, 1, "exactly CSI 16 t is consumed");
         for split in 0..=stream.len() {
             assert_eq!(collect(&[&stream[..split], &stream[split..]]), whole, "split {split}");
@@ -1671,7 +1680,34 @@ mod tests {
         assert_eq!(run(b"a\x1b_Gjunk\x18b"), (b"ab".to_vec(), 0));
         assert_eq!(run(b"a\x1b_Gjunk\x1ab"), (b"ab".to_vec(), 0));
         assert_eq!(run(b"a\x1b_Gjunk\x1b[1mb"), (b"a\x1b[1mb".to_vec(), 0));
-        assert_eq!(run(b"a\x1b_Gjunk\x1b\x1b_Gi=1;AAAA\x1b\\b"), (b"a\x1bb".to_vec(), 1));
+        assert_eq!(run(b"a\x1b_Gjunk\x1b\x1b_Gi=1;AAAA\x1b\\b"), (b"ab".to_vec(), 1));
+    }
+
+    #[test]
+    fn double_esc_before_an_apc_does_not_leak_an_escape() {
+        // A redundant ESC before a stripped APC must not leave a lone ESC in
+        // the pass stream: the parser would read `ESC X` as SOS and swallow
+        // the following text until a string terminator.
+        let stream = b"\x1b\x1b_Ga=T,f=24,s=1,v=1,i=1,q=2;AAAA\x1b\\Xhello";
+        let collect = |parts: &[&[u8]]| {
+            let mut filter = ApcFilter::default();
+            let (mut pass, mut apc) = (Vec::new(), 0);
+            for part in parts {
+                for segment in filter.feed(part) {
+                    match segment {
+                        Segment::Pass(bytes) => pass.extend(bytes),
+                        Segment::Apc(_) => apc += 1,
+                        Segment::CellSizeQuery => {}
+                    }
+                }
+            }
+            (pass, apc)
+        };
+        let whole = collect(&[stream]);
+        assert_eq!(whole, (b"Xhello".to_vec(), 1));
+        for split in 0..=stream.len() {
+            assert_eq!(collect(&[&stream[..split], &stream[split..]]), whole, "split {split}");
+        }
     }
 
     #[test]

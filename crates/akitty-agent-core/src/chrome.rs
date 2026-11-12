@@ -345,13 +345,14 @@ impl Filter {
                             self.state = State::Osc;
                             self.buffer.clear();
                             self.overflow = false;
-                        } else {
+                        } else if byte != 0x1b {
                             pass.push(0x1b);
-                            if byte != 0x1b {
-                                pass.push(byte);
-                                self.state = State::Ground;
-                            }
+                            pass.push(byte);
+                            self.state = State::Ground;
                         }
+                        // A redundant ESC replaces the pending one. Forwarding
+                        // the first would leak a lone ESC into the pass stream
+                        // whenever the following OSC is intercepted here.
                     }
                     State::Osc => match byte {
                         0x07 => self.finish(&mut out, b"\x07"),
@@ -543,6 +544,28 @@ mod tests {
         // An aborted chrome string is dropped and its ESC starts the next sequence.
         let mut filter = Filter::default();
         assert_eq!(joined([filter.feed(b"\x1b]771;{\x1b[31mred")]), vec![(0, b"\x1b[31mred".to_vec())]);
+    }
+
+    #[test]
+    fn double_esc_before_an_intercepted_osc_does_not_leak_an_escape() {
+        // The redundant ESC and the intercepted OSC must both disappear; a
+        // leaked lone ESC would turn the following `X` into SOS and swallow
+        // the text after the shell marker.
+        let stream = b"\x1b\x1b]133;A\x07Xhello";
+        let mut whole = Filter::default();
+        let expected = joined([whole.feed(stream)]);
+        assert_eq!(expected, vec![(2, b"133;A".to_vec()), (0, b"Xhello".to_vec())]);
+        for split in 0..=stream.len() {
+            let mut filter = Filter::default();
+            let got = joined([filter.feed(&stream[..split]), filter.feed(&stream[split..])]);
+            assert_eq!(got, expected, "split {split}");
+        }
+        // The same holds for an intercepted document OSC.
+        let mut filter = Filter::default();
+        assert_eq!(
+            joined([filter.feed(b"\x1b\x1b]771;{}\x07Xhello")]),
+            vec![(1, b"{}".to_vec()), (0, b"Xhello".to_vec())]
+        );
     }
 
     #[test]

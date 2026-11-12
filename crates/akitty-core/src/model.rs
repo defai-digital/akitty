@@ -540,7 +540,10 @@ impl Model {
                 Event::Reply(bytes) if !overflowed => replies.extend_from_slice(&bytes),
                 Event::Scroll { alternate, top, bottom, lines, history, to_history } =>
                     self.graphics.scroll(alternate, top as i32, bottom as i32, lines, to_history, history),
-                Event::Resize { history_delta, history } => self.graphics.shift_main(history_delta, history),
+                Event::Resize { history_delta, history, rows } => {
+                    self.graphics.shift_main(history_delta, history);
+                    self.graphics.delete_below_row(rows);
+                },
                 Event::ClearVisible { alternate, rows } => self.graphics.delete_visible(alternate, rows),
                 Event::ClearHistory => self.graphics.delete_scrollback(),
                 Event::Alternate(enabled) => {
@@ -1868,6 +1871,32 @@ mod tests {
         model.revision += 1;
         model.snapshot(None);
         assert_eq!(model.graphics.placements[0].line, 0);
+    }
+    #[test]
+    fn resize_drops_placements_on_discarded_viewport_rows() {
+        let mut model = Model::new(Size::validate(20, 5).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(b"\x1b[5;1H");
+        model.feed(place(1).as_bytes());
+        assert_eq!(model.graphics.placements[0].line, 4);
+        // Cursor at the top: shrinking discards the bottom viewport rows
+        // instead of reflowing them into history. The placement anchored on
+        // the discarded row must be deleted, not hidden until the next grow.
+        model.feed(b"\x1b[1;1H");
+        let size = Size::validate(20, 3).unwrap();
+        model.resize_grid(size);
+        model.size = size;
+        model.revision += 1;
+        model.snapshot(None);
+        assert!(model.graphics.placements.is_empty(), "placement on a discarded row must not survive");
+        // Growing back must not resurrect it.
+        let size = Size::validate(20, 5).unwrap();
+        model.resize_grid(size);
+        model.size = size;
+        model.revision += 1;
+        let snapshot = model.snapshot(None);
+        assert!(model.graphics.placements.is_empty());
+        assert_eq!(snapshot["images"].as_array().unwrap().len(), 0);
     }
     /// (text, wide) of the cell at `row`, `col` in a full snapshot.
     fn cell_at(snapshot: &Value, row: usize, col: usize) -> (String, bool) {
