@@ -265,7 +265,8 @@ for implementation details.
 ## What is implemented
 
 - Native windows, tabs and split panes with interactive login shells; a visible
-  **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window.
+  **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window,
+  including when `exit` inherits a failed command's status.
 - Bash/zsh shell integration records bounded command observations without editing
   startup files. zsh also offers [command history](#command-history) on Tab and Up/Down.
   A persistent quick terminal has an opt-in global shortcut; hiding

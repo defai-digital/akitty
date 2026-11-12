@@ -419,7 +419,9 @@ private let hiddenPollInterval: Double = 0.25
                 if selectionEnd == nil { snapshot?.clearSelectionMarks() }
                 // More frames usually follow a changed one: output keeps streaming, an animation advances.
                 lastChange = ProcessInfo.processInfo.systemUptime
-                if next.exited, next.error == nil, next.exit_code == 0, !exitHandled {
+                // A bare `exit` inherits the last command's status. Any reported shell exit
+                // closes its pane; engine/PTY failures remain visible for restart.
+                if next.exited, next.error == nil, next.exit_code != nil, !exitHandled {
                     exitHandled = true
                     DispatchQueue.main.async { [weak self] in self?.onExit?() }
                 }
