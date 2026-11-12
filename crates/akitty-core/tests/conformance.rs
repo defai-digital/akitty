@@ -600,6 +600,35 @@ fn normal_shell_exit_preserves_success_status_for_native_pane_cleanup() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn bare_exit_after_failure_preserves_status_with_shell_integration() {
+    let directory = format!(
+        "{}/../../macos/Sources/AkittyKit/Resources/shell-integration",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let t = Terminal(call(json!({"op":"create","cols":40,"rows":8,"shell":shell,"cwd":"/tmp","shell_integration_dir":directory,"folder_history":false}))["id"].as_u64().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while t.snapshot()["shell"]["ready"] != true {
+            assert!(Instant::now() < deadline, "initial prompt missing in {shell}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        call(json!({"op":"input","id":t.0,"text":"false\rexit\r"}));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = t.snapshot();
+            if snapshot["exited"] == true {
+                assert_eq!(snapshot["exit_code"], 1, "{shell}: {snapshot}");
+                assert!(snapshot["error"].is_null(), "{shell}: {snapshot}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "{shell} did not exit: {snapshot}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 #[test]
 fn events_are_not_dropped_within_one_large_chunk() {
     let t = Terminal::new(20, 4);
