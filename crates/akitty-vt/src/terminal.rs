@@ -33,6 +33,8 @@ pub enum Event {
     Resize {
         history_delta: i32,
         history: usize,
+        /// Rows removed from the top of the alternate screen, which has no history.
+        alternate_delta: i32,
         /// New viewport row count; placements anchored on discarded rows must go.
         rows: usize,
     },
@@ -1391,10 +1393,11 @@ impl Terminal {
             return Ok(());
         }
         let delta = self.main.resize(cols, rows, true);
-        self.alternate.resize(cols, rows, false);
+        let alternate_delta = self.alternate.resize(cols, rows, false);
         emit(Event::Resize {
             history_delta: delta,
             history: self.main.history.len(),
+            alternate_delta,
             rows,
         });
         self.revision = self.revision.wrapping_add(1);
