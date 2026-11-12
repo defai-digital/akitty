@@ -448,9 +448,10 @@ export class Terminal implements ITerminalCore {
   private readonly handleWheel = (event: WheelEvent): void => {
     if (!this.isOpen || this.isDisposed) return;
     event.preventDefault(); event.stopPropagation();
-    if (this.customWheelEventHandler?.(event)) return;
-    if (!event.deltaY) return;
     const engine = this.wasmTerm!;
+    if (this.customWheelEventHandler?.(event)) return;
+    // Host handlers can reset or dispose the terminal before the gesture resumes.
+    if (this.isDisposed || this.wasmTerm !== engine || !event.deltaY) return;
     if (engine.hasMouseTracking() && !event.shiftKey) {
       const { x, y } = this.pointer(event); const button = (event.deltaY < 0 ? 64 : 65) | this.mouseModifiers(event);
       this.emitInput(mouseReport(button, x, y, false, engine.getMode(1006), engine.getMode(1005))); return;

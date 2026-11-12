@@ -160,7 +160,7 @@ The tab bar follows native macOS tabs (as Ghostty uses): tabs share the bar's wi
 equally, each has a close button (confirming when a process is running), drags to
 reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and shows
 its ⌘1–⌘8 shortcut (⌘9 is the last tab). The plus button and close buttons are
-accessible. Successful shell exit closes
+accessible. Shell exit with a reported status closes
 the associated pane and any empty tab/window; failed startup remains visible.
 
 Sparkle owns signed update verification and installation. A gentle titlebar reminder
@@ -254,3 +254,5 @@ The warning's Don't ask again checkbox persists only when Paste is chosen; Setti
 terminals. Additional pastes wait for the current dialog to finish. Bracketed paste strips escape characters
 that could terminate its delimiters. Actual-PTY regressions check Unicode payloads, both shortcut paths,
 approval/cancellation and the disabled-confirmation path.
+
+Web custom wheel handlers may reset or dispose their terminal. The adapter stops the current gesture when the handler replaces or closes the engine, so it cannot access released state or scroll a replacement terminal.

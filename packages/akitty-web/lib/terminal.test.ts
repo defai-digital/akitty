@@ -36,6 +36,31 @@ test('horizontal and stationary wheel events do not generate vertical mouse repo
   } finally { term.dispose(); }
 });
 
+test("wheel handlers can dispose the terminal without continuing the wheel event", async () => {
+  const term = await createIsolatedTerminal()
+  term.open(document.createElement("div"))
+  term.attachCustomWheelEventHandler(() => { term.dispose(); return false })
+  const wheel = { deltaY: 1, preventDefault() {}, stopPropagation() {} } as WheelEvent
+  try { expect(() => (term as any).handleWheel(wheel)).not.toThrow() }
+  finally { term.dispose() }
+})
+
+test("wheel handlers that reset the terminal leave the replacement viewport untouched", async () => {
+  const term = await createIsolatedTerminal({ rows: 2, smoothScrollDuration: 0 })
+  term.open(document.createElement("div"))
+  term.attachCustomWheelEventHandler(() => {
+    term.reset()
+    term.write("new\r\nterminal\r\nhistory\r\n")
+    return false
+  })
+  const wheel = { deltaY: -1, deltaMode: 1, preventDefault() {}, stopPropagation() {} } as WheelEvent
+  try {
+    (term as any).handleWheel(wheel)
+    expect(term.getScrollbackLength()).toBeGreaterThan(0)
+    expect(term.getViewportY()).toBe(0)
+  } finally { term.dispose() }
+})
+
 /**
  * Helper to convert viewport row to absolute buffer row for selection tests.
  * Absolute row = scrollbackLength + viewportRow - viewportY
