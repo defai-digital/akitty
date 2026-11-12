@@ -77,6 +77,10 @@ before the subcommand selects a different local test/instance endpoint.
 
 ## Local request protocol and trust boundary
 
+The optional [local MCP bridge](MCP.md) exposes these same list/request operations
+through `akitty-agent mcp`. It adds no native authority, output access, or automatic
+retry. Pending approval is abandoned when the MCP call is canceled or stdin closes.
+
 `AgentIPC` is a separate native transport library, not the core ABI. The socket is
 `~/Library/Application Support/Akitty/agent/requests.sock`. Its directory is 0700,
 the socket and ownership lock are 0600, and the server checks kernel peer UID and

@@ -38,9 +38,39 @@ public enum LocalSocket {
         do { try configure(fd, timeout: 3) } catch { Darwin.close(fd); throw error }
         return fd
     }
+    private static func connect(_ fd: Int32, path: String, cancellation: LocalSocketRequest?) throws {
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw AgentIPCError.failure("Cannot bound local connection setup.") }
+        defer { _ = fcntl(fd, F_SETFL, flags) }
+        try cancellation?.check()
+        let result = try withAddress(path, { Darwin.connect(fd, $0, $1) })
+        if result == 0 { return }
+        let message = "Cannot connect. Enable Local Agent Requests in the running AkiTTY app."
+        guard errno == EINPROGRESS else { throw AgentIPCError.failure(message) }
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            try cancellation?.check()
+            var readiness = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let ready = Darwin.poll(&readiness, 1, 50)
+            if ready < 0 && errno == EINTR { continue }
+            guard ready >= 0 else { throw AgentIPCError.failure(message) }
+            if ready > 0 {
+                var error: Int32 = 0, size = socklen_t(MemoryLayout<Int32>.size)
+                guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0, error == 0 else { throw AgentIPCError.failure(message) }
+                return
+            }
+        }
+        throw AgentIPCError.failure("Local connection setup timed out. No command was sent; do not automatically retry.")
+    }
     public static func request(_ data: Data, path: String = defaultPath) throws -> Data {
+        try request(data, path: path, cancellation: nil)
+    }
+    static func request(_ data: Data, path: String, cancellation: LocalSocketRequest?) throws -> Data {
         let fd = try descriptor(); defer { Darwin.close(fd) }
-        guard try withAddress(path, { Darwin.connect(fd, $0, $1) }) == 0 else { throw AgentIPCError.failure("Cannot connect. Enable Local Agent Requests in the running AkiTTY app.") }
+        try cancellation?.attach(fd)
+        defer { cancellation?.detach() }
+        try connect(fd, path: path, cancellation: cancellation)
+        try cancellation?.check()
         var uid: uid_t = 0, gid: gid_t = 0
         guard getpeereid(fd, &uid, &gid) == 0, uid == getuid() else { throw AgentIPCError.failure("Local server is not owned by your OS account.") }
         try configure(fd, timeout: 135)
@@ -99,6 +129,48 @@ public enum LocalSocket {
                 offset += sent
             }
         }
+    }
+}
+
+/// One request, with cancellation that shuts down I/O without closing a descriptor still in use.
+/// Disconnecting abandons pending approval. A command already dispatched cannot be undone.
+public final class LocalSocketRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var descriptor: Int32 = -1
+    private var cancelled = false
+    private var started = false
+    public init() {}
+    fileprivate func attach(_ fd: Int32) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancelled else { throw CancellationError() }
+        descriptor = fd
+    }
+    fileprivate func detach() {
+        lock.lock(); defer { lock.unlock() }
+        descriptor = -1
+    }
+    fileprivate func check() throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+    }
+    public func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = true
+        if descriptor >= 0 { _ = shutdown(descriptor, SHUT_RDWR) }
+    }
+    private func begin() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancelled else { throw CancellationError() }
+        guard !started else { throw AgentIPCError.failure("A local request cannot be reused or retried.") }
+        started = true
+    }
+    public func send(_ data: Data, path: String = LocalSocket.defaultPath) async throws -> Data {
+        try begin()
+        return try await withTaskCancellationHandler {
+            try await Task.detached {
+                try LocalSocket.request(data, path: path, cancellation: self)
+            }.value
+        } onCancel: { self.cancel() }
     }
 }
 

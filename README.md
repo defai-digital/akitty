@@ -222,6 +222,10 @@ The native app keeps reported activity separate from command authority:
   existing serialized stdout writer; no status-bar Python script is needed.
 - **`akitty-agent`** uses an opt-in same-user local socket to request native
   approval. It does not expose the privileged core control API to terminal programs.
+- **Optional local MCP server:** `akitty-agent mcp` exposes pane listing and
+  human-approved command requests to external agents. Use it for commands you
+  want visible in a native pane; it does not read output or verify completion.
+  See [setup for Grok, Muse, and other MCP clients](docs/MCP.md).
 
 See the [protocol and ABI contract](docs/ABI.md),
 [native request and event contracts](docs/AGENT_NATIVE.md), and

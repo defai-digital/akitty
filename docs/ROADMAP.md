@@ -201,8 +201,10 @@ denial/disconnect/timeout/reclaim regressions; a real PTY command with an observ
 filesystem effect; bounded private recording with loss markers; and the canonical
 verification gate plus a built-app smoke. Published binaries are separate evidence.
 
-Next work should validate another real Agent integration against the same request
-contract, then define optional command policy/evidence adapters. Existing ax-trust
+The optional [local MCP approval bridge](MCP.md) exposes the same native request
+contract through two tools, with Grok/Muse configuration examples. Output reading
+and UTCP remain deferred. Next work should validate user demand for visible
+approved dispatch, then define optional command policy/evidence adapters. Existing ax-trust
 LLM policies do not automatically authorize shell commands. Complete orchestration,
 cloud execution, remote multiplexing and verifiable result attestation are deferred.
 
