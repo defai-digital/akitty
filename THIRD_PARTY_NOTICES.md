@@ -14,12 +14,16 @@ The native and Web terminal engine is the independently authored **akitty-vt**
   opentui and 2026 DEFAI Digital. Adapted fuzzy command ranking only; see
   third_party/ax-tui/NOTICE.md and LICENSE.
 
-Cargo.lock and package-lock.json pin the complete dependency graphs. The
+Cargo.lock, package-lock.json, and macos/Package.resolved pin dependency graphs. The
 release build also includes THIRD_PARTY_LICENSES.txt, generated from the exact
-locally resolved Cargo sources and their license/notice files. TypeScript and
+locally resolved Cargo sources and Swift package license/notice files. TypeScript and
 esbuild are build tools, not runtime components of the Mac app.
 
 - Sparkle 2.10.1: MIT and bundled third-party notices; see `third_party/sparkle/LICENSE`. The app embeds its framework and update helpers.
+- **MCP Swift SDK 0.12.1** — https://github.com/modelcontextprotocol/swift-sdk — MIT;
+  used by the bundled `akitty-agent` MCP mode. Swift System and Swift Log use
+  Apache 2.0 with the Swift runtime exception; EventSource uses MIT. Resolved
+  package notices are included in the generated `THIRD_PARTY_LICENSES.txt`.
 - **AkiTTY Web** (`packages/akitty-web`) — production terminal code was reauthored
   around the owned Rust engine. Historical regression tests and helpers originated
   from coder/ghostty-web v0.4.0 (MIT, copyright 2025 Coder); their MIT notice remains
