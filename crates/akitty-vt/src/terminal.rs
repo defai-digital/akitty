@@ -33,6 +33,8 @@ pub enum Event {
     Resize {
         history_delta: i32,
         history: usize,
+        /// New viewport row count; placements anchored on discarded rows must go.
+        rows: usize,
     },
     ClearVisible {
         alternate: bool,
@@ -488,7 +490,12 @@ impl Terminal {
         }
         let mut cell = previous.clone();
         let old_width = usize::from(cell.width);
-        let width = cluster.width().clamp(1, 2).min(self.cols());
+        let mut width = cluster.width().clamp(1, 2).min(self.cols());
+        // DECAWM off: keep the cluster inside the last column instead of
+        // wrapping and advancing a row (print() clamps the same way).
+        if position.col + width > self.cols() && !self.modes.wrap {
+            width = self.cols() - position.col;
+        }
         self.cluster_scratch = cluster;
         cell.combining.push(ch);
         cell.width = width as u8;
@@ -1388,6 +1395,7 @@ impl Terminal {
         emit(Event::Resize {
             history_delta: delta,
             history: self.main.history.len(),
+            rows,
         });
         self.revision = self.revision.wrapping_add(1);
         Ok(())
@@ -1504,6 +1512,24 @@ mod tests {
         let mut events = Vec::new();
         term.feed(bytes, 0, |e| events.push(e));
         events
+    }
+    #[test]
+    fn grapheme_widening_respects_decawm() {
+        // With DECAWM off, widening the last-column cell into a two-column
+        // grapheme cluster must not wrap or linefeed (print() already clamps).
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "\x1b[?7labc\u{2764}\u{fe0f}".as_bytes());
+        assert_eq!(term.cursor().row, 0, "no linefeed with DECAWM off");
+        assert_eq!(term.screen().history.len(), 0);
+        assert!(!term.screen().rows[0].wrapped);
+        assert_eq!(term.screen().rows[0].cells[3].ch, '\u{2764}');
+        assert!(term.screen().rows[0].cells[3].combining.contains(&'\u{fe0f}'));
+        // With DECAWM on (the default) the cluster still wraps to the next row.
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "abc\u{2764}\u{fe0f}".as_bytes());
+        assert_eq!(term.cursor().row, 1, "wrap allowed with DECAWM on");
     }
     #[test]
     fn edits_styles_and_queries_survive_all_chunk_boundaries() {
