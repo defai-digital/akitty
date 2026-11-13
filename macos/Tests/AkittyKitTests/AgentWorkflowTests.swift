@@ -3,6 +3,48 @@ import AppKit
 @testable import AkittyKit
 
 final class AgentWorkflowTests: XCTestCase {
+    @MainActor func testPreCancelledCommandDoesNotAcquireControlOrPrompt() async throws {
+        let session = try TerminalSession(headless: true)
+        defer { try? session.close() }
+        var prompted = false
+        let action = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await AgentCommandHost(session: session).execute(actor: "agent", command: "echo hi") { _ in
+                prompted = true
+                return true
+            }
+        }
+        do { _ = try await action.value; XCTFail("expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError, "unexpected error: \(error)") }
+        XCTAssertFalse(prompted)
+        let audit = try JSONSerialization.jsonObject(with: session.controlAudit()) as! [String: Any]
+        XCTAssertTrue((audit["events"] as! [[String: Any]]).isEmpty, "cancelled work must not acquire authority")
+    }
+
+    @MainActor func testCancellationDuringApprovalDoesNotAuthorizeOrDispatch() async throws {
+        let session = try TerminalSession(headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])
+        var dispatched = false
+        let host = AgentCommandHost(session: session, dispatch: { _, _, _ in
+            dispatched = true
+            throw AkittyError.core("dispatch must not run after cancellation")
+        })
+        let action = Task { @MainActor in
+            try await host.execute(actor: "agent", command: "echo hi") { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return true
+            }
+        }
+        do { _ = try await action.value; XCTFail("expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError, "unexpected error: \(error)") }
+        XCTAssertFalse(dispatched)
+        XCTAssertEqual(try session.snapshot()?.control?.owner, "human")
+        let audit = try JSONSerialization.jsonObject(with: session.controlAudit()) as! [String: Any]
+        let events = audit["events"] as! [[String: Any]]
+        XCTAssertFalse(events.contains { ["authorized", "dispatched", "denied"].contains($0["event"] as? String ?? "") })
+    }
+
     func testPreparingDeferredCloseRevokesAccessBeforeCleanupRuns() throws {
         let session = try TerminalSession(headless:true)
         let cleanup = try XCTUnwrap(session.prepareClose())

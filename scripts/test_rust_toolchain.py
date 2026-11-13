@@ -1,5 +1,6 @@
 """Build scripts must select the pinned toolchain without changing user defaults."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ToolchainTests(unittest.TestCase):
+    def test_rustup_binaries_take_precedence_over_same_version_distribution_tools(self):
+        with tempfile.TemporaryDirectory(prefix='akitty-toolchain-') as directory:
+            root = Path(directory)
+            for name in ['pinned', 'distribution']:
+                folder = root / name
+                folder.mkdir()
+                commands = {
+                    'rustc': 'echo "rustc 1.99.1 (test)"',
+                    'rustdoc': ':',
+                    'cargo': 'if [[ $1 == --version ]]; then echo "cargo 1.99.1 (test)"; else cargo-clippy; fi',
+                    'cargo-clippy': f'echo "{name}-clippy"',
+                }
+                for command, body in commands.items():
+                    binary = folder / command
+                    binary.write_text('#!/bin/bash\n' + body + '\n')
+                    binary.chmod(0o755)
+            script = '''
+set -eu
+rustup() { echo "$PINNED_BIN/${@: -1}"; }
+source scripts/rust-toolchain.sh
+cargo clippy
+'''
+            environment = dict(os.environ, PINNED_BIN=str(root / 'pinned'),
+                               PATH=str(root / 'distribution') + ':/usr/bin:/bin')
+            result = subprocess.run(['/bin/bash', '-c', script], cwd=ROOT, env=environment,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), 'pinned-clippy')
+
     def run_helper(self, compiler='1.99.1', distribution=False, wrong_cargo=False):
         with tempfile.TemporaryDirectory(prefix='akitty-toolchain-') as directory:
             binary = Path(directory) / 'rustc'
