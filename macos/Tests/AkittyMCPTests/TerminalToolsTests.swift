@@ -119,6 +119,12 @@ final class TerminalToolsTests: XCTestCase {
     }
 
     func testCancellationBusyAndShutdownDisconnectWithoutRetry() async throws {
+        // Each case has a fresh server: observing a disconnect does not mean the
+        // previous handler has returned and released the server's busy slot.
+        for shutdown in [false, true] { try await checkDisconnectWithoutRetry(shutdown: shutdown) }
+    }
+
+    private func checkDisconnectWithoutRetry(shutdown: Bool) async throws {
         let root = try socketDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("requests.sock").path
         let server = LocalRequestServer(path: path), count = Counter()
@@ -126,29 +132,31 @@ final class TerminalToolsTests: XCTestCase {
             await count.increment()
             while peer.connected && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
             await count.disconnected()
+            // Disconnect observation precedes the server's handler cleanup.
+            try? await Task.sleep(for: .milliseconds(100))
             return Data("{\"version\":1,\"ok\":false,\"error\":\"cancelled\"}".utf8)
         }
         defer { server.stop() }
         let cancelled = LocalSocketRequest(); cancelled.cancel()
         do { _ = try await cancelled.send(Data("{}".utf8), path: path); XCTFail("pre-cancelled request must not connect") }
         catch is CancellationError {} catch { XCTFail("unexpected error: \(error)") }
-        let tools = TerminalTools(path: path)
+        let tools = TerminalTools(path: path); defer { tools.stop() }
         let params = CallTool.Parameters(name: "request_command", arguments: ["pane": "x", "command": "pwd"])
-        let first = Task { try await tools.call(params) }
+        let pending = Task { try await tools.call(params) }
         try await waitUntil { await count.value == 1 }
         let busy = try await tools.call(params)
         XCTAssertEqual(busy.isError, true)
-        first.cancel()
-        do { _ = try await first.value; XCTFail("expected cancellation") } catch is CancellationError {}
+        if shutdown {
+            tools.stop()
+            let stopped = try await pending.value
+            XCTAssertEqual(stopped.isError, true)
+        } else {
+            pending.cancel()
+            do { _ = try await pending.value; XCTFail("expected cancellation") } catch is CancellationError {}
+        }
         try await waitUntil { await count.disconnects == 1 }
-        let second = Task { try await tools.call(params) }
-        try await waitUntil { await count.value == 2 }
-        tools.stop()
-        let stopped = try await second.value
-        XCTAssertEqual(stopped.isError, true)
-        try await waitUntil { await count.disconnects == 2 }
         let total = await count.value
-        XCTAssertEqual(total, 2, "busy, cancellation, and shutdown must not resend")
+        XCTAssertEqual(total, 1, "busy, cancellation, and shutdown must not resend")
     }
 
     private func waitUntil(_ condition: () async -> Bool) async throws {
