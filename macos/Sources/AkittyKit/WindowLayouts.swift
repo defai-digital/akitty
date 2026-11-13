@@ -167,13 +167,14 @@ extension WindowLayout {
     func clamped() -> Self {
         var value = self
         value.windows = Array(windows.prefix(WindowLayoutStore.maxWindows)).map { $0.clamped() }
-        var remaining = 128 * 1024
+        // Share the layout budget so a large arrangement keeps a recent tail for every pane.
+        let count = value.windows.reduce(0) { $0 + $1.tabs.reduce(0) { $0 + $1.panes.count } }
+        let perPane = min(16384, 128 * 1024 / max(1, count))
         for window in value.windows.indices {
             for tab in value.windows[window].tabs.indices {
                 for pane in value.windows[window].tabs[tab].panes.indices {
-                    let text = SavedLayoutText.bounded(value.windows[window].tabs[tab].panes[pane].scrollback ?? "", maxBytes: min(16384, remaining))
+                    let text = SavedLayoutText.bounded(value.windows[window].tabs[tab].panes[pane].scrollback ?? "", maxBytes: perPane)
                     value.windows[window].tabs[tab].panes[pane].scrollback = text.isEmpty ? nil : text
-                    remaining -= text.utf8.count
                 }
             }
         }
