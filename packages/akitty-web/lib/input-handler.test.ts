@@ -247,6 +247,24 @@ describe('InputHandler', () => {
   });
 
   describe('Printable Characters', () => {
+    test('disposing from onKey stops the current printable key before emitting input', () => {
+      let handler: InputHandler;
+      handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        () => handler.dispose());
+      simulateKey(container, createKeyEvent('KeyA', 'a'));
+      expect(dataReceived).toEqual([]);
+      expect(handler.isActive()).toBe(false);
+    });
+
+    test('disposing from a custom handler stops the current key even when it returns false', () => {
+      let handler: InputHandler;
+      handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, () => { handler.dispose(); return false; });
+      simulateKey(container, createKeyEvent('KeyA', 'a'));
+      expect(dataReceived).toEqual([]);
+      expect(handler.isActive()).toBe(false);
+    });
+
     test('sends printable characters outside the BMP without replacing them with the physical key', () => {
       const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {});
       try {
