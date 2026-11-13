@@ -115,7 +115,15 @@ pub struct ShellIntegration {
     /// False starts the shell with AKITTY_FOLDER_HISTORY=0.
     pub folder_history: bool,
 }
+#[derive(Default)]
+pub struct SessionConfig {
+    pub shell: Option<String>,
+    pub cwd: Option<String>,
+    pub integration: Option<ShellIntegration>,
+    pub restored_text: Option<String>,
+}
 impl Session {
+    #[cfg(test)]
     pub fn new(
         cols: usize,
         rows: usize,
@@ -125,9 +133,16 @@ impl Session {
         scrollback: usize,
         integration: Option<ShellIntegration>,
     ) -> Result<Self, String> {
+        Self::new_configured(cols, rows, headless, scrollback, SessionConfig { shell, cwd, integration, restored_text: None })
+    }
+    pub fn new_configured(cols: usize, rows: usize, headless: bool, scrollback: usize, config: SessionConfig) -> Result<Self, String> {
+        let SessionConfig { shell, cwd, integration, restored_text } = config;
         if scrollback > 20000 { return Err("scrollback exceeds 20000 lines".into()); }
         let size = Size::validate(cols, rows)?;
-        let model = Arc::new(Mutex::new(Model::new(size, scrollback)));
+        let mut initial = Model::new(size, scrollback);
+        if let Some(text) = restored_text { initial.restore_text(&text)?; }
+        // Populate only the model, before the PTY starts. Saved text is never shell input.
+        let model = Arc::new(Mutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(AtomicUsize::new(0));
         if headless {
@@ -348,6 +363,9 @@ impl Session {
     }
     pub fn command_history(&self, after: u64) -> Result<Value, String> {
         Ok(self.state()?.shell.history(after))
+    }
+    pub fn recent_text(&self) -> Result<Value, String> {
+        Ok(json!({"text": self.state()?.recent_text(), "untrusted": true}))
     }
     /// Shell and control summaries without a snapshot's side effects: a snapshot consumes
     /// pending bell and clipboard events, so hosts must not take one just to read the cwd.

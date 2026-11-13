@@ -242,6 +242,15 @@ Removing or changing a documented field/semantic requires a new ABI/schema major
 Additive response fields must be tolerated; unknown operations must fail.
 
 `create` accepts optional `scrollback` in the range 0..20000 lines (default 5000).
+It also accepts optional `restored_text` (at most 200 lines and 16 KiB UTF-8).
+The core removes control characters except newlines and inserts this plain text,
+with previous-session and fresh-session markers, before starting the new PTY.
+It never writes saved text to the shell. `recent_text` takes only `id` and returns
+`{text, untrusted:true}`: the latest 200 screen/history rows, at most 16 KiB, without
+scrolling the viewport or consuming snapshot events.
+Snapshots add `alternate_scroll`, the current DEC mode 1007 flag. Native scrolling
+in the alternate screen emits cursor keys only while this flag is enabled; mouse
+reporting retains priority and Option bypasses program input.
 Normal PTY termination reports the child exit code; the native UI closes sessions
 with any reported exit code and leaves engine/PTY failures visible for restart.
 

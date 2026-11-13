@@ -1,7 +1,7 @@
 import AppKit
 
-/// A saved arrangement of windows, tabs and splits. Only the shape and each pane's starting folder are stored;
-/// live processes and scrollback are deliberately absent, because restoring those is a separate capability.
+/// A saved arrangement of windows, tabs and splits with each pane's starting folder.
+/// Live processes are never restored. Optional bounded text is shown before a fresh shell starts.
 struct WindowLayout: Codable, Equatable {
     struct Window: Codable, Equatable {
         /// x, y, width and height in the screen coordinates NSWindow uses.
@@ -18,6 +18,7 @@ struct WindowLayout: Codable, Equatable {
         var directory: String = ""
         /// The profile the pane was opened with; nil is the Settings defaults. A profile deleted since restores as defaults.
         var profile: UUID?
+        var scrollback: String?
     }
     var name: String = ""
     var windows: [Window] = []
@@ -54,12 +55,13 @@ extension WindowLayout.Tab {
     }
 }
 extension WindowLayout.Pane {
-    private enum CodingKeys: String, CodingKey { case directory, profile }
+    private enum CodingKeys: String, CodingKey { case directory, profile, scrollback }
     init(from decoder: Decoder) throws {
         self.init()
         let container = try decoder.container(keyedBy: CodingKeys.self)
         directory = try container.decodeIfPresent(String.self, forKey: .directory) ?? directory
         profile = try? container.decodeIfPresent(UUID.self, forKey: .profile)
+        scrollback = try? container.decodeIfPresent(String.self, forKey: .scrollback)
     }
 }
 
@@ -67,11 +69,13 @@ enum WindowLayoutError: LocalizedError, Equatable {
     case noWindows
     case invalidName
     case tooManyLayouts
+    case tooLarge
     var errorDescription: String? {
         switch self {
         case .noWindows: return "Open at least one terminal window before saving a layout."
         case .invalidName: return "Layout names must be 1–64 characters."
         case .tooManyLayouts: return "Akitty saves at most 20 layouts."
+        case .tooLarge: return "The saved layouts exceed the local storage limit. Remove stored scrollback or a layout and try again."
         }
     }
 }
@@ -85,9 +89,11 @@ enum WindowLayoutStore {
     static let maxTabs = 16
     static let maxPanes = 8
     static let maxNameLength = 64
+    static let maxStoreBytes = 4 * 1024 * 1024
 
     static func load(from defaults: UserDefaults = .standard) -> [WindowLayout] {
-        guard let data = defaults.data(forKey: key), let decoded = try? JSONDecoder().decode([WindowLayout].self, from: data) else { return [] }
+        guard let data = defaults.data(forKey: key), data.count <= maxStoreBytes,
+              let decoded = try? JSONDecoder().decode([WindowLayout].self, from: data) else { return [] }
         return decoded.prefix(maxLayouts).compactMap { layout in
             // A layout without a usable name cannot be selected from the menu, so drop it on load.
             guard let name = validatedName(layout.name) else { return nil }
@@ -105,14 +111,16 @@ enum WindowLayoutStore {
             value.name = name
             return value
         }
-        defaults.set(try JSONEncoder().encode(values), forKey: key)
+        let data = try JSONEncoder().encode(values)
+        guard data.count <= maxStoreBytes else { throw WindowLayoutError.tooLarge }
+        defaults.set(data, forKey: key)
     }
 
     /// Replaces a layout with the same name case-insensitively, or appends a new one. A name that trims to
     /// empty (or exceeds the limit) is ignored, so callers that need an error validate first.
     /// Adding a 21st layout drops the oldest, so saving never grows the store past its cap.
-    static func upsert(_ layout: WindowLayout, in defaults: UserDefaults = .standard) {
-        guard let name = validatedName(layout.name) else { return }
+    @discardableResult static func upsert(_ layout: WindowLayout, in defaults: UserDefaults = .standard) -> Bool {
+        guard let name = validatedName(layout.name) else { return false }
         var stored = load(from: defaults)
         var value = layout.clamped()
         value.name = name
@@ -122,7 +130,21 @@ enum WindowLayoutStore {
             if stored.count >= maxLayouts { stored.removeFirst() }
             stored.append(value)
         }
-        try? save(stored, to: defaults)
+        do { try save(stored, to: defaults); return true } catch { return false }
+    }
+
+    static func removeScrollback(named name: String, from defaults: UserDefaults = .standard) throws {
+        var stored = load(from: defaults)
+        for index in stored.indices where stored[index].name.caseInsensitiveCompare(name) == .orderedSame {
+            for window in stored[index].windows.indices {
+                for tab in stored[index].windows[window].tabs.indices {
+                    for pane in stored[index].windows[window].tabs[tab].panes.indices {
+                        stored[index].windows[window].tabs[tab].panes[pane].scrollback = nil
+                    }
+                }
+            }
+        }
+        try save(stored, to: defaults)
     }
 
     static func delete(named name: String, from defaults: UserDefaults = .standard) {
@@ -145,7 +167,31 @@ extension WindowLayout {
     func clamped() -> Self {
         var value = self
         value.windows = Array(windows.prefix(WindowLayoutStore.maxWindows)).map { $0.clamped() }
+        var remaining = 128 * 1024
+        for window in value.windows.indices {
+            for tab in value.windows[window].tabs.indices {
+                for pane in value.windows[window].tabs[tab].panes.indices {
+                    let text = SavedLayoutText.bounded(value.windows[window].tabs[tab].panes[pane].scrollback ?? "", maxBytes: min(16384, remaining))
+                    value.windows[window].tabs[tab].panes[pane].scrollback = text.isEmpty ? nil : text
+                    remaining -= text.utf8.count
+                }
+            }
+        }
         return value
+    }
+}
+
+enum SavedLayoutText {
+    static func bounded(_ text: String, maxBytes: Int = 16384) -> String {
+        guard maxBytes > 0 else { return "" }
+        let plain = String(text.unicodeScalars.filter { $0 == "\n" || !CharacterSet.controlCharacters.contains($0) })
+        let lines = plain.split(separator: "\n", omittingEmptySubsequences: false).suffix(200).joined(separator: "\n")
+        var bytes = 0
+        let suffix = lines.unicodeScalars.reversed().prefix { scalar in
+            bytes += scalar.utf8.count
+            return bytes <= maxBytes
+        }
+        return String(String.UnicodeScalarView(suffix.reversed()))
     }
 }
 

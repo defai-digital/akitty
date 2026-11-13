@@ -122,10 +122,10 @@ private let hiddenPollInterval: Double = 0.25
     public override var isFlipped: Bool { true }
     /// `directory` overrides the Settings starting directory for this terminal only (a folder opened from Finder, Dock or `open -a`).
     /// `profile` names a saved profile whose settings replace the defaults for this pane; nil uses Settings.
-    convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
+    convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
         var initial = TerminalPreferences.load().effective(profile: profile)
         if let directory { initial.directory = directory }
-        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial, profile: profile)
+        try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, initial: initial, profile: profile, restoredText: restoredText)
     }
     public convenience init(headless: Bool = false, forceSoftware: Bool = false, forceShaderFailure: Bool = false, directory: String? = nil) throws {
         try self.init(headless: headless, forceSoftware: forceSoftware, forceShaderFailure: forceShaderFailure, directory: directory, profile: nil)
@@ -141,14 +141,14 @@ private let hiddenPollInterval: Double = 0.25
               FileManager.default.fileExists(atPath: directory.appendingPathComponent(wrapper).path) else { return nil }
         return directory.path
     }
-    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard, profile: UUID? = nil) throws {
+    init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard, profile: UUID? = nil, restoredText: String? = nil) throws {
         preferenceDefaults = defaults; profileID = profile
         startingDirectory = initial.directory.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : initial.directory
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         // NSView must be initialized before a throwing operation can unwind it.
         let integrationDirectory = initial.shellIntegration && !headless
             ? Self.integrationDirectory(shell: initial.shell, resources: Bundle.main.resourceURL) : nil
-        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: initial.scrollback, shellIntegrationDirectory: integrationDirectory, folderHistory: initial.folderHistory)
+        sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: restoredText == nil ? initial.scrollback : max(500, initial.scrollback), shellIntegrationDirectory: integrationDirectory, folderHistory: initial.folderHistory, restoredText: restoredText)
         preferences = initial; fontSize = initial.fontSize
         try syncCoreSettings()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
@@ -778,6 +778,11 @@ private let hiddenPollInterval: Double = 0.25
         if reportMouse(event, button: 0) { return }
         clearSelection()
         selectionStart = position(convert(event.locationInWindow, from: nil)); selectionEnd = nil
+        if event.clickCount >= 2, let snapshot, let cell = selectionStart {
+            let range = snapshot.selectionColumns(row: cell.0, col: cell.1, wholeLine: event.clickCount >= 3)
+            selectionStart = (cell.0, range.lowerBound); selectionEnd = (cell.0, range.upperBound - 1)
+            updateSelection()
+        }
     }
     public override func mouseDragged(with event: NSEvent) {
         if snapshot?.mouse_mode == true && !event.modifierFlags.contains(.option) {
@@ -866,6 +871,7 @@ private let hiddenPollInterval: Double = 0.25
             return
         }
         if snapshot?.alternate == true && !event.modifierFlags.contains(.option) {
+            guard snapshot?.alternate_scroll != false else { return }
             let arrow = "\u{1b}\(snapshot?.app_cursor == true ? "O" : "[")\(lines > 0 ? "A" : "B")"
             if steps > 0 { send(String(repeating: arrow, count: steps)) }
             return

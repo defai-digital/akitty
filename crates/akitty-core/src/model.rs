@@ -126,6 +126,7 @@ pub(crate) struct SnapshotOut {
     mouse_motion: bool,
     focus_reporting: bool,
     alternate: bool,
+    alternate_scroll: bool,
     kitty_flags: u8,
     offset: usize,
     history: usize,
@@ -318,6 +319,38 @@ impl Model {
         }
     }
     /// Move to a literal hit and remember it for the next snapshot. `text` is 1..=256 bytes.
+    /// A bounded plain-text tail, without consuming snapshot events or changing the viewport.
+    pub fn recent_text(&self) -> String {
+        let screen = self.term.screen();
+        let mut lines = Vec::new();
+        let mut bytes = 0;
+        for row in screen.history.iter().chain(screen.rows.iter()).rev() {
+            let text = row.text().trim_end_matches(' ').to_owned();
+            if lines.is_empty() && text.is_empty() { continue; }
+            let available = 16384usize.saturating_sub(bytes + usize::from(!lines.is_empty()));
+            if available == 0 || lines.len() == 200 { break; }
+            let mut start = text.len().saturating_sub(available);
+            while !text.is_char_boundary(start) { start += 1; }
+            let tail = text[start..].to_owned();
+            bytes += tail.len() + usize::from(!lines.is_empty());
+            lines.push(tail);
+            if start != 0 { break; }
+        }
+        lines.reverse();
+        lines.join("\n")
+    }
+    pub fn restore_text(&mut self, text: &str) -> Result<(), String> {
+        if text.len() > 16384 || text.split('\n').count() > 200 {
+            return Err("restored text exceeds 200 lines or 16 KiB".into());
+        }
+        let plain: String = text.chars().filter(|c| *c == '\n' || !c.is_control()).collect();
+        if !plain.is_empty() {
+            self.feed(b"[Restored text - previous session]\r\n");
+            self.feed(plain.replace('\n', "\r\n").as_bytes());
+            self.feed(b"\r\n[End restored text - fresh session]\r\n");
+        }
+        Ok(())
+    }
     pub fn search(&mut self, text: &str, direction: FindDirection) -> Value {
         let top = -(self.term.screen().history.len() as i32);
         let bottom = self.term.rows() as i32 - 1;
@@ -909,6 +942,7 @@ impl Model {
             mouse_motion: content.modes.mouse_motion,
             focus_reporting: content.modes.focus_reporting,
             alternate: content.modes.alternate,
+            alternate_scroll: content.modes.alternate_scroll,
             kitty_flags: content.keyboard_flags(),
             offset: content.screen().offset,
             history: self.term.screen().history.len(),

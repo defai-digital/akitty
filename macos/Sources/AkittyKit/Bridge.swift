@@ -399,6 +399,8 @@ public struct Snapshot: Codable, Sendable {
     public let mouse_motion: Bool
     public let focus_reporting: Bool
     public let alternate: Bool
+    /// DEC mode 1007. Older cores omit it and used alternate scrolling by default.
+    public let alternate_scroll: Bool?
     /// Active Kitty keyboard flags (1 disambiguate, 2 events, 4 alternates, 8 all keys, 16 text).
     public let kitty_flags: UInt8?
     public let offset: Int
@@ -512,6 +514,23 @@ public struct Snapshot: Codable, Sendable {
         for cell in cells where cell.row == row && cell.col < col { present += 1; units += cell.text.utf16.count }
         return before + units + (col - present)
     }
+    /// Cell coordinates keep combining text and both halves of a wide glyph together.
+    func selectionColumns(row: Int, col: Int, wholeLine: Bool) -> Range<Int> {
+        let width = max(1, cols), column = min(max(0, col), width - 1)
+        if wholeLine { return 0..<width }
+        var kinds = Array(repeating: 0, count: width)
+        for cell in cells where cell.row == row && cell.col >= 0 && cell.col < width && !cell.text.isEmpty {
+            let kind = cell.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) } ? 0
+                : (cell.text.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) || $0 == "_" } ? 1 : 2)
+            kinds[cell.col] = kind
+            if cell.wide && cell.col + 1 < width { kinds[cell.col + 1] = kind }
+        }
+        let kind = kinds[column]
+        var start = column, end = column + 1
+        while start > 0 && kinds[start - 1] == kind { start -= 1 }
+        while end < width && kinds[end] == kind { end += 1 }
+        return start..<end
+    }
 }
 
 public final class TerminalSession: @unchecked Sendable {
@@ -526,16 +545,24 @@ public final class TerminalSession: @unchecked Sendable {
     private static let maxUndeliveredClipboard = 8
     /// The core's exact reply when nothing changed since `since`; matched byte-for-byte so an idle poll decodes nothing.
     private static let unchangedEnvelope = Data(#"{"version":1,"ok":true,"data":{"changed":false}}"#.utf8)
-    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000, shellIntegrationDirectory: String? = nil, folderHistory: Bool = true) throws {
+    public init(cols: Int = 100, rows: Int = 30, headless: Bool = false, shell: String? = nil, directory: String? = nil, scrollback: Int = 5000, shellIntegrationDirectory: String? = nil, folderHistory: Bool = true, restoredText: String? = nil) throws {
         var request: [String: Any] = ["op": "create", "cols": cols, "rows": rows, "headless": headless, "scrollback": scrollback]
         if let shell, !shell.isEmpty { request["shell"] = shell }
         if let directory, !directory.isEmpty { request["cwd"] = directory }
         if let shellIntegrationDirectory { request["shell_integration_dir"] = shellIntegrationDirectory }
         if !folderHistory { request["folder_history"] = false }
+        if let restoredText { request["restored_text"] = SavedLayoutText.bounded(restoredText) }
         let data = try CoreBridge.call(request)
         let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let id = value?["id"] as? UInt64 else { throw AkittyError.core("No terminal handle") }
         self.id = id
+    }
+    func recentText() throws -> String {
+        let data = try call("recent_text")
+        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let text = value["text"] as? String else {
+            throw AkittyError.core("Invalid recent text response")
+        }
+        return SavedLayoutText.bounded(text)
     }
     // Backstop for a session dropped without shutdown(). The core close can wait up to a second for a child
     // that ignores SIGHUP, and the last reference is often released on the main thread, so close off it.

@@ -32,10 +32,10 @@ import AppIntents
     let status = NSTextField(labelWithString: "Starting shell…")
     /// Directory passed at creation. Nil means the Settings directory.
     let launchDirectory: String?
-    init(headless: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
+    init(headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
         launchDirectory = directory
         super.init(frame: .zero)
-        terminalStorage = try TerminalView(headless: headless, directory: directory, profile: profile)
+        terminalStorage = try TerminalView(headless: headless, directory: directory, profile: profile, restoredText: restoredText)
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         terminal.translatesAutoresizingMaskIntoConstraints = false; status.translatesAutoresizingMaskIntoConstraints = false
@@ -333,7 +333,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// The selected tab's first pane. `newTab()` selects its tab before returning,
     /// so a foreground action reads the pane it created even before focus settles.
     var selectedPane: TerminalView? { (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
-    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil, profile: UUID? = nil) throws {
+    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
         self.headless = headless
         self.directory = directory
         self.profile = profile
@@ -378,7 +378,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         window.contentView = content
-        try newTab(profile: profile); refreshUpdateReminder(app.updates.availableVersion)
+        try newTab(profile: profile, restoredText: restoredText); refreshUpdateReminder(app.updates.availableVersion)
     }
     required init?(coder: NSCoder) { nil }
     func newTab() throws { try newTab(profile: inheritedProfile, copyDirectory: true) }
@@ -387,7 +387,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults). A tab chosen from New Tab with Profile
     /// passes `copyDirectory: false`, so it starts in the profile's (or Settings') folder rather than the focused pane's.
     /// A restored layout passes its saved folder as `directory`; nil there falls back to this window's folder.
-    func newTab(profile: UUID?, copyDirectory: Bool = true, directory savedDirectory: String?? = nil) throws {
+    func newTab(profile: UUID?, copyDirectory: Bool = true, directory savedDirectory: String?? = nil, restoredText: String? = nil) throws {
         let split = NSSplitView(); split.isVertical = true; split.dividerStyle = .thin
         let item = NSTabViewItem(identifier: UUID()); item.label = TabTitle.defaultTitle; item.view = split
         // Read the focused pane before the new tab becomes selected.
@@ -398,7 +398,7 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let index = selected == NSNotFound ? tabs.numberOfTabViewItems : selected + 1
         if index >= tabs.numberOfTabViewItems { tabs.addTabViewItem(item) } else { tabs.insertTabViewItem(item, at: index) }
         tabs.selectTabViewItem(item)
-        do { try addPane(to: split, directory: directory, profile: profile, useWindowDirectory: useWindowDirectory) }
+        do { try addPane(to: split, directory: directory, profile: profile, useWindowDirectory: useWindowDirectory, restoredText: restoredText) }
         catch { tabs.removeTabViewItem(item); refreshTabs(); throw error }
         refreshTabs()
     }
@@ -417,6 +417,18 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         let frame = window?.frame ?? NSRect(x: 0, y: 0, width: 1000, height: 650)
         return WindowLayout.Window(frame: [Double(frame.minX), Double(frame.minY), Double(frame.width), Double(frame.height)], selectedTab: selected, tabs: captured)
     }
+    func captureLayout(includeScrollback: Bool) throws -> WindowLayout.Window {
+        var value = captureLayout()
+        guard includeScrollback else { return value }
+        for (tab, item) in tabs.tabViewItems.enumerated() {
+            let panes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
+            for (pane, source) in panes.enumerated() {
+                let text = try source.terminal.session.recentText()
+                value.tabs[tab].panes[pane].scrollback = text.isEmpty ? nil : text
+            }
+        }
+        return value
+    }
     /// Each pane's width over the split's total. Before AppKit lays out a headless window every width is zero,
     /// so equal shares keep a captured layout usable.
     private func fractions(of panes: [TerminalPane]) -> [Double] {
@@ -431,15 +443,15 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
     static func restored(app: AkittyApplication, headless: Bool = false, layout: WindowLayout.Window) throws -> TerminalWindow {
         let layoutTabs = layout.tabs.isEmpty ? [WindowLayout.Tab()] : layout.tabs
         let first = layoutTabs.first?.panes.first
-        let controller = try TerminalWindow(app: app, headless: headless, directory: first.flatMap { restoringDirectory($0.directory) }, profile: first?.profile)
+        let controller = try TerminalWindow(app: app, headless: headless, directory: first.flatMap { restoringDirectory($0.directory) }, profile: first?.profile, restoredText: first?.scrollback)
         if let firstTab = layoutTabs.first, let split = controller.tabs.tabViewItems.first?.view as? NSSplitView {
-            for pane in firstTab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile)) }
+            for pane in firstTab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile), restoredText: pane.scrollback) }
         }
         for tab in layoutTabs.dropFirst() {
             let lead = tab.panes.first
-            try controller.newTab(profile: lead?.profile, copyDirectory: false, directory: .some(lead.flatMap { restoringDirectory($0.directory) }))
+            try controller.newTab(profile: lead?.profile, copyDirectory: false, directory: .some(lead.flatMap { restoringDirectory($0.directory) }), restoredText: lead?.scrollback)
             if let split = controller.tabs.selectedTabViewItem?.view as? NSSplitView {
-                for pane in tab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile)) }
+                for pane in tab.panes.dropFirst() { try controller.addPane(to: split, directory: restoringDirectory(pane.directory), profile: .some(pane.profile), restoredText: pane.scrollback) }
             }
         }
         // Saved indices are literal; selectTab(at:) reserves 8 for the Command-9 last-tab shortcut.
@@ -483,12 +495,12 @@ final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
         return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
     @discardableResult
-    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil, profile paneProfile: UUID?? = nil, useWindowDirectory: Bool = true) throws -> TerminalPane? {
+    private func addPane(to split: NSSplitView, directory paneDirectory: String? = nil, at index: Int? = nil, profile paneProfile: UUID?? = nil, useWindowDirectory: Bool = true, restoredText: String? = nil) throws -> TerminalPane? {
         // A restart replaces a pane, so it may briefly hold a ninth before the old one is removed.
         guard index != nil || split.arrangedSubviews.count < 8 else { return nil }
         // A split takes the profile of the pane it splits from; an explicit profile (even nil, the defaults) wins.
         let inheritedDirectory = useWindowDirectory ? directory.flatMap { Self.existingDirectory($0) ? $0 : nil } : nil
-        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? inheritedDirectory, profile: paneProfile ?? inheritedProfile)
+        let pane = try TerminalPane(headless: headless, directory: paneDirectory ?? inheritedDirectory, profile: paneProfile ?? inheritedProfile, restoredText: restoredText)
         // A restart inserts in place; a new split appends as before.
         if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
         else { split.addArrangedSubview(pane) }
@@ -1038,12 +1050,12 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     /// The windows a layout may capture: every regular window, never the quick terminal.
     private var regularWindows: [TerminalWindow] { windows.filter { $0 !== quickTerminal.terminalWindow } }
-    /// Saves the current regular windows in window order. Processes and scrollback are not included.
-    func saveLayout(named name: String) throws {
+    /// Saves regular windows. Text capture is explicitly opt-in; processes always start fresh.
+    func saveLayout(named name: String, includeScrollback: Bool = false) throws {
         guard WindowLayoutStore.validatedName(name) != nil else { throw WindowLayoutError.invalidName }
-        let captured = regularWindows.map { $0.captureLayout() }
+        let captured = try regularWindows.map { try $0.captureLayout(includeScrollback: includeScrollback) }
         guard !captured.isEmpty else { throw WindowLayoutError.noWindows }
-        WindowLayoutStore.upsert(WindowLayout(name: name, windows: captured))
+        guard WindowLayoutStore.upsert(WindowLayout(name: name, windows: captured)) else { throw WindowLayoutError.tooLarge }
     }
     /// Opens every window in the layout as a new window, leaving open windows alone.
     /// `headless` lets tests exercise restoration without starting real shells.
@@ -1131,6 +1143,13 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             }
         }
         menu.addItem(.separator())
+        let clear = menu.addItem(withTitle: "Remove Stored Scrollback", action: nil, keyEquivalent: "")
+        let clearMenu = NSMenu(title: "Remove Stored Scrollback")
+        for layout in layouts where layout.windows.contains(where: { $0.tabs.contains(where: { $0.panes.contains(where: { $0.scrollback != nil }) }) }) {
+            let item = clearMenu.addItem(withTitle: layout.name, action: #selector(removeSavedScrollback(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = layout.name
+        }
+        clear.isEnabled = !clearMenu.items.isEmpty; clear.submenu = clearMenu
         let delete = menu.addItem(withTitle: "Delete Layout", action: nil, keyEquivalent: "")
         let deleteMenu = NSMenu(title: "Delete Layout")
         if layouts.isEmpty {
@@ -1145,29 +1164,47 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     @objc private func saveLayoutFromMenu(_ sender: Any?) {
         guard !regularWindows.isEmpty, let window = alertHost else { return }
-        let alert = NSAlert()
-        alert.messageText = "Save Windows as Layout"
-        alert.informativeText = "Save every open window, tab and split with each pane's starting folder. Running processes and scrollback are not saved."
-        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.stringValue = nextLayoutName()
-        alert.accessoryView = field; alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self, field] response in
+        let (alert, field, history) = Self.layoutSaveAlert(name: nextLayoutName())
+        alert.beginSheetModal(for: window) { [weak self, field, history] response in
             guard response == .alertFirstButtonReturn, let self else { return }
-            self.confirmSaveLayout(named: field.stringValue, in: window)
+            self.confirmSaveLayout(named: field.stringValue, includeScrollback: history.state == .on, in: window)
         }
     }
-    private func confirmSaveLayout(named rawName: String, in window: NSWindow) {
+    static func layoutSaveAlert(name: String) -> (NSAlert, NSTextField, NSButton) {
+        let alert = NSAlert()
+        alert.messageText = "Save Windows as Layout"
+        alert.informativeText = "Save every open window, tab and split with each pane's starting folder. Optional recent text is stored locally and may contain sensitive output. Each pane opens a fresh shell."
+        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = name; field.setAccessibilityLabel("Layout name")
+        let history = NSButton(checkboxWithTitle: "Include recent scrollback", target: nil, action: nil)
+        history.state = .off
+        let accessory = NSStackView(views: [field, history]); accessory.orientation = .vertical; accessory.alignment = .leading; accessory.spacing = 8
+        accessory.frame = NSRect(x: 0, y: 0, width: 280, height: 58)
+        alert.accessoryView = accessory; alert.window.initialFirstResponder = field
+        return (alert, field, history)
+    }
+    private func confirmSaveLayout(named rawName: String, includeScrollback: Bool, in window: NSWindow) {
         guard let name = WindowLayoutStore.validatedName(rawName) else { NSAlert(error: WindowLayoutError.invalidName).runModal(); return }
         let exists = WindowLayoutStore.load().contains { $0.name.caseInsensitiveCompare(name) == .orderedSame }
-        guard exists else { persistLayout(named: name); return }
+        guard exists else { persistLayout(named: name, includeScrollback: includeScrollback); return }
         let alert = NSAlert(); alert.messageText = "Replace “\(name)”?"
         alert.informativeText = "A saved layout with this name already exists."
         alert.addButton(withTitle: "Replace"); alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in if response == .alertFirstButtonReturn { self?.persistLayout(named: name) } }
+        alert.beginSheetModal(for: window) { [weak self] response in if response == .alertFirstButtonReturn { self?.persistLayout(named: name, includeScrollback: includeScrollback) } }
     }
-    private func persistLayout(named name: String) {
-        do { try saveLayout(named: name) } catch { NSAlert(error: error).runModal() }
+    private func persistLayout(named name: String, includeScrollback: Bool) {
+        do { try saveLayout(named: name, includeScrollback: includeScrollback) } catch { NSAlert(error: error).runModal() }
+    }
+    @objc private func removeSavedScrollback(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String, let window = alertHost else { return }
+        let alert = NSAlert(); alert.messageText = "Remove stored scrollback from “\(name)”?"
+        alert.informativeText = "The layout and open terminals are kept. Future openings will start without the saved text."
+        alert.addButton(withTitle: "Remove Scrollback"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            do { try WindowLayoutStore.removeScrollback(named: name) } catch { NSAlert(error: error).runModal() }
+        }
     }
     /// The first unused "Layout N", so the prefilled name does not immediately ask to replace an existing one.
     private func nextLayoutName() -> String {

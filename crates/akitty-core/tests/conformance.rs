@@ -281,6 +281,70 @@ fn typing_partials_stay_byte_identical_without_the_shift_key() {
     assert!(!wire.contains("shift"), "{wire}");
 }
 #[test]
+fn alternate_scroll_mode_is_published_in_full_and_partial_snapshots() {
+    let t = Terminal::new(30, 4);
+    t.feed("\x1b[?1049h\x1b[?1007l");
+    let off = t.snapshot();
+    assert_eq!(off["alternate"], true);
+    assert_eq!(off["alternate_scroll"], false);
+    t.feed("\x1b[?1007h");
+    let on = call(json!({"op":"snapshot","id":t.0,"compact":true,"since":off["revision"]}));
+    assert_eq!(on["alternate_scroll"], true);
+}
+#[test]
+fn recent_text_is_bounded_and_does_not_consume_snapshot_events() {
+    let t = Terminal::new(80, 8);
+    for line in 0..240 { t.feed(&format!("line-{line} 中文\r\n")); }
+    t.feed("\x07\x1b]52;c;aGVsbG8=\x07");
+    let recent = call(json!({"op":"recent_text","id":t.0}));
+    let text = recent["text"].as_str().unwrap();
+    assert!(text.contains("line-239"));
+    assert!(!text.contains("line-0 "));
+    assert!(text.lines().count() <= 200 && text.len() <= 16384);
+    assert_eq!(recent["untrusted"], true);
+    let next = t.snapshot();
+    assert_eq!(next["bell"], true);
+    assert_eq!(next["clipboard"], json!(["hello"]));
+}
+#[test]
+fn restored_text_is_inert_searchable_and_precedes_fresh_output() {
+    let text = "saved failure\n\x1b[?1000h\x1b]52;c;aGVsbG8=\x07\x1b]133;A\x07";
+    let id = call(json!({"op":"create","cols":80,"rows":12,"headless":true,"restored_text":text}))["id"].as_u64().unwrap();
+    let t = Terminal(id);
+    t.feed("FRESH PROMPT");
+    let snapshot = t.snapshot();
+    let rendered = snapshot["lines"].as_array().unwrap().iter().map(|v|v.as_str().unwrap()).collect::<Vec<_>>().join("\n");
+    assert!(rendered.find("saved failure").unwrap() < rendered.find("FRESH PROMPT").unwrap());
+    assert!(rendered.contains("[End restored text - fresh session]"));
+    assert_eq!(snapshot["mouse_mode"], false);
+    assert_eq!(snapshot["bell"], false);
+    assert_eq!(snapshot["clipboard"], json!([]));
+    assert_ne!(snapshot["shell"]["ready"], true);
+    assert_eq!(call(json!({"op":"find","id":t.0,"text":"saved failure"}))["found"], true);
+    let selected = call(json!({"op":"select","id":t.0,"start_row":1,"start_col":0,"end_row":1,"end_col":12}));
+    assert_eq!(selected["text"], "saved failure");
+    assert_eq!(response(json!({"op":"create","cols":80,"rows":12,"headless":true,"restored_text":"x".repeat(16385)}))["ok"], false);
+    assert_eq!(response(json!({"op":"create","cols":80,"rows":12,"headless":true,"restored_text":"\n".repeat(200)}))["ok"], false);
+}
+#[test]
+fn restored_command_text_never_runs_in_the_fresh_shell() {
+    let token = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let path = format!("/tmp/akitty-restored-{}-{token}", std::process::id());
+    let id = call(json!({"op":"create","cols":80,"rows":12,"shell":"/bin/sh","cwd":"/tmp", "restored_text":format!("touch {path}\n")}))["id"].as_u64().unwrap();
+    let t = Terminal(id);
+    call(json!({"op":"input","id":t.0,"text":"printf '__FRESH%s__\\n' SHELL\n"}));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snap = t.snapshot().to_string();
+        if snap.contains("__FRESHSHELL__") { break; }
+        assert!(Instant::now() < deadline, "fresh shell did not execute new input");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let replayed = std::path::Path::new(&path).exists();
+    let _ = std::fs::remove_file(path);
+    assert!(!replayed, "restored text was replayed to the PTY");
+}
+#[test]
 fn clipboard_is_bounded_text_event_not_host_write() {
     let t = Terminal::new(20, 3);
     t.feed("\x1b]52;c;aGVsbG8=\x07");

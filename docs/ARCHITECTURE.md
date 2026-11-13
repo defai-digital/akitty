@@ -206,6 +206,14 @@ The first tab and every split start in that folder. A new tab is inserted after 
 
 ## zsh command history
 
+Named window layouts optionally retain recent plain-text screen/history rows locally.
+The save dialog leaves this option unchecked; text can contain sensitive output.
+Capture reads at most 200 rows / 16 KiB per pane without consuming snapshot events.
+Storage caps text at 128 KiB per layout and the complete layout store at 4 MiB.
+Restore strips terminal controls and populates the model before the new PTY starts,
+with markers separating saved text and fresh output. Commands are never replayed.
+Shell → Window Layouts → Remove Stored Scrollback keeps the saved geometry and folders.
+
 The bundled zsh integration stores accepted single-line commands with a timestamp and both the logical and
 physical working directory in the existing shared store. Queries scan records newest first and rank this
 folder's records (by its logical or physical path) before other folders', each newest first; they filter by a
