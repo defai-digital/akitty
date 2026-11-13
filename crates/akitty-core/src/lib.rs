@@ -164,11 +164,15 @@ fn envelope(result: Result<Value, String>) -> Value {
 }
 
 /// The response envelope as a value. The C ABI uses [`respond`], which splices
-/// pre-serialized data instead of parsing it back.
+/// pre-serialized data instead of parsing it back. A binary cell block cannot be
+/// represented as a value, so negotiating one here fails closed.
 pub fn request(bytes: &[u8]) -> Value {
     envelope(guarded(bytes).and_then(|reply| match reply {
         Reply::Value(value) => Ok(value),
-        Reply::Json(json) | Reply::JsonBinary { json, .. } => serde_json::from_str(&json).map_err(|e| e.to_string()),
+        Reply::Json(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+        // Returning the head alone would advertise `cells_binary.bytes` for a block
+        // this path silently dropped; refuse the negotiation instead.
+        Reply::JsonBinary { .. } => Err("binary cells require the C ABI response path".into()),
     }))
 }
 
@@ -530,5 +534,21 @@ mod tests {
         assert_eq!(head["data"]["cells_binary"]["bytes"], 0);
         assert_eq!(empty.len(), nul + 1, "no bytes may follow an empty block");
         let _ = respond(format!(r#"{{"op":"close","id":{blank_id}}}"#).as_bytes());
+    }
+
+    #[test]
+    fn json_value_api_rejects_binary_cells_instead_of_dropping_them() {
+        let created: Value =
+            serde_json::from_slice(&respond(br#"{"op":"create","cols":20,"rows":4,"headless":true}"#)).unwrap();
+        let id = created["data"]["id"].as_u64().expect("session id");
+        let fed = respond(format!(r#"{{"op":"feed","id":{id},"text":"hello"}}"#).as_bytes());
+        assert_eq!(serde_json::from_slice::<Value>(&fed).unwrap()["ok"], true);
+        let reply = request(format!(r#"{{"op":"snapshot","id":{id},"compact":true,"cells":"binary"}}"#).as_bytes());
+        assert_eq!(reply["ok"], false, "binary negotiation must fail closed on the JSON-value path: {reply}");
+        assert!(reply["error"].as_str().expect("error string").contains("binary cells"));
+        // The C ABI path still delivers the block after the same negotiation.
+        let bytes = respond(format!(r#"{{"op":"snapshot","id":{id},"compact":true,"cells":"binary"}}"#).as_bytes());
+        assert!(bytes.contains(&0), "C ABI reply must keep the NUL separator");
+        let _ = respond(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
     }
 }
