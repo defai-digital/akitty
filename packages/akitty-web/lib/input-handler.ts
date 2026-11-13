@@ -78,7 +78,10 @@ export class InputHandler {
     if (release && (reportedKey === undefined || !(flags & 2))) return;
     if (!release) {
       this.onKey?.({ key: event.key, domEvent: event });
+      if (this.closed) return;
       if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
+      // User callbacks can synchronously dispose the terminal and its encoder.
+      if (this.closed) return;
     }
     if (event.key === 'Dead') return;
     if (modifierKeys[event.code] !== undefined && !(flags & 8)) return;

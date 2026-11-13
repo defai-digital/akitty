@@ -62,13 +62,18 @@ extension TerminalSession {
               !command.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.properties.generalCategory == .format }) else { throw AkittyError.core("Command must be one line of at most 4096 bytes without controls or invisible formatting characters.") }
     }
     public func execute(actor: String, command: String, approve: (AgentCommandRequest) async throws -> Bool) async throws -> (lease: UInt64, dispatch: AgentDispatch) {
+        try Task.checkCancellation()
         try Self.validateCommand(command)
         let lease = try session.acquireControl(actor: actor)
         var dispatchAttempted = false
         do {
             guard let shell = try session.shellState().shell, shell.ready else { throw AkittyError.core("An integrated shell prompt is required.") }
             let request = AgentCommandRequest(sessionID: session.id, actor: actor, command: command, cwd: shell.cwd)
-            guard try await approve(request) else { try session.denyCommand(lease: lease); throw AkittyError.core("Command execution denied.") }
+            let approved = try await approve(request)
+            // Approval callbacks may return normally after their caller was cancelled.
+            // Check before recording denial or acquiring dispatch authorization.
+            try Task.checkCancellation()
+            guard approved else { try session.denyCommand(lease: lease); throw AkittyError.core("Command execution denied.") }
             let authorization = try session.authorizeCommand(lease: lease, command: command, expectedDirectory: request.cwd)
             dispatchAttempted = true
             return (lease, try dispatch(lease, authorization, command))

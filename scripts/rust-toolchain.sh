@@ -6,6 +6,9 @@ if command -v rustup >/dev/null 2>&1; then
     export RUSTUP_TOOLCHAIN=1.99.1
     export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
     export RUSTDOC="$(rustup which --toolchain 1.99.1 rustdoc)"
+    # Cargo subcommands also resolve tools through PATH. A same-version Homebrew
+    # Clippy can otherwise use its own sysroot and miss rustup's WASM libraries.
+    export PATH="$(dirname "$RUSTC"):$PATH"
 else
     export AKITTY_RUST_DISTRIBUTION=true
     export RUSTC="$(command -v rustc)"
