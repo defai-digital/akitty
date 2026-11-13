@@ -151,8 +151,8 @@ enum Reply {
 }
 
 /// Runs one request, turning a panic into an error response.
-fn guarded(bytes: &[u8]) -> Result<Reply, String> {
-    catch_unwind(AssertUnwindSafe(|| dispatch(bytes)))
+fn guarded(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
+    catch_unwind(AssertUnwindSafe(|| dispatch(bytes, allow_binary)))
         .unwrap_or_else(|_| Err("internal panic; recreate affected session".into()))
 }
 
@@ -167,7 +167,7 @@ fn envelope(result: Result<Value, String>) -> Value {
 /// pre-serialized data instead of parsing it back. A binary cell block cannot be
 /// represented as a value, so negotiating one here fails closed.
 pub fn request(bytes: &[u8]) -> Value {
-    envelope(guarded(bytes).and_then(|reply| match reply {
+    envelope(guarded(bytes, false).and_then(|reply| match reply {
         Reply::Value(value) => Ok(value),
         Reply::Json(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
         // Returning the head alone would advertise `cells_binary.bytes` for a block
@@ -190,7 +190,7 @@ impl Drop for CreatingSlot {
 }
 
 fn respond(bytes: &[u8]) -> Vec<u8> {
-    let result = match guarded(bytes) {
+    let result = match guarded(bytes, true) {
         Ok(Reply::Json(json)) => return envelope_json(&json, None),
         // One response: the JSON head, a NUL (JSON never contains one), then the cell block.
         Ok(Reply::JsonBinary { json, binary }) => return envelope_json(&json, Some(&binary)),
@@ -212,7 +212,7 @@ fn envelope_json(json: &str, binary: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
+fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
     if bytes.len() > MAX_REQUEST {
         return Err("request exceeds 1 MiB".into());
     }
@@ -327,6 +327,11 @@ fn dispatch(bytes: &[u8]) -> Result<Reply, String> {
                     let compact = compact.unwrap_or(false);
                     // Binary is an opt-in negotiation and only replaces compact cells.
                     let binary = compact && cells.as_deref() == Some("binary");
+                    // Reject unsupported delivery before a snapshot consumes pending events
+                    // or commits the row hashes used by the next diff.
+                    if binary && !allow_binary {
+                        return Err("binary cells require the C ABI response path".into());
+                    }
                     let (json, block) = session.snapshot_with(since, compact, allow_shift.unwrap_or(false), binary)?;
                     return Ok(match block {
                         Some(binary) => Reply::JsonBinary { json, binary },
@@ -550,5 +555,19 @@ mod tests {
         let bytes = respond(format!(r#"{{"op":"snapshot","id":{id},"compact":true,"cells":"binary"}}"#).as_bytes());
         assert!(bytes.contains(&0), "C ABI reply must keep the NUL separator");
         let _ = respond(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
+    }
+
+    #[test]
+    fn rejected_json_binary_snapshot_preserves_pending_events() {
+        let created = request(br#"{"op":"create","cols":20,"rows":4,"headless":true}"#);
+        let id = created["data"]["id"].as_u64().expect("session id");
+        let feed = json!({"op":"feed", "id":id, "text":"hello\u{7}\u{1b}]52;c;aGVsbG8=\u{7}"});
+        assert_eq!(request(&serde_json::to_vec(&feed).unwrap())["ok"], true);
+        let reply = request(format!(r#"{{"op":"snapshot","id":{id},"compact":true,"cells":"binary"}}"#).as_bytes());
+        assert_eq!(reply["ok"], false);
+        let delivered = request(format!(r#"{{"op":"snapshot","id":{id}}}"#).as_bytes());
+        let _ = request(format!(r#"{{"op":"close","id":{id}}}"#).as_bytes());
+        assert_eq!(delivered["data"]["bell"], true, "rejected snapshots must not consume bells");
+        assert_eq!(delivered["data"]["clipboard"], json!(["hello"]));
     }
 }
