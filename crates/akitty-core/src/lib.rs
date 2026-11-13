@@ -37,6 +37,7 @@ enum Request {
         scrollback: Option<usize>,
         shell_integration_dir: Option<String>,
         folder_history: Option<bool>,
+        restored_text: Option<String>,
     },
     ControlAcquire { id: u64, actor: String },
     ControlRelease { id: u64, lease: u64 },
@@ -47,6 +48,7 @@ enum Request {
     ControlAudit { id: u64, after: Option<u64> },
     CommandHistory { id: u64, after: Option<u64> },
     ShellState { id: u64 },
+    RecentText { id: u64 },
     CommandOutput { id: u64, command_id: u64 },
     Close {
         id: u64,
@@ -234,6 +236,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
             scrollback,
             shell_integration_dir,
             folder_history,
+            restored_text,
         } => {
             model::Size::validate(cols, rows)?;
             if registry.sessions.len() + registry.creating >= 64 {
@@ -249,18 +252,12 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
             // Releases the reserved slot even if `Session::new` panics; `guarded` catches the
             // panic, and without this each one would leak a slot until Create always failed.
             let reservation = CreatingSlot;
-            let created = session::Session::new(
-                cols,
-                rows,
-                shell,
-                cwd,
-                headless.unwrap_or(false),
-                scrollback.unwrap_or(5000),
-                shell_integration_dir.map(|directory| session::ShellIntegration {
-                    directory,
-                    folder_history: folder_history.unwrap_or(true),
+            let created = session::Session::new_configured(cols, rows, headless.unwrap_or(false), scrollback.unwrap_or(5000), session::SessionConfig {
+                shell, cwd, restored_text,
+                integration: shell_integration_dir.map(|directory| session::ShellIntegration {
+                    directory, folder_history: folder_history.unwrap_or(true),
                 }),
-            );
+            });
             let mut registry = lock_registry();
             std::mem::forget(reservation);
             registry.creating -= 1;
@@ -288,6 +285,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 | Request::ControlAudit { id, .. }
                 | Request::CommandHistory { id, .. }
                 | Request::ShellState { id }
+                | Request::RecentText { id }
                 | Request::CommandOutput { id, .. }
                 | Request::Input { id, .. }
                 | Request::InputBytes { id, .. }
@@ -310,7 +308,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             // Reads must not wake the host: a snapshot that signalled would make its poller poll again forever.
-            let mutating = !matches!(request, Request::ShellState { .. } | Request::CommandHistory { .. }
+            let mutating = !matches!(request, Request::ShellState { .. } | Request::RecentText { .. } | Request::CommandHistory { .. }
                 | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. });
             let result = match request {
                 Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
@@ -322,6 +320,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 Request::ControlAudit { after, .. } => session.control_audit(after.unwrap_or(0)),
                 Request::CommandHistory { after, .. } => session.command_history(after.unwrap_or(0)),
                 Request::ShellState { .. } => session.shell_state(),
+                Request::RecentText { .. } => session.recent_text(),
                 Request::CommandOutput { command_id, .. } => session.command_output(command_id),
                 Request::Snapshot { since, compact, allow_shift, cells, .. } => {
                     let compact = compact.unwrap_or(false);

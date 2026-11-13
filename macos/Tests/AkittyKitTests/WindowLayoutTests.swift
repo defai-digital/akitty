@@ -26,6 +26,70 @@ final class WindowLayoutTests: XCTestCase {
         let decoded = try JSONDecoder().decode(WindowLayout.self, from: try JSONEncoder().encode(value))
         XCTAssertEqual(decoded, value)
     }
+    @MainActor func testSaveDialogLeavesSensitiveTextCaptureUnchecked() {
+        _ = NSApplication.shared
+        let (alert, field, history) = AkittyApplication.layoutSaveAlert(name: "Work")
+        XCTAssertEqual(field.stringValue, "Work")
+        XCTAssertEqual(history.title, "Include recent scrollback")
+        XCTAssertEqual(history.state, .off)
+        XCTAssertTrue(alert.informativeText.contains("sensitive output"))
+        XCTAssertTrue((alert.accessoryView as? NSStackView)?.views.contains(history) == true)
+    }
+
+    func testStoredScrollbackIsBoundedAndCanBeRemovedWithoutDeletingLayout() throws {
+        let (defaults, suite) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var value = layout(named: "Private")
+        value.windows[0].tabs[0].panes = Array(repeating: WindowLayout.Pane(directory: "/tmp", scrollback: String(repeating: "中文 output" + String(repeating: "x", count: 140) + "\n", count: 1000)), count: 8)
+        value.windows[0].tabs = Array(repeating: value.windows[0].tabs[0], count: 2)
+        XCTAssertTrue(WindowLayoutStore.upsert(value, in: defaults))
+        let stored = try XCTUnwrap(WindowLayoutStore.load(from: defaults).first)
+        let panes = stored.windows.flatMap(\.tabs).flatMap(\.panes)
+        XCTAssertLessThanOrEqual(panes.reduce(0) { $0 + ($1.scrollback?.utf8.count ?? 0) }, 128 * 1024)
+        for text in panes.compactMap(\.scrollback) {
+            XCTAssertLessThanOrEqual(text.utf8.count, 16384)
+            XCTAssertLessThanOrEqual(text.split(separator: "\n", omittingEmptySubsequences: false).count, 200)
+        }
+        try WindowLayoutStore.removeScrollback(named: "PRIVATE", from: defaults)
+        let cleared = try XCTUnwrap(WindowLayoutStore.load(from: defaults).first)
+        XCTAssertEqual(cleared.name, stored.name)
+        XCTAssertEqual(cleared.windows[0].tabs.count, 2)
+        XCTAssertTrue(cleared.windows.flatMap(\.tabs).flatMap(\.panes).allSatisfy { $0.scrollback == nil && $0.directory == "/tmp" })
+        XCTAssertFalse(defaults.data(forKey: WindowLayoutStore.key).map { String(decoding: $0, as: UTF8.self).contains("中文 output") } ?? true)
+        XCTAssertEqual(SavedLayoutText.bounded("a\u{1b}\u{7}\r\nb"), "a\nb")
+        XCTAssertEqual(SavedLayoutText.bounded("中文🙂", maxBytes: 4), "🙂")
+    }
+
+    @MainActor func testOptionalHistoryCaptureRestoresTextInEachPaneBeforeFreshOutput() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let original = try TerminalWindow(app: app, headless: true)
+        defer { original.panes.forEach { $0.terminal.shutdown() }; original.window?.close() }
+        _ = try original.splitPane(containing: original.panes[0].terminal)
+        try original.newTab()
+        for (index, pane) in original.panes.enumerated() {
+            _ = try pane.terminal.session.call("feed", ["text": "saved-output-\(index) 中文"])
+        }
+        XCTAssertTrue(original.captureLayout().tabs.flatMap(\.panes).allSatisfy { $0.scrollback == nil })
+        XCTAssertTrue(try original.captureLayout(includeScrollback: false).tabs.flatMap(\.panes).allSatisfy { $0.scrollback == nil })
+        let saved = try original.captureLayout(includeScrollback: true)
+        XCTAssertEqual(saved.tabs.flatMap(\.panes).compactMap(\.scrollback).count, 3)
+        try app.openLayout(WindowLayout(name: "History", windows: [saved]), headless: true)
+        defer { for window in app.windows { window.panes.forEach { $0.terminal.shutdown() }; window.window?.close() } }
+        let restored = try XCTUnwrap(app.windows.first)
+        for (index, pane) in restored.panes.enumerated() {
+            let session = pane.terminal.session
+            _ = try session.call("feed", ["text": "fresh-output"])
+            let text = try session.recentText()
+            XCTAssertTrue(text.contains("saved-output-\(index) 中文"))
+            XCTAssertTrue(text.contains("[End restored text - fresh session]"))
+            XCTAssertLessThan(try XCTUnwrap(text.range(of: "saved-output")).lowerBound, try XCTUnwrap(text.range(of: "fresh-output")).lowerBound)
+            let found = try JSONSerialization.jsonObject(with: session.call("find", ["text": "saved-output-\(index)"])) as? [String: Any]
+            XCTAssertEqual(found?["found"] as? Bool, true)
+        }
+        try restored.newTab()
+        XCTAssertFalse(try XCTUnwrap(restored.selectedPane).session.recentText().contains("saved-output"), "ordinary new tabs never inherit restored text")
+    }
 
     func testDecodingToleratesMissingFields() throws {
         let decoded = try JSONDecoder().decode(WindowLayout.self, from: Data(#"{"windows":[{}]}"#.utf8))
