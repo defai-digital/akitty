@@ -45,6 +45,7 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertTrue(WindowLayoutStore.upsert(value, in: defaults))
         let stored = try XCTUnwrap(WindowLayoutStore.load(from: defaults).first)
         let panes = stored.windows.flatMap(\.tabs).flatMap(\.panes)
+        XCTAssertEqual(panes.compactMap(\.scrollback).count, 16, "the layout budget is shared across every pane")
         XCTAssertLessThanOrEqual(panes.reduce(0) { $0 + ($1.scrollback?.utf8.count ?? 0) }, 128 * 1024)
         for text in panes.compactMap(\.scrollback) {
             XCTAssertLessThanOrEqual(text.utf8.count, 16384)
