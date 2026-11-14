@@ -4,7 +4,7 @@
 //! grid mutations, so consumers never need to simulate scrolling a second time.
 
 use crate::cell::{self, Cell, Color, Combining, Link, Palette, Style};
-use crate::parser::{Action, Csi, Parser, StringKind, Terminator};
+use crate::parser::{Action, Csi, Input, Parser, StringKind, Terminator};
 use crate::screen::{Cursor, Position, Screen};
 use base64::Engine;
 use std::ops::Range;
@@ -244,7 +244,10 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8], now_ms: u64, mut emit: impl FnMut(Event)) {
         self.expire_sync(now_ms, &mut emit);
         let mut parser = std::mem::take(&mut self.parser);
-        parser.feed(bytes, |action| self.dispatch(action, now_ms, &mut emit));
+        parser.feed_runs(bytes, |input| match input {
+            Input::Ascii(bytes) => self.print_ascii(bytes, now_ms, &mut emit),
+            Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
+        });
         self.parser = parser;
         if !bytes.is_empty() {
             self.revision = self.revision.wrapping_add(1);
@@ -266,9 +269,24 @@ impl Terminal {
     fn flush_sync(&mut self, emit: &mut impl FnMut(Event)) {
         self.sync_deadline = None;
         self.sync_bytes = 0;
+        // Synchronized TUIs defer scalar actions. Reassemble their ordinary text
+        // at flush time so they also benefit from row writes, with bounded scratch.
+        let mut ascii = [0u8; 8192];
+        let mut count = 0;
         for action in std::mem::take(&mut self.sync_actions) {
+            if let Action::Print(ch @ ' '..='~') = action {
+                ascii[count] = ch as u8;
+                count += 1;
+                if count == ascii.len() {
+                    self.print_ascii(&ascii, 0, emit);
+                    count = 0;
+                }
+                continue;
+            }
+            if count > 0 { self.print_ascii(&ascii[..count], 0, emit); count = 0; }
             self.apply(action, emit);
         }
+        if count > 0 { self.print_ascii(&ascii[..count], 0, emit); }
     }
     fn dispatch(&mut self, action: Action, now: u64, emit: &mut impl FnMut(Event)) {
         if let Action::Csi(csi) = &action
@@ -386,6 +404,45 @@ impl Terminal {
             cells[col + 1] = Cell::blank(bg);
         }
         cells[col] = Cell::blank(bg);
+    }
+    /// Write ordinary text a row at a time, leaving protocol-sensitive cases on the
+    /// scalar path. The generation count and final grapheme target match scalar writes.
+    fn print_ascii(&mut self, mut bytes: &[u8], now: u64, emit: &mut impl FnMut(Event)) {
+        while !bytes.is_empty() {
+            let cursor = self.screen().cursor;
+            let complex_cluster = self.modes.grapheme_clusters && self.grapheme_target.is_some_and(|pos| {
+                let previous = &self.screen().rows[pos.row].cells[pos.col];
+                !previous.ch.is_ascii() || !previous.combining.is_empty()
+            });
+            if self.sync_deadline.is_some() || self.modes.insert || self.single_shift.is_some()
+                || self.charsets[self.charset] || self.link.is_some() || cursor.pending_wrap || complex_cluster {
+                self.dispatch(Action::Print(char::from(bytes[0])), now, emit);
+                bytes = &bytes[1..];
+                continue;
+            }
+            let pos = cursor.position;
+            let cols = self.cols();
+            let available = bytes.len().min(cols - pos.col);
+            let row = &self.screen().rows[pos.row];
+            let count = row.cells[pos.col..pos.col + available].iter().take_while(|cell| cell.width == 1).count();
+            if count == 0 {
+                self.print(char::from(bytes[0]), emit);
+                bytes = &bytes[1..];
+                continue;
+            }
+            let style = self.style;
+            let screen = self.screen_mut();
+            let row = &mut screen.rows[pos.row];
+            for (cell, &byte) in row.cells[pos.col..pos.col + count].iter_mut().zip(bytes) {
+                *cell = Cell { ch: char::from(byte), width: 1, style, link: None, combining: Combining::new(), written: true };
+            }
+            row.generation = row.generation.wrapping_add(count as u64);
+            screen.cursor.position.col = (pos.col + count).min(cols - 1);
+            screen.cursor.pending_wrap = pos.col + count == cols;
+            self.last_printed = Some(char::from(bytes[count - 1]));
+            self.grapheme_target = Some(Position { row: pos.row, col: pos.col + count - 1 });
+            bytes = &bytes[count..];
+        }
     }
     fn print(&mut self, mut ch: char, emit: &mut impl FnMut(Event)) {
         let charset = self.single_shift.take().unwrap_or(self.charset);
@@ -1544,6 +1601,83 @@ mod tests {
         let mut events = Vec::new();
         term.feed(bytes, 0, |e| events.push(e));
         events
+    }
+    /// The original scalar action path is an independent reference for run writes.
+    fn feed_scalar(term: &mut Terminal, bytes: &[u8], now: u64) -> Vec<Event> {
+        let mut events = Vec::new();
+        term.expire_sync(now, |event| events.push(event));
+        let mut parser = std::mem::take(&mut term.parser);
+        parser.feed(bytes, |action| term.dispatch(action, now, &mut |event| events.push(event)));
+        term.parser = parser;
+        if !bytes.is_empty() { term.revision = term.revision.wrapping_add(1); }
+        events
+    }
+
+    #[test]
+    fn ascii_runs_match_scalar_state_and_events_through_modes_and_chunk_boundaries() {
+        let inputs = [
+            "abcdefghijklmnop ABC 0123456789!~", "\r\nnext line ", "\x1b[2;1Hoverwrite cells",
+            "\x1b[1;3;4:3;38;2;17;82;201mstyled text\x1b[0m", "\x1b[?7lright margin writes",
+            "\x1b[?7hwrap enabled again", "\x1b[4hinserting text\x1b[4l", "\x1b[2;3r\x1b[3;1Hbottom\n",
+            "\x1b[r\x1b[H", "\x1b(0lqqqk\x1b(Bplain", "\x1b)0\x0eqqqx\x0fASCII",
+            "\x1b*0\x1bNqsingle shift", "\x1b[?1049halt screen\x1b[?1049lback",
+            "\x1b]8;;https://example.test\x1b\\linked text\x1b]8;;\x1b\\unlinked text",
+            "中👩\u{200d}💻e\u{301}ASCII", "\u{600}abc1\u{fe0f}\u{20e3}xyz", "\x1b[1;1H中中\x1b[1;2Hwide repair",
+            "\x1b[?2026hsynchronized text\x1b[6n", "pending text\x1b[?2026l", "\x1b[5brepeat",
+            "\x1b[2J\x1b[Hcleared", "\x1b7saved\x1b8restored", "\x07\x1b[6n", "\x1bcreset",
+        ];
+        for cols in [1, 2, 9, 80] {
+            for history in [0, 10] {
+                for graphemes in [false, true] {
+                    let mut fast = Terminal::new(cols, 3, history).unwrap();
+                    let mut scalar = Terminal::new(cols, 3, history).unwrap();
+                    fast.enable_grapheme_support(graphemes);
+                    scalar.enable_grapheme_support(graphemes);
+                    let mut rng = 42u64;
+                    for step in 0..400 {
+                        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let text = inputs[(rng >> 32) as usize % inputs.len()].as_bytes();
+                        // Includes splits inside UTF-8 and escapes, as well as whole long runs.
+                        let chunk_size = [1, 3, 7, text.len()][step % 4];
+                        for chunk in text.chunks(chunk_size) {
+                            let now = step as u64;
+                            let mut events = Vec::new();
+                            fast.feed(chunk, now, |event| events.push(event));
+                            assert_eq!(events, feed_scalar(&mut scalar, chunk, now));
+                            assert_eq!(format!("{fast:?}"), format!("{scalar:?}"), "cols={cols}, history={history}, graphemes={graphemes}, step={step}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn synchronized_ascii_runs_flush_like_scalar_actions_on_end_and_timeout() {
+        let text = format!("{}\x1b[31mstyled\x1b[0m中\x1b[1;1Hwide overwrite\x1b(0qqq\x1b(Bascii\x1b[6n\x07",
+                           "ordinary text 0123456789 ".repeat(600));
+        for timeout in [false, true] {
+            let mut fast = Terminal::new(17, 4, 10).unwrap();
+            let mut scalar = Terminal::new(17, 4, 10).unwrap();
+            for term in [&mut fast, &mut scalar] {
+                term.enable_grapheme_support(true);
+                term.feed(b"\x1b[?2026h", 0, |_| panic!("unexpected event"));
+                term.feed(text.as_bytes(), 0, |_| panic!("synchronized output escaped"));
+                assert!(term.sync_deadline.is_some());
+            }
+            // Flush the reference strictly through the original scalar apply path.
+            scalar.sync_deadline = None; scalar.sync_bytes = 0;
+            let mut expected = Vec::new();
+            for action in std::mem::take(&mut scalar.sync_actions) {
+                scalar.apply(action, &mut |event| expected.push(event));
+            }
+            scalar.revision = scalar.revision.wrapping_add(1);
+            let mut actual = Vec::new();
+            if timeout { assert!(fast.expire_sync(200, |event| actual.push(event))); }
+            else { fast.feed(b"\x1b[?2026l", 1, |event| actual.push(event)); }
+            assert_eq!(actual, expected);
+            assert_eq!(format!("{fast:?}"), format!("{scalar:?}"));
+        }
     }
     #[test]
     fn grapheme_widening_respects_decawm() {
