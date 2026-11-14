@@ -1,0 +1,5271 @@
+{
+  "schema": 1,
+  "created_at": "2026-11-14T19:20:13.435755+00:00",
+  "baseline_product_commit": "a0babc4f82907c82175bc375504c5b810d06743f",
+  "baseline_instrumented_commit": "e0f1835ed44ab9bbf7425e3f43d50cead488bdde",
+  "candidate_commit": "e47b0c8ad0f1422dde2fb7157e70d821e53f73d1",
+  "scope": "instrumented-native-terminal-pipeline",
+  "metric": "synthetic Enter or scroll dispatch to matching GPU completion callback; not physical key-to-photon latency",
+  "presentation_timestamp_limitation": "Initial probe trials returned zero timestamps. All six formal runs reported positive presentation timestamps, but only availability counts were retained; no event-to-presentation latency was collected.",
+  "host": {
+    "cpu": "Apple M3 Max",
+    "macos": "27.2.1",
+    "node": "v26.13.1",
+    "swift": "Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)\nTarget: arm64-apple-macosx27.2.0"
+  },
+  "configuration": {
+    "samples_per_scene_per_run": 60,
+    "runs_per_version": 3,
+    "warmups": 3,
+    "producer_interval_ms": 8,
+    "producer_lines_per_tick": 1,
+    "input_intervals_seconds": [
+      0.083,
+      0.097,
+      0.113,
+      0.091,
+      0.109,
+      0.101
+    ]
+  },
+  "baseline_source_sha256": {
+    "Cargo.lock": "c74445ddd1fae0e5235b51c66b46787a39bfe9e683f3668c56eb915598ba058c",
+    "Cargo.toml": "3dd3b4e9828508f0e5371624a111255ad1c952ca0c2ff54cf04b001ed5391a97",
+    "benchmarks/native-pipeline.swift": "537bfbcd48caa146ad72e4e654a7a287e379268e4fb7c35213b0bbc14dc744c8",
+    "crates/akitty-agent-core/src/child.rs": "a706aa0f6b78b534f8e7f0e906cc20768f7edd2000fa00e236b8669045529f5b",
+    "crates/akitty-agent-core/src/chrome.rs": "5573b974fe18623cdc77729fe3544e6df5e18b125bd871351269ee2d179b90ed",
+    "crates/akitty-agent-core/src/control.rs": "5cbb3cb5cbc47e1469f590509a58e0c99b9a0b32489779497463cdc4c1862d7f",
+    "crates/akitty-agent-core/src/lib.rs": "02d1282890e593682dddb3b7b1cefb6f7a6ad9c8beeb15f54fd80ecd6018f6bf",
+    "crates/akitty-agent-core/src/program_status.rs": "f6b1118b1c4a23a126333f6b5f53a1034b6f806f763c2ba2ea6843c14312b8e0",
+    "crates/akitty-agent-core/src/shell.rs": "93daabd760a47bf5835ed61bb26aa4ada41c8a09ff14042ceaafe401c303542c",
+    "crates/akitty-core/src/child.rs": "3792434b6a151991392a99dd6bdf5551736e5aa4b0bbb07182349d89ebc11f7e",
+    "crates/akitty-core/src/chrome.rs": "33cf854a7424087c80a38e67d6df1190ca1a64b79af2afcc25fe89a3c0f21c5f",
+    "crates/akitty-core/src/control.rs": "719bd5412ac2f210bd6b6cfb4d2948f2d4b44d34443eb16575577a96c92ab3c4",
+    "crates/akitty-core/src/graphics.rs": "4cbebf96f22ad1dd557cdf1098f5d621fd1dffbded2c34bb976e92f2210c3628",
+    "crates/akitty-core/src/lib.rs": "5168e28d54e5755a2677bfb626aacc754889d6551bf18b8a609ca4c244c8c95c",
+    "crates/akitty-core/src/media.rs": "bcc051077988ef9617e7fca173884a9b6d7e1d1eb363dd1154e1f931db384127",
+    "crates/akitty-core/src/model.rs": "a700107ae86ecbd6de8ae7099033aa83f58501c0c2431d1559a65c155b09f3cb",
+    "crates/akitty-core/src/placeholder.rs": "398dba5f7aa853eb806a5f5a129cfbb6b5af25f27df925457e00ec572f26ceeb",
+    "crates/akitty-core/src/placeholder_table.rs": "cb0d3e7731694200ab63576ad48b6562a096d579566b2b483ee435be06cb5e08",
+    "crates/akitty-core/src/program_status.rs": "58ce2646618c7ddc8a4ce31296cdc263d77b9cf579a75a513a2838998434b972",
+    "crates/akitty-core/src/session.rs": "6eaa22c75e2113d71d3030d8fe160f86b46063b5745329f7fef5535db78e8e9f",
+    "crates/akitty-core/src/shell.rs": "46edeb77a9a35f1321b50ff44486b4b8d683334b6375fe722301c21a6634ba62",
+    "crates/akitty-core/tests/conformance.rs": "13a4b8c1156cd3af3a31cc7d55e2e86c4f4a94cdb97627f863baeb6e39c370bf",
+    "crates/akitty-core/tests/hotpath_probe.rs": "a44a66e942d1891e87bffac1610d05e6349f721dc8e2e4b24d3fc6750749ddba",
+    "crates/akitty-core/tests/lifecycle_stress.rs": "d6235161765c6a59e0930bcce93f120b2239b8e6525805d977e72312beeb24b0",
+    "crates/akitty-core/tests/notify_fd.rs": "04381f84741b6bb93bc786cfbaa51af377b514427334f0121476b3f8be901810",
+    "crates/akitty-core/tests/pty_throughput.rs": "69a387168560871dcb34ac2796d822ae2aafdb9809f8c233f2ffaf0b4da26cac",
+    "crates/akitty-core/tests/real_tools.rs": "2912cf2fca688484747258d599f047ff3e91b5f0d429e6dcd6fde34135b3e1fb",
+    "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",
+    "crates/akitty-vt/src/cell.rs": "0eff9dea14876bac4105674e09fb5fcad25e7bbebe66281f501998030c87e46a",
+    "crates/akitty-vt/src/key.rs": "6764faf42f76fea8bf7ec11d147d0ed4e2b5b8c83e8485558ff381b0c9e4d3c3",
+    "crates/akitty-vt/src/lib.rs": "50019f82dc48b8c44b966b0197e3b1f526160b81da9b20beb282ce75eeca49f7",
+    "crates/akitty-vt/src/parser.rs": "616845e5969791cfa6f2289793f6b464be1e7bae404ea13c1fb96a4fd8b27b79",
+    "crates/akitty-vt/src/screen.rs": "1fc566b87f460cbbc2af310be90b42702dcd52b9c3a46df144f30da288858195",
+    "crates/akitty-vt/src/terminal.rs": "8fe64cf5b41d44943d514cc4e3be956c85cb768a186c2c32e3f9dd536397bce5",
+    "crates/akitty-vt/src/wasm.rs": "1de3ee9b7619f9fc2a606be528a76be13a8e28a19097e33ca236b57db99f45d5",
+    "crates/akitty-vt/tests/contracts.rs": "e800419e66994496b9184320c787697bba94db31ecb7c243e51d7893c2fa869f",
+    "macos/Package.resolved": "5a2f34acf14c4b1350bec5b3ba8847aad277abea594f044a340012606232cacd",
+    "macos/Package.swift": "f672abb4ccba3104d6e9009d62c0bed7422f44ff12eb3927acad04bfad55ec4e",
+    "macos/Sources/AgentIPC/LocalSocket.swift": "45dbb6bb5e30efb687b9065afbc44ea5848cd0d110b8217d60e3e715cb10544e",
+    "macos/Sources/AkittyKit/AgentEventStore.swift": "2595dd2da44ebc865e2eb5466ebd9609eda046f76a23bd5d852163c15f6d11fa",
+    "macos/Sources/AkittyKit/AgentHost.swift": "36fcfe3bb030733103f08c7eb923beff5f7388f97fb5b2109890e12f19e7e0d0",
+    "macos/Sources/AkittyKit/AgentOverview.swift": "71bf9b785c55353481340b6a441443b967a82f331a2c0dd373d2850576cb9f61",
+    "macos/Sources/AkittyKit/AgentRequests.swift": "546bb4060ad787e96d82c06e572413e586fd429139906cc75eaf1ec3500bbb5a",
+    "macos/Sources/AkittyKit/Application/Application.swift": "9745831ac82ea47618b0a58e48d6b80866bcb0f0aecfccdc379765b0a80e875b",
+    "macos/Sources/AkittyKit/Application/FindBar.swift": "1307916b03d5c36bd278d0a396235a604003d861902d52fc9f1a9797fed2ced3",
+    "macos/Sources/AkittyKit/Application/PaletteController.swift": "7dfa73bc4b753a305121c5218b84f3886ba2bb9b91226c05d59ec614d154ce34",
+    "macos/Sources/AkittyKit/Application/TabBar.swift": "afddeb2ec44c97f89ac060fe3aa19054eb966ddbc5de29d65fd1bd7ccd39943a",
+    "macos/Sources/AkittyKit/Application/TerminalWindow.swift": "528d1641985616fe6fadd14c60ca88b469c5a5ab3d8322e22f45bb18468eec3f",
+    "macos/Sources/AkittyKit/BlockGlyphs.swift": "98e856660db753f92554c0c2c38756694c67f9217eb1c1b1a375a03a95fc287a",
+    "macos/Sources/AkittyKit/BoxGlyphs.swift": "81622fdebe534b21dacc17046fba1ac178b3886da5a3781b3e47eaa4c03441f1",
+    "macos/Sources/AkittyKit/Bridge.swift": "a27de06b2c40f058c7b1eae2bc60710e533bae7d6548cf4c499fe6890be000fe",
+    "macos/Sources/AkittyKit/CellGlyphs.swift": "d450410209d1911586de9e715ccddcc7417b30a93bee7d149e372866ab830bec",
+    "macos/Sources/AkittyKit/CellScanner.swift": "3cb35525e3722f3bdede8916b30f30c38ce1c0f7f1000b9801ff36e0abb127ce",
+    "macos/Sources/AkittyKit/DropPolicy.swift": "343079acfb4c8d3a5a7b0781016e84e5945e2a3c09caa2a19bc9031b9394bd5d",
+    "macos/Sources/AkittyKit/Features.swift": "979621f3d0dcbd07d0437b80bb3bcb6182f8e12d7854873fd97e007f989b9f88",
+    "macos/Sources/AkittyKit/GlyphClusters.swift": "46f88139111613b3a7bf6f395c244275562d3977a7425a4fb141a59a1847e09d",
+    "macos/Sources/AkittyKit/GlyphFonts.swift": "08c3a3d1d544947888b3049cbaf1923a1c27a5d3f39c93cfde056a05962af8be",
+    "macos/Sources/AkittyKit/GridDamage.swift": "ee9280a549b758985a6840f198e1c73e94bbb9795c452f06ac15a6584aec04c8",
+    "macos/Sources/AkittyKit/KittyKeyboard.swift": "754d5e748b1f5d36fbdb00c682875c73924d03fa3047ed3ef9f33d8e7fc73a6e",
+    "macos/Sources/AkittyKit/Preferences.swift": "e1009ac15c9cec8d202dae42e967a5b0738d561c3007a594fbb90b38ccaf19fc",
+    "macos/Sources/AkittyKit/Profiles.swift": "b702e557d02b0de64540b08002628bf02aa0385a8ea1e5c7f453ba7d0657d7c0",
+    "macos/Sources/AkittyKit/QuickTerminal.swift": "51b538b8c366ececab6bade628d11dc5e23cf557e234f5fb91b29b2ae28f9ebc",
+    "macos/Sources/AkittyKit/Renderer.swift": "2c6462f2739846ecba18d7b8ff3185322b7eb62c0b8f4e113293386c17b3a086",
+    "macos/Sources/AkittyKit/SiriIntents.swift": "1730c98a109cffaaf76d2f4fb3e1e464d851fc7914bc74852eac7cb45cad190d",
+    "macos/Sources/AkittyKit/TerminalView.swift": "bd38863dba4dd85973484663538aeedad76cf2655b58db54e8652aadb00e924d",
+    "macos/Sources/AkittyKit/UpdateController.swift": "1a7b68a2eeefa906dff6531c6a53d9b1d2021483b0676d88b7526c73e50cfe95",
+    "macos/Sources/AkittyKit/WindowLayouts.swift": "8113935270583316a252dcd58cdde1f803313daf64e26d9960e1fa1658e26a9b",
+    "scripts/benchmark-native.sh": "eb30c5cf2dbf339476ccb0bf56ec92b8515efa5ced601a6006ef0833d67ae66a"
+  },
+  "candidate_source_sha256": {
+    "Cargo.lock": "c74445ddd1fae0e5235b51c66b46787a39bfe9e683f3668c56eb915598ba058c",
+    "Cargo.toml": "3dd3b4e9828508f0e5371624a111255ad1c952ca0c2ff54cf04b001ed5391a97",
+    "benchmarks/native-pipeline.swift": "537bfbcd48caa146ad72e4e654a7a287e379268e4fb7c35213b0bbc14dc744c8",
+    "crates/akitty-agent-core/src/child.rs": "a706aa0f6b78b534f8e7f0e906cc20768f7edd2000fa00e236b8669045529f5b",
+    "crates/akitty-agent-core/src/chrome.rs": "5573b974fe18623cdc77729fe3544e6df5e18b125bd871351269ee2d179b90ed",
+    "crates/akitty-agent-core/src/control.rs": "5cbb3cb5cbc47e1469f590509a58e0c99b9a0b32489779497463cdc4c1862d7f",
+    "crates/akitty-agent-core/src/lib.rs": "02d1282890e593682dddb3b7b1cefb6f7a6ad9c8beeb15f54fd80ecd6018f6bf",
+    "crates/akitty-agent-core/src/program_status.rs": "f6b1118b1c4a23a126333f6b5f53a1034b6f806f763c2ba2ea6843c14312b8e0",
+    "crates/akitty-agent-core/src/shell.rs": "93daabd760a47bf5835ed61bb26aa4ada41c8a09ff14042ceaafe401c303542c",
+    "crates/akitty-core/src/child.rs": "3792434b6a151991392a99dd6bdf5551736e5aa4b0bbb07182349d89ebc11f7e",
+    "crates/akitty-core/src/chrome.rs": "33cf854a7424087c80a38e67d6df1190ca1a64b79af2afcc25fe89a3c0f21c5f",
+    "crates/akitty-core/src/control.rs": "719bd5412ac2f210bd6b6cfb4d2948f2d4b44d34443eb16575577a96c92ab3c4",
+    "crates/akitty-core/src/graphics.rs": "4cbebf96f22ad1dd557cdf1098f5d621fd1dffbded2c34bb976e92f2210c3628",
+    "crates/akitty-core/src/lib.rs": "5168e28d54e5755a2677bfb626aacc754889d6551bf18b8a609ca4c244c8c95c",
+    "crates/akitty-core/src/media.rs": "bcc051077988ef9617e7fca173884a9b6d7e1d1eb363dd1154e1f931db384127",
+    "crates/akitty-core/src/model.rs": "a700107ae86ecbd6de8ae7099033aa83f58501c0c2431d1559a65c155b09f3cb",
+    "crates/akitty-core/src/placeholder.rs": "398dba5f7aa853eb806a5f5a129cfbb6b5af25f27df925457e00ec572f26ceeb",
+    "crates/akitty-core/src/placeholder_table.rs": "cb0d3e7731694200ab63576ad48b6562a096d579566b2b483ee435be06cb5e08",
+    "crates/akitty-core/src/program_status.rs": "58ce2646618c7ddc8a4ce31296cdc263d77b9cf579a75a513a2838998434b972",
+    "crates/akitty-core/src/session.rs": "6eaa22c75e2113d71d3030d8fe160f86b46063b5745329f7fef5535db78e8e9f",
+    "crates/akitty-core/src/shell.rs": "46edeb77a9a35f1321b50ff44486b4b8d683334b6375fe722301c21a6634ba62",
+    "crates/akitty-core/tests/conformance.rs": "13a4b8c1156cd3af3a31cc7d55e2e86c4f4a94cdb97627f863baeb6e39c370bf",
+    "crates/akitty-core/tests/hotpath_probe.rs": "a44a66e942d1891e87bffac1610d05e6349f721dc8e2e4b24d3fc6750749ddba",
+    "crates/akitty-core/tests/lifecycle_stress.rs": "d6235161765c6a59e0930bcce93f120b2239b8e6525805d977e72312beeb24b0",
+    "crates/akitty-core/tests/notify_fd.rs": "04381f84741b6bb93bc786cfbaa51af377b514427334f0121476b3f8be901810",
+    "crates/akitty-core/tests/pty_throughput.rs": "69a387168560871dcb34ac2796d822ae2aafdb9809f8c233f2ffaf0b4da26cac",
+    "crates/akitty-core/tests/real_tools.rs": "2912cf2fca688484747258d599f047ff3e91b5f0d429e6dcd6fde34135b3e1fb",
+    "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",
+    "crates/akitty-vt/src/cell.rs": "0eff9dea14876bac4105674e09fb5fcad25e7bbebe66281f501998030c87e46a",
+    "crates/akitty-vt/src/key.rs": "6764faf42f76fea8bf7ec11d147d0ed4e2b5b8c83e8485558ff381b0c9e4d3c3",
+    "crates/akitty-vt/src/lib.rs": "50019f82dc48b8c44b966b0197e3b1f526160b81da9b20beb282ce75eeca49f7",
+    "crates/akitty-vt/src/parser.rs": "616845e5969791cfa6f2289793f6b464be1e7bae404ea13c1fb96a4fd8b27b79",
+    "crates/akitty-vt/src/screen.rs": "1fc566b87f460cbbc2af310be90b42702dcd52b9c3a46df144f30da288858195",
+    "crates/akitty-vt/src/terminal.rs": "8fe64cf5b41d44943d514cc4e3be956c85cb768a186c2c32e3f9dd536397bce5",
+    "crates/akitty-vt/src/wasm.rs": "1de3ee9b7619f9fc2a606be528a76be13a8e28a19097e33ca236b57db99f45d5",
+    "crates/akitty-vt/tests/contracts.rs": "e800419e66994496b9184320c787697bba94db31ecb7c243e51d7893c2fa869f",
+    "macos/Package.resolved": "5a2f34acf14c4b1350bec5b3ba8847aad277abea594f044a340012606232cacd",
+    "macos/Package.swift": "f672abb4ccba3104d6e9009d62c0bed7422f44ff12eb3927acad04bfad55ec4e",
+    "macos/Sources/AgentIPC/LocalSocket.swift": "45dbb6bb5e30efb687b9065afbc44ea5848cd0d110b8217d60e3e715cb10544e",
+    "macos/Sources/AkittyKit/AgentEventStore.swift": "2595dd2da44ebc865e2eb5466ebd9609eda046f76a23bd5d852163c15f6d11fa",
+    "macos/Sources/AkittyKit/AgentHost.swift": "36fcfe3bb030733103f08c7eb923beff5f7388f97fb5b2109890e12f19e7e0d0",
+    "macos/Sources/AkittyKit/AgentOverview.swift": "71bf9b785c55353481340b6a441443b967a82f331a2c0dd373d2850576cb9f61",
+    "macos/Sources/AkittyKit/AgentRequests.swift": "546bb4060ad787e96d82c06e572413e586fd429139906cc75eaf1ec3500bbb5a",
+    "macos/Sources/AkittyKit/Application/Application.swift": "9745831ac82ea47618b0a58e48d6b80866bcb0f0aecfccdc379765b0a80e875b",
+    "macos/Sources/AkittyKit/Application/FindBar.swift": "1307916b03d5c36bd278d0a396235a604003d861902d52fc9f1a9797fed2ced3",
+    "macos/Sources/AkittyKit/Application/PaletteController.swift": "7dfa73bc4b753a305121c5218b84f3886ba2bb9b91226c05d59ec614d154ce34",
+    "macos/Sources/AkittyKit/Application/TabBar.swift": "afddeb2ec44c97f89ac060fe3aa19054eb966ddbc5de29d65fd1bd7ccd39943a",
+    "macos/Sources/AkittyKit/Application/TerminalWindow.swift": "528d1641985616fe6fadd14c60ca88b469c5a5ab3d8322e22f45bb18468eec3f",
+    "macos/Sources/AkittyKit/BlockGlyphs.swift": "98e856660db753f92554c0c2c38756694c67f9217eb1c1b1a375a03a95fc287a",
+    "macos/Sources/AkittyKit/BoxGlyphs.swift": "81622fdebe534b21dacc17046fba1ac178b3886da5a3781b3e47eaa4c03441f1",
+    "macos/Sources/AkittyKit/Bridge.swift": "a27de06b2c40f058c7b1eae2bc60710e533bae7d6548cf4c499fe6890be000fe",
+    "macos/Sources/AkittyKit/CellGlyphs.swift": "d450410209d1911586de9e715ccddcc7417b30a93bee7d149e372866ab830bec",
+    "macos/Sources/AkittyKit/CellScanner.swift": "3cb35525e3722f3bdede8916b30f30c38ce1c0f7f1000b9801ff36e0abb127ce",
+    "macos/Sources/AkittyKit/DropPolicy.swift": "343079acfb4c8d3a5a7b0781016e84e5945e2a3c09caa2a19bc9031b9394bd5d",
+    "macos/Sources/AkittyKit/Features.swift": "979621f3d0dcbd07d0437b80bb3bcb6182f8e12d7854873fd97e007f989b9f88",
+    "macos/Sources/AkittyKit/FrameRefresh.swift": "a92b930e426eb5b9bc4bcb44b1faad7f0ccd52284ee800a59f27a4305d381192",
+    "macos/Sources/AkittyKit/GlyphClusters.swift": "46f88139111613b3a7bf6f395c244275562d3977a7425a4fb141a59a1847e09d",
+    "macos/Sources/AkittyKit/GlyphFonts.swift": "08c3a3d1d544947888b3049cbaf1923a1c27a5d3f39c93cfde056a05962af8be",
+    "macos/Sources/AkittyKit/GridDamage.swift": "ee9280a549b758985a6840f198e1c73e94bbb9795c452f06ac15a6584aec04c8",
+    "macos/Sources/AkittyKit/KittyKeyboard.swift": "754d5e748b1f5d36fbdb00c682875c73924d03fa3047ed3ef9f33d8e7fc73a6e",
+    "macos/Sources/AkittyKit/Preferences.swift": "e1009ac15c9cec8d202dae42e967a5b0738d561c3007a594fbb90b38ccaf19fc",
+    "macos/Sources/AkittyKit/Profiles.swift": "b702e557d02b0de64540b08002628bf02aa0385a8ea1e5c7f453ba7d0657d7c0",
+    "macos/Sources/AkittyKit/QuickTerminal.swift": "51b538b8c366ececab6bade628d11dc5e23cf557e234f5fb91b29b2ae28f9ebc",
+    "macos/Sources/AkittyKit/Renderer.swift": "2c6462f2739846ecba18d7b8ff3185322b7eb62c0b8f4e113293386c17b3a086",
+    "macos/Sources/AkittyKit/SiriIntents.swift": "1730c98a109cffaaf76d2f4fb3e1e464d851fc7914bc74852eac7cb45cad190d",
+    "macos/Sources/AkittyKit/TerminalView.swift": "283d84c9ddb8f06a7ca7a486f17d01283b88a798f6093ce662649578df8943b8",
+    "macos/Sources/AkittyKit/UpdateController.swift": "1a7b68a2eeefa906dff6531c6a53d9b1d2021483b0676d88b7526c73e50cfe95",
+    "macos/Sources/AkittyKit/WindowLayouts.swift": "8113935270583316a252dcd58cdde1f803313daf64e26d9960e1fa1658e26a9b",
+    "scripts/benchmark-native.sh": "eb30c5cf2dbf339476ccb0bf56ec92b8515efa5ced601a6006ef0833d67ae66a"
+  },
+  "shared_library_sha256": {
+    "macos/.build/out/Products/Release/Sparkle.framework/Versions/B/Sparkle": "d49c33979971b66eedd1b5b91f349c7b5f72abd3078bedcae3e079add2a75171"
+  },
+  "rust_static_archive_sha256": "9b770b4f3bfca55761a747b465156827771e41357c11946e353473e5e0e33e46",
+  "probe_binary_sha256": {
+    "before": "425ae7adaf3f98f3197ceb08667799a4c69bda4dce67b99e5b77a0c6b92f6f32",
+    "after": "7ab38b86ba71dcf3f5df24135da368858f7a0aae149748d4f40119afaf6530e8"
+  },
+  "runner_sha256": "9990f7fb3c3b9e88322b8538c088d3c3d2af3da8244d3520a66a389fa892e35a",
+  "runs": [
+    {
+      "order": 1,
+      "version": "before",
+      "raw_sha256": "3161c318d2066eba44cfc2ce19a0af99ed5abedf8e6f6a6d6963c745f02753a6",
+      "raw_file": "formal-01-before.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "425ae7adaf3f98f3197ceb08667799a4c69bda4dce67b99e5b77a0c6b92f6f32",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.7930809999999999,
+          "event_to_gpu_ms": [
+            7.972000021254644,
+            12.325708317803219,
+            10.670375020708889,
+            9.159499983070418,
+            10.693249991163611,
+            12.391625001328066,
+            16.05908334022388,
+            10.78437501564622,
+            8.764541678829119,
+            14.607583347242326,
+            9.963083342881873,
+            10.51274998462759,
+            9.137708344496787,
+            9.796791651751846,
+            12.803958321455866,
+            9.322666650405154,
+            10.848875012015924,
+            9.744875016622245,
+            9.12562501616776,
+            11.985375022049993,
+            9.574666677508503,
+            19.109291664790362,
+            10.870416677789763,
+            8.848124998621643,
+            7.827791676390916,
+            7.9909583437256515,
+            10.117416648427024,
+            9.112500003539026,
+            13.406375015620142,
+            13.524249981855974,
+            9.526791662210599,
+            10.943000001134351,
+            9.514958335785195,
+            8.40112500009127,
+            9.47104167426005,
+            9.22020833240822,
+            12.645375012652948,
+            8.051666663959622,
+            11.25816666171886,
+            13.154749991372228,
+            6.747208331944421,
+            7.6916250109206885,
+            9.304625011282042,
+            6.546208314830437,
+            9.132583334576339,
+            11.016416683560237,
+            12.299499998334795,
+            6.753875000867993,
+            12.154541676864028,
+            9.19158334727399,
+            9.525375004159287,
+            10.202541656326503,
+            8.066833310294896,
+            7.449625001754612,
+            10.683958331355825,
+            9.342208330053836,
+            7.523833308368921,
+            8.613374986452982,
+            7.926583319203928,
+            12.06491666380316
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 8,
+              "gpu_completions": 76,
+              "partial_uploads": 104,
+              "positive_presentation_timestamps": 75,
+              "raster_builds": 112,
+              "snapshot_builds": 822,
+              "uploaded_bytes": 1175040000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 822,
+                "p50": 0.1252916408702731,
+                "p95": 0.5030833417549729,
+                "p99": 0.7235833327285945
+              },
+              "raster_ms_summary": {
+                "count": 112,
+                "p50": 1.1777916515711695,
+                "p95": 3.9867500017862767,
+                "p99": 4.253999999491498
+              },
+              "upload_ms_summary": {
+                "count": 112,
+                "p50": 2.5508750113658607,
+                "p95": 3.349291655467823,
+                "p99": 3.6045416491106153
+              }
+            }
+          ],
+          "process_cpu_percent": 13.577568888585127,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.841111958317924,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 9.526791662210599,
+            "p95": 13.524249981855974,
+            "p99": 19.109291664790362
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 3.1957219999999995,
+          "event_to_gpu_ms": [
+            9.295249998103827,
+            6.83995833969675,
+            3.7049583334010094,
+            11.08133333036676,
+            4.0905416826717556,
+            14.514374983264133,
+            5.414791667135432,
+            2.92716667172499,
+            6.762083357898518,
+            7.745749986497685,
+            7.280916644958779,
+            2.9818333277944475,
+            4.6805000165477395,
+            2.430249995086342,
+            2.792208339087665,
+            5.469583353260532,
+            5.900083313463256,
+            17.689416679786518,
+            3.0522083397954702,
+            7.421625021379441,
+            5.466958333272487,
+            5.2216250041965395,
+            4.524041665717959,
+            21.08641667291522,
+            12.8497916739434,
+            16.821375000290573,
+            6.922333326656371,
+            8.75716665177606,
+            2.301958331372589,
+            10.211708344286308,
+            7.879083335865289,
+            9.759875014424324,
+            6.142958329292014,
+            9.69141666428186,
+            6.453500012867153,
+            9.718458342831582,
+            3.0494583188556135,
+            4.396958334837109,
+            11.067666666349396,
+            2.452708315104246,
+            2.9758750170003623,
+            5.245000007562339,
+            9.79608332272619,
+            4.639874998247251,
+            4.84737497754395,
+            9.665333345765248,
+            9.731875004945323,
+            8.55308331665583,
+            7.7773333177901804,
+            8.01324998610653,
+            10.697333316784352,
+            6.894833320984617,
+            9.494249999988824,
+            9.593041671905667,
+            7.565583335235715,
+            10.104333341587335,
+            6.677458324702457,
+            7.342291675740853,
+            7.919041672721505,
+            7.070374995237216
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 1,
+              "gpu_completions": 65,
+              "partial_uploads": 103,
+              "positive_presentation_timestamps": 65,
+              "raster_builds": 104,
+              "snapshot_builds": 814,
+              "uploaded_bytes": 284076800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 814,
+                "p50": 0.21120833116583526,
+                "p95": 0.7473333389498293,
+                "p99": 1.443124987417832
+              },
+              "raster_ms_summary": {
+                "count": 104,
+                "p50": 0.20441666129045188,
+                "p95": 0.8834166510496289,
+                "p99": 1.6226666630245745
+              },
+              "upload_ms_summary": {
+                "count": 104,
+                "p50": 0.30370833701454103,
+                "p95": 0.6480833108071238,
+                "p99": 0.6869166682008654
+              }
+            },
+            {
+              "full_uploads": 19,
+              "gpu_completions": 590,
+              "partial_uploads": 587,
+              "positive_presentation_timestamps": 590,
+              "raster_builds": 606,
+              "snapshot_builds": 1306,
+              "uploaded_bytes": 2775379200,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1306,
+                "p50": 0.2535833336878568,
+                "p95": 0.679708318784833,
+                "p99": 1.2495416740421206
+              },
+              "raster_ms_summary": {
+                "count": 606,
+                "p50": 0.44037497718818486,
+                "p95": 1.2778750096913427,
+                "p99": 1.8733750039245933
+              },
+              "upload_ms_summary": {
+                "count": 606,
+                "p50": 0.3794583317358047,
+                "p95": 0.7469166594091803,
+                "p99": 0.831749988719821
+              }
+            },
+            {
+              "full_uploads": 21,
+              "gpu_completions": 592,
+              "partial_uploads": 587,
+              "positive_presentation_timestamps": 593,
+              "raster_builds": 608,
+              "snapshot_builds": 1309,
+              "uploaded_bytes": 2785171200,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1308,
+                "p50": 0.2444583224132657,
+                "p95": 0.7484166417270899,
+                "p99": 1.1847499990835786
+              },
+              "raster_ms_summary": {
+                "count": 608,
+                "p50": 0.42945833411067724,
+                "p95": 1.2955416459590197,
+                "p99": 2.025583351496607
+              },
+              "upload_ms_summary": {
+                "count": 608,
+                "p50": 0.36895833909511566,
+                "p95": 0.7451249985024333,
+                "p99": 0.8932083437684923
+              }
+            },
+            {
+              "full_uploads": 10,
+              "gpu_completions": 595,
+              "partial_uploads": 601,
+              "positive_presentation_timestamps": 595,
+              "raster_builds": 610,
+              "snapshot_builds": 1310,
+              "uploaded_bytes": 2795289600,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1310,
+                "p50": 0.24087500059977174,
+                "p95": 0.7079583301674575,
+                "p99": 1.3780833396594971
+              },
+              "raster_ms_summary": {
+                "count": 610,
+                "p50": 0.44620834523811936,
+                "p95": 1.296166650718078,
+                "p99": 1.7059999809134752
+              },
+              "upload_ms_summary": {
+                "count": 611,
+                "p50": 0.37975001032464206,
+                "p95": 0.7428333046846092,
+                "p99": 1.0580833186395466
+              }
+            }
+          ],
+          "process_cpu_percent": 54.71410190245316,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.8407647916756105,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.070374995237216,
+            "p95": 14.514374983264133,
+            "p99": 21.08641667291522
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 3.7847050000000007,
+          "event_to_gpu_ms": [
+            7.029874977888539,
+            4.963374987710267,
+            6.059125007595867,
+            2.923791646026075,
+            3.483708336716518,
+            3.970624995417893,
+            5.557541677262634,
+            2.36770833726041,
+            5.235624994384125,
+            10.724291671067476,
+            2.4258750199805945,
+            8.685875014634803,
+            8.871458325302228,
+            9.256291668862104,
+            7.137124979635701,
+            8.438416669378057,
+            6.502083328086883,
+            21.124291670275852,
+            6.19975000154227,
+            5.258291668724269,
+            9.755041683092713,
+            5.355583329219371,
+            2.7134166448377073,
+            4.626791662303731,
+            4.9088750092778355,
+            9.088374994462356,
+            3.2181666465476155,
+            9.695249987998977,
+            9.259749989723787,
+            2.9758333403151482,
+            7.106833334546536,
+            3.26399999903515,
+            9.300916659412906,
+            8.780333329923451,
+            6.380375009030104,
+            10.231541644316167,
+            8.940583327785134,
+            8.603833324741572,
+            4.180791671387851,
+            7.6959583384450525,
+            4.33541665552184,
+            3.290333319455385,
+            7.807666668668389,
+            2.4251666909549385,
+            6.673875002888963,
+            16.678333311574534,
+            23.34195832372643,
+            5.833833332872018,
+            16.13320835167542,
+            21.868750016437843,
+            7.362874981481582,
+            8.85625000228174,
+            8.95983332884498,
+            4.834333318285644,
+            3.8390416593756527,
+            6.297708343481645,
+            4.397958342451602,
+            5.281749996356666,
+            5.064791650511324,
+            3.69841669453308
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 1,
+              "gpu_completions": 63,
+              "partial_uploads": 105,
+              "positive_presentation_timestamps": 63,
+              "raster_builds": 106,
+              "snapshot_builds": 793,
+              "uploaded_bytes": 284512000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 793,
+                "p50": 0.1810416579246521,
+                "p95": 0.6134166615083814,
+                "p99": 1.750791649101302
+              },
+              "raster_ms_summary": {
+                "count": 106,
+                "p50": 0.18595834262669086,
+                "p95": 0.6693749746773392,
+                "p99": 1.924500014865771
+              },
+              "upload_ms_summary": {
+                "count": 106,
+                "p50": 0.2871250035241246,
+                "p95": 0.576958351302892,
+                "p99": 0.765541655709967
+              }
+            },
+            {
+              "full_uploads": 589,
+              "gpu_completions": 559,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 559,
+              "raster_builds": 589,
+              "snapshot_builds": 1257,
+              "uploaded_bytes": 2883744000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1257,
+                "p50": 0.18595834262669086,
+                "p95": 0.5477083614096045,
+                "p99": 1.3067916734144092
+              },
+              "raster_ms_summary": {
+                "count": 589,
+                "p50": 0.9647916594985873,
+                "p95": 2.6883333339355886,
+                "p99": 11.855124990688637
+              },
+              "upload_ms_summary": {
+                "count": 589,
+                "p50": 0.3819999983534217,
+                "p95": 0.6482083408627659,
+                "p99": 0.807916687335819
+              }
+            },
+            {
+              "full_uploads": 589,
+              "gpu_completions": 560,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 561,
+              "raster_builds": 589,
+              "snapshot_builds": 1253,
+              "uploaded_bytes": 2883744000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1253,
+                "p50": 0.18649999401532114,
+                "p95": 0.5361666844692081,
+                "p99": 1.2655833270400763
+              },
+              "raster_ms_summary": {
+                "count": 589,
+                "p50": 0.9288333531003445,
+                "p95": 2.527541684685275,
+                "p99": 8.180208329576999
+              },
+              "upload_ms_summary": {
+                "count": 589,
+                "p50": 0.38341665640473366,
+                "p95": 0.6644583190791309,
+                "p99": 0.766291661420837
+              }
+            },
+            {
+              "full_uploads": 591,
+              "gpu_completions": 567,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 568,
+              "raster_builds": 592,
+              "snapshot_builds": 1261,
+              "uploaded_bytes": 2893536000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1261,
+                "p50": 0.18375000217929482,
+                "p95": 0.5522083374671638,
+                "p99": 1.5399999974761158
+              },
+              "raster_ms_summary": {
+                "count": 591,
+                "p50": 0.8688333327881992,
+                "p95": 2.365583321079612,
+                "p99": 6.2589583394583315
+              },
+              "upload_ms_summary": {
+                "count": 591,
+                "p50": 0.38154167123138905,
+                "p95": 0.5646666686516255,
+                "p99": 0.753958331188187
+              }
+            }
+          ],
+          "process_cpu_percent": 64.87002216633681,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.834289666643599,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.297708343481645,
+            "p95": 16.678333311574534,
+            "p99": 23.34195832372643
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 3.753636,
+          "event_to_gpu_ms": [
+            6.216666661202908,
+            6.683166662696749,
+            9.082958335056901,
+            9.38900001347065,
+            12.81279165414162,
+            4.142874997342005,
+            3.0194583523552865,
+            7.49379166518338,
+            6.191749998833984,
+            8.840750000672415,
+            6.798041664296761,
+            8.954958320828155,
+            6.524291675304994,
+            5.0594583444762975,
+            4.293999983929098,
+            9.030208340846002,
+            8.91908333869651,
+            9.38858333393,
+            4.682208324084058,
+            4.9975416623055935,
+            9.133625018876046,
+            10.25258333538659,
+            4.45262499852106,
+            9.919875010382384,
+            17.224208335392177,
+            10.658833314664662,
+            4.182583332294598,
+            7.9294166644103825,
+            2.5795833207666874,
+            7.024416670901701,
+            4.07429167535156,
+            6.257416680455208,
+            2.4637083406560123,
+            5.869625019840896,
+            9.189416683511809,
+            5.047249986091629,
+            6.71770834014751,
+            8.759499993175268,
+            3.0103333410806954,
+            2.2877916926518083,
+            3.5282083263155073,
+            28.113750013289973,
+            23.400958336424083,
+            12.790874985512346,
+            15.69362499867566,
+            13.584875006927177,
+            10.480500000994653,
+            4.504083335632458,
+            9.428624995052814,
+            4.565666691632941,
+            17.193166655488312,
+            7.074249995639548,
+            2.535166684538126,
+            8.827958314213902,
+            6.210666673723608,
+            8.032541663851589,
+            8.184166654245928,
+            7.830333343008533,
+            7.968124991748482,
+            4.6714583586435765
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 790,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 790,
+                "p50": 0.1817083393689245,
+                "p95": 0.6139583420008421,
+                "p99": 1.2557083391584456
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 0.5164166504982859,
+                "p95": 1.2505833292379975,
+                "p99": 12.514833331806585
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.3870000073220581,
+                "p95": 0.6469166837632656,
+                "p99": 0.8083750144578516
+              }
+            },
+            {
+              "full_uploads": 590,
+              "gpu_completions": 559,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 559,
+              "raster_builds": 591,
+              "snapshot_builds": 1246,
+              "uploaded_bytes": 2888640000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1246,
+                "p50": 0.18595834262669086,
+                "p95": 0.5658750014845282,
+                "p99": 1.7882499960251153
+              },
+              "raster_ms_summary": {
+                "count": 590,
+                "p50": 0.8955833327490836,
+                "p95": 2.5722499995026737,
+                "p99": 11.739374982425943
+              },
+              "upload_ms_summary": {
+                "count": 590,
+                "p50": 0.3839583368971944,
+                "p95": 0.673958333209157,
+                "p99": 0.8512916683685035
+              }
+            },
+            {
+              "full_uploads": 584,
+              "gpu_completions": 560,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 560,
+              "raster_builds": 585,
+              "snapshot_builds": 1241,
+              "uploaded_bytes": 2859264000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1241,
+                "p50": 0.1842500059865415,
+                "p95": 0.5594583344645798,
+                "p99": 1.6569166618864983
+              },
+              "raster_ms_summary": {
+                "count": 584,
+                "p50": 0.908166664885357,
+                "p95": 2.56437502685003,
+                "p99": 11.277166689978912
+              },
+              "upload_ms_summary": {
+                "count": 584,
+                "p50": 0.3798749821726233,
+                "p95": 0.5705833318643272,
+                "p99": 0.7654166547581553
+              }
+            },
+            {
+              "full_uploads": 588,
+              "gpu_completions": 551,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 551,
+              "raster_builds": 588,
+              "snapshot_builds": 1239,
+              "uploaded_bytes": 2878848000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1239,
+                "p50": 0.18287499551661313,
+                "p95": 0.5596666596829891,
+                "p99": 1.8859999836422503
+              },
+              "raster_ms_summary": {
+                "count": 588,
+                "p50": 0.908874993911013,
+                "p95": 2.6052083412650973,
+                "p99": 11.94308334379457
+              },
+              "upload_ms_summary": {
+                "count": 588,
+                "p50": 0.3830833302345127,
+                "p95": 0.6613333534915,
+                "p99": 0.7864583458285779
+              }
+            }
+          ],
+          "process_cpu_percent": 64.34980200423493,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.833174125000369,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.074249995639548,
+            "p95": 17.193166655488312,
+            "p99": 28.113750013289973
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    },
+    {
+      "order": 2,
+      "version": "after",
+      "raw_sha256": "e909ace0d8470f41f2f4d7aefb9b9b336575fbfd60dd5d096b85388df2fde36b",
+      "raw_file": "formal-02-after.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "7ab38b86ba71dcf3f5df24135da368858f7a0aae149748d4f40119afaf6530e8",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.7646160000000001,
+          "event_to_gpu_ms": [
+            13.752458355156705,
+            10.41120832087472,
+            11.70587498927489,
+            11.045708350138739,
+            9.410916682099923,
+            14.787916647037491,
+            18.013791675912216,
+            8.717083313968033,
+            8.535791654139757,
+            8.51887499447912,
+            9.27791665890254,
+            9.318833326688036,
+            11.30170832038857,
+            7.389458332909271,
+            11.103916680440307,
+            13.241083332104608,
+            14.2844166548457,
+            7.523208332713693,
+            11.644958343822509,
+            8.356583333807066,
+            9.33066665311344,
+            9.121916664298624,
+            10.545791679760441,
+            14.046041673282161,
+            10.509875020943582,
+            8.034750004298985,
+            7.78762498521246,
+            7.807291665812954,
+            9.508166665909812,
+            11.543583328602836,
+            13.978458329802379,
+            9.50449999072589,
+            12.120208324631676,
+            9.053041663719341,
+            7.409583340631798,
+            7.899583346443251,
+            9.76466663996689,
+            5.791583331301808,
+            9.655291680246592,
+            6.849958328530192,
+            6.688458321150392,
+            6.710499990731478,
+            7.975458342116326,
+            12.383333349134773,
+            8.916708320612088,
+            8.922375011024997,
+            7.446041679941118,
+            8.293916675029323,
+            6.429166649468243,
+            11.918875010451302,
+            8.433458337094635,
+            9.661374991992489,
+            7.543666666606441,
+            5.801624996820465,
+            7.934291672427207,
+            7.011375011643395,
+            11.862999992445111,
+            11.59070833818987,
+            8.37216665968299,
+            6.569333345396444
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 7,
+              "gpu_completions": 73,
+              "partial_uploads": 99,
+              "positive_presentation_timestamps": 73,
+              "raster_builds": 106,
+              "snapshot_builds": 822,
+              "uploaded_bytes": 1171993600,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 822,
+                "p50": 0.11258333688601851,
+                "p95": 0.4805416683666408,
+                "p99": 0.6421666766982526
+              },
+              "raster_ms_summary": {
+                "count": 106,
+                "p50": 1.271958346478641,
+                "p95": 3.549208340700716,
+                "p99": 3.939833346521482
+              },
+              "upload_ms_summary": {
+                "count": 106,
+                "p50": 2.6980833208654076,
+                "p95": 3.4431666717864573,
+                "p99": 3.6834583443123847
+              }
+            }
+          ],
+          "process_cpu_percent": 13.093777157490907,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.839537291671149,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 9.121916664298624,
+            "p95": 14.046041673282161,
+            "p99": 18.013791675912216
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 1.9711659999999998,
+          "event_to_gpu_ms": [
+            6.783166667446494,
+            9.12712499848567,
+            8.382375002838671,
+            8.195583359338343,
+            11.53354166308418,
+            4.735249996883795,
+            11.710624996339902,
+            7.722874986939132,
+            7.859083329094574,
+            6.0548333276528865,
+            9.909791668178514,
+            4.39149999874644,
+            4.430999979376793,
+            10.496583330677822,
+            8.381916646612808,
+            7.710791687713936,
+            5.004541686503217,
+            9.945833327947184,
+            12.142833351390436,
+            4.601624998031184,
+            3.328958322526887,
+            8.76937501016073,
+            13.65258332225494,
+            4.184083314612508,
+            12.179958343040198,
+            11.56208332395181,
+            9.585916646756232,
+            10.596749983960763,
+            4.4032083242200315,
+            6.303333328105509,
+            6.247708312002942,
+            9.217583341524005,
+            4.219083319185302,
+            8.908499992685392,
+            9.136291657341644,
+            8.02633332205005,
+            3.3810416935011744,
+            6.303708360064775,
+            2.945666667073965,
+            3.9413750055246055,
+            4.250708327163011,
+            9.359374991618097,
+            6.227375008165836,
+            3.2113333290908486,
+            3.0928750056773424,
+            3.3120416628662497,
+            5.523375002667308,
+            7.190499978605658,
+            8.16724999458529,
+            4.750791675178334,
+            11.721874994691461,
+            8.539500006008893,
+            7.066666672471911,
+            3.7123749789316207,
+            6.962333340197802,
+            7.667708327062428,
+            3.727999981492758,
+            6.002791662467644,
+            5.424166651209816,
+            3.570374974515289
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 69,
+              "partial_uploads": 105,
+              "positive_presentation_timestamps": 69,
+              "raster_builds": 108,
+              "snapshot_builds": 820,
+              "uploaded_bytes": 285600000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 820,
+                "p50": 0.17737498274073005,
+                "p95": 0.5407500138971955,
+                "p99": 1.2428750051185489
+              },
+              "raster_ms_summary": {
+                "count": 108,
+                "p50": 0.4016250022687018,
+                "p95": 1.1982500145677477,
+                "p99": 1.4888333389535546
+              },
+              "upload_ms_summary": {
+                "count": 108,
+                "p50": 0.5843749968335032,
+                "p95": 0.7933749875519425,
+                "p99": 0.9436666732653975
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.48500002594664693,
+                "p95": 1.1352500005159527,
+                "p99": 1.6379583394154906
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 0.8557916735298932,
+                "p95": 2.4256666656583548,
+                "p99": 2.88341665873304
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.6904166657477617,
+                "p95": 1.0205416474491358,
+                "p99": 1.3066666724625975
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4877916653640568,
+                "p95": 1.0208333260379732,
+                "p99": 1.7104583093896508
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 0.9712500032037497,
+                "p95": 2.0988333271816373,
+                "p99": 3.2424999808426946
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.6920000014360994,
+                "p95": 0.9440416761208326,
+                "p99": 1.190833339933306
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4834999854210764,
+                "p95": 1.4719583268743008,
+                "p99": 2.4645833182148635
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 0.8384583343286067,
+                "p95": 2.061041654087603,
+                "p99": 2.7284166717436165
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.6847499753348529,
+                "p95": 0.9797500097192824,
+                "p99": 1.1440833332017064
+              }
+            }
+          ],
+          "process_cpu_percent": 33.80313065190038,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.831311958347214,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.962333340197802,
+            "p95": 11.721874994691461,
+            "p99": 13.65258332225494
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 2.590241,
+          "event_to_gpu_ms": [
+            7.38633333821781,
+            5.277916672639549,
+            4.084249987499788,
+            7.206333335489035,
+            4.703083308413625,
+            8.922708337195218,
+            2.156500006094575,
+            10.118458332726732,
+            4.675333329942077,
+            9.078500006580725,
+            7.093208347214386,
+            8.856416679918766,
+            3.2320833415724337,
+            8.23566663893871,
+            5.54795833886601,
+            9.389708342496306,
+            4.96233333251439,
+            9.794458310352638,
+            7.807833317201585,
+            4.6348749892786145,
+            12.700708321062848,
+            5.250875023193657,
+            10.364416666561738,
+            6.877041654661298,
+            8.084500004770234,
+            10.081708314828575,
+            6.2748749915044755,
+            11.515791673446074,
+            10.53591666277498,
+            6.637124984990805,
+            8.350583346327767,
+            9.701125003630295,
+            7.070583349559456,
+            8.773416659096256,
+            9.973166655981913,
+            3.057750000152737,
+            6.001333327731118,
+            8.730500005185604,
+            5.470125004649162,
+            2.6382083306089044,
+            8.259708323748782,
+            6.888333329698071,
+            3.546124993590638,
+            3.2612916838843375,
+            4.629125003702939,
+            10.574958345387131,
+            6.524500000523403,
+            2.8483750065788627,
+            3.127583331661299,
+            3.548000007867813,
+            3.8994166534394026,
+            8.902125002350658,
+            2.7691666909959167,
+            2.799749985570088,
+            9.47929167887196,
+            9.430958336452022,
+            9.44508332759142,
+            8.12262500403449,
+            8.799208328127861,
+            11.401875002775341
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 66,
+              "partial_uploads": 104,
+              "positive_presentation_timestamps": 65,
+              "raster_builds": 107,
+              "snapshot_builds": 818,
+              "uploaded_bytes": 285382400,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 818,
+                "p50": 0.24166665389202535,
+                "p95": 0.6606666429433972,
+                "p99": 1.4112083590589464
+              },
+              "raster_ms_summary": {
+                "count": 107,
+                "p50": 0.375708332285285,
+                "p95": 0.9666666446719319,
+                "p99": 1.5278333448804915
+              },
+              "upload_ms_summary": {
+                "count": 107,
+                "p50": 0.31420832965523005,
+                "p95": 0.75216667028144,
+                "p99": 1.5508749929722399
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 171,
+              "raster_builds": 171,
+              "snapshot_builds": 171,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 171,
+                "p50": 0.46354165533557534,
+                "p95": 0.7187500013969839,
+                "p99": 2.2197500220499933
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.5069166731555015,
+                "p95": 3.663958312245086,
+                "p99": 4.196291672997177
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7067499973345548,
+                "p95": 0.8658749866299331,
+                "p99": 1.4487083535641432
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.44650002382695675,
+                "p95": 0.6795833469368517,
+                "p99": 0.8217916474677622
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.1383749844972044,
+                "p95": 2.854416670743376,
+                "p99": 3.8147916784510016
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7006666855886579,
+                "p95": 0.826750008855015,
+                "p99": 1.1782083311118186
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 171,
+              "raster_builds": 171,
+              "snapshot_builds": 171,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 171,
+                "p50": 0.4630833282135427,
+                "p95": 0.6952499970793724,
+                "p99": 1.6399999731220305
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.591166674392298,
+                "p95": 3.637666639406234,
+                "p99": 4.310416668886319
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7122499810066074,
+                "p95": 0.8766249811742455,
+                "p99": 1.3230000040493906
+              }
+            }
+          ],
+          "process_cpu_percent": 44.3427752806728,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.841404791659443,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.093208347214386,
+            "p95": 10.574958345387131,
+            "p99": 12.700708321062848
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 2.728416000000001,
+          "event_to_gpu_ms": [
+            9.574875002726912,
+            4.152166657149792,
+            6.05787499807775,
+            11.659291660180315,
+            3.3140000014100224,
+            3.329041675897315,
+            6.764458317775279,
+            8.919374988181517,
+            5.467791663249955,
+            8.710249996511266,
+            10.657000006176531,
+            6.098125013522804,
+            9.766041679540649,
+            7.9178750165738165,
+            11.528958333656192,
+            7.255375006934628,
+            8.68112497846596,
+            6.404374988051131,
+            12.183750019175932,
+            4.33016664464958,
+            7.03845830867067,
+            4.680375015595928,
+            4.156208335189149,
+            9.963083342881873,
+            11.392374988645315,
+            3.9133333193603903,
+            9.469708340475336,
+            6.906166672706604,
+            11.768708325689659,
+            11.587416665861383,
+            2.9067500145174563,
+            6.350999989081174,
+            9.133000014116988,
+            8.587791642639786,
+            7.536124991020188,
+            8.144666644511744,
+            7.531999988714233,
+            4.6185833343770355,
+            12.63841666514054,
+            4.230999998981133,
+            9.728458331665024,
+            7.076083333231509,
+            11.162750015500933,
+            6.70462497510016,
+            13.794791651889682,
+            9.270374983316287,
+            6.632333330344409,
+            6.155291659524664,
+            4.724166676169261,
+            8.597333333455026,
+            13.163374998839572,
+            6.432041671359912,
+            10.5069583223667,
+            3.8582499837502837,
+            9.846041677519679,
+            11.303875013254583,
+            10.38879167754203,
+            3.8486249977722764,
+            7.397541659884155,
+            8.76445832545869
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 812,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 812,
+                "p50": 0.16920833149924874,
+                "p95": 1.1403333337511867,
+                "p99": 1.9281666609458625
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 1.3343750033527613,
+                "p95": 2.990125009091571,
+                "p99": 4.749833344249055
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.7561666425317526,
+                "p95": 0.9307083382736892,
+                "p99": 1.0272499930579215
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4847916425205767,
+                "p95": 1.1524583387654275,
+                "p99": 1.724458357784897
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.125041665043682,
+                "p95": 5.051250016549602,
+                "p99": 6.105124979512766
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7397083099931479,
+                "p95": 0.9295833297073841,
+                "p99": 1.271833316422999
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 171,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4925416724290699,
+                "p95": 0.9469999931752682,
+                "p99": 1.4690833340864629
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.192958334693685,
+                "p95": 4.9964166537392884,
+                "p99": 6.012166675645858
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7468333351425827,
+                "p95": 1.0003333445638418,
+                "p99": 1.4279583119787276
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4830000107176602,
+                "p95": 1.1704166827257723,
+                "p99": 1.574499998241663
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.160958323860541,
+                "p95": 4.994208342395723,
+                "p99": 6.134458351880312
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7508333364967257,
+                "p95": 1.027250022161752,
+                "p99": 1.2634166632778943
+              }
+            }
+          ],
+          "process_cpu_percent": 46.7080606333344,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.841424291662406,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.536124991020188,
+            "p95": 12.183750019175932,
+            "p99": 13.794791651889682
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    },
+    {
+      "order": 3,
+      "version": "after",
+      "raw_sha256": "b06b2a497b4465118174bfb223dcaed7139bbeb78036586103692e38fa9d0be0",
+      "raw_file": "formal-03-after.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "7ab38b86ba71dcf3f5df24135da368858f7a0aae149748d4f40119afaf6530e8",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.8328880000000001,
+          "event_to_gpu_ms": [
+            10.981125000398606,
+            9.967708319891244,
+            15.001708321506158,
+            8.30783334095031,
+            14.359958353452384,
+            10.936666658381,
+            13.776291656540707,
+            12.918458320200443,
+            9.671500010881573,
+            10.11404165183194,
+            11.866000015288591,
+            14.759291691007093,
+            12.626958341570571,
+            13.602208317024633,
+            11.225166672375053,
+            12.258291651960462,
+            11.345083330525085,
+            10.587875003693625,
+            12.910791672766209,
+            11.66641665622592,
+            9.319374978076667,
+            14.525625010719523,
+            9.345083322841674,
+            10.762499994598329,
+            8.801416668575257,
+            9.743083326611668,
+            12.722083338303491,
+            7.29100001626648,
+            12.811166670871899,
+            7.902333338279277,
+            14.364708331413567,
+            8.963208354543895,
+            7.847916684113443,
+            11.918458330910653,
+            10.200916673056781,
+            6.851166661363095,
+            8.403125015320256,
+            9.161249996395782,
+            7.957208348670974,
+            9.159500012174249,
+            10.31758333556354,
+            10.906333336606622,
+            8.379291684832424,
+            8.958291669841856,
+            6.901708344230428,
+            6.784916651668027,
+            8.141541678924114,
+            10.502416669623926,
+            10.832916683284566,
+            8.282875001896173,
+            8.591999998316169,
+            7.900374999735504,
+            7.061208336381242,
+            10.101458319695666,
+            9.50395833933726,
+            5.774499994004145,
+            9.599999990314245,
+            9.635750000597909,
+            9.701833332655951,
+            7.0227083342615515
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 6,
+              "gpu_completions": 74,
+              "partial_uploads": 100,
+              "positive_presentation_timestamps": 75,
+              "raster_builds": 106,
+              "snapshot_builds": 821,
+              "uploaded_bytes": 1171558400,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 821,
+                "p50": 0.137916678795591,
+                "p95": 0.5666249780915678,
+                "p99": 0.7823750202078372
+              },
+              "raster_ms_summary": {
+                "count": 106,
+                "p50": 1.2348750024102628,
+                "p95": 4.06495833885856,
+                "p99": 4.794791660970077
+              },
+              "upload_ms_summary": {
+                "count": 106,
+                "p50": 2.6741666661109775,
+                "p95": 3.5255416587460786,
+                "p99": 4.0915833378676325
+              }
+            }
+          ],
+          "process_cpu_percent": 14.265440004990761,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.838501999998698,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 9.743083326611668,
+            "p95": 14.364708331413567,
+            "p99": 15.001708321506158
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 2.2181710000000003,
+          "event_to_gpu_ms": [
+            7.974250009283423,
+            4.276041669072583,
+            5.17691666027531,
+            9.748333337483928,
+            12.332499987678602,
+            5.5854166857898235,
+            6.6322083584964275,
+            10.984791675582528,
+            9.322750003775582,
+            3.8019999919924885,
+            10.353666672017425,
+            6.8778749846387655,
+            8.014458348043263,
+            11.679249990265816,
+            7.468458323273808,
+            8.094083343166858,
+            6.114291667472571,
+            7.818833342753351,
+            3.431333345361054,
+            7.839833328034729,
+            8.42579166055657,
+            3.2706666679587215,
+            7.9149583471007645,
+            6.1214583402033895,
+            10.626875009620562,
+            10.964583343593404,
+            9.253000025637448,
+            11.038375028874725,
+            2.943666680948809,
+            4.905541660264134,
+            8.414583338890225,
+            8.882750000339001,
+            8.51920832064934,
+            7.750416669296101,
+            10.165250016143546,
+            9.906374994898215,
+            10.408666654257104,
+            8.904208341846243,
+            7.088333339197561,
+            9.158958331681788,
+            4.65712501318194,
+            4.845791670959443,
+            9.74429165944457,
+            8.541749994037673,
+            3.664833348011598,
+            4.726416693301871,
+            2.9349999967962503,
+            7.240500010084361,
+            9.562791674397886,
+            5.110791651532054,
+            8.72820831136778,
+            9.15587501367554,
+            11.220916640013456,
+            4.857708350755274,
+            10.4168749821838,
+            11.216375016374514,
+            7.240791659569368,
+            5.862333346158266,
+            8.31062500947155,
+            5.979833309538662
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 69,
+              "partial_uploads": 105,
+              "positive_presentation_timestamps": 70,
+              "raster_builds": 108,
+              "snapshot_builds": 818,
+              "uploaded_bytes": 285600000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 818,
+                "p50": 0.22008331143297255,
+                "p95": 0.8631666714791209,
+                "p99": 2.1366250002756715
+              },
+              "raster_ms_summary": {
+                "count": 108,
+                "p50": 0.4257500113453716,
+                "p95": 1.686791656538844,
+                "p99": 2.07108334871009
+              },
+              "upload_ms_summary": {
+                "count": 108,
+                "p50": 0.5782500084023923,
+                "p95": 0.9151249832939357,
+                "p99": 0.9885833424050361
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.6839166744612157,
+                "p95": 1.6084166418295354,
+                "p99": 2.7307916607242078
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 1.485416665673256,
+                "p95": 3.050458326470107,
+                "p99": 3.3796666539274156
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7560000231023878,
+                "p95": 1.0510416759643704,
+                "p99": 1.1410416627768427
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.7030833512544632,
+                "p95": 1.585416670423001,
+                "p99": 2.3533749917987734
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 1.5691666631028056,
+                "p95": 3.212499985238537,
+                "p99": 4.222749994369224
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7565833220724016,
+                "p95": 1.0215416841674596,
+                "p99": 1.2801249977201223
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.6244166870601475,
+                "p95": 1.2367083400022238,
+                "p99": 2.0354583393782377
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 1.6865000070538372,
+                "p95": 2.9818333277944475,
+                "p99": 3.4321249986533076
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7671249913983047,
+                "p95": 1.0740416473709047,
+                "p99": 1.1859166552312672
+              }
+            }
+          ],
+          "process_cpu_percent": 38.01694637274412,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.834690083342139,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.974250009283423,
+            "p95": 11.216375016374514,
+            "p99": 12.332499987678602
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 2.6183940000000003,
+          "event_to_gpu_ms": [
+            6.7284583346918225,
+            5.359499977203086,
+            18.6730416608043,
+            9.196500002872199,
+            5.2824583544861525,
+            6.854958337498829,
+            2.4023333098739386,
+            8.430124988080934,
+            9.364541678223759,
+            9.26170832826756,
+            7.898416661191732,
+            9.81666665757075,
+            8.964541688328609,
+            9.819583327043802,
+            8.412625000346452,
+            8.620041655376554,
+            5.864250008016825,
+            7.742416666587815,
+            11.342333338689059,
+            3.3982083259616047,
+            5.189916671952233,
+            11.133749998407438,
+            3.7548333348240703,
+            5.2016666741110384,
+            7.213708333438262,
+            8.959875005530193,
+            8.295083331177011,
+            3.305791673483327,
+            4.1820833284873515,
+            6.370166665874422,
+            3.1291666673496366,
+            8.710208319826052,
+            7.034625014057383,
+            9.65462499880232,
+            6.1896666593384,
+            4.745874990476295,
+            3.887083352310583,
+            9.962791664293036,
+            3.8376250013243407,
+            3.341375006129965,
+            5.441458313725889,
+            8.83383332984522,
+            3.8962083344813436,
+            6.250875012483448,
+            9.235625009750947,
+            3.1282083364203572,
+            2.9920416709501296,
+            5.278166674543172,
+            3.6988333449698985,
+            8.308708318509161,
+            4.933666670694947,
+            9.878875018330291,
+            9.1824583359994,
+            3.868833329761401,
+            7.739916676655412,
+            9.998166671721265,
+            5.178083316422999,
+            7.08800001302734,
+            6.185041653225198,
+            10.147374996449798
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 4,
+              "gpu_completions": 67,
+              "partial_uploads": 97,
+              "positive_presentation_timestamps": 67,
+              "raster_builds": 101,
+              "snapshot_builds": 818,
+              "uploaded_bytes": 284403200,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 818,
+                "p50": 0.1889999839477241,
+                "p95": 0.6122500053606927,
+                "p99": 1.5942083264235407
+              },
+              "raster_ms_summary": {
+                "count": 101,
+                "p50": 0.3989583346992731,
+                "p95": 1.6771666705608368,
+                "p99": 2.153083332814276
+              },
+              "upload_ms_summary": {
+                "count": 101,
+                "p50": 0.5734166770707816,
+                "p95": 0.819166685687378,
+                "p99": 1.216499978909269
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 171,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.48983332817442715,
+                "p95": 0.7378333248198032,
+                "p99": 2.739208342973143
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.794708329020068,
+                "p95": 3.936958353733644,
+                "p99": 4.791916668182239
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7412083214148879,
+                "p95": 0.9188749827444553,
+                "p99": 1.0997499921359122
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 171,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.47462500515393913,
+                "p95": 0.7462500070687383,
+                "p99": 3.055583336390555
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.028041683137417,
+                "p95": 4.076166660524905,
+                "p99": 5.273041664622724
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7280416903086007,
+                "p95": 0.9214166493620723,
+                "p99": 1.044916658429429
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4594583297148347,
+                "p95": 1.430416654329747,
+                "p99": 2.3595833336003125
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.0701250177808106,
+                "p95": 2.810833335388452,
+                "p99": 3.853625006740913
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.6688333232887089,
+                "p95": 0.8515833469573408,
+                "p99": 1.0157916694879532
+              }
+            }
+          ],
+          "process_cpu_percent": 44.82579952300589,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.8412655833526514,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.854958337498829,
+            "p95": 10.147374996449798,
+            "p99": 18.6730416608043
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 2.8608819999999993,
+          "event_to_gpu_ms": [
+            9.913416666677222,
+            5.672374973073602,
+            10.381458327174187,
+            10.476124996785074,
+            5.338874994777143,
+            8.606791670899838,
+            6.634833320276812,
+            7.847000000765547,
+            6.630458316067234,
+            10.639791667927057,
+            10.88529167464003,
+            6.832833314547315,
+            4.458041657926515,
+            9.902333345962688,
+            7.7549583511427045,
+            8.743791666347533,
+            5.570541659835726,
+            7.994624989805743,
+            6.179208343382925,
+            4.41766667063348,
+            8.161333331372589,
+            3.5999583487864584,
+            8.754500013310462,
+            6.529249978484586,
+            5.3957083146087825,
+            11.955541674979031,
+            5.309083324391395,
+            8.07404168881476,
+            9.661458345362917,
+            4.6953333367127925,
+            11.324624996632338,
+            9.0736249985639,
+            6.478708324721083,
+            8.451833331491798,
+            8.512375003192574,
+            12.183166661998257,
+            4.073625023011118,
+            6.3346250099129975,
+            7.557625009212643,
+            6.285375013248995,
+            6.3431249873247,
+            2.0213333191350102,
+            9.032958332682028,
+            12.067125004250556,
+            7.29829166084528,
+            5.137000000104308,
+            5.311541666742414,
+            8.267583325505257,
+            9.904624981572852,
+            11.17633332614787,
+            8.658666658448055,
+            12.738708319375291,
+            9.754291677381843,
+            4.638916667317972,
+            6.43341668182984,
+            11.329999979352579,
+            7.234958349727094,
+            9.89966664928943,
+            6.736208335496485,
+            3.2106250000651926
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 813,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 813,
+                "p50": 0.16520833014510572,
+                "p95": 1.106791663914919,
+                "p99": 2.017958351643756
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 1.429041672963649,
+                "p95": 2.611374977277592,
+                "p99": 4.133833310334012
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.7605416758451611,
+                "p95": 0.9625833481550217,
+                "p99": 1.2247916602063924
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.545791641343385,
+                "p95": 1.0931666765827686,
+                "p99": 1.8164583307225257
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.634541673818603,
+                "p95": 5.436708335764706,
+                "p99": 6.093749980209395
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.767374993301928,
+                "p95": 0.9379583352711052,
+                "p99": 1.2740000092890114
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.5322500073816627,
+                "p95": 1.1432916799094528,
+                "p99": 2.089499990688637
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.419624990783632,
+                "p95": 5.508458329131827,
+                "p99": 5.99116666126065
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7632083143107593,
+                "p95": 0.9620833152439445,
+                "p99": 1.3182499969843775
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.5267499946057796,
+                "p95": 1.3214166683610529,
+                "p99": 2.1838333341293037
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 3.5642500151880085,
+                "p95": 5.2918750152457505,
+                "p99": 5.811416660435498
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7552916649729013,
+                "p95": 1.0133750038221478,
+                "p99": 1.3349583314266056
+              }
+            }
+          ],
+          "process_cpu_percent": 49.043385958215076,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.833369666681392,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.7549583511427045,
+            "p95": 11.955541674979031,
+            "p99": 12.738708319375291
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    },
+    {
+      "order": 4,
+      "version": "before",
+      "raw_sha256": "f3804d254ecea4029e48d71d4441f7b962fcfdbb9ec14f602f8a4e039bf418e6",
+      "raw_file": "formal-04-before.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "425ae7adaf3f98f3197ceb08667799a4c69bda4dce67b99e5b77a0c6b92f6f32",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.884285,
+          "event_to_gpu_ms": [
+            11.975958332186565,
+            14.769166678888723,
+            13.795958337141201,
+            10.123166692210361,
+            11.038124997867271,
+            12.07274998887442,
+            10.838499991223216,
+            11.7574583273381,
+            10.285333351930603,
+            14.301333314506337,
+            15.1344999903813,
+            18.989125004736707,
+            10.896791645791382,
+            10.193166672252119,
+            15.049916662974283,
+            8.156249998137355,
+            8.541541668819264,
+            12.35412500682287,
+            11.627833329839632,
+            9.772249992238358,
+            8.903374982764944,
+            19.512416678480804,
+            9.748333308380097,
+            10.177333344472572,
+            13.108499988447875,
+            8.968666661530733,
+            11.541625019162893,
+            8.551458333386108,
+            11.764166672946885,
+            11.705499986419454,
+            13.230458309408277,
+            8.990458329208195,
+            11.719250003807247,
+            8.33025001338683,
+            7.711958343861625,
+            10.818458336871117,
+            7.928458333481103,
+            8.351833326742053,
+            10.03833333379589,
+            10.499833326321095,
+            9.0609583130572,
+            7.98108332674019,
+            10.271666658809409,
+            7.977958332048729,
+            9.603875019820407,
+            7.243041647598147,
+            9.196125000016764,
+            9.947041660780087,
+            12.093083350919187,
+            10.206208331510425,
+            9.384833334479481,
+            7.707958342507482,
+            7.491958327591419,
+            10.38941668230109,
+            10.590041667455807,
+            12.038416665745899,
+            7.033125002635643,
+            9.54299999284558,
+            8.852666651364416,
+            10.649416683008894
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 70,
+              "partial_uploads": 98,
+              "positive_presentation_timestamps": 70,
+              "raster_builds": 101,
+              "snapshot_builds": 816,
+              "uploaded_bytes": 1168076800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 816,
+                "p50": 0.1518749922979623,
+                "p95": 0.6272500031627715,
+                "p99": 0.8168333151843399
+              },
+              "raster_ms_summary": {
+                "count": 101,
+                "p50": 1.5298750076908618,
+                "p95": 4.309958312660456,
+                "p99": 4.589624993968755
+              },
+              "upload_ms_summary": {
+                "count": 101,
+                "p50": 2.8416250133886933,
+                "p95": 4.059999977471307,
+                "p99": 4.515083332080394
+              }
+            }
+          ],
+          "process_cpu_percent": 15.135735471956785,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.842365583346691,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 10.206208331510425,
+            "p95": 15.049916662974283,
+            "p99": 19.512416678480804
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 3.3092979999999996,
+          "event_to_gpu_ms": [
+            8.201749995350838,
+            3.920749993994832,
+            10.482999990927055,
+            10.131458315299824,
+            4.519833339145407,
+            9.617250005248934,
+            9.695791668491438,
+            2.654125011758879,
+            4.122499987715855,
+            9.946791658876464,
+            8.68499997886829,
+            8.390458329813555,
+            5.784291657619178,
+            8.60412500333041,
+            7.349166669882834,
+            6.273375009186566,
+            8.222125004976988,
+            10.951083357213065,
+            4.0025416819844395,
+            8.81087500602007,
+            2.711041655857116,
+            3.86925000930205,
+            3.1980000203475356,
+            5.921583331655711,
+            12.805333331925794,
+            11.36195834260434,
+            6.735583330737427,
+            9.582916682120413,
+            3.458541672443971,
+            7.008333341218531,
+            8.317708328831941,
+            4.307708324631676,
+            8.617333340225741,
+            7.001874997513369,
+            7.212083321064711,
+            6.759416661225259,
+            4.4575000065378845,
+            8.559250010875985,
+            9.14524999097921,
+            7.4653750052675605,
+            5.243208317551762,
+            8.18000000435859,
+            3.0950416694395244,
+            3.448416682658717,
+            6.200541683938354,
+            10.906374984188005,
+            4.629666655091569,
+            8.35191665100865,
+            8.302333328174427,
+            5.748833325924352,
+            10.91983332298696,
+            9.713208331959322,
+            8.455291681457311,
+            9.01270835311152,
+            6.749624997610226,
+            8.58470835373737,
+            5.617041664663702,
+            6.897666666191071,
+            6.522041687276214,
+            6.0508750029839575
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 1,
+              "gpu_completions": 63,
+              "partial_uploads": 100,
+              "positive_presentation_timestamps": 63,
+              "raster_builds": 101,
+              "snapshot_builds": 813,
+              "uploaded_bytes": 283424000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 813,
+                "p50": 0.22991668083705008,
+                "p95": 0.9049999935086817,
+                "p99": 1.5685000107623637
+              },
+              "raster_ms_summary": {
+                "count": 101,
+                "p50": 0.20583331934176385,
+                "p95": 0.9564166539348662,
+                "p99": 1.5124999918043613
+              },
+              "upload_ms_summary": {
+                "count": 101,
+                "p50": 0.29887500568293035,
+                "p95": 0.68374999682419,
+                "p99": 0.8397500205319375
+              }
+            },
+            {
+              "full_uploads": 23,
+              "gpu_completions": 602,
+              "partial_uploads": 588,
+              "positive_presentation_timestamps": 602,
+              "raster_builds": 611,
+              "snapshot_builds": 1312,
+              "uploaded_bytes": 2799532800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1312,
+                "p50": 0.28787500923499465,
+                "p95": 0.7522083178628236,
+                "p99": 1.350083330180496
+              },
+              "raster_ms_summary": {
+                "count": 611,
+                "p50": 0.4553749749902636,
+                "p95": 1.298374991165474,
+                "p99": 1.7650416702963412
+              },
+              "upload_ms_summary": {
+                "count": 611,
+                "p50": 0.40374998934566975,
+                "p95": 0.7248749898280948,
+                "p99": 0.8778333431109786
+              }
+            },
+            {
+              "full_uploads": 24,
+              "gpu_completions": 602,
+              "partial_uploads": 588,
+              "positive_presentation_timestamps": 603,
+              "raster_builds": 612,
+              "snapshot_builds": 1312,
+              "uploaded_bytes": 2804428800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1312,
+                "p50": 0.27266665711067617,
+                "p95": 0.7886666571721435,
+                "p99": 1.3728750054724514
+              },
+              "raster_ms_summary": {
+                "count": 612,
+                "p50": 0.4245000018272549,
+                "p95": 1.209708338137716,
+                "p99": 1.7502499977126718
+              },
+              "upload_ms_summary": {
+                "count": 612,
+                "p50": 0.3901250020135194,
+                "p95": 0.7433333375956863,
+                "p99": 0.8851250167936087
+              }
+            },
+            {
+              "full_uploads": 14,
+              "gpu_completions": 603,
+              "partial_uploads": 598,
+              "positive_presentation_timestamps": 603,
+              "raster_builds": 612,
+              "snapshot_builds": 1311,
+              "uploaded_bytes": 2801164800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1311,
+                "p50": 0.30174999847076833,
+                "p95": 0.7008750108070672,
+                "p99": 1.2065833434462547
+              },
+              "raster_ms_summary": {
+                "count": 612,
+                "p50": 0.46174999442882836,
+                "p95": 1.2228749983478338,
+                "p99": 1.8710416625253856
+              },
+              "upload_ms_summary": {
+                "count": 612,
+                "p50": 0.43329165782779455,
+                "p95": 0.7183749985415488,
+                "p99": 0.8199583389796317
+              }
+            }
+          ],
+          "process_cpu_percent": 56.7178190815731,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.834670750016812,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.212083321064711,
+            "p95": 10.91983332298696,
+            "p99": 12.805333331925794
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 3.7451240000000006,
+          "event_to_gpu_ms": [
+            7.09283331525512,
+            4.389208334032446,
+            9.20874997973442,
+            2.398333337623626,
+            9.729249984957278,
+            4.320541658671573,
+            2.377291675657034,
+            4.752874985570088,
+            3.005750011652708,
+            6.0407083365134895,
+            10.059624997666106,
+            2.989375003380701,
+            3.7093333376105875,
+            9.5487916842103,
+            5.037458322476596,
+            7.2601249848958105,
+            8.052250021137297,
+            2.210166654549539,
+            6.736333336448297,
+            3.6553749814629555,
+            5.003208352718502,
+            27.0580833312124,
+            18.377875006990507,
+            7.898499985458329,
+            7.6916666876059026,
+            2.2530833375640213,
+            8.130583330057561,
+            4.369875008706003,
+            9.341249999124557,
+            8.830041653709486,
+            13.693083339603618,
+            4.336666665039957,
+            9.987208322854713,
+            7.085041666869074,
+            9.981291659642011,
+            8.85720833321102,
+            4.268874996341765,
+            5.162791669135913,
+            11.733374994946644,
+            5.48125000204891,
+            4.38045832561329,
+            7.489749987144023,
+            2.9247083293739706,
+            2.7029166521970183,
+            2.3598749830853194,
+            6.4497499843128026,
+            6.521833332953975,
+            3.971708327298984,
+            3.7643333489540964,
+            12.877750006737188,
+            19.295708334539086,
+            7.687708333833143,
+            9.014666662551463,
+            4.6931249962653965,
+            4.696291667642072,
+            6.387083325535059,
+            8.050708333030343,
+            5.13283335021697,
+            9.183874994050711,
+            7.850333320675418
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 64,
+              "partial_uploads": 100,
+              "positive_presentation_timestamps": 64,
+              "raster_builds": 103,
+              "snapshot_builds": 807,
+              "uploaded_bytes": 284512000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 807,
+                "p50": 0.17558335093781352,
+                "p95": 0.4668750043492764,
+                "p99": 0.8574999810662121
+              },
+              "raster_ms_summary": {
+                "count": 103,
+                "p50": 0.17587500042282045,
+                "p95": 0.5594166577793658,
+                "p99": 0.9243749955203384
+              },
+              "upload_ms_summary": {
+                "count": 103,
+                "p50": 0.29729166999459267,
+                "p95": 0.46208332059904933,
+                "p99": 0.648625020403415
+              }
+            },
+            {
+              "full_uploads": 602,
+              "gpu_completions": 584,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 584,
+              "raster_builds": 602,
+              "snapshot_builds": 1288,
+              "uploaded_bytes": 2947392000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1288,
+                "p50": 0.18308334983885288,
+                "p95": 0.4689999914262444,
+                "p99": 0.8622916648164392
+              },
+              "raster_ms_summary": {
+                "count": 602,
+                "p50": 0.8864999981597066,
+                "p95": 2.380874997470528,
+                "p99": 6.893333338666707
+              },
+              "upload_ms_summary": {
+                "count": 602,
+                "p50": 0.37891665124334395,
+                "p95": 0.5615000263787806,
+                "p99": 0.7515833422075957
+              }
+            },
+            {
+              "full_uploads": 595,
+              "gpu_completions": 585,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 584,
+              "raster_builds": 595,
+              "snapshot_builds": 1285,
+              "uploaded_bytes": 2913120000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1284,
+                "p50": 0.17991667846217752,
+                "p95": 0.4769999941345304,
+                "p99": 1.0294999810867012
+              },
+              "raster_ms_summary": {
+                "count": 595,
+                "p50": 0.895125005627051,
+                "p95": 2.368124987697229,
+                "p99": 4.141833342146128
+              },
+              "upload_ms_summary": {
+                "count": 595,
+                "p50": 0.3782083513215184,
+                "p95": 0.6370833434630185,
+                "p99": 0.7196250080596656
+              }
+            },
+            {
+              "full_uploads": 599,
+              "gpu_completions": 586,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 585,
+              "raster_builds": 599,
+              "snapshot_builds": 1286,
+              "uploaded_bytes": 2932704000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1285,
+                "p50": 0.1784583437256515,
+                "p95": 0.4692083166446537,
+                "p99": 1.0699166741687804
+              },
+              "raster_ms_summary": {
+                "count": 599,
+                "p50": 0.8814583416096866,
+                "p95": 2.2769583156332374,
+                "p99": 3.729708318132907
+              },
+              "upload_ms_summary": {
+                "count": 599,
+                "p50": 0.37733331555500627,
+                "p95": 0.5327083345036954,
+                "p99": 0.7009999826550484
+              }
+            }
+          ],
+          "process_cpu_percent": 64.10143837986813,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.842496041674167,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.4497499843128026,
+            "p95": 13.693083339603618,
+            "p99": 27.0580833312124
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 3.8385,
+          "event_to_gpu_ms": [
+            6.463791651185602,
+            4.697083350038156,
+            7.994125015102327,
+            4.378833342343569,
+            8.823874988593161,
+            4.033625009469688,
+            8.843833347782493,
+            8.35029166773893,
+            6.850541685707867,
+            5.3751250088680536,
+            9.93591666338034,
+            9.66470834100619,
+            7.619708339916542,
+            5.124000017531216,
+            9.03404166456312,
+            5.045041674748063,
+            4.9149999977089465,
+            6.737916672136635,
+            9.293583338148892,
+            4.011124983662739,
+            10.531791660469025,
+            9.392625011969358,
+            11.289499991107732,
+            5.15750001068227,
+            3.6947916669305414,
+            5.6899999908637255,
+            8.273999992525205,
+            7.305083330720663,
+            8.963125001173466,
+            6.659041653620079,
+            8.739958342630416,
+            8.579708344768733,
+            4.9953333218581975,
+            14.923291659215465,
+            11.743499984731898,
+            10.232250002445653,
+            6.307208328507841,
+            4.875541664659977,
+            5.859291675733402,
+            10.635583341354504,
+            6.889916665386409,
+            8.88445830787532,
+            9.255750017473474,
+            5.1267500093672425,
+            8.135749987559393,
+            16.876333334948868,
+            17.54262499161996,
+            4.204166674753651,
+            19.603875000029802,
+            23.16641667857766,
+            7.665708311833441,
+            9.269958332879469,
+            5.46870831749402,
+            9.609958331566304,
+            7.463666668627411,
+            9.343583340523764,
+            8.033999998588115,
+            4.146083345403895,
+            5.339458322850987,
+            9.787541639525443
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 811,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 811,
+                "p50": 0.18129165982827544,
+                "p95": 0.5607083439826965,
+                "p99": 1.0339999862480909
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 0.5079583497717977,
+                "p95": 1.214374991832301,
+                "p99": 1.4468333392869681
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.390916655305773,
+                "p95": 0.6597916653845459,
+                "p99": 0.8080833358690143
+              }
+            },
+            {
+              "full_uploads": 603,
+              "gpu_completions": 578,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 579,
+              "raster_builds": 603,
+              "snapshot_builds": 1291,
+              "uploaded_bytes": 2952288000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1291,
+                "p50": 0.18483333406038582,
+                "p95": 0.48354166210629046,
+                "p99": 1.0882499918807298
+              },
+              "raster_ms_summary": {
+                "count": 603,
+                "p50": 0.9187499817926437,
+                "p95": 2.3908333387225866,
+                "p99": 4.583708359859884
+              },
+              "upload_ms_summary": {
+                "count": 603,
+                "p50": 0.37979165790602565,
+                "p95": 0.6432083318941295,
+                "p99": 0.755041663069278
+              }
+            },
+            {
+              "full_uploads": 603,
+              "gpu_completions": 582,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 582,
+              "raster_builds": 603,
+              "snapshot_builds": 1290,
+              "uploaded_bytes": 2952288000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1290,
+                "p50": 0.18370835459791124,
+                "p95": 0.525541661772877,
+                "p99": 1.067500008502975
+              },
+              "raster_ms_summary": {
+                "count": 603,
+                "p50": 0.9177916799671948,
+                "p95": 2.4392500054091215,
+                "p99": 3.7737500097136945
+              },
+              "upload_ms_summary": {
+                "count": 603,
+                "p50": 0.3779583494178951,
+                "p95": 0.5444583366625011,
+                "p99": 0.7428333337884396
+              }
+            },
+            {
+              "full_uploads": 602,
+              "gpu_completions": 574,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 574,
+              "raster_builds": 601,
+              "snapshot_builds": 1289,
+              "uploaded_bytes": 2947392000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1289,
+                "p50": 0.18308332073502243,
+                "p95": 0.4999999946448952,
+                "p99": 1.1044999992009252
+              },
+              "raster_ms_summary": {
+                "count": 601,
+                "p50": 0.965333339991048,
+                "p95": 2.4055000103544444,
+                "p99": 5.600708333076909
+              },
+              "upload_ms_summary": {
+                "count": 602,
+                "p50": 0.3797499812208116,
+                "p95": 0.5776666512247175,
+                "p99": 0.7247916655614972
+              }
+            }
+          ],
+          "process_cpu_percent": 65.72486238755437,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.840255666669691,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 7.994125015102327,
+            "p95": 16.876333334948868,
+            "p99": 23.16641667857766
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    },
+    {
+      "order": 5,
+      "version": "before",
+      "raw_sha256": "26e64ea611a1970a5fa95559a4d5058a7181eb7a54bdbadf15ef7fef33363195",
+      "raw_file": "formal-05-before.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "425ae7adaf3f98f3197ceb08667799a4c69bda4dce67b99e5b77a0c6b92f6f32",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.939614,
+          "event_to_gpu_ms": [
+            12.075875012669712,
+            12.600416666828096,
+            15.23400002042763,
+            15.23979168268852,
+            10.083833331009373,
+            12.962958338903263,
+            13.562666688812897,
+            12.54341666935943,
+            13.181500020436943,
+            12.72250001784414,
+            14.713249984197319,
+            8.946874993853271,
+            12.251791689777747,
+            10.718375007854775,
+            11.437875014962628,
+            12.091791664715856,
+            11.205333314137533,
+            11.763208342017606,
+            9.986125020077452,
+            8.505416655680165,
+            11.219291656743735,
+            11.843125015730038,
+            10.439166682772338,
+            13.544749992433935,
+            9.232458338374272,
+            9.029125008964911,
+            11.810958327259868,
+            9.315458330092952,
+            9.34020831482485,
+            10.294375009834766,
+            13.601374987047166,
+            13.606291671749204,
+            13.203291659010574,
+            6.937833357369527,
+            8.071083342656493,
+            8.261999988462776,
+            9.682666655862704,
+            12.825083307689056,
+            14.009333332069218,
+            11.495166691020131,
+            10.918291663983837,
+            8.45795834902674,
+            8.386458357563242,
+            13.384666672209278,
+            9.513166674878448,
+            14.828291692538187,
+            11.928916675969958,
+            11.872499977471307,
+            12.300500005949289,
+            11.044708342524245,
+            12.263874989002943,
+            12.156583339674398,
+            8.35737501620315,
+            12.863249983638525,
+            8.206458354834467,
+            7.9243750078603625,
+            13.648958323756233,
+            8.639000006951392,
+            7.960874994751066,
+            13.976333342725411
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 6,
+              "gpu_completions": 80,
+              "partial_uploads": 102,
+              "positive_presentation_timestamps": 80,
+              "raster_builds": 108,
+              "snapshot_builds": 815,
+              "uploaded_bytes": 1172428800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 815,
+                "p50": 0.15287499991245568,
+                "p95": 0.6782083364669234,
+                "p99": 0.8817916677799076
+              },
+              "raster_ms_summary": {
+                "count": 108,
+                "p50": 1.4010416925884783,
+                "p95": 4.551874997559935,
+                "p99": 4.986166663002223
+              },
+              "upload_ms_summary": {
+                "count": 108,
+                "p50": 2.7993750118184835,
+                "p95": 5.210083327256143,
+                "p99": 6.279416644247249
+              }
+            }
+          ],
+          "process_cpu_percent": 16.07963751360675,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.84350237500621,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 11.763208342017606,
+            "p95": 14.713249984197319,
+            "p99": 15.23979168268852
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 3.304082,
+          "event_to_gpu_ms": [
+            7.831249997252598,
+            4.037458333186805,
+            8.190041669877246,
+            8.750749984756112,
+            4.1675416578073055,
+            5.317749979440123,
+            5.846208339789882,
+            9.778875013580546,
+            12.435375014320016,
+            10.946875001536682,
+            7.424375013215467,
+            5.928958329604939,
+            3.225749998819083,
+            9.716875007143244,
+            4.940874991007149,
+            6.11899999785237,
+            7.488125003874302,
+            3.784375003306195,
+            3.399166656890884,
+            3.9823749975766987,
+            9.787458315258846,
+            4.380833328468725,
+            12.06137498957105,
+            13.334166666027158,
+            9.682791656814516,
+            2.9597083339467645,
+            10.40637498954311,
+            8.105958317173645,
+            3.9156250131782144,
+            6.03545832564123,
+            6.654083350440487,
+            4.611958313034847,
+            6.018500018399209,
+            4.750833322759718,
+            10.028874996351078,
+            3.090833342866972,
+            8.725666644750163,
+            6.981958315009251,
+            4.525374999502674,
+            2.1917499834671617,
+            3.0488333432003856,
+            7.793083321303129,
+            4.146000021137297,
+            5.343708326108754,
+            6.483166653197259,
+            9.266708337236196,
+            2.1131666435394436,
+            4.0275416686199605,
+            17.473499989137053,
+            19.160875002853572,
+            33.293916640104726,
+            12.353583326330408,
+            34.924791660159826,
+            10.550666687777266,
+            5.063624994363636,
+            6.43170831608586,
+            5.262041668174788,
+            8.983541658381,
+            9.814041666686535,
+            3.734583326149732
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 2,
+              "gpu_completions": 63,
+              "partial_uploads": 102,
+              "positive_presentation_timestamps": 63,
+              "raster_builds": 104,
+              "snapshot_builds": 797,
+              "uploaded_bytes": 284403200,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 797,
+                "p50": 0.24162500631064177,
+                "p95": 0.9184583323076367,
+                "p99": 1.7059999809134752
+              },
+              "raster_ms_summary": {
+                "count": 104,
+                "p50": 0.24745834525674582,
+                "p95": 1.1212916870135814,
+                "p99": 2.2228333400562406
+              },
+              "upload_ms_summary": {
+                "count": 104,
+                "p50": 0.3037083079107106,
+                "p95": 0.6789166654925793,
+                "p99": 0.7517083431594074
+              }
+            },
+            {
+              "full_uploads": 39,
+              "gpu_completions": 580,
+              "partial_uploads": 566,
+              "positive_presentation_timestamps": 580,
+              "raster_builds": 605,
+              "snapshot_builds": 1281,
+              "uploaded_bytes": 2777337600,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1281,
+                "p50": 0.300791667541489,
+                "p95": 0.8596249972470105,
+                "p99": 2.0103749993722886
+              },
+              "raster_ms_summary": {
+                "count": 605,
+                "p50": 0.45241665793582797,
+                "p95": 1.4045000134501606,
+                "p99": 2.2778333513997495
+              },
+              "upload_ms_summary": {
+                "count": 605,
+                "p50": 0.4070000140927732,
+                "p95": 0.7601666438858956,
+                "p99": 1.0380000167060643
+              }
+            },
+            {
+              "full_uploads": 35,
+              "gpu_completions": 583,
+              "partial_uploads": 574,
+              "positive_presentation_timestamps": 583,
+              "raster_builds": 609,
+              "snapshot_builds": 1287,
+              "uploaded_bytes": 2794310400,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1287,
+                "p50": 0.3050833474844694,
+                "p95": 0.902333325939253,
+                "p99": 7.12670834036544
+              },
+              "raster_ms_summary": {
+                "count": 609,
+                "p50": 0.45016666990704834,
+                "p95": 1.4250833191908896,
+                "p99": 2.6206666661892086
+              },
+              "upload_ms_summary": {
+                "count": 609,
+                "p50": 0.4457916656974703,
+                "p95": 0.7702083385083824,
+                "p99": 0.9487916831858456
+              }
+            },
+            {
+              "full_uploads": 25,
+              "gpu_completions": 583,
+              "partial_uploads": 581,
+              "positive_presentation_timestamps": 583,
+              "raster_builds": 606,
+              "snapshot_builds": 1287,
+              "uploaded_bytes": 2777337600,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1287,
+                "p50": 0.2939583209808916,
+                "p95": 0.8972500218078494,
+                "p99": 2.504666685126722
+              },
+              "raster_ms_summary": {
+                "count": 606,
+                "p50": 0.45741666690446436,
+                "p95": 1.3716666726395488,
+                "p99": 2.4321249802596867
+              },
+              "upload_ms_summary": {
+                "count": 606,
+                "p50": 0.45058332034386694,
+                "p95": 0.7403750205412507,
+                "p99": 0.8658750157337636
+              }
+            }
+          ],
+          "process_cpu_percent": 56.63246789724262,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.834253958339104,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.43170831608586,
+            "p95": 17.473499989137053,
+            "p99": 34.924791660159826
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 3.7011520000000004,
+          "event_to_gpu_ms": [
+            5.885583319468424,
+            4.461666656425223,
+            24.81583334156312,
+            14.596249995520338,
+            8.356791659025475,
+            5.074916669400409,
+            6.205208337632939,
+            9.340874996269122,
+            7.131291669793427,
+            6.473708315752447,
+            9.108375001233071,
+            9.244833316188306,
+            4.6804583398625255,
+            4.889999981969595,
+            4.2038333194796,
+            3.2971249893307686,
+            8.257291658082977,
+            6.121499987784773,
+            4.59708331618458,
+            5.1379583310335875,
+            6.184458325151354,
+            2.5777499831747264,
+            6.258750014239922,
+            4.464249999728054,
+            3.427291667321697,
+            8.180375007214025,
+            7.501583342673257,
+            6.411958311218768,
+            8.128083340125158,
+            6.243458337849006,
+            4.205208329949528,
+            6.829249992733821,
+            4.796458320925012,
+            4.473208333365619,
+            5.450124997878447,
+            7.866500003729016,
+            3.9079583366401494,
+            4.739750002045184,
+            6.91545833251439,
+            9.860249992925674,
+            4.336208337917924,
+            5.716291663702577,
+            7.948083337396383,
+            5.679249996319413,
+            2.5512083375360817,
+            3.6888750037178397,
+            8.674458338646218,
+            4.2225833458360285,
+            6.513208354590461,
+            8.5525416652672,
+            3.503041691146791,
+            9.785875008674338,
+            6.780750001780689,
+            9.094291686778888,
+            5.310333333909512,
+            5.306958337314427,
+            4.996250005206093,
+            5.118958331877366,
+            8.675583347212523,
+            2.1912083320785314
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 0,
+              "gpu_completions": 61,
+              "partial_uploads": 101,
+              "positive_presentation_timestamps": 61,
+              "raster_builds": 101,
+              "snapshot_builds": 814,
+              "uploaded_bytes": 283097600,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 814,
+                "p50": 0.17004169058054686,
+                "p95": 0.5003333499189466,
+                "p99": 0.9459999855607748
+              },
+              "raster_ms_summary": {
+                "count": 101,
+                "p50": 0.16958333435468376,
+                "p95": 0.4955833137501031,
+                "p99": 0.7137916691135615
+              },
+              "upload_ms_summary": {
+                "count": 101,
+                "p50": 0.2926666638813913,
+                "p95": 0.43616665061563253,
+                "p99": 0.5515833327081054
+              }
+            },
+            {
+              "full_uploads": 604,
+              "gpu_completions": 597,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 596,
+              "raster_builds": 604,
+              "snapshot_builds": 1299,
+              "uploaded_bytes": 2957184000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1299,
+                "p50": 0.17858334467746317,
+                "p95": 0.49441668670624495,
+                "p99": 0.8744166698306799
+              },
+              "raster_ms_summary": {
+                "count": 604,
+                "p50": 0.9069166553672403,
+                "p95": 2.0879583316855133,
+                "p99": 2.8239999955985695
+              },
+              "upload_ms_summary": {
+                "count": 604,
+                "p50": 0.37583333323709667,
+                "p95": 0.5294166621752083,
+                "p99": 0.7795416750013828
+              }
+            },
+            {
+              "full_uploads": 601,
+              "gpu_completions": 590,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 590,
+              "raster_builds": 601,
+              "snapshot_builds": 1295,
+              "uploaded_bytes": 2942496000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1295,
+                "p50": 0.17724998178891838,
+                "p95": 0.447041675215587,
+                "p99": 0.7371249957941473
+              },
+              "raster_ms_summary": {
+                "count": 601,
+                "p50": 0.9249166469089687,
+                "p95": 2.282250003190711,
+                "p99": 3.2080833334475756
+              },
+              "upload_ms_summary": {
+                "count": 601,
+                "p50": 0.37608330603688955,
+                "p95": 0.5260416946839541,
+                "p99": 0.733666674932465
+              }
+            },
+            {
+              "full_uploads": 602,
+              "gpu_completions": 594,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 594,
+              "raster_builds": 602,
+              "snapshot_builds": 1297,
+              "uploaded_bytes": 2947392000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1297,
+                "p50": 0.17625000327825546,
+                "p95": 0.4998333170078695,
+                "p99": 0.9105000062845647
+              },
+              "raster_ms_summary": {
+                "count": 602,
+                "p50": 0.8930416661314666,
+                "p95": 2.0709583477582783,
+                "p99": 3.0237500031944364
+              },
+              "upload_ms_summary": {
+                "count": 602,
+                "p50": 0.372458336642012,
+                "p95": 0.5396250053308904,
+                "p99": 0.7818333397153765
+              }
+            }
+          ],
+          "process_cpu_percent": 63.45199432381927,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.832995541655691,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 5.885583319468424,
+            "p95": 9.785875008674338,
+            "p99": 24.81583334156312
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 3.717369999999999,
+          "event_to_gpu_ms": [
+            6.561416666954756,
+            3.385125019121915,
+            7.981708331499249,
+            8.376874990062788,
+            10.210000007646158,
+            4.9913749971892685,
+            7.988708326593041,
+            10.064625006634742,
+            9.352416673209518,
+            5.836791649926454,
+            9.11383333732374,
+            4.574291669996455,
+            3.6715833412017673,
+            7.995458319783211,
+            8.930874988436699,
+            6.9955416838638484,
+            4.565375013044104,
+            2.952916664071381,
+            6.6531249904073775,
+            4.9468749784864485,
+            6.711541645927355,
+            8.985000022221357,
+            3.895291651133448,
+            7.1650000172667205,
+            2.673000009963289,
+            10.336708335671574,
+            7.701958325924352,
+            7.4581250082701445,
+            3.6005833535455167,
+            10.581625014310703,
+            6.1417083197738975,
+            2.9590000049211085,
+            9.610250010155141,
+            4.344541666796431,
+            7.264416664838791,
+            8.390583330765367,
+            4.235875006997958,
+            4.523916664766148,
+            4.021875007310882,
+            4.092125018360093,
+            4.838333319639787,
+            2.369000023463741,
+            8.760874974541366,
+            3.651750012068078,
+            3.8445416721515357,
+            8.219333336455747,
+            5.445374990813434,
+            3.196375007973984,
+            7.812583324266598,
+            8.49624999682419,
+            2.287500014062971,
+            6.930916686542332,
+            7.956833345815539,
+            5.059958319179714,
+            13.364874990656972,
+            8.708624984137714,
+            7.430666679283604,
+            6.156874995213002,
+            7.206125010270625,
+            2.394000010099262
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 817,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 817,
+                "p50": 0.17745833611115813,
+                "p95": 0.4450416599866003,
+                "p99": 0.8391666633542627
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 0.4995833442080766,
+                "p95": 1.2778333330061287,
+                "p99": 1.540541648864746
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.3797916870098561,
+                "p95": 0.7476666651200503,
+                "p99": 0.9815416706260294
+              }
+            },
+            {
+              "full_uploads": 604,
+              "gpu_completions": 593,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 592,
+              "raster_builds": 604,
+              "snapshot_builds": 1303,
+              "uploaded_bytes": 2957184000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1303,
+                "p50": 0.17766666132956743,
+                "p95": 0.42062500142492354,
+                "p99": 0.7953333260957152
+              },
+              "raster_ms_summary": {
+                "count": 604,
+                "p50": 0.8807916892692447,
+                "p95": 2.2218750091269612,
+                "p99": 2.956583339255303
+              },
+              "upload_ms_summary": {
+                "count": 604,
+                "p50": 0.3740833490155637,
+                "p95": 0.515749998157844,
+                "p99": 0.7164999842643738
+              }
+            },
+            {
+              "full_uploads": 607,
+              "gpu_completions": 598,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 597,
+              "raster_builds": 607,
+              "snapshot_builds": 1305,
+              "uploaded_bytes": 2971872000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1305,
+                "p50": 0.17833334277383983,
+                "p95": 0.44862498180009425,
+                "p99": 0.827458337880671
+              },
+              "raster_ms_summary": {
+                "count": 607,
+                "p50": 0.8736250165384263,
+                "p95": 1.8989166710525751,
+                "p99": 2.5474166905041784
+              },
+              "upload_ms_summary": {
+                "count": 607,
+                "p50": 0.3707083233166486,
+                "p95": 0.4926249966956675,
+                "p99": 0.7075416506268084
+              }
+            },
+            {
+              "full_uploads": 601,
+              "gpu_completions": 595,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 594,
+              "raster_builds": 601,
+              "snapshot_builds": 1301,
+              "uploaded_bytes": 2942496000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 1301,
+                "p50": 0.17666668281890452,
+                "p95": 0.4822916816920042,
+                "p99": 0.8525000012014061
+              },
+              "raster_ms_summary": {
+                "count": 601,
+                "p50": 0.9269166912417859,
+                "p95": 2.191791689256206,
+                "p99": 2.7957083366345614
+              },
+              "upload_ms_summary": {
+                "count": 601,
+                "p50": 0.37829167558811605,
+                "p95": 0.530666671693325,
+                "p99": 0.7738750136923045
+              }
+            }
+          ],
+          "process_cpu_percent": 63.72968092708612,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.833027791639324,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.6531249904073775,
+            "p95": 10.210000007646158,
+            "p99": 13.364874990656972
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    },
+    {
+      "order": 6,
+      "version": "after",
+      "raw_sha256": "9cb4abd1ca8d0ba8eea0ad62bad508620a7f2c81f7388b9ed9006d48bdf65d76",
+      "raw_file": "formal-06-after.json",
+      "os": "Version 27.2.1 (Build 26B131)",
+      "probe_binary_sha256": "7ab38b86ba71dcf3f5df24135da368858f7a0aae149748d4f40119afaf6530e8",
+      "results": [
+        {
+          "condition": "single-typing",
+          "cpu_seconds": 0.9149079999999998,
+          "event_to_gpu_ms": [
+            12.895666674012318,
+            12.818124989280477,
+            13.00474998424761,
+            14.738583326106891,
+            12.75187500868924,
+            13.72966667986475,
+            14.31283331476152,
+            10.607083328068256,
+            14.78833332657814,
+            14.218916679965332,
+            12.336416664766148,
+            12.104208319215104,
+            11.259499995503575,
+            14.154958334984258,
+            11.048208340071142,
+            13.268541661091149,
+            12.024750001728535,
+            15.283791668480262,
+            9.410250000655651,
+            12.462708342354745,
+            8.883541653631255,
+            9.248291666153818,
+            10.47929166816175,
+            13.223458314314485,
+            9.385000012116507,
+            11.984291690168902,
+            9.27758333273232,
+            10.706708329962566,
+            7.822333340300247,
+            12.637291656574234,
+            6.706833344651386,
+            13.43637498212047,
+            12.724791682558134,
+            8.250166662037373,
+            7.837625016691163,
+            10.160166682908311,
+            12.042749993270263,
+            8.367749978788197,
+            10.630916658556089,
+            6.430083332816139,
+            11.546583322342485,
+            7.442083355272189,
+            8.204000012483448,
+            8.210541651351377,
+            9.099291666643694,
+            8.337875013239682,
+            11.372291686711833,
+            8.857250009896234,
+            10.543166659772396,
+            11.070833337726071,
+            10.334874998079613,
+            8.092416654108092,
+            9.466874995268881,
+            12.877375003881752,
+            14.261291653383523,
+            7.654458342585713,
+            11.653291672701016,
+            8.876041683834046,
+            7.766958355205134,
+            9.423833340406418
+          ],
+          "grids": [
+            {
+              "cols": 168,
+              "rows": 44
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 5,
+              "gpu_completions": 75,
+              "partial_uploads": 100,
+              "positive_presentation_timestamps": 75,
+              "raster_builds": 105,
+              "snapshot_builds": 810,
+              "uploaded_bytes": 1170688000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 810,
+                "p50": 0.1489166752435267,
+                "p95": 0.6132500129751861,
+                "p99": 0.8508333121426404
+              },
+              "raster_ms_summary": {
+                "count": 105,
+                "p50": 1.3790416705887765,
+                "p95": 4.713708331109956,
+                "p99": 5.050291656516492
+              },
+              "upload_ms_summary": {
+                "count": 105,
+                "p50": 2.9261666641104966,
+                "p95": 4.132875008508563,
+                "p99": 4.215583350742236
+              }
+            }
+          ],
+          "process_cpu_percent": 15.667613406322372,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.839485416654497,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 10.706708329962566,
+            "p95": 14.31283331476152,
+            "p99": 15.283791668480262
+          }
+        },
+        {
+          "condition": "four-ascii-typing",
+          "cpu_seconds": 2.0698990000000004,
+          "event_to_gpu_ms": [
+            8.065625006565824,
+            7.383166666841134,
+            10.402166662970558,
+            10.818625014508143,
+            4.429624998010695,
+            5.371000006562099,
+            5.849749984918162,
+            9.54858332988806,
+            10.763333324575797,
+            7.289583329111338,
+            4.832583334064111,
+            7.020458346232772,
+            5.966041673673317,
+            7.031333341728896,
+            10.31779166078195,
+            8.050958305830136,
+            8.702499995706603,
+            10.524999990593642,
+            5.454041674965993,
+            7.784625020576641,
+            10.765999992145225,
+            5.154041660716757,
+            3.80287499865517,
+            7.211666670627892,
+            9.2644999967888,
+            5.170041666133329,
+            8.91629167017527,
+            2.885583322495222,
+            4.1567083389963955,
+            4.223291674861684,
+            8.784541656496003,
+            12.835750007070601,
+            3.130458324449137,
+            11.288583307759836,
+            3.6993333196733147,
+            12.397958344081417,
+            7.472833327483386,
+            10.26470834040083,
+            9.91049999720417,
+            8.09829166973941,
+            8.498791663441807,
+            10.17495832638815,
+            5.147499992744997,
+            8.356333331903443,
+            7.002333324635401,
+            9.412125014932826,
+            4.88329166546464,
+            5.366625002352521,
+            10.257791669573635,
+            13.670041662408039,
+            4.014583333628252,
+            9.332624991657212,
+            12.574791675433517,
+            3.885208338033408,
+            10.230874991975725,
+            11.477499996544793,
+            5.685833340976387,
+            14.551458327332512,
+            9.149250021437183,
+            5.318541661836207
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 8,
+              "gpu_completions": 73,
+              "partial_uploads": 95,
+              "positive_presentation_timestamps": 73,
+              "raster_builds": 103,
+              "snapshot_builds": 815,
+              "uploaded_bytes": 286144000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 815,
+                "p50": 0.20629167556762695,
+                "p95": 0.7508333364967257,
+                "p99": 1.6752500087022781
+              },
+              "raster_ms_summary": {
+                "count": 103,
+                "p50": 0.41199999395757914,
+                "p95": 1.2921666784677655,
+                "p99": 1.4636249979957938
+              },
+              "upload_ms_summary": {
+                "count": 103,
+                "p50": 0.6005833565723151,
+                "p95": 0.9198749903589487,
+                "p99": 1.260666671441868
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.5471666809171438,
+                "p95": 1.3502083311323076,
+                "p99": 2.036041667452082
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 1.2018333363812417,
+                "p95": 2.799374982714653,
+                "p99": 3.9765833353158087
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7148750009946525,
+                "p95": 1.059500005794689,
+                "p99": 1.2896250118501484
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.5129583296366036,
+                "p95": 1.295875001233071,
+                "p99": 1.796791679225862
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 0.9390000195708126,
+                "p95": 2.6599999982863665,
+                "p99": 3.473791672149673
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7036250026430935,
+                "p95": 0.9541666659060866,
+                "p99": 1.2154583528172225
+              }
+            },
+            {
+              "full_uploads": 0,
+              "gpu_completions": 170,
+              "partial_uploads": 170,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 776832000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.5076250236015767,
+                "p95": 1.2026666663587093,
+                "p99": 2.1347499859984964
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 1.3575833290815353,
+                "p95": 2.68416665494442,
+                "p99": 3.338833339512348
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7120416557881981,
+                "p95": 1.0720000136643648,
+                "p99": 1.305583311477676
+              }
+            }
+          ],
+          "process_cpu_percent": 35.4803217947693,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.833935250004288,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 8.050958305830136,
+            "p95": 12.574791675433517,
+            "p99": 14.551458327332512
+          }
+        },
+        {
+          "condition": "four-unicode-typing",
+          "cpu_seconds": 2.705844,
+          "event_to_gpu_ms": [
+            6.199916679179296,
+            10.778249998111278,
+            9.782083332538605,
+            3.3631666738074273,
+            4.359958315035328,
+            3.572999994503334,
+            11.036916665034369,
+            3.279833326814696,
+            9.20487497933209,
+            6.285249983193353,
+            11.42995833652094,
+            7.191041688201949,
+            8.427458349615335,
+            7.628416671650484,
+            9.718374989461154,
+            6.951874995138496,
+            6.481874996097758,
+            5.224916676525027,
+            9.246124973287806,
+            13.976375019410625,
+            4.405041690915823,
+            13.996458350447938,
+            3.8600833213422447,
+            9.04508333769627,
+            8.379625011002645,
+            5.035083333496004,
+            10.40358332102187,
+            3.5487499844748527,
+            12.266666657524183,
+            5.149791686562821,
+            9.634666668716818,
+            10.5549999861978,
+            2.630291652167216,
+            5.151125020347536,
+            8.281249989522621,
+            5.442499998025596,
+            4.420291661517695,
+            5.043666664278135,
+            7.0288333226926625,
+            5.074541666544974,
+            5.335875001037493,
+            10.061083332402632,
+            2.406333340331912,
+            5.355583329219371,
+            3.848083346383646,
+            5.5871666700113565,
+            3.076958324527368,
+            3.303916659206152,
+            10.16679167514667,
+            4.431333334650844,
+            9.132541657891124,
+            8.397124998737127,
+            9.399250004207715,
+            5.063416640041396,
+            10.762541671283543,
+            10.882958333240822,
+            6.620041676796973,
+            7.694749976508319,
+            9.190249984385446,
+            8.9342083374504
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 3,
+              "gpu_completions": 67,
+              "partial_uploads": 88,
+              "positive_presentation_timestamps": 67,
+              "raster_builds": 91,
+              "snapshot_builds": 817,
+              "uploaded_bytes": 281900800,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 817,
+                "p50": 0.18920833826996386,
+                "p95": 0.7329999934881926,
+                "p99": 1.7321250052191317
+              },
+              "raster_ms_summary": {
+                "count": 91,
+                "p50": 0.41941666859202087,
+                "p95": 1.406166673405096,
+                "p99": 1.5765833377372473
+              },
+              "upload_ms_summary": {
+                "count": 91,
+                "p50": 0.6187499966472387,
+                "p95": 0.8084166620392352,
+                "p99": 0.9683750104159117
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4987916618119925,
+                "p95": 1.1472916812635958,
+                "p99": 1.8567083170637488
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.819916669977829,
+                "p95": 4.747458326164633,
+                "p99": 5.659083341015503
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7417916785925627,
+                "p95": 0.9265416592825204,
+                "p99": 1.04320835089311
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.48587500350549817,
+                "p95": 0.7835833239369094,
+                "p99": 1.3110833242535591
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.9327083320822567,
+                "p95": 4.513874999247491,
+                "p99": 5.792250012746081
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.748874997952953,
+                "p95": 0.9054166730493307,
+                "p99": 1.1632083333097398
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 169,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.46120831393636763,
+                "p95": 1.1059583339374512,
+                "p99": 1.5903750027064234
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.166666672565043,
+                "p95": 4.627708345651627,
+                "p99": 5.464541667606682
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.6995000003371388,
+                "p95": 0.8682500047143549,
+                "p99": 1.0937083279713988
+              }
+            }
+          ],
+          "process_cpu_percent": 46.324148376611305,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.84110900000087,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 6.951874995138496,
+            "p95": 11.42995833652094,
+            "p99": 13.996458350447938
+          }
+        },
+        {
+          "condition": "four-unicode-scroll",
+          "cpu_seconds": 2.6710700000000003,
+          "event_to_gpu_ms": [
+            7.015375012997538,
+            5.764000001363456,
+            6.7928750067949295,
+            9.33141665882431,
+            11.410500010242686,
+            4.468666680622846,
+            8.619875006843358,
+            8.556499989936128,
+            10.532625019550323,
+            8.124375017359853,
+            6.03470831993036,
+            9.812250005779788,
+            8.574791660066694,
+            8.882499998435378,
+            5.574666662141681,
+            5.47375000314787,
+            7.846416672691703,
+            10.659583349479362,
+            6.148583343019709,
+            9.51233331579715,
+            3.8329166709445417,
+            8.873041660990566,
+            7.458541658706963,
+            9.043833357281983,
+            9.638625022489578,
+            3.551958332536742,
+            7.840666687116027,
+            6.8522916699294,
+            4.42324997857213,
+            8.519750001141801,
+            10.480083321454003,
+            9.007749991724268,
+            10.03404165385291,
+            7.133833336411044,
+            8.7412916473113,
+            5.653833330143243,
+            3.416749997995794,
+            7.436125015374273,
+            8.623458328656852,
+            8.19362499169074,
+            8.104375010589138,
+            6.4359999960288405,
+            9.144958341494203,
+            4.141333309235051,
+            11.340041644871235,
+            9.73570832866244,
+            12.46920833364129,
+            4.236416658386588,
+            4.426416679052636,
+            9.971916646463796,
+            10.700041661038995,
+            9.909458312904462,
+            10.684833338018507,
+            6.207083322806284,
+            10.05966667435132,
+            10.7611249841284,
+            10.047958319773898,
+            10.18504166859202,
+            8.361708343727514,
+            9.712583327200264
+          ],
+          "grids": [
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            },
+            {
+              "cols": 83,
+              "rows": 21
+            }
+          ],
+          "input_intervals_seconds": [
+            0.083,
+            0.097,
+            0.113,
+            0.091,
+            0.109,
+            0.101
+          ],
+          "panes": [
+            {
+              "full_uploads": 60,
+              "gpu_completions": 60,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 60,
+              "raster_builds": 60,
+              "snapshot_builds": 811,
+              "uploaded_bytes": 293760000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 811,
+                "p50": 0.1765000051818788,
+                "p95": 0.9397499961778522,
+                "p99": 1.8462500011082739
+              },
+              "raster_ms_summary": {
+                "count": 60,
+                "p50": 1.2998750025872141,
+                "p95": 1.821416663005948,
+                "p99": 2.4195833248086274
+              },
+              "upload_ms_summary": {
+                "count": 60,
+                "p50": 0.7501666550524533,
+                "p95": 1.0604166600387543,
+                "p99": 1.1671666579786688
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.4650000191759318,
+                "p95": 0.7385000062640756,
+                "p99": 1.147374976426363
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.920250000897795,
+                "p95": 4.9100000178441405,
+                "p99": 5.9205416473560035
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7544583349954337,
+                "p95": 0.9590416739229113,
+                "p99": 1.1150833161082119
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.46675000339746475,
+                "p95": 1.2688749993685633,
+                "p99": 2.6157083339057863
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.1154999849386513,
+                "p95": 4.60329168708995,
+                "p99": 5.207874986808747
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7133333419915289,
+                "p95": 0.9532916883472353,
+                "p99": 1.122416666476056
+              }
+            },
+            {
+              "full_uploads": 170,
+              "gpu_completions": 170,
+              "partial_uploads": 0,
+              "positive_presentation_timestamps": 170,
+              "raster_builds": 170,
+              "snapshot_builds": 170,
+              "uploaded_bytes": 832320000,
+              "zero_presentation_timestamps": 0,
+              "snapshot_ms_summary": {
+                "count": 170,
+                "p50": 0.44762500328943133,
+                "p95": 0.7835833239369094,
+                "p99": 1.5071250090841204
+              },
+              "raster_ms_summary": {
+                "count": 170,
+                "p50": 2.6959166571032256,
+                "p95": 4.540166672086343,
+                "p99": 5.76404167804867
+              },
+              "upload_ms_summary": {
+                "count": 170,
+                "p50": 0.7395833381451666,
+                "p95": 0.9903750033117831,
+                "p99": 1.1322083591949195
+              }
+            }
+          ],
+          "process_cpu_percent": 45.719797278951106,
+          "producer_interval_ms": 8,
+          "producer_lines_per_tick": 1,
+          "samples": 60,
+          "scale": 2,
+          "wall_seconds": 5.842261249985313,
+          "warmup": 3,
+          "window_points": [
+            1360,
+            900
+          ],
+          "event_to_gpu_summary_ms": {
+            "count": 60,
+            "p50": 8.556499989936128,
+            "p95": 10.7611249841284,
+            "p99": 12.46920833364129
+          }
+        }
+      ],
+      "schema": 1,
+      "scope": "synthetic-native-event-to-gpu-completion"
+    }
+  ],
+  "summary": [
+    {
+      "condition": "single-typing",
+      "before": {
+        "cpu_percent_samples": [
+          13.577568888585127,
+          15.135735471956785,
+          16.07963751360675
+        ],
+        "median_cpu_percent": 15.135735471956785,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 10.38941668230109,
+          "p95": 14.769166678888723,
+          "p99": 19.109291664790362
+        },
+        "background_raster_counts": [
+          0,
+          0,
+          0
+        ],
+        "uploaded_bytes": [
+          1175040000,
+          1168076800,
+          1172428800
+        ]
+      },
+      "after": {
+        "cpu_percent_samples": [
+          13.093777157490907,
+          14.265440004990761,
+          15.667613406322372
+        ],
+        "median_cpu_percent": 14.265440004990761,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 9.701833332655951,
+          "p95": 14.359958353452384,
+          "p99": 15.283791668480262
+        },
+        "background_raster_counts": [
+          0,
+          0,
+          0
+        ],
+        "uploaded_bytes": [
+          1171993600,
+          1171558400,
+          1170688000
+        ]
+      },
+      "cpu_reduction_percent": 5.7499384062207675
+    },
+    {
+      "condition": "four-ascii-typing",
+      "before": {
+        "cpu_percent_samples": [
+          54.71410190245316,
+          56.7178190815731,
+          56.63246789724262
+        ],
+        "median_cpu_percent": 56.63246789724262,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 7.001874997513369,
+          "p95": 12.8497916739434,
+          "p99": 33.293916640104726
+        },
+        "background_raster_counts": [
+          1824,
+          1835,
+          1820
+        ],
+        "uploaded_bytes": [
+          8639916800,
+          8688550400,
+          8633388800
+        ]
+      },
+      "after": {
+        "cpu_percent_samples": [
+          33.80313065190038,
+          38.01694637274412,
+          35.4803217947693
+        ],
+        "median_cpu_percent": 35.4803217947693,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 7.784625020576641,
+          "p95": 11.721874994691461,
+          "p99": 13.670041662408039
+        },
+        "background_raster_counts": [
+          510,
+          510,
+          510
+        ],
+        "uploaded_bytes": [
+          2616096000,
+          2616096000,
+          2616640000
+        ]
+      },
+      "cpu_reduction_percent": 37.34985757790575
+    },
+    {
+      "condition": "four-unicode-typing",
+      "before": {
+        "cpu_percent_samples": [
+          64.87002216633681,
+          64.10143837986813,
+          63.45199432381927
+        ],
+        "median_cpu_percent": 64.10143837986813,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 6.205208337632939,
+          "p95": 14.596249995520338,
+          "p99": 24.81583334156312
+        },
+        "background_raster_counts": [
+          1770,
+          1796,
+          1807
+        ],
+        "uploaded_bytes": [
+          8945536000,
+          9077728000,
+          9130169600
+        ]
+      },
+      "after": {
+        "cpu_percent_samples": [
+          44.3427752806728,
+          44.82579952300589,
+          46.324148376611305
+        ],
+        "median_cpu_percent": 44.82579952300589,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 7.034625014057383,
+          "p95": 11.133749998407438,
+          "p99": 13.996458350447938
+        },
+        "background_raster_counts": [
+          512,
+          510,
+          510
+        ],
+        "uploaded_bytes": [
+          2782342400,
+          2781363200,
+          2778860800
+        ]
+      },
+      "cpu_reduction_percent": 30.07052469343028
+    },
+    {
+      "condition": "four-unicode-scroll",
+      "before": {
+        "cpu_percent_samples": [
+          64.34980200423493,
+          65.72486238755437,
+          63.72968092708612
+        ],
+        "median_cpu_percent": 64.34980200423493,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 7.206125010270625,
+          "p95": 14.923291659215465,
+          "p99": 23.400958336424083
+        },
+        "background_raster_counts": [
+          1764,
+          1807,
+          1812
+        ],
+        "uploaded_bytes": [
+          8920512000,
+          9145728000,
+          9165312000
+        ]
+      },
+      "after": {
+        "cpu_percent_samples": [
+          46.7080606333344,
+          49.043385958215076,
+          45.719797278951106
+        ],
+        "median_cpu_percent": 46.7080606333344,
+        "event_to_gpu_ms": {
+          "count": 180,
+          "p50": 8.124375017359853,
+          "p95": 11.768708325689659,
+          "p99": 13.163374998839572
+        },
+        "background_raster_counts": [
+          510,
+          510,
+          510
+        ],
+        "uploaded_bytes": [
+          2790720000,
+          2790720000,
+          2790720000
+        ]
+      },
+      "cpu_reduction_percent": 27.4153778588775
+    }
+  ],
+  "aggregation": {
+    "cpu": "Median of three process user-plus-system CPU percentages; one fully used core is 100%.",
+    "latency": "Nearest-rank quantiles pooled over 180 samples per scene/version; no confidence interval or statistical significance claim.",
+    "counts": "Per-run totals include only the measured CPU window; table counts and upload bytes use the median of three runs.",
+    "run_order": [
+      "before",
+      "after",
+      "after",
+      "before",
+      "before",
+      "after"
+    ]
+  },
+  "validation": {
+    "canonical_gate": "scripts/verify.sh exited 0; 389 Swift tests, 3 opt-in skips, no failures.",
+    "local_browser_limit": "Chromium and WebKit passed; existing Firefox startup failure (Could not find profile folder) triggered the configured local skip. Fresh CI Firefox qualification is outstanding.",
+    "native_app": "Debug and clean committed release builds, three-second startup smokes and ad-hoc signature checks passed. Release app stamp matches candidate_commit.",
+    "staged_public_file_audit": "Implementation audit passed before its commit. Final evidence index audit passed over 341 files.",
+    "wasm": "No Rust or WASM implementation changed in this round; committed provenance verified."
+  },
+  "interpretation": {
+    "accepted": "Multi-pane process CPU reductions exceed the planned 15-20% gate in these workloads.",
+    "tradeoff": "Visible unfocused automatic refreshes now coalesce at about 30 Hz. Focused/local interaction stays immediate. Multi-pane p50 event-to-GPU latency increased by approximately 0.8-0.9 ms while pooled p95 decreased.",
+    "limits": [
+      "Three short runs per version on one host, synthetic input, instrumented release testable modules.",
+      "No physical key-to-photon measurement, shipping-app comparison or fresh Ghostty benchmark.",
+      "CPU excludes producer child processes and WindowServer; this is not energy usage.",
+      "VT/grapheme throughput and browser performance are outside this change."
+    ]
+  }
+}

@@ -230,8 +230,10 @@ including its PTY workers, but excludes producer children and WindowServer.
 
 The latency metric ends at the GPU completion callback for a revision containing
 the input marker or the requested viewport change. It does not measure physical
-key-to-photon latency. Drawable presentation timestamps are counted separately;
-this machine reports zero for them, so they cannot supply presentation latency.
+key-to-photon latency. Drawable presentation timestamps are counted separately.
+Initial trials returned zero; all six formal runs returned positive timestamps,
+but the probe retains only availability counts, not input-correlated presentation
+times. These data therefore cannot supply event-to-presentation latency.
 Raw phase samples, raster counts and uploaded bytes help distinguish where the
 work is spent. GPU completion and drawable presentation are never conflated.
 
@@ -266,3 +268,66 @@ repaints the full bitmap, so those uploads are real damage, not only stale textu
 copies. This pass reduces unnecessary refresh work and leaves pixel rendering,
 protocol handling and frame damage semantics unchanged. Committed-candidate
 measurements below determine the accepted scope of the improvement.
+
+### Native committed-candidate remeasurement
+
+Product baseline: `a0babc4f82907c82175bc375504c5b810d06743f` (1.3.28).
+The unchanged scheduling baseline includes instrumentation at
+`e0f1835ed44ab9bbf7425e3f43d50cead488bdde`; the implementation is
+`e47b0c8ad0f1422dde2fb7157e70d821e53f73d1`. The baseline probe was frozen before
+implementation; the candidate was built after committing it. The measurement
+source tree stayed clean at the candidate commit throughout the formal runs.
+Both probes use identical harness, renderer instrumentation and Rust source.
+
+Six runs execute before/after/after/before/before/after on Apple M3 Max,
+macOS 27.2.1, Rust 1.99.1, Swift 6.4.2 and Node 26.13.1. Each scene has three
+warmups and 60 measured inputs per run: 180 latency samples per version/scene.
+CPU is the median of three process user-plus-system percentages, where one fully
+used core is 100%. Latency quantiles pool the 180 samples using nearest rank.
+These are short repeated measurements on one host, without confidence intervals.
+
+| Scene | CPU before | CPU after | CPU reduction | GPU completion p95 before | After |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Single-pane typing | 15.14% | 14.27% | 5.7% | 14.77 ms | 14.36 ms |
+| Typing with three ASCII streams | 56.63% | 35.48% | 37.3% | 12.85 ms | 11.72 ms |
+| Typing with three Unicode streams | 64.10% | 44.83% | 30.1% | 14.60 ms | 11.13 ms |
+| Scrolling with three Unicode streams | 64.35% | 46.71% | 27.4% | 14.92 ms | 11.77 ms |
+
+The three multi-pane scenes exceed the planned 15-20% CPU-improvement gate.
+Their foreground GPU completion p50 rises from 7.00 to 7.78 ms, 6.21 to 7.03 ms,
+and 7.21 to 8.12 ms respectively, while p95 and p99 fall. This is a measured
+tradeoff, not a claim that every input becomes faster. The single-pane control
+shows a much smaller difference; it does not establish a general single-pane gain.
+
+| Scene | Background raster builds before | After | Total upload GiB before | After |
+| --- | ---: | ---: | ---: | ---: |
+| Single-pane typing | 0 | 0 | 1.09 | 1.09 |
+| Typing with three ASCII streams | 1824 | 510 | 8.05 | 2.44 |
+| Typing with three Unicode streams | 1796 | 510 | 8.45 | 2.59 |
+| Scrolling with three Unicode streams | 1807 | 510 | 8.52 | 2.60 |
+
+Counts and bytes are median totals over each approximately 5.84-second measured
+window; upload totals include the foreground pane. Background rasters fall about
+72%, consistent with retaining only the latest output at the lower cadence.
+Unfocused visible panes now update at about 30 Hz, which is an intentional
+smoothness tradeoff. Focus, local input and explicit scroll/selection polls retain
+immediate refreshes. This change improves the native host's work under concurrent
+output; it does not change the Unicode/grapheme engine gap, browser performance,
+or establish full-app parity with Ghostty.
+
+[The machine-readable record](../benchmarks/results/native-refresh-2026-11-14.json)
+retains all 1,440 critical latency samples, raw CPU windows, per-pane counts,
+phase quantiles, geometry, source/binary fingerprints and original raw-file
+hashes. Full phase arrays and build logs remain local benchmark artifacts.
+Reproduce a single run with `scripts/benchmark-native.sh OUTPUT.json 60` from
+each pinned tree, preserving focus and the same display geometry; alternate the
+versions as above. `AKITTY_NATIVE_PROBE_SAVE_APP` can retain an immutable probe
+app to repeat runs without rebuilding; its Sparkle dependency must stay unchanged.
+
+The full local `scripts/verify.sh` gate passed, including 389 Swift tests with
+three opt-in skips and no failures. Chromium and WebKit passed; the existing
+Firefox startup error (`Could not find profile folder`) triggered its configured
+local skip, so fresh CI Firefox qualification remains outstanding. Debug and
+clean committed release app builds, three-second startup smokes and ad-hoc
+signature checks passed. WASM provenance was verified and its artifact is
+unchanged. No notarization or release publication was performed.
