@@ -50,8 +50,11 @@ impl Shell {
         self.ready = false;
         self.pending.clear();
     }
-    pub fn observe(&mut self, body: &[u8]) {
-        if body.len() > 8192 || self.apply(body).is_err() { self.rejected = self.rejected.saturating_add(1); }
+    /// Returns whether the notification was accepted; rejected metadata must not drive
+    /// host-side control state.
+    pub fn observe(&mut self, body: &[u8]) -> bool {
+        if body.len() > 8192 || self.apply(body).is_err() { self.rejected = self.rejected.saturating_add(1); return false; }
+        true
     }
     fn apply(&mut self, body: &[u8]) -> Result<(), ()> {
         let body = std::str::from_utf8(body).map_err(|_| ())?;

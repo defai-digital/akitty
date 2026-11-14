@@ -423,9 +423,13 @@ impl Model {
                     self.feed_terminal(&data, &mut replies, &mut overflowed);
                 },
                 ChromeSegment::Shell(body) => {
-                    self.shell.observe(&body);
-                    if body == b"133;A" { self.control.dirty = false; self.program_status.finish_work(); }
-                    if body.starts_with(b"133;D") { self.control.observed_completion(); }
+                    // Only accepted notifications drive control state. An oversized body is
+                    // truncated by the filter and rejected by the shell, yet its prefix can
+                    // still look like a prompt or completion; it must not be attributed.
+                    if self.shell.observe(&body) {
+                        if body == b"133;A" { self.control.dirty = false; self.program_status.finish_work(); }
+                        if body.starts_with(b"133;D") { self.control.observed_completion(); }
+                    }
                 },
                 // A program sequence is consumed either way, so it never lands in the grid.
                 // With program chrome off it does not replace the document.

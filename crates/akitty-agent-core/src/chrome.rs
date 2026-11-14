@@ -633,4 +633,21 @@ mod tests {
         assert_eq!(segments.first(), Some(&(0, b"\x1b]0;partial\x18".to_vec())));
         assert_eq!(segments.last(), Some(&(0, b"hello".to_vec())));
     }
+
+    #[test]
+    fn oversized_shell_metadata_is_delivered_truncated_for_downstream_rejection() {
+        // Unlike documents, shell metadata reaches the shell layer even over the cap so it
+        // can be rejected and counted there; only the truncated prefix is delivered, and
+        // nothing leaks into the pass stream.
+        let mut input = b"\x1b]133;D".to_vec();
+        input.extend(vec![b'x'; MAX_OSC_BODY + 10]);
+        input.extend_from_slice(b"\x1b\\after");
+        let mut filter = Filter::default();
+        let segments = joined([filter.feed(&input)]);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].0, 2);
+        assert_eq!(segments[0].1.len(), MAX_OSC_BODY);
+        assert!(segments[0].1.starts_with(b"133;D"));
+        assert_eq!(segments[1], (0, b"after".to_vec()));
+    }
 }

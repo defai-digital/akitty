@@ -1428,6 +1428,33 @@ mod tests {
     }
 
     #[test]
+    fn oversized_completion_report_never_consumes_the_pending_command() {
+        let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        session.feed(b"\x1b]133;A\x07").unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        session.commands = Some(tx);
+        let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
+        let authorization = session.command_authorize(lease, "echo hi".into(), None).unwrap()["authorization"].as_u64().unwrap();
+        session.command_execute(lease, authorization, "echo hi".into()).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Command::Input(_))));
+        // Rejected oversized metadata must not observe the dispatched command's completion
+        // through its truncated prefix.
+        let mut oversized = b"\x1b]133;D".to_vec();
+        oversized.extend(vec![b'x'; 70_000]);
+        oversized.push(0x07);
+        session.model.lock().unwrap().feed(&oversized);
+        let audit = session.control_audit(0).unwrap();
+        let events: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert!(events.contains(&"dispatched"), "{audit}");
+        assert!(!events.contains(&"shell_completion_observed_untrusted"), "{audit}");
+        // The genuine completion that follows is still observed.
+        session.model.lock().unwrap().feed(b"\x1b]133;D;0\x07");
+        let audit = session.control_audit(0).unwrap();
+        let events: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert!(events.contains(&"shell_completion_observed_untrusted"), "{audit}");
+    }
+
+    #[test]
     fn rejected_control_operations_leave_the_snapshot_revision_unchanged() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
