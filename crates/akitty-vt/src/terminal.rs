@@ -432,9 +432,18 @@ impl Terminal {
         if self.modes.insert {
             self.edit_chars(width, true, false);
         }
-        self.clear_wide_at(pos.row, pos.col, self.style.bg);
-        if width == 2 {
-            self.clear_wide_at(pos.row, pos.col + 1, self.style.bg);
+        // Overwriting a plain width-1 cell needs no wide-neighbour repair and no
+        // pre-blank (the cell is overwritten below); only the generation bump is
+        // required. This is the common ASCII path, where clear_wide_at's self-blank
+        // was redundant. Wide halves and width-2 writes keep the full repair.
+        if width == 1 && self.screen().rows[pos.row].cells[pos.col].width == 1 {
+            let row = &mut self.screen_mut().rows[pos.row];
+            row.generation = row.generation.wrapping_add(1);
+        } else {
+            self.clear_wide_at(pos.row, pos.col, self.style.bg);
+            if width == 2 {
+                self.clear_wide_at(pos.row, pos.col + 1, self.style.bg);
+            }
         }
         let style = self.style;
         let link = self.link.clone();
@@ -1931,6 +1940,49 @@ mod tests {
         assert!(
             term.screen().rows.iter().all(|row| row.used() == 0),
             "DECALN content must be erasable; the fill bump invalidates the blank marker"
+        );
+    }
+
+    #[test]
+    fn plain_print_over_a_wide_half_still_repairs_the_neighbour() {
+        // Overwriting the spacer tail must blank the wide lead (fast path must not fire).
+        let mut term = Terminal::new(6, 2, 0).unwrap();
+        feed(&mut term, "中".as_bytes());
+        assert_eq!(term.screen().rows[0].cells[0].width, 2);
+        assert_eq!(term.screen().rows[0].cells[1].width, 0);
+        feed(&mut term, b"\x1b[1;2HX");
+        assert_eq!(term.screen().rows[0].cells[1].ch, 'X');
+        assert_eq!(term.screen().rows[0].cells[0].ch, ' ', "wide lead blanked when its tail is overwritten");
+        // Overwriting the wide lead must blank the spacer tail.
+        let mut term = Terminal::new(6, 2, 0).unwrap();
+        feed(&mut term, "中".as_bytes());
+        feed(&mut term, b"\x1b[1;1HY");
+        assert_eq!(term.screen().rows[0].cells[0].ch, 'Y');
+        assert_eq!(term.screen().rows[0].cells[1].ch, ' ', "spacer tail blanked when its lead is overwritten");
+    }
+
+    #[test]
+    fn plain_overwrite_uses_fast_path_and_bumps_generation() {
+        let mut term = Terminal::new(6, 2, 0).unwrap();
+        feed(&mut term, b"ABC");
+        let gen_before = term.screen().rows[0].generation;
+        feed(&mut term, b"\x1b[1;2HX");
+        assert_eq!(term.screen().rows[0].cells[0].ch, 'A');
+        assert_eq!(term.screen().rows[0].cells[1].ch, 'X');
+        assert_eq!(term.screen().rows[0].cells[2].ch, 'C');
+        assert!(term.screen().rows[0].generation > gen_before, "fast path must bump generation");
+    }
+
+    #[test]
+    fn fast_path_print_invalidates_the_blank_marker() {
+        let mut term = Terminal::new(6, 2, 0).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[2J");
+        feed(&mut term, b"Z");
+        feed(&mut term, b"\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "a fast-path write must invalidate the blank marker so ED2 clears it"
         );
     }
 }
