@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import QuartzCore
 import CoreText
 import os
 
@@ -67,6 +68,10 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     /// Whether frames composite the two text layers and the image textures, rather than the single bitmap.
     private(set) var layered = false
     var onFailure: ((String) -> Void)?
+    var frameRevision: UInt64 = 0
+    var onCompleted: (@MainActor @Sendable (UInt64, Double) -> Void)?
+    var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
+    var onUpload: ((Int, Bool) -> Void)?
     init(forceFailure: Bool = false, forceShaderFailure: Bool = false) throws {
         guard !forceFailure, let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw AkittyError.core("Metal device unavailable") }
         self.device = device
@@ -221,12 +226,14 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
                 current.replace(region: MTLRegionMake2D(0, damage.lowerBound, bitmap.width, damage.count), mipmapLevel: 0,
                                 withBytes: data + damage.lowerBound * bitmap.bytesPerRow, bytesPerRow: bitmap.bytesPerRow)
             }
+            onUpload?(damage.count * bitmap.width * 4, false)
             return current
         }
         // A frame still owns the current texture (or the size changed): give this one a free, fully uploaded texture.
         let next = try makeTexture(width: bitmap.width, height: bitmap.height)
         if let current { retire(current) }
         next.replace(region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height), mipmapLevel: 0, withBytes: data, bytesPerRow: bitmap.bytesPerRow)
+        onUpload?(bitmap.width * bitmap.height * 4, true)
         return next
     }
     /// The theme background; layered frames clear to it, so it must match what the CPU bitmaps fill.
@@ -292,12 +299,23 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         }
         encoder.endEncoding()
         pending.add(1)
-        let pending = self.pending
+        let pending = self.pending, onCompleted = self.onCompleted, revision = frameRevision
         command.addCompletedHandler { [weak self] completed in
             pending.add(-1)
+            if completed.status == .completed, let onCompleted {
+                let time = CACurrentMediaTime()
+                DispatchQueue.main.async { onCompleted(revision, time) }
+            }
             if completed.status == .error {
                 let message = completed.error?.localizedDescription ?? "GPU command failed"
                 DispatchQueue.main.async { self?.onFailure?(message) }
+            }
+        }
+        if let onPresented {
+            let revision = frameRevision
+            drawable.addPresentedHandler { displayed in
+                let time = displayed.presentedTime
+                DispatchQueue.main.async { onPresented(revision, time) }
             }
         }
         command.present(drawable); command.commit()

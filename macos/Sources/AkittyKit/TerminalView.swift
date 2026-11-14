@@ -8,6 +8,12 @@ import os
 /// A hidden pane refreshes at most this often; also the coalescing window for a deferred wake.
 private let hiddenPollInterval: Double = 0.25
 
+/// Opt-in observations for the native pipeline probe; no terminal contents are recorded.
+enum NativeFrameEvent {
+    case snapshotStarted, snapshotFinished(UInt64?), rasterStarted(UInt64), rasterReady(UInt64)
+    case uploaded(bytes: Int, full: Bool), handedOff(UInt64), gpuCompleted(UInt64, Double), presented(UInt64, Double)
+}
+
 @MainActor public final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     private var sessionStorage: TerminalSession?
     public var session: TerminalSession { sessionStorage! }
@@ -23,6 +29,15 @@ private let hiddenPollInterval: Double = 0.25
     /// Chrome or program-status changes can alter the tab's activity badge.
     var onChrome: ((ChromeDocument?) -> Void)?
     private var presenter: MetalPresenter?
+    /// Internal observation sink, normally nil. The probe owns bounded samples and persistence.
+    var onNativeFrameEvent: ((NativeFrameEvent) -> Void)? {
+        didSet {
+            guard onNativeFrameEvent != nil else { presenter?.onPresented = nil; presenter?.onCompleted = nil; presenter?.onUpload = nil; return }
+            presenter?.onCompleted = { [weak self] revision, time in self?.onNativeFrameEvent?(.gpuCompleted(revision, time)) }
+            presenter?.onPresented = { [weak self] revision, time in self?.onNativeFrameEvent?(.presented(revision, time)) }
+            presenter?.onUpload = { [weak self] bytes, full in self?.onNativeFrameEvent?(.uploaded(bytes: bytes, full: full)) }
+        }
+    }
     private var bitmap: CGContext?
     private let snapshotQueue = DispatchQueue(label: "com.defai.akitty.snapshot", qos: .userInteractive)
     private let rasterQueue = DispatchQueue(label: "com.defai.akitty.raster", qos: .userInteractive)
@@ -381,6 +396,7 @@ private let hiddenPollInterval: Double = 0.25
         // until the raster is handed off, then poll once: the newest frame is never lost.
         if rasterInFlight { pollDeferred = true; return }
         pollInFlight = true
+        onNativeFrameEvent?(.snapshotStarted)
         let session = self.session, base = snapshot, since = snapshot?.revision, store = imageStore
         snapshotQueue.async { [weak self] in
             let result = Result { try session.snapshot(since: since, base: base) }
@@ -391,6 +407,7 @@ private let hiddenPollInterval: Double = 0.25
                 self.pollInFlight = false
                 guard !self.stopped else { return }
                 self.applySnapshot(result)
+                self.onNativeFrameEvent?(.snapshotFinished((try? result.get())?.revision))
                 self.updatePolling()
                 if self.pollAgain { self.pollAgain = false; self.poll() }
             }
@@ -485,13 +502,16 @@ private let hiddenPollInterval: Double = 0.25
         // An image-only frame goes straight to the GPU: new placements and textures, redraw, no text work.
         if imageOnly, let presenter, presenter.layered, !(snapshot.images ?? []).isEmpty, pendingDamage == [], !rasterInFlight {
             do {
+                presenter.frameRevision = snapshot.revision
                 try presenter.updateImages(placements: snapshot.images ?? [], pixels: imageStore.entries,
                                            grid: GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cellSize, scale: window?.backingScaleFactor ?? 2))
+                onNativeFrameEvent?(.handedOff(snapshot.revision))
             } catch { renderFailed(error.localizedDescription) }
             return
         }
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
+        onNativeFrameEvent?(.rasterStarted(snapshot.revision))
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
         let fontName = font.fontName, fontSize = font.pointSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
         // With Metal, frames that show images split the text into two layers and let the GPU composite each image from
@@ -515,6 +535,7 @@ private let hiddenPollInterval: Double = 0.25
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.rasterInFlight = false
+                    self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                     guard !self.stopped else { return }
                     // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
                     // presenting it would flash the new background behind them. Repaint fully instead.
@@ -523,8 +544,10 @@ private let hiddenPollInterval: Double = 0.25
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
                         if size == self.bounds.size, self.window != nil, let presenter = self.presenter {
+                            presenter.frameRevision = snapshot.revision
                             try presenter.updateLayers(background: frame.background, foreground: frame.foreground, damage: frame.damage, grid: grid,
                                                        placements: self.snapshot?.images ?? snapshot.images ?? [], pixels: self.imageStore.entries)
+                            self.onNativeFrameEvent?(.handedOff(snapshot.revision))
                         } else { self.pendingDamage = nil }
                     } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
                     if self.rasterPending { self.redraw() }
@@ -536,13 +559,20 @@ private let hiddenPollInterval: Double = 0.25
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.rasterInFlight = false
+                self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                 guard !self.stopped else { return }
                 guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                 do {
                     let frame = try result.get()
                     if size == self.bounds.size, self.window != nil {
                         self.bitmap = frame.context
-                        if let presenter = self.presenter { do { try presenter.update(bitmap: frame.context, damage: frame.damage) } catch { self.renderFailed(error.localizedDescription) } }
+                        if let presenter = self.presenter {
+                            do {
+                                presenter.frameRevision = snapshot.revision
+                                try presenter.update(bitmap: frame.context, damage: frame.damage)
+                                self.onNativeFrameEvent?(.handedOff(snapshot.revision))
+                            } catch { self.renderFailed(error.localizedDescription) }
+                        }
                         self.needsDisplay = true
                     } else { self.pendingDamage = nil }
                 } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }

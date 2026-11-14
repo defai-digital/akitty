@@ -209,3 +209,36 @@ Firefox CI qualification remains outstanding. Swift ran 382 tests with three
 opt-in skips and no failures. Debug and clean committed release app builds,
 three-second startup smokes and ad-hoc signature verification passed. No
 notarization or release publication was performed.
+
+## Native pipeline follow-up
+
+This pass measures the native host before changing its scheduling. The opt-in
+`scripts/benchmark-native.sh OUTPUT.json [SAMPLES=60]` builds a local AppKit probe
+from the normal release testable modules. It opens a focused 1360x900-point
+window, drives real PTYs, and exercises snapshot, raster, upload and GPU command
+completion callbacks. The observer is internal and inactive in ordinary app use.
+It records no terminal contents. Run it with an unlocked desktop and retain
+keyboard focus in the probe window; losing focus fails the measurement.
+
+Four scenes cover single-pane typing, typing alongside three ASCII streams,
+typing alongside three Unicode streams, and scrolling with three Unicode streams.
+Each producer writes one numbered line every 8 ms with backpressure. Synthetic
+Enter events have matching key releases. Three warmups precede the measured
+samples, with a fixed sequence of 83/97/113/91/109/101 ms input intervals to avoid
+locking to one display phase. Process CPU covers the probe's user/system CPU,
+including its PTY workers, but excludes producer children and WindowServer.
+
+The latency metric ends at the GPU completion callback for a revision containing
+the input marker or the requested viewport change. It does not measure physical
+key-to-photon latency. Drawable presentation timestamps are counted separately;
+this machine reports zero for them, so they cannot supply presentation latency.
+Raw phase samples, raster counts and uploaded bytes help distinguish where the
+work is spent. GPU completion and drawable presentation are never conflated.
+
+The candidates are coalescing visible unfocused panes at 30 Hz while retaining
+focused and local-interaction responsiveness, and reducing unnecessary texture
+uploads if measured damage supports it. Hidden panes retain their 4 Hz policy.
+Any cadence change must preserve the final update, events, focus transitions and
+shutdown. Texture history is deferred when full uploads correspond to genuinely
+changed bitmap rows. VT/grapheme optimization and a new glyph renderer remain
+separate work; this pass changes neither the Rust engine nor the browser artifact.
