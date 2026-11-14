@@ -163,7 +163,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// An empty destination avoids spawning a temporary shell and keeps the moved session's opaque IDs.
     @discardableResult func moveTabToNewWindow(_ item: NSTabViewItem, from source: TerminalWindow, at point: NSPoint? = nil) throws -> TerminalWindow? {
         guard windows.contains(where: { $0 === source }), source.canTransferTab(item) else { return nil }
-        let destination = try TerminalWindow(app: self, headless: source.headless, createInitialTab: false)
+        // The window's opened folder and profile are defaults for new splits and tabs, so they travel too.
+        let destination = try TerminalWindow(app: self, headless: source.headless, directory: source.directory, profile: source.profile, createInitialTab: false)
         // Capture geometry while the source still owns its last tab and display.
         if let window = destination.window, let original = source.window?.frame {
             var frame = original

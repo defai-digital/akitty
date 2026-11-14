@@ -3,6 +3,17 @@ import AppKit
 @testable import AkittyKit
 
 final class TabTransferTests: XCTestCase {
+    /// Hit-test against this process's windows only, as if no other app covered them.
+    @MainActor override func setUp() {
+        super.setUp()
+        TerminalWindow.windowNumberAtPoint = { point in
+            NSApp.orderedWindows.first { $0.isVisible && !$0.ignoresMouseEvents && $0.frame.contains(point) }?.windowNumber ?? 0
+        }
+    }
+    @MainActor override func tearDown() {
+        TerminalWindow.windowNumberAtPoint = { NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0) }
+        super.tearDown()
+    }
     @MainActor private func cleanUp(_ app: AkittyApplication) {
         for controller in app.windows {
             controller.panes.forEach { $0.terminal.shutdown() }; controller.window?.close()
@@ -299,6 +310,70 @@ final class TabTransferTests: XCTestCase {
         XCTAssertFalse(NSApp.windows.contains { $0 is TabDragPreview && $0.isVisible })
         chip.mouseUp(with: try mouse(.leftMouseUp, in: window, at: end))
         XCTAssertEqual(app.windows.count, 1)
+    }
+
+    @MainActor func testMovedTabKeepsTheWindowsOpenedFolderAndProfile() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let folder = FileManager.default.temporaryDirectory.path, profile = UUID()
+        let source = try app.createTerminalWindow(directory: folder, headless: true, profile: profile)
+        try source.newTab()
+        let moved = try XCTUnwrap(app.moveTabToNewWindow(source.tabs.tabViewItems[0], from: source))
+        XCTAssertEqual(moved.directory, folder)
+        XCTAssertEqual(moved.profile, profile)
+    }
+
+    @MainActor func testDroppingTheOnlyTabOnItsOwnContentKeepsTheWindow() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true)
+        let chip = source.tabChips[0], window = try XCTUnwrap(source.window)
+        let frame = window.frame, item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        let start = try chipPoint(chip), end = NSPoint(x: start.x, y: start.y - 120)
+        chip.mouseDown(with: try mouse(.leftMouseDown, in: window, at: start))
+        chip.mouseDragged(with: try mouse(.leftMouseDragged, in: window, at: end))
+        chip.mouseUp(with: try mouse(.leftMouseUp, in: window, at: end))
+        XCTAssertEqual(app.windows.count, 1)
+        XCTAssertTrue(app.windows.first === source)
+        XCTAssertTrue(source.tabs.selectedTabViewItem === item)
+        XCTAssertEqual(window.frame, frame)
+    }
+
+    @MainActor func testStripHeightBesideTheWindowDetachesInsteadOfReordering() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true)
+        try source.newTab()
+        let window = try XCTUnwrap(source.window), screen = try XCTUnwrap(NSScreen.main?.visibleFrame)
+        window.setFrame(NSRect(x: screen.minX + 20, y: screen.minY + 20, width: 450, height: 300), display: true)
+        let original = source.tabs.tabViewItems, chip = source.tabChips[0]
+        let start = try chipPoint(chip), end = NSPoint(x: window.frame.maxX + 200, y: start.y)
+        chip.mouseDown(with: try mouse(.leftMouseDown, in: window, at: start))
+        chip.mouseDragged(with: try mouse(.leftMouseDragged, in: window, at: end))
+        XCTAssertEqual(source.tabs.tabViewItems, original, "strip height outside the window must not reorder")
+        chip.mouseUp(with: try mouse(.leftMouseUp, in: window, at: end))
+        XCTAssertEqual(app.windows.count, 2)
+        XCTAssertTrue(app.windows.last?.tabs.selectedTabViewItem === original[0])
+    }
+
+    @MainActor func testDropOnAWindowCoveredByAnotherAppDetachesInsteadOfJoiningIt() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        try source.newTab()
+        let window = try XCTUnwrap(source.window), targetWindow = try XCTUnwrap(target.window)
+        let origin = NSScreen.main?.visibleFrame.origin ?? .zero
+        window.setFrame(NSRect(x: origin.x + 20, y: origin.y + 20, width: 450, height: 300), display: true)
+        targetWindow.setFrame(NSRect(x: origin.x + 500, y: origin.y + 20, width: 450, height: 300), display: true)
+        let item = source.tabs.tabViewItems[0], chip = source.tabChips[0]
+        let start = try chipPoint(chip), end = try chipPoint(target.tabChips[0])
+        TerminalWindow.windowNumberAtPoint = { _ in -1 }  // another app's window is on top
+        chip.mouseDown(with: try mouse(.leftMouseDown, in: window, at: start))
+        chip.mouseDragged(with: try mouse(.leftMouseDragged, in: window, at: end))
+        chip.mouseUp(with: try mouse(.leftMouseUp, in: window, at: end))
+        XCTAssertEqual(target.tabs.numberOfTabViewItems, 1, "a covered window must not take the drop")
+        XCTAssertEqual(app.windows.count, 3)
+        XCTAssertTrue(app.windows.last?.tabs.selectedTabViewItem === item)
     }
 
     @MainActor func testRejectedDropRestoresOriginalOrderAndSelection() throws {

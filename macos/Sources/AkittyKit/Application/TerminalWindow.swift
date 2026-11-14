@@ -236,14 +236,17 @@ import AppKit
             guard let split = item.view as? NSSplitView else { continue }
             let count = split.arrangedSubviews.count
             guard count > 1 else { continue }
-            let shares = tab.fractions.count == count ? tab.fractions : Array(repeating: 1 / Double(count), count: count)
-            let total = shares.reduce(0, +)
-            guard total > 0 else { continue }
-            var position: CGFloat = 0
-            for index in 0..<(count - 1) {
-                position += CGFloat(shares[index] / total)
-                split.setPosition(split.bounds.width * position, ofDividerAt: index)
-            }
+            setShares(tab.fractions.count == count ? tab.fractions : Array(repeating: 1, count: count), of: split)
+        }
+    }
+    /// Places each divider at the running total of `shares`, normalized so they need not sum to one.
+    private func setShares(_ shares: [Double], of split: NSSplitView) {
+        let total = shares.reduce(0, +)
+        guard shares.count == split.arrangedSubviews.count, shares.count > 1, total > 0 else { return }
+        var position = 0.0
+        for divider in 0..<(shares.count - 1) {
+            position += shares[divider] / total
+            split.setPosition(split.bounds.width * CGFloat(position), ofDividerAt: divider)
         }
     }
     /// The focused pane's current directory, copied at the moment the tab is created.
@@ -271,11 +274,10 @@ import AppKit
         else { split.addArrangedSubview(pane) }
         app?.registerAgentTerminal(pane.terminal)
         bindPane(pane, in: split)
-        DispatchQueue.main.async { [weak split] in
+        DispatchQueue.main.async { [weak self, weak split] in
             guard let split else { return }
             split.adjustSubviews()
-            let count = split.arrangedSubviews.count
-            if count > 1 { for index in 1..<count { split.setPosition(split.bounds.width * CGFloat(index) / CGFloat(count), ofDividerAt: index - 1) } }
+            self?.setShares(Array(repeating: 1, count: split.arrangedSubviews.count), of: split)
         }
         window?.makeFirstResponder(pane.terminal)
         return pane
@@ -399,6 +401,10 @@ import AppKit
     var allowsTabTransfer: Bool {
         !closing && quickDismiss == nil && window != nil && window?.attachedSheet == nil && NSApp.modalWindow == nil && app?.allowsTabTransfer == true
     }
+    /// Reordering inside this window needs no application coordinator, so the quick terminal can reorder too.
+    private var allowsTabReorder: Bool {
+        !closing && window?.attachedSheet == nil && NSApp.modalWindow == nil && app?.allowsTabTransfer != false
+    }
     func canTransferTab(_ item: NSTabViewItem) -> Bool {
         allowsTabTransfer && tabs.indexOfTabViewItem(item) != NSNotFound && (item.view as? NSSplitView)?.arrangedSubviews.isEmpty == false
     }
@@ -409,13 +415,31 @@ import AppKit
         guard tabStrip.bounds.insetBy(dx: -12, dy: -16).contains(local) else { return nil }
         return tabChips.firstIndex { local.x < $0.frame.midX } ?? tabs.numberOfTabViewItems
     }
+    /// The strip's height plus slack, but only across this window: at strip height over another window
+    /// or the desktop the drag detaches instead of reordering.
     private func isInReorderBand(_ point: NSPoint) -> Bool {
-        guard let window else { return false }
+        guard let window, point.x >= window.frame.minX, point.x <= window.frame.maxX else { return false }
         let local = tabStrip.convert(window.convertPoint(fromScreen: point), from: nil)
         return local.y >= tabStrip.bounds.minY - 24 && local.y <= tabStrip.bounds.maxY + 24
     }
+    /// The topmost window at `point` across every app on the active Space. Nil when another app's
+    /// window, or nothing of ours, is there, so a covered or off-Space window never takes the drop.
+    /// The window server's topmost window number at a screen point. Tests replace it, since other apps'
+    /// windows on the test machine would otherwise decide where a synthetic drop lands.
+    static var windowNumberAtPoint: (NSPoint) -> Int = { NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0) }
+    private func frontmostAppWindow(at point: NSPoint) -> NSWindow? {
+        let number = Self.windowNumberAtPoint(point)
+        guard let hit = NSApp.windows.first(where: { $0.windowNumber == number }), hit.isOnActiveSpace,
+              hit.isVisible, !hit.isMiniaturized, !hit.ignoresMouseEvents else { return nil }
+        return hit
+    }
+    private func detachTab(_ item: NSTabViewItem, at point: NSPoint? = nil) -> Bool {
+        guard let app else { return false }
+        do { return try app.moveTabToNewWindow(item, from: self, at: point) != nil }
+        catch { NSAlert(error: error).runModal(); return false }
+    }
     private func dragTab(to point: NSPoint) {
-        guard !closing, window?.attachedSheet == nil, app?.allowsTabTransfer != false, let item = draggedTab else { return }
+        guard allowsTabReorder, let item = draggedTab else { return }
         if isInReorderBand(point) {
             dragPreview?.orderOut(nil)
             guard let window else { return }
@@ -432,28 +456,19 @@ import AppKit
         guard let item else { return }
         var accepted = false
         defer { if !accepted { restoreTabDrag(item, index: originalIndex, selection: originalSelection) } }
-        guard canTransferTab(item), let app else {
-            // Reordering needs no application coordinator; transfers do. Keep the quick terminal's reorder too.
-            accepted = !closing && window?.attachedSheet == nil && NSApp.modalWindow == nil && app?.allowsTabTransfer != false && isInReorderBand(point)
-            return
+        guard canTransferTab(item), let app else { accepted = allowsTabReorder && isInReorderBand(point); return }
+        // Hit the frontmost window, so a sheet, settings window or another app never drops through to a terminal behind it.
+        guard let hit = frontmostAppWindow(at: point) else {
+            accepted = detachTab(item, at: point); return
         }
-        // Hit the frontmost app window, so a sheet or settings window never drops through to a terminal behind it.
-        if let hit = NSApp.orderedWindows.first(where: { $0.isVisible && !$0.isMiniaturized && !$0.ignoresMouseEvents && $0.frame.contains(point) }) {
-            guard let destination = hit.windowController as? TerminalWindow, destination.app === app else { return }
-            if destination === self, !isInReorderBand(point) {
-                do { accepted = try app.moveTabToNewWindow(item, from: self, at: point) != nil }
-                catch { NSAlert(error: error).runModal() }
-            } else if destination === self {
-                accepted = true
-            } else if let index = destination.tabInsertionIndex(at: point), destination !== self,
-                      transferTab(item, to: destination, at: index) {
-                accepted = true
-                destination.showWindow(nil); destination.window?.makeKeyAndOrderFront(nil)
-            }
-        } else if !isInReorderBand(point) {
-            do { accepted = try app.moveTabToNewWindow(item, from: self, at: point) != nil }
-            catch { NSAlert(error: error).runModal() }
-        } else { accepted = true }
+        guard let destination = hit.windowController as? TerminalWindow, destination.app === app else { return }
+        if destination === self {
+            // A window's only tab dropped on its own content stays put: detaching would just replace the window.
+            accepted = isInReorderBand(point) || (tabs.numberOfTabViewItems > 1 && detachTab(item, at: point))
+        } else if let index = destination.tabInsertionIndex(at: point), transferTab(item, to: destination, at: index) {
+            accepted = true
+            destination.showWindow(nil); destination.window?.makeKeyAndOrderFront(nil)
+        }
     }
     private func cancelTabDrag() {
         let item = draggedTab, selection = dragOriginalSelection, index = dragOriginalIndex
@@ -497,20 +512,19 @@ import AppKit
             guard let destination, let split, let item, destination.tabs.indexOfTabViewItem(item) != NSNotFound else { return }
             destination.window?.layoutIfNeeded(); destination.restoreTabShares(shares, item: item, split: split)
         }
-        if let focused { destination.window?.makeFirstResponder(focused); focused.poll() }
+        if let focused { destination.window?.makeFirstResponder(focused); if searched == nil { focused.poll() } }
         if destination.window?.isKeyWindow == true { destination.acknowledgeSelectedTab() }
-        if tabs.numberOfTabViewItems == 0 { window?.close() }
-        else if keepFindFocus { window?.makeFirstResponder(findBar.field) }
+        if tabs.numberOfTabViewItems == 0 { window?.close(); return true }
+        // removeTabViewItem selected the next tab while didSelect was suppressed, so acknowledge it here.
+        if window?.isKeyWindow == true { acknowledgeSelectedTab() }
+        if keepFindFocus { window?.makeFirstResponder(findBar.field) }
         else { window?.makeFirstResponder(selectedPane) }
         return true
     }
     private func restoreTabShares(_ shares: [Double], item: NSTabViewItem, split: NSSplitView) {
         guard tabs.indexOfTabViewItem(item) != NSNotFound, split.arrangedSubviews.count == shares.count else { return }
         split.adjustSubviews()
-        var position: Double = 0
-        for divider in 0..<max(0, shares.count - 1) {
-            position += shares[divider]; split.setPosition(CGFloat(position) * split.bounds.width, ofDividerAt: divider)
-        }
+        setShares(shares, of: split)
     }
     /// ⌘1 to ⌘8 select that tab and ⌘9 the last one; an index past the last tab does nothing.
     /// Selects the tab holding `terminal`, brings this window forward and focuses that pane.
@@ -643,8 +657,7 @@ import AppKit
     }
     @objc private func moveTabToNewWindowFromMenu(_ sender: TabMenuItem) {
         guard let item = sender.tabs.first, canTransferTab(item) else { return }
-        do { _ = try app?.moveTabToNewWindow(item, from: self) }
-        catch { NSAlert(error: error).runModal() }
+        _ = detachTab(item)
     }
     @objc private func closeTabsFromMenu(_ sender: TabMenuItem) {
         let items = sender.tabs.filter { tabs.indexOfTabViewItem($0) != NSNotFound }
@@ -701,19 +714,19 @@ import AppKit
     /// Drops a Find target that is leaving this window. Only the departing panes lose their highlights;
     /// the bar stays open for the remaining tabs unless the departing tab was the one on screen.
     private func releaseFind(of departing: [TerminalView], hideBar: Bool) {
-        for terminal in departing {
-            _ = try? terminal.session.call("find", ["clear": true])
-            terminal.poll()
-        }
+        clearFindHighlights(in: departing)
         findTarget = nil; searchedQuery = nil; findBar.status.stringValue = ""
         if hideBar { findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0 }
     }
     /// The bar is one per window, and a search can have highlighted any pane, so clear them all.
     private func clearFindHighlights() {
         searchedQuery = nil
-        for pane in panes {
-            _ = try? pane.terminal.session.call("find", ["clear": true])
-            pane.terminal.poll()
+        clearFindHighlights(in: panes.map(\.terminal))
+    }
+    private func clearFindHighlights(in terminals: [TerminalView]) {
+        for terminal in terminals {
+            _ = try? terminal.session.call("find", ["clear": true])
+            terminal.poll()
         }
     }
     /// `direction` is `latest`, `next`, or `previous`. An empty field clears the highlight.
