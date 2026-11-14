@@ -33,6 +33,12 @@ pub struct Row {
     /// bump and must call `unmark_blank`.
     blank_gen: u64,
     blank_bg: Color,
+    /// Whether any cell in this row may own heap (combining marks or a hyperlink).
+    /// `false` certifies every cell is heap-free, letting `bytes()` skip the per-cell
+    /// scan. It is set when combining/link is attached and cleared only by a full
+    /// blank; a stale `true` merely over-counts (safe), while a stale `false` would
+    /// under-count the history budget, so resize conservatively re-sets it.
+    has_heap: bool,
 }
 
 impl Row {
@@ -50,26 +56,35 @@ impl Row {
             .collect()
     }
     fn bytes(&self) -> usize {
-        self.cells.capacity() * std::mem::size_of::<Cell>()
-            + self
-                .cells
-                .iter()
-                .map(|c| {
-                    c.combining.heap_bytes()
-                        + c.link
-                            .as_ref()
-                            .map_or(0, |l| std::mem::size_of::<Link>() + l.uri.len())
-                })
-                .sum::<usize>()
+        let base = self.cells.capacity() * std::mem::size_of::<Cell>();
+        if !self.has_heap {
+            return base;
+        }
+        base + self
+            .cells
+            .iter()
+            .map(|c| {
+                c.combining.heap_bytes()
+                    + c.link
+                        .as_ref()
+                        .map_or(0, |l| std::mem::size_of::<Link>() + l.uri.len())
+            })
+            .sum::<usize>()
     }
     /// True when the cells are known to be exactly `cols` blanks of `bg`.
     pub(crate) fn is_blank(&self, bg: Color) -> bool {
         self.blank_gen == self.generation && self.blank_bg == bg
     }
     /// Record that the cells were just fully blanked with `bg` at the current generation.
+    /// A fully blanked row owns no combining marks or links, so the heap flag clears too.
     pub(crate) fn mark_blank(&mut self, bg: Color) {
         self.blank_gen = self.generation;
         self.blank_bg = bg;
+        self.has_heap = false;
+    }
+    /// Record that a cell in this row now owns heap (combining marks or a hyperlink).
+    pub(crate) fn mark_heap(&mut self) {
+        self.has_heap = true;
     }
     /// Invalidate the blank marker: cells changed without a generation bump (resize).
     /// Use `generation - 1`, not `+ 1`: generation only ever advances by one per write,
@@ -150,6 +165,7 @@ impl Screen {
             history_cost: 0,
             blank_gen: 0,
             blank_bg: background,
+            has_heap: false,
         }
     }
 
@@ -244,6 +260,13 @@ impl Screen {
             }
         }
         self.offset = self.offset.min(self.history.len());
+    }
+
+    /// Test-only: the currently accounted history bytes, to assert the heap flag
+    /// never lets a combining/link row under-count the history budget.
+    #[cfg(test)]
+    pub(crate) fn history_bytes_for_test(&self) -> usize {
+        self.history_bytes
     }
 
     /// Rotate a region. Positive counts move text up; only a top-anchored region
@@ -537,6 +560,13 @@ impl Screen {
         while all.len() < rows {
             let row = self.blank(Color::Background);
             all.push(row);
+        }
+        // Resize moves cells between rows without a generation bump, so a row that was
+        // heap-free may now hold combining/link cells. Conservatively re-arm the heap
+        // flag before remember() recomputes history_cost; over-counting is safe, but a
+        // stale false here would under-count the history budget.
+        for row in &mut all {
+            row.has_heap = true;
         }
         let history_count = all.len().saturating_sub(rows);
         self.rows = all.split_off(history_count);

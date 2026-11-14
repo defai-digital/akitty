@@ -410,6 +410,7 @@ impl Terminal {
                 row.cells[col].combining.push(ch);
                 row.cells[col].written = true;
                 row.generation = row.generation.wrapping_add(1);
+                row.mark_heap();
             }
             return;
         }
@@ -462,6 +463,9 @@ impl Terminal {
                 link,
                 ..Cell::default()
             };
+        }
+        if self.link.is_some() {
+            self.screen_mut().rows[pos.row].mark_heap();
         }
         let cols = self.cols();
         let cursor = &mut self.screen_mut().cursor;
@@ -536,6 +540,7 @@ impl Terminal {
             row.cells[position.col + 1] = trail;
         }
         row.generation = row.generation.wrapping_add(1);
+        row.mark_heap();
         let cols = self.cols();
         self.screen_mut().cursor = Cursor {
             position: Position {
@@ -1983,6 +1988,84 @@ mod tests {
         assert!(
             term.screen().rows.iter().all(|row| row.used() == 0),
             "a fast-path write must invalidate the blank marker so ED2 clears it"
+        );
+    }
+
+    fn history_base(term: &Terminal) -> usize {
+        term.screen().history.len() * term.cols() * std::mem::size_of::<Cell>()
+    }
+
+    #[test]
+    fn heap_free_history_rows_are_counted_as_base_only() {
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        feed(&mut term, b"abc\r\ndef\r\nghi\r\njkl\r\n");
+        assert!(!term.screen().history.is_empty());
+        assert_eq!(
+            term.screen().history_bytes_for_test(),
+            history_base(&term),
+            "plain rows must skip the heap scan and count base bytes only"
+        );
+    }
+
+    #[test]
+    fn combining_rows_never_undercount_the_history_budget() {
+        // Grapheme mode routes combining through join_grapheme.
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "a\u{0301}\r\nb\u{0301}\r\nc\u{0301}\r\nd\u{0301}\r\n".as_bytes());
+        assert!(!term.screen().history.is_empty());
+        assert!(
+            term.screen().history_bytes_for_test() > history_base(&term),
+            "combining heap must be counted (join_grapheme path)"
+        );
+        // Without grapheme mode combining goes through the width-0 print path.
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        feed(&mut term, "a\u{0301}\r\nb\u{0301}\r\nc\u{0301}\r\nd\u{0301}\r\n".as_bytes());
+        assert!(!term.screen().history.is_empty());
+        assert!(
+            term.screen().history_bytes_for_test() > history_base(&term),
+            "combining heap must be counted (width-0 print path)"
+        );
+    }
+
+    #[test]
+    fn hyperlink_rows_never_undercount_the_history_budget() {
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        feed(&mut term, b"\x1b]8;;https://example.com\x1b\\abc\x1b]8;;\x1b\\\r\n");
+        feed(&mut term, b"x\r\ny\r\nz\r\n");
+        assert!(!term.screen().history.is_empty());
+        assert!(
+            term.screen().history_bytes_for_test() > history_base(&term),
+            "hyperlink heap must be counted (print link path)"
+        );
+    }
+
+    #[test]
+    fn resize_keeps_heap_rows_counted_in_history() {
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "a\u{0301}b\u{0301}c\u{0301}\r\n".as_bytes());
+        term.resize(5, 2, |_| {}).unwrap();
+        feed(&mut term, b"x\r\ny\r\nz\r\n");
+        assert!(!term.screen().history.is_empty());
+        assert!(
+            term.screen().history_bytes_for_test() > history_base(&term),
+            "resize must not let reflowed heap rows under-count"
+        );
+    }
+
+    #[test]
+    fn erased_heap_row_scrolls_into_history_as_base_only() {
+        let mut term = Terminal::new(10, 2, 100).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b]8;;https://example.com\x1b\\abc\x1b]8;;\x1b\\\r\n");
+        feed(&mut term, b"\x1b[2J");
+        feed(&mut term, b"x\r\ny\r\nz\r\n");
+        assert!(!term.screen().history.is_empty());
+        assert_eq!(
+            term.screen().history_bytes_for_test(),
+            history_base(&term),
+            "a fully-erased heap row must count base-only once mark_blank clears the flag"
         );
     }
 }
