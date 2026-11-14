@@ -3,8 +3,9 @@
 This document describes the native workflow and SDK host additions in AkiTTY 1.1.0.
 The separate Web terminal and its embedding host retain their own adoption and release process.
 
-Post-1.2.5 source development adds [OSC 7501 reports, local execution requests and
-bounded durable event metadata](AGENT_NATIVE.md). These do not change the trust
+Since 1.3.0 the app also provides [OSC 7501 reports, local execution requests and
+bounded durable event metadata](AGENT_NATIVE.md). The optional local MCP bridge
+added in 1.3.21 uses that same request path. These do not change the trust
 boundary below: status and shell observations are not execution authority or proof.
 
 ## Product strengths and scope

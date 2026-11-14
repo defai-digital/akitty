@@ -152,10 +152,13 @@ renderer failure); an image-only update skips the CPU raster entirely. A display
 link polls while `animating` is set or images changed in the last second. The software
 fallback still composites images in the CPU bitmap.
 
-## macOS 0.6 release additions
+## macOS app surface
 
-The deliberately small settings surface covers appearance, new-terminal startup,
-scrollback and Option-key behavior. Preferences remain in local UserDefaults.
+Settings covers appearance (font, a separate CJK font, theme and cursor), named
+profiles, sessions (silent mode, paste and OSC 52 confirmation, shell integration,
+zsh command history, shell, starting directory and scrollback), keyboard behavior
+(quick terminal, Option-as-Alt and program status) and update checks. Preferences
+remain in local UserDefaults.
 The tab bar follows native macOS tabs (as Ghostty uses): tabs share the bar's width
 equally, each has a close button (confirming when a process is running), drags to
 reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and shows
@@ -204,15 +207,22 @@ Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per
 parent folder), up to 8 per request. Missing paths and non-file URLs are counted and reported, not ignored silently.
 The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses that pane's starting folder. Restarting a pane uses the same fallback. A tab explicitly opened with a profile starts in the profile's folder (or Settings for the default profile), and retains that folder as its fallback even inside a window opened in another folder. When a remembered folder has been deleted, new tabs, splits and restarted panes use the profile's or Settings' validated starting folder instead.
 
-## zsh command history
+## Named window layouts
 
-Named window layouts optionally retain recent plain-text screen/history rows locally.
-The save dialog leaves this option unchecked; text can contain sensitive output.
-Capture reads at most 200 rows / 16 KiB per pane without consuming snapshot events.
-Storage caps text at 128 KiB per layout and the complete layout store at 4 MiB.
-Restore strips terminal controls and populates the model before the new PTY starts,
-with markers separating saved text and fresh output. Commands are never replayed.
-Shell → Window Layouts → Remove Stored Scrollback keeps the saved geometry and folders.
+**Shell → Window Layouts → Save Windows as Layout…** stores every open window, its
+tabs and vertical splits, each pane's folder and profile, and the split proportions.
+The shell's reported directory is saved while that path still exists; otherwise the
+folder the pane started with is kept. Reopening starts fresh shells. At most 20
+named layouts are stored, and the whole store is capped at 4 MiB.
+
+**Include recent scrollback** is unchecked in the save dialog. The text can contain
+sensitive output. Capture reads at most 200 rows and 16 KiB per pane without
+consuming snapshot events. A layout's saved text shares a 128 KiB budget. Restore
+strips terminal controls and places the plain text in the model before the new PTY
+starts, with markers between the saved text and fresh output. Commands are never
+replayed. **Remove Stored Scrollback** keeps the saved geometry and folders.
+
+## zsh command history
 
 The bundled zsh integration stores accepted single-line commands with a timestamp and both the logical and
 physical working directory in the existing shared store. Queries scan records newest first and rank this
@@ -262,5 +272,9 @@ The warning's Don't ask again checkbox persists only when Paste is chosen; Setti
 terminals. Additional pastes wait for the current dialog to finish. Bracketed paste strips escape characters
 that could terminate its delimiters. Actual-PTY regressions check Unicode payloads, both shortcut paths,
 approval/cancellation and the disabled-confirmation path.
+
+Double-click selects a word and triple-click selects a line, including wide and combining text.
+Program mouse reporting keeps priority; Option selects locally. Alternate-screen wheel input sends
+cursor keys only while DEC mode 1007 is enabled.
 
 Web custom wheel handlers may reset or dispose their terminal. The adapter stops the current gesture when the handler replaces or closes the engine, so it cannot access released state or scroll a replacement terminal.

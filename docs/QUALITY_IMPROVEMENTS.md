@@ -46,3 +46,6 @@ and zero failures. Local Firefox retains the documented startup exception; its b
 The [30-sample baseline](../benchmarks/baseline-macos-arm64.json) preserves the exact measured source,
 workload and harness fingerprints. Physical IME, VoiceOver, UI latency and competitor benchmarks remain the
 separate qualification work described above.
+
+Those counts are that milestone's local run. Source 1.3.22 still uses `scripts/verify.sh`
+as the required gate. Treat a fresh run, not the numbers above, as the current suite size.
