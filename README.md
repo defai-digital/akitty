@@ -439,6 +439,9 @@ These are remaining qualification goals for the implemented features. See the
 
 ## Build and run
 
+See the [contributor guide](CONTRIBUTING.md) for the repository map, component
+boundaries, generated files, and focused development commands.
+
 Requires macOS 27.2+, Rust 1.99.1 and Node 22+. App bundle packaging requires
 the stable Xcode 27.2 toolchain with its Swift build engine to extract Siri
 metadata. Siri and Shortcuts target macOS 27.2; see the
