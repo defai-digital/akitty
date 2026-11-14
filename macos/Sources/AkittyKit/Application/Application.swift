@@ -103,6 +103,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private var openedFolderAtLaunch = false
     private enum TerminationState { case idle, confirming, closing }
     private var terminationState = TerminationState.idle
+    var allowsTabTransfer: Bool { if case .idle = terminationState { return true }; return false }
     private let quitConfirmation = CloseConfirmation()
     public func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
@@ -158,6 +159,23 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if !launched { openedFolderAtLaunch = true }
         controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
         return controller
+    }
+    /// An empty destination avoids spawning a temporary shell and keeps the moved session's opaque IDs.
+    @discardableResult func moveTabToNewWindow(_ item: NSTabViewItem, from source: TerminalWindow, at point: NSPoint? = nil) throws -> TerminalWindow? {
+        guard windows.contains(where: { $0 === source }), source.canTransferTab(item) else { return nil }
+        let destination = try TerminalWindow(app: self, headless: source.headless, createInitialTab: false)
+        // Capture geometry while the source still owns its last tab and display.
+        if let window = destination.window, let original = source.window?.frame {
+            var frame = original
+            if let point { frame.origin = NSPoint(x: point.x - min(120, frame.width / 2), y: point.y - frame.height + 40) }
+            else { frame.origin.x += 30; frame.origin.y -= 30 }
+            let screen = point.flatMap { location in NSScreen.screens.first { $0.frame.contains(location) } } ?? source.window?.screen ?? NSScreen.main
+            window.setFrame(window.constrainFrameRect(frame, to: screen), display: false)
+        }
+        windows.append(destination)
+        guard source.transferTab(item, to: destination, at: 0) else { destination.window?.close(); return nil }
+        destination.showWindow(nil); destination.window?.makeKeyAndOrderFront(nil)
+        return destination
     }
     /// The windows a layout may capture: every regular window, never the quick terminal.
     private var regularWindows: [TerminalWindow] { windows.filter { $0 !== quickTerminal.terminalWindow } }

@@ -172,6 +172,13 @@ reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and 
 its ⌘1–⌘8 shortcut (⌘9 is the last tab). The plus button and close buttons are
 accessible. Shell exit with a reported status closes
 the associated pane and any empty tab/window; failed startup remains visible.
+Dragging outside the strip above or below it detaches the tab; dropping on another regular window's
+strip transfers it there. The context menu also offers Move Tab to New Window. Transfers retain the
+same split tree, terminal views, session handles, profiles and agent control state. The destination
+rebinds window callbacks and restores divider shares; an empty source window closes without stopping
+the moved processes. A new destination starts empty, so no temporary shell is spawned. Escape or
+app deactivation cancels a drag. Quick terminals, attached dialogs, modal sessions and app termination
+block transfers. Custom tabs disable AppKit's separate native window tab groups.
 
 Sparkle owns signed update verification and installation. A gentle titlebar reminder
 keeps scheduled checks out of the user's typing flow. Automatic downloads/installations

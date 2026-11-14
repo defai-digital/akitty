@@ -303,6 +303,10 @@ for implementation details.
   it stores plain text locally (at most 200 rows and 16 KiB per pane, 128 KiB per layout)
   and restores it above the new shell, between session markers. **Remove Stored Scrollback**
   keeps the layout. AkiTTY stores at most 20 layouts.
+- Drag a tab sideways to reorder it, pull it above or below the tab bar to open it in a new window,
+  or drop it on another window's tab bar to move it there. **Move Tab to New Window** is also in
+  the tab's context menu. Split panes, running shells and scrollback move together; Escape cancels
+  the drag. Transfers are unavailable for the quick terminal or while either window has a dialog open.
 - Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.
 - CoreText text rasterization and Metal presentation, with visible software

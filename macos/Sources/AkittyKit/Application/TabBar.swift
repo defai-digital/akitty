@@ -122,9 +122,12 @@ enum TabTitle {
     var activity: TabActivity { get { activityMark.activity } set { activityMark.activity = newValue; refresh() } }
     var shortcut: String { get { shortcutLabel.stringValue } set { shortcutLabel.stringValue = newValue } }
     var onSelect: (() -> Void)?, onClose: (() -> Void)?, contextMenu: (() -> NSMenu)?
-    /// The pointer's x in the tab strip while this tab is dragged.
-    var onDrag: ((CGFloat) -> Void)?
-    private var dragStart: CGFloat?, dragging = false
+    /// Screen coordinates keep a drag attached to its source even over another window.
+    var onDrag: ((NSPoint) -> Void)?, onDrop: ((NSPoint) -> Void)?, onCancelDrag: (() -> Void)?
+    private var dragStart: NSPoint?, dragging = false
+    private var dragKeyMonitor: Any?
+    private var dragDeactivateObserver: NSObjectProtocol?
+    private weak var dragWindow: NSWindow?
     var label: String { get { title.stringValue } set { title.stringValue = newValue; closeButton.setAccessibilityLabel("Close \(newValue)") } }
     var isSelected = false { didSet { refresh() } }
     private var hovering = false { didSet { refresh() } }
@@ -177,15 +180,45 @@ enum TabTitle {
     }
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
-    override func mouseDown(with event: NSEvent) { dragStart = event.locationInWindow.x; dragging = false; onSelect?() }
-    override func mouseDragged(with event: NSEvent) {
-        guard let start = dragStart, let strip = superview else { return }
-        // A few points of slack so a slightly shaky click is still a click.
-        if !dragging, abs(event.locationInWindow.x - start) < 4 { return }
-        dragging = true
-        onDrag?(strip.convert(event.locationInWindow, from: nil).x)
+    override func mouseDown(with event: NSEvent) {
+        endDrag(); dragWindow = window; dragStart = window?.convertPoint(toScreen: event.locationInWindow); onSelect?()
     }
-    override func mouseUp(with event: NSEvent) { dragStart = nil; dragging = false }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStart, let window = dragWindow else { return }
+        let point = window.convertPoint(toScreen: event.locationInWindow)
+        // A few points of slack so a slightly shaky click is still a click.
+        if !dragging, hypot(point.x - start.x, point.y - start.y) < 4 { return }
+        if !dragging {
+            dragKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard event.keyCode == 53 else { return event }
+                self?.cancelDrag(); return nil
+            }
+            dragDeactivateObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.cancelDrag() }
+            }
+        }
+        dragging = true
+        onDrag?(point)
+    }
+    override func mouseUp(with event: NSEvent) {
+        let point = dragging ? dragWindow?.convertPoint(toScreen: event.locationInWindow) : nil
+        endDrag()
+        if let point { onDrop?(point) }
+    }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { cancelDrag() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    func cancelDrag() { let wasDragging = dragging; endDrag(); if wasDragging { onCancelDrag?() } }
+    private func endDrag() {
+        if let dragKeyMonitor { NSEvent.removeMonitor(dragKeyMonitor) }
+        if let dragDeactivateObserver { NotificationCenter.default.removeObserver(dragDeactivateObserver) }
+        dragKeyMonitor = nil; dragDeactivateObserver = nil; dragStart = nil; dragWindow = nil; dragging = false
+    }
+    deinit {
+        if let dragKeyMonitor { NSEvent.removeMonitor(dragKeyMonitor) }
+        if let dragDeactivateObserver { NotificationCenter.default.removeObserver(dragDeactivateObserver) }
+    }
     override func otherMouseUp(with event: NSEvent) { if event.buttonNumber == 2 { onClose?() } }
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     override func accessibilityPerformPress() -> Bool { onSelect?(); return true }
@@ -194,3 +227,19 @@ enum TabTitle {
 
 /// A tab menu entry that remembers which tabs it acts on.
 final class TabMenuItem: NSMenuItem { var tabs: [NSTabViewItem] = [] }
+
+/// A noninteractive label follows a tab outside its strip; the live panes stay put until drop.
+@MainActor final class TabDragPreview: NSPanel {
+    init(title: String) {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 240, height: 32), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false; ignoresMouseEvents = true; hasShadow = true; level = .floating
+        isOpaque = false; backgroundColor = .clear; isExcludedFromWindowsMenu = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        let background = NSVisualEffectView(); background.material = .popover; background.state = .active
+        background.wantsLayer = true; background.layer?.cornerRadius = 7; background.layer?.masksToBounds = true
+        let label = NSTextField(labelWithString: title); label.lineBreakMode = .byTruncatingMiddle
+        label.frame = NSRect(x: 10, y: 8, width: 220, height: 18); background.addSubview(label)
+        contentView = background
+    }
+    func follow(_ point: NSPoint) { setFrameOrigin(NSPoint(x: point.x - 120, y: point.y - 16)); orderFront(nil) }
+}

@@ -57,7 +57,11 @@ import AppKit
     /// The tab being dragged. Chips are reused by position, so after a move the chip under the pointer shows a
     /// different tab; the drag follows the tab, not the chip.
     private weak var draggedTab: NSTabViewItem?
-    private let headless: Bool
+    private var dragOriginalIndex = 0
+    private weak var dragOriginalSelection: NSTabViewItem?
+    private var dragPreview: TabDragPreview?
+    let headless: Bool
+    private var closing = false
     /// Folder this window was opened with. The first tab and splits use this folder.
     /// Later tabs follow the focused pane's reported directory or its starting folder.
     /// Nil uses the Settings directory.
@@ -92,7 +96,7 @@ import AppKit
     /// The selected tab's first pane. `newTab()` selects its tab before returning,
     /// so a foreground action reads the pane it created even before focus settles.
     var selectedPane: TerminalView? { (tabs.selectedTabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }.first }
-    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
+    init(app: AkittyApplication, headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil, createInitialTab: Bool = true) throws {
         self.headless = headless
         self.directory = directory
         self.profile = profile
@@ -102,6 +106,7 @@ import AppKit
         // The controller owns the window and is itself released from windowWillClose; a window that also
         // releases itself on close risks an over-release, as every other window in the app already avoids.
         window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
         super.init(window: window)
         window.delegate = self; tabs.delegate = self; tabs.tabViewType = .noTabsNoBorder
         let content = NSView()
@@ -137,7 +142,8 @@ import AppKit
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         window.contentView = content
-        try newTab(profile: profile, restoredText: restoredText); refreshUpdateReminder(app.updates.availableVersion)
+        if createInitialTab { try newTab(profile: profile, restoredText: restoredText) }
+        refreshUpdateReminder(app.updates.availableVersion)
     }
     required init?(coder: NSCoder) { nil }
     func newTab() throws { try newTab(profile: inheritedProfile, copyDirectory: true) }
@@ -264,15 +270,21 @@ import AppKit
         if let index { split.insertArrangedSubview(pane, at: min(max(index, 0), split.arrangedSubviews.count)) }
         else { split.addArrangedSubview(pane) }
         app?.registerAgentTerminal(pane.terminal)
-        pane.terminal.onExit = { [weak self, weak pane] in
-            guard let self, let pane else { return }
-            self.close(pane.terminal)
-        }
+        bindPane(pane, in: split)
         DispatchQueue.main.async { [weak split] in
             guard let split else { return }
             split.adjustSubviews()
             let count = split.arrangedSubviews.count
             if count > 1 { for index in 1..<count { split.setPosition(split.bounds.width * CGFloat(index) / CGFloat(count), ofDividerAt: index - 1) } }
+        }
+        window?.makeFirstResponder(pane.terminal)
+        return pane
+    }
+    /// Window callbacks follow the pane when its tab moves; session registration stays unchanged.
+    private func bindPane(_ pane: TerminalPane, in split: NSSplitView) {
+        pane.terminal.onExit = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.close(pane.terminal)
         }
         // The item keeps the raw title; the chip and the window add the bell prefix when they show it.
         pane.terminal.onTitle = { [weak self, weak split] title in
@@ -290,8 +302,6 @@ import AppKit
             guard let self, let split else { return }
             self.refreshActivity(of: split)
         }
-        window?.makeFirstResponder(pane.terminal)
-        return pane
     }
     /// Split the tab holding `terminal` (or the active pane) and return the new
     /// pane. Unlike the key command, a full tab reports why instead of doing nothing.
@@ -348,11 +358,15 @@ import AppKit
         for (index, (chip, item)) in zip(tabChips, tabs.tabViewItems).enumerated() {
             chip.label = TabTitle.label(item.label, bell: belled(item)); chip.isSelected = item === tabs.selectedTabViewItem; chip.activity = activity(of: item)
             chip.shortcut = shortcut(forTab: index)
-            chip.onSelect = { [weak self, weak item] in if let item { self?.draggedTab = item; self?.tabs.selectTabViewItem(item) } }
-            chip.onDrag = { [weak self] x in
-                guard let self, let dragged = self.draggedTab, let target = self.tabChips.firstIndex(where: { x < $0.frame.maxX }) ?? self.tabChips.indices.last else { return }
-                self.moveTab(dragged, to: target)
+            chip.onSelect = { [weak self, weak item] in
+                guard let self, let item else { return }
+                self.draggedTab = item; self.dragOriginalIndex = self.tabs.indexOfTabViewItem(item)
+                self.dragOriginalSelection = self.tabs.selectedTabViewItem
+                self.tabs.selectTabViewItem(item)
             }
+            chip.onDrag = { [weak self] point in self?.dragTab(to: point) }
+            chip.onDrop = { [weak self] point in self?.dropTab(at: point) }
+            chip.onCancelDrag = { [weak self] in self?.cancelTabDrag() }
             chip.onClose = { [weak self, weak item] in if let item { self?.closeTab(item) } }
             chip.contextMenu = { [weak self, weak item] in self.flatMap { owner in item.map(owner.tabMenu) } ?? NSMenu() }
         }
@@ -381,6 +395,117 @@ import AppKit
             }
         }
         refreshTabs()
+    }
+    var allowsTabTransfer: Bool {
+        !closing && quickDismiss == nil && window != nil && window?.attachedSheet == nil && NSApp.modalWindow == nil && app?.allowsTabTransfer == true
+    }
+    func canTransferTab(_ item: NSTabViewItem) -> Bool {
+        allowsTabTransfer && tabs.indexOfTabViewItem(item) != NSNotFound && (item.view as? NSSplitView)?.arrangedSubviews.isEmpty == false
+    }
+    /// The strip has vertical slack for slightly diagonal reordering, but accepts drops only over its width.
+    func tabInsertionIndex(at point: NSPoint) -> Int? {
+        guard allowsTabTransfer, let window else { return nil }
+        let local = tabStrip.convert(window.convertPoint(fromScreen: point), from: nil)
+        guard tabStrip.bounds.insetBy(dx: -12, dy: -16).contains(local) else { return nil }
+        return tabChips.firstIndex { local.x < $0.frame.midX } ?? tabs.numberOfTabViewItems
+    }
+    private func isInReorderBand(_ point: NSPoint) -> Bool {
+        guard let window else { return false }
+        let local = tabStrip.convert(window.convertPoint(fromScreen: point), from: nil)
+        return local.y >= tabStrip.bounds.minY - 24 && local.y <= tabStrip.bounds.maxY + 24
+    }
+    private func dragTab(to point: NSPoint) {
+        guard !closing, window?.attachedSheet == nil, app?.allowsTabTransfer != false, let item = draggedTab else { return }
+        if isInReorderBand(point) {
+            dragPreview?.orderOut(nil)
+            guard let window else { return }
+            let x = tabStrip.convert(window.convertPoint(fromScreen: point), from: nil).x
+            if let index = tabChips.firstIndex(where: { x < $0.frame.maxX }) ?? tabChips.indices.last { moveTab(item, to: index) }
+        } else if canTransferTab(item) {
+            if dragPreview == nil { dragPreview = TabDragPreview(title: item.label) }
+            dragPreview?.follow(point)
+        }
+    }
+    private func dropTab(at point: NSPoint) {
+        let item = draggedTab, originalSelection = dragOriginalSelection, originalIndex = dragOriginalIndex
+        dragPreview?.orderOut(nil); dragPreview = nil; draggedTab = nil; dragOriginalSelection = nil
+        guard let item else { return }
+        var accepted = false
+        defer { if !accepted { restoreTabDrag(item, index: originalIndex, selection: originalSelection) } }
+        guard canTransferTab(item), let app else {
+            // Reordering needs no application coordinator; transfers do. Keep the quick terminal's reorder too.
+            accepted = !closing && window?.attachedSheet == nil && NSApp.modalWindow == nil && app?.allowsTabTransfer != false && isInReorderBand(point)
+            return
+        }
+        // Hit the frontmost app window, so a sheet or settings window never drops through to a terminal behind it.
+        if let hit = NSApp.orderedWindows.first(where: { $0.isVisible && !$0.isMiniaturized && !$0.ignoresMouseEvents && $0.frame.contains(point) }) {
+            guard let destination = hit.windowController as? TerminalWindow, destination.app === app else { return }
+            if destination === self, !isInReorderBand(point) {
+                do { accepted = try app.moveTabToNewWindow(item, from: self, at: point) != nil }
+                catch { NSAlert(error: error).runModal() }
+            } else if destination === self {
+                accepted = true
+            } else if let index = destination.tabInsertionIndex(at: point), destination !== self,
+                      transferTab(item, to: destination, at: index) {
+                accepted = true
+                destination.showWindow(nil); destination.window?.makeKeyAndOrderFront(nil)
+            }
+        } else if !isInReorderBand(point) {
+            do { accepted = try app.moveTabToNewWindow(item, from: self, at: point) != nil }
+            catch { NSAlert(error: error).runModal() }
+        } else { accepted = true }
+    }
+    private func cancelTabDrag() {
+        let item = draggedTab, selection = dragOriginalSelection, index = dragOriginalIndex
+        dragPreview?.orderOut(nil); dragPreview = nil
+        draggedTab = nil; dragOriginalSelection = nil
+        if let item { restoreTabDrag(item, index: index, selection: selection) }
+    }
+    private func restoreTabDrag(_ item: NSTabViewItem, index: Int, selection: NSTabViewItem?) {
+        guard !closing else { return }
+        if tabs.indexOfTabViewItem(item) != NSNotFound { moveTab(item, to: max(0, min(index, tabs.numberOfTabViewItems - 1))) }
+        if let selection, tabs.indexOfTabViewItem(selection) != NSNotFound { tabs.selectTabViewItem(selection) }
+    }
+    /// Moves the retained split tree atomically on the main actor. No PTY is opened, closed or registered again.
+    @discardableResult func transferTab(_ item: NSTabViewItem, to destination: TerminalWindow, at index: Int) -> Bool {
+        guard destination !== self, canTransferTab(item), destination.allowsTabTransfer,
+              let app, destination.app === app, (0...destination.tabs.numberOfTabViewItems).contains(index),
+              let split = item.view as? NSSplitView else { return false }
+        let moved = split.arrangedSubviews.compactMap { $0 as? TerminalPane }
+        guard !moved.isEmpty, moved.allSatisfy({ !$0.terminal.isShutdown }) else { return false }
+        let focused = moved.first { $0.terminal === window?.firstResponder }?.terminal ?? moved.first?.terminal
+        let shares = fractions(of: moved), key = ObjectIdentifier(split)
+        if let findTarget, moved.contains(where: { $0.terminal === findTarget }) { closeFind() }
+        reorderingTabs = true; destination.reorderingTabs = true
+        let wasWorking = workingTabs.remove(key) != nil, wasFinished = finishedTabs.remove(key) != nil, wasBelled = belledTabs.remove(key) != nil
+        tabs.removeTabViewItem(item)
+        for pane in moved { destination.bindPane(pane, in: split) }
+        destination.tabs.insertTabViewItem(item, at: index); destination.tabs.selectTabViewItem(item)
+        if wasWorking { destination.workingTabs.insert(key) }
+        if wasFinished { destination.finishedTabs.insert(key) }
+        if wasBelled { destination.belledTabs.insert(key) }
+        reorderingTabs = false; destination.reorderingTabs = false
+        refreshTabs(); destination.refreshTabs()
+        destination.window?.layoutIfNeeded()
+        destination.restoreTabShares(shares, item: item, split: split)
+        // AppKit may lay out the adopted split again after the window is shown.
+        DispatchQueue.main.async { [weak destination, weak split, weak item] in
+            guard let destination, let split, let item, destination.tabs.indexOfTabViewItem(item) != NSNotFound else { return }
+            destination.window?.layoutIfNeeded(); destination.restoreTabShares(shares, item: item, split: split)
+        }
+        if let focused { destination.window?.makeFirstResponder(focused); focused.poll() }
+        if destination.window?.isKeyWindow == true { destination.acknowledgeSelectedTab() }
+        if tabs.numberOfTabViewItems == 0 { window?.close() }
+        else { window?.makeFirstResponder(selectedPane) }
+        return true
+    }
+    private func restoreTabShares(_ shares: [Double], item: NSTabViewItem, split: NSSplitView) {
+        guard tabs.indexOfTabViewItem(item) != NSNotFound, split.arrangedSubviews.count == shares.count else { return }
+        split.adjustSubviews()
+        var position: Double = 0
+        for divider in 0..<max(0, shares.count - 1) {
+            position += shares[divider]; split.setPosition(CGFloat(position) * split.bounds.width, ofDividerAt: divider)
+        }
     }
     /// ⌘1 to ⌘8 select that tab and ⌘9 the last one; an index past the last tab does nothing.
     /// Selects the tab holding `terminal`, brings this window forward and focuses that pane.
@@ -503,10 +628,18 @@ import AppKit
             menu.addItem(entry)
         }
         menu.autoenablesItems = false
+        let detach = TabMenuItem(title: "Move Tab to New Window", action: #selector(moveTabToNewWindowFromMenu(_:)), keyEquivalent: ""); detach.target = self
+        detach.tabs = [item]; detach.isEnabled = canTransferTab(item)
+        menu.addItem(detach); menu.addItem(.separator())
         add("Close Tab", [item])
         add("Close Other Tabs", all.filter { $0 !== item })
         add("Close Tabs to the Right", index == NSNotFound ? [] : Array(all.dropFirst(index + 1)))
         return menu
+    }
+    @objc private func moveTabToNewWindowFromMenu(_ sender: TabMenuItem) {
+        guard let item = sender.tabs.first, canTransferTab(item) else { return }
+        do { _ = try app?.moveTabToNewWindow(item, from: self) }
+        catch { NSAlert(error: error).runModal() }
     }
     @objc private func closeTabsFromMenu(_ sender: TabMenuItem) {
         let items = sender.tabs.filter { tabs.indexOfTabViewItem($0) != NSNotFound }
@@ -594,5 +727,8 @@ import AppKit
         }
         return false
     }
-    func windowWillClose(_ notification: Notification) { closeConfirmation.cancel(); for pane in panes { pane.terminal.shutdown() }; app?.remove(self) }
+    func windowWillClose(_ notification: Notification) {
+        closing = true; tabChips.forEach { $0.cancelDrag() }; cancelTabDrag()
+        closeConfirmation.cancel(); for pane in panes { pane.terminal.shutdown() }; app?.remove(self)
+    }
 }

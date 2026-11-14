@@ -208,6 +208,27 @@ approved dispatch, then define optional command policy/evidence adapters. Existi
 LLM policies do not automatically authorize shell commands. Complete orchestration,
 cloud execution, remote multiplexing and verifiable result attestation are deferred.
 
+## 6. Workspace usability
+
+Tab movement is implemented for regular native windows: drag above or below the strip to detach,
+drop on another window's tab strip to transfer, or use Move Tab to New Window in the context menu.
+The existing panes and PTYs move together. Escape and app deactivation cancel the drag; quick-terminal
+transfers and transfers during dialogs or termination are disabled. Regression tests cover split
+identity, control leases, callbacks, focus, cancellation and a real shell retaining its environment.
+
+The next feature candidates, in proposed order, are:
+
+1. Attention navigation in the existing Agent Overview: unread state, filters and jump to the next waiting pane.
+2. Global text search across tabs and windows, with bounded results and direct pane navigation.
+3. Command navigation and output inspection using the existing bounded shell observations. Agent output-read
+   access would require its own explicit permission and retention contract.
+4. Opt-in app-restart layout recovery with corrupt-state preservation and clear fresh-process labels.
+   Live-process continuation requires a separate persistent PTY design.
+5. Project/worktree launch presets that open a task's tabs, folder and profile together.
+6. Diff preview and selected review-feedback handoff to an agent.
+
+These candidates are a learning backlog; only tab movement is included in this implementation.
+
 ## Outside the current roadmap
 
 - Native Linux or Windows desktop apps (the 1.3.5 experiments are discontinued;
