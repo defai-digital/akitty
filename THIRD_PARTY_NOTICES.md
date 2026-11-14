@@ -10,8 +10,10 @@ The native and Web terminal engine is the independently authored **akitty-vt**
   placeholder alphabet is generated from Unicode 6.0.0 protocol data. Notice:
   `third_party/unicode/LICENSE`; bundled as `UNICODE_LICENSE` in the Mac app.
 - **portable-pty 0.9.0 / WezTerm** — https://github.com/wezterm/wezterm — MIT.
-- **AX TUI** — https://github.com/defai-digital/ax-tui — MIT, copyright 2025
-  opentui and 2026 DEFAI Digital. Adapted fuzzy command ranking only; see
+- **AX TUI** — https://github.com/defai-digital/ax-code/tree/main/packages/ax-tui — MIT, copyright 2025
+  opentui and 2026 DEFAI Digital. Maintained in the AX Code repository as
+  `@defai-digital/ax-tui`. Akitty does not depend on or bundle that package.
+  It adapts the fuzzy command ranking only; see
   third_party/ax-tui/NOTICE.md and LICENSE.
 
 Cargo.lock, package-lock.json, and macos/Package.resolved pin dependency graphs. The
