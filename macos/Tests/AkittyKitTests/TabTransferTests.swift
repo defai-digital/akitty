@@ -133,6 +133,32 @@ final class TabTransferTests: XCTestCase {
         XCTAssertTrue(source.window?.firstResponder is NSTextView, "moving a background tab must not steal the Find field's focus")
     }
 
+    @MainActor func testMovingABackgroundTabKeepsTheRemainingSplitFocused() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        let item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        try source.newTab()
+        let focused = try source.splitPane(containing: source.selectedPane)
+        source.window?.makeFirstResponder(focused)
+        XCTAssertTrue(source.transferTab(item, to: target, at: 1))
+        XCTAssertTrue(source.window?.firstResponder === focused, "moving a background tab must not redirect typing to the first split")
+        XCTAssertFalse(focused.isShutdown)
+    }
+
+    @MainActor func testReorderingTheSelectedTabKeepsItsFocusedSplit() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true)
+        try source.newTab()
+        let item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        let focused = try source.splitPane(containing: source.selectedPane)
+        source.window?.makeFirstResponder(focused)
+        source.moveTab(item, to: 0)
+        XCTAssertTrue(source.tabs.selectedTabViewItem === item)
+        XCTAssertTrue(source.window?.firstResponder === focused, "reordering a tab must not redirect typing to the first split")
+    }
+
     @MainActor func testLastTabMovesWithoutShuttingDownOrChangingSessionIdentity() throws {
         _ = NSApplication.shared
         let app = AkittyApplication(); defer { cleanUp(app) }

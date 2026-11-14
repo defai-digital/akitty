@@ -387,13 +387,14 @@ import AppKit
         let from = tabs.indexOfTabViewItem(item)
         guard from != NSNotFound, from != index, tabs.tabViewItems.indices.contains(index) else { return }
         let selected = tabs.selectedTabViewItem === item
+        let focused = selected ? window?.firstResponder : nil
         reorderingTabs = true
         tabs.removeTabViewItem(item); tabs.insertTabViewItem(item, at: index)
         reorderingTabs = false
         if selected {
             tabs.selectTabViewItem(item)
             if let pane = (item.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
-                window?.makeFirstResponder(pane.terminal)
+                window?.makeFirstResponder(focused ?? pane.terminal)
             }
         }
         refreshTabs()
@@ -494,6 +495,7 @@ import AppKit
         let searched = findTarget.flatMap { target in moved.contains { $0.terminal === target } ? target : nil }
         let focused = searched ?? moved.first { $0.terminal === window?.firstResponder }?.terminal ?? moved.first?.terminal
         let movingSelected = tabs.selectedTabViewItem === item, keepFindFocus = editingFind && !movingSelected
+        let remainingFocus = movingSelected ? nil : window?.firstResponder as? TerminalView
         if searched != nil { releaseFind(of: moved.map(\.terminal), hideBar: movingSelected) }
         reorderingTabs = true; destination.reorderingTabs = true
         let wasWorking = workingTabs.remove(key) != nil, wasFinished = finishedTabs.remove(key) != nil, wasBelled = belledTabs.remove(key) != nil
@@ -518,7 +520,7 @@ import AppKit
         // removeTabViewItem selected the next tab while didSelect was suppressed, so acknowledge it here.
         if window?.isKeyWindow == true { acknowledgeSelectedTab() }
         if keepFindFocus { window?.makeFirstResponder(findBar.field) }
-        else { window?.makeFirstResponder(selectedPane) }
+        else { window?.makeFirstResponder(remainingFocus ?? selectedPane) }
         return true
     }
     private func restoreTabShares(_ shares: [Double], item: NSTabViewItem, split: NSSplitView) {
