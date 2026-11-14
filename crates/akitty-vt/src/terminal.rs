@@ -704,11 +704,26 @@ impl Terminal {
         let start = range.start.min(cols);
         let end = range.end.min(cols);
         if start < end {
-            self.clear_wide_at(row, start, bg);
-            if end < cols && self.screen().rows[row].cells[end].width == 0 {
-                self.clear_wide_at(row, end, bg);
+            // A full-row erase of a row already blank with this colour has no wide
+            // cells to repair and no cells to fill; just advance the generation.
+            if start == 0
+                && end == cols
+                && self.screen().rows[row].cells.len() == cols
+                && self.screen().rows[row].is_blank(bg)
+            {
+                let row = &mut self.screen_mut().rows[row];
+                row.generation = row.generation.wrapping_add(1);
+                row.mark_blank(bg);
+            } else {
+                self.clear_wide_at(row, start, bg);
+                if end < cols && self.screen().rows[row].cells[end].width == 0 {
+                    self.clear_wide_at(row, end, bg);
+                }
+                self.screen_mut().rows[row].cells[start..end].fill(Cell::blank(bg));
+                if start == 0 && end == cols {
+                    self.screen_mut().rows[row].mark_blank(bg);
+                }
             }
-            self.screen_mut().rows[row].cells[start..end].fill(Cell::blank(bg));
         }
         if end == cols {
             self.screen_mut().rows[row].wrapped = false;
@@ -1823,5 +1838,99 @@ mod tests {
         feed(&mut term, b"X");
         assert_eq!(term.screen().rows[pos.row].cells[0].ch, 'X');
         assert!(term.screen().rows.iter().any(|row| row.cells[0].ch == '3'));
+    }
+
+    #[test]
+    fn blank_fill_skip_still_clears_rows_written_after_a_blank() {
+        let mut term = Terminal::new(20, 4, 0).unwrap();
+        feed(&mut term, b"\x1b[2J");
+        feed(&mut term, b"HELLO");
+        feed(&mut term, b"\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "a write after a blank must invalidate the skip and be erased"
+        );
+    }
+
+    #[test]
+    fn full_row_erase_refills_when_the_bce_background_changes() {
+        let mut term = Terminal::new(8, 3, 0).unwrap();
+        feed(&mut term, b"\x1b[41m\x1b[2J");
+        assert!(term.screen().rows.iter().all(|row| row
+            .cells
+            .iter()
+            .all(|c| c.style.bg == Color::Indexed(1))));
+        // A different BCE colour must refill, not reuse the red blank marker.
+        feed(&mut term, b"\x1b[44m\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row
+                .cells
+                .iter()
+                .all(|c| c.style.bg == Color::Indexed(4))),
+            "erase with a new background must not skip the fill"
+        );
+    }
+
+    #[test]
+    fn resize_invalidates_blank_markers_before_a_later_erase() {
+        let mut term = Terminal::new(10, 4, 0).unwrap();
+        // Disable preserve-erased-screen so ED2 erases rows in place instead of
+        // scrolling content to history first (which would mask a stale blank marker).
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"ABCDEFGHIJKLMNOPQRST");
+        // Reflow rebuilds rows via blank() and moves cells in without a generation
+        // bump; a stale blank marker would let ED2 skip them and leave content.
+        term.resize(5, 4, |_| {}).unwrap();
+        feed(&mut term, b"\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "reflowed content must be erasable after resize"
+        );
+    }
+
+    #[test]
+    fn resize_then_write_then_erase_does_not_skip_the_written_row() {
+        let mut term = Terminal::new(10, 4, 0).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"ABCDEFGHIJKLMNOPQRST");
+        term.resize(5, 4, |_| {}).unwrap();
+        // A single width-1 write bumps generation by exactly one. A `+1` blank
+        // invalidation would re-alias the marker here and let ED2 skip the row,
+        // leaving the 'Z' behind; a past-generation invalidation must not.
+        feed(&mut term, b"\x1b[HZ");
+        feed(&mut term, b"\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "a row written after resize must not be skipped by a later erase"
+        );
+    }
+
+    #[test]
+    fn alternate_screen_cycles_leave_no_stale_content() {
+        let mut term = Terminal::new(20, 4, 100).unwrap();
+        for _ in 0..3 {
+            feed(&mut term, b"\x1b[?1049h\x1b[H\x1b[2JSTALE\x1b[?1049l");
+        }
+        feed(&mut term, b"\x1b[?1049h\x1b[H\x1b[2J");
+        assert!(term.modes.alternate);
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "entering the alternate screen and clearing must leave it fully blank"
+        );
+    }
+
+    #[test]
+    fn decaln_fill_then_erase_clears_every_row() {
+        let mut term = Terminal::new(8, 3, 0).unwrap();
+        term.preserve_erased_screen = false;
+        // DECALN fills the screen with 'E' and bumps generation; the blank marker
+        // must be invalidated so a following ED2 refills instead of skipping.
+        feed(&mut term, b"\x1b#8");
+        assert!(term.screen().rows.iter().all(|row| row.cells.iter().all(|c| c.ch == 'E')));
+        feed(&mut term, b"\x1b[2J");
+        assert!(
+            term.screen().rows.iter().all(|row| row.used() == 0),
+            "DECALN content must be erasable; the fill bump invalidates the blank marker"
+        );
     }
 }

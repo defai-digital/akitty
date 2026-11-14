@@ -26,6 +26,13 @@ pub struct Row {
     pub wrap_padding: bool,
     pub generation: u64,
     history_cost: usize,
+    /// Generation at which the cells were last fully blanked, and the background used.
+    /// `blank_gen == generation && blank_bg == bg` means the cells are exactly `cols`
+    /// blanks of `bg`, so a repeat blank of the same colour can skip the fill. Any cell
+    /// write bumps `generation` and invalidates this; resize mutates cells without a
+    /// bump and must call `unmark_blank`.
+    blank_gen: u64,
+    blank_bg: Color,
 }
 
 impl Row {
@@ -54,6 +61,22 @@ impl Row {
                             .map_or(0, |l| std::mem::size_of::<Link>() + l.uri.len())
                 })
                 .sum::<usize>()
+    }
+    /// True when the cells are known to be exactly `cols` blanks of `bg`.
+    pub(crate) fn is_blank(&self, bg: Color) -> bool {
+        self.blank_gen == self.generation && self.blank_bg == bg
+    }
+    /// Record that the cells were just fully blanked with `bg` at the current generation.
+    pub(crate) fn mark_blank(&mut self, bg: Color) {
+        self.blank_gen = self.generation;
+        self.blank_bg = bg;
+    }
+    /// Invalidate the blank marker: cells changed without a generation bump (resize).
+    /// Use `generation - 1`, not `+ 1`: generation only ever advances by one per write,
+    /// so `+ 1` would re-alias `blank_gen == generation` on the very next write and
+    /// falsely re-certify a row that now holds text. A past generation is never revisited.
+    fn unmark_blank(&mut self) {
+        self.blank_gen = self.generation.wrapping_sub(1);
     }
 }
 
@@ -125,6 +148,8 @@ impl Screen {
             wrap_padding: false,
             generation: 0,
             history_cost: 0,
+            blank_gen: 0,
+            blank_bg: background,
         }
     }
 
@@ -138,14 +163,20 @@ impl Screen {
         for row in &mut self.rows {
             row.id = next_id;
             next_id = next_id.wrapping_add(1);
+            // A row already blank with the clear colour needs no refill; any cell write
+            // since the last blank bumped generation and invalidated the marker.
+            let already_blank = row.cells.len() == cols && row.is_blank(Color::Background);
             if row.cells.len() == cols {
-                row.cells.fill(Cell::blank(Color::Background));
+                if !already_blank {
+                    row.cells.fill(Cell::blank(Color::Background));
+                }
             } else {
                 row.cells = vec![Cell::blank(Color::Background); cols];
             }
             row.wrapped = false;
             row.wrap_padding = false;
             row.generation = row.generation.wrapping_add(1);
+            row.mark_blank(Color::Background);
             row.history_cost = 0;
         }
         self.next_row_id = next_id;
@@ -539,6 +570,12 @@ impl Screen {
         } else {
             0
         };
+        // Resize mutates cells without bumping generation (reflow moves cells into
+        // rebuilt rows; the non-reflow path resizes/truncates), so every blank marker
+        // is stale and must be invalidated before a later clear could trust it.
+        for row in self.rows.iter_mut().chain(self.history.iter_mut()) {
+            row.unmark_blank();
+        }
         self.selection = None;
         history_count as i32 - old_history as i32
     }
