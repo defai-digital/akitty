@@ -61,6 +61,12 @@ pub enum Action {
     },
 }
 
+/// Borrowed text runs stay inside one feed call; the public action stream remains scalar.
+pub(crate) enum Input<'a> {
+    Ascii(&'a [u8]),
+    Action(Action),
+}
+
 #[derive(Default, Debug)]
 enum State {
     #[default]
@@ -91,21 +97,28 @@ impl Parser {
     }
 
     pub fn feed(&mut self, input: &[u8], mut emit: impl FnMut(Action)) {
+        self.feed_runs(input, |item| match item {
+            Input::Ascii(bytes) => {
+                for &byte in bytes { emit(Action::Print(char::from(byte))); }
+            }
+            Input::Action(action) => emit(action),
+        });
+    }
+
+    pub(crate) fn feed_runs<'a>(&mut self, input: &'a [u8], mut emit: impl FnMut(Input<'a>)) {
         let mut index = 0;
         while index < input.len() {
-            // In text with no pending UTF-8 sequence, printable ASCII has exactly one
-            // possible effect: one Print action. Emit a whole run without re-entering
-            // the state machine, then fall back to `byte` for the next non-ASCII byte.
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
+                let start = index;
                 while index < input.len() && (0x20..=0x7e).contains(&input[index]) {
-                    emit(Action::Print(char::from(input[index])));
                     index += 1;
                 }
+                if index > start { emit(Input::Ascii(&input[start..index])); }
                 if index == input.len() {
                     break;
                 }
             }
-            self.byte(input[index], &mut emit);
+            self.byte(input[index], &mut |action| emit(Input::Action(action)));
             index += 1;
         }
     }

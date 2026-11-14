@@ -668,6 +668,8 @@ fn read_pty(fd: i32, buffer: &mut [u8], hung_up: bool) -> Result<Option<usize>, 
 
 /// One syscall's read size, and the most a single pass pulls before servicing writes again.
 const READ_BUFFER: usize = 64 * 1024;
+/// Keep the model lock bounded to 8 KiB of parsing, even when many small reads coalesce.
+const PARSE_BATCH: usize = 8 * 1024;
 const MAX_READ_PER_PASS: usize = 256 * 1024;
 
 const MAX_REPLY_BACKLOG: usize = 65_536;
@@ -791,9 +793,9 @@ fn feed_and_queue(
     if !bytes.is_empty() { notify.signal(); }
 }
 
-/// Read one poll-ready batch, draining until the PTY reports no more bytes or the per-pass budget
-/// is spent. Each read is fed under its own model lock, so a snapshot or keystroke waits for at
-/// most one buffer's parse rather than the whole batch, and the lock is never held across a read.
+/// Drain ready bytes before parsing: macOS PTYs can return much less than the buffer size.
+/// Coalescing those reads pays the model, protocol and host-notify costs once per 8 KiB.
+/// No read waits for more output, and the model lock is never held across a syscall.
 fn feed_batch(
     fd: i32,
     model: &Arc<Mutex<Model>>,
@@ -802,15 +804,36 @@ fn feed_batch(
     hung_up: bool,
     notify: &Wake,
 ) -> Result<Option<usize>, String> {
-    let mut buffer = [0u8; READ_BUFFER];
+    feed_batch_with(model, output, response_pending, notify, |buffer| read_pty(fd, buffer, hung_up))
+}
+
+fn feed_batch_with(
+    model: &Arc<Mutex<Model>>,
+    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: &mut usize,
+    notify: &Wake,
+    mut read: impl FnMut(&mut [u8]) -> Result<Option<usize>, String>,
+) -> Result<Option<usize>, String> {
+    let mut buffer = [0u8; PARSE_BATCH];
     let mut total = 0usize;
+    let mut filled = 0usize;
     loop {
-        match read_pty(fd, &mut buffer, hung_up) {
+        let result = read(&mut buffer[filled..]);
+        if let Ok(Some(count)) = result {
+            filled += count;
+            total += count;
+            if count > 0 && filled < buffer.len() { continue; }
+        }
+        // A short tail still has to reach the model on would-block, EOF or failure.
+        // Otherwise a final prompt, bell or terminal query would be lost.
+        if filled > 0 {
+            feed_and_queue(model, output, response_pending, &buffer[..filled], notify);
+            filled = 0;
+        }
+        match result {
             Ok(Some(0)) => return Ok(None),
             Ok(None) => return Ok(Some(total)),
-            Ok(Some(count)) => {
-                feed_and_queue(model, output, response_pending, &buffer[..count], notify);
-                total += count;
+            Ok(Some(_)) => {
                 if total >= MAX_READ_PER_PASS { return Ok(Some(total)); }
             }
             Err(error) => return Err(error),
@@ -2228,6 +2251,58 @@ mod reply_tests {
             assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
         }
         (fds[0], fds[1])
+    }
+
+    #[test]
+    fn coalesced_reads_flush_the_tail_and_keep_queries_events_and_utf8_in_order() {
+        for end in [Ok(None), Ok(Some(0)), Err("test read failed".to_owned())] {
+            let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+            let notify = Wake::new().unwrap();
+            let mut output = VecDeque::new();
+            let mut response_pending = 0;
+            let bytes = "hello中\x07\x1b[6n".as_bytes();
+            let mut offset = 0;
+            let revision = lock_model(&session.model).revision;
+            let result = feed_batch_with(&session.model, &mut output, &mut response_pending, &notify, |buffer| {
+                if offset == bytes.len() { return end.clone(); }
+                // Each read splits UTF-8 and the query, like small PTY reads can.
+                buffer[0] = bytes[offset]; offset += 1;
+                Ok(Some(1))
+            });
+            assert_eq!(result, match &end {
+                Ok(None) => Ok(Some(bytes.len())),
+                Ok(Some(_)) => Ok(None),
+                Err(error) => Err(error.clone()),
+            });
+            assert_eq!(lock_model(&session.model).revision, revision + 1, "one model feed for all the small reads");
+            let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+            assert!(snapshot["lines"][0].as_str().unwrap().starts_with("hello中"));
+            assert_eq!(snapshot["bell"], true);
+            let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
+            assert_eq!(queued, b"\x1b[1;8R");
+            assert_eq!(response_pending, queued.len());
+        }
+    }
+
+    #[test]
+    fn coalesced_reads_bound_model_feeds_and_yield_at_the_pass_budget() {
+        let session = Session::new(80, 3, None, None, true, 0, None).unwrap();
+        let notify = Wake::new().unwrap();
+        let mut output = VecDeque::new();
+        let mut response_pending = 0;
+        let revision = lock_model(&session.model).revision;
+        let mut read_bytes = 0;
+        let result = feed_batch_with(&session.model, &mut output, &mut response_pending, &notify, |buffer| {
+            // Simulate a writer that never stops; no read may exceed the parse budget.
+            assert!(!buffer.is_empty() && buffer.len() <= PARSE_BATCH);
+            let count = buffer.len().min(1024);
+            buffer[..count].fill(b'x');
+            read_bytes += count;
+            Ok(Some(count))
+        }).unwrap();
+        assert_eq!(result, Some(MAX_READ_PER_PASS));
+        assert_eq!(read_bytes, MAX_READ_PER_PASS);
+        assert_eq!(lock_model(&session.model).revision - revision, (MAX_READ_PER_PASS / PARSE_BATCH) as u64);
     }
 
     #[test]

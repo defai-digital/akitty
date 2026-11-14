@@ -28,6 +28,8 @@ process execution. See [native agent contracts and scope](AGENT_NATIVE.md).
 No Ghostty, Alacritty or VTE implementation is compiled or bundled. Historical
 notices and test origins are documented in the [provenance ledger](../third_party/TERMINAL_ENGINE.md).
 Native and browser platform behavior and performance require separate qualification.
+The [throughput plan and measurements](PERFORMANCE.md) document the ASCII-run and
+PTY read-batching implementation and its measured scope.
 
 The [contributor guide](../CONTRIBUTING.md) maps these components to their source,
 tests, build commands, and generated artifacts. `akitty-core` composes `akitty-vt`
@@ -40,9 +42,16 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   keyboard encoder in `akitty-vt`. It has no PTY, filesystem or wall-clock access;
   hosts supply time and enforce clipboard/process policy. Unicode libraries and
   other ordinary dependencies retain their own licenses.
+  The parser lends printable ASCII runs to the terminal, which writes plain width-1
+  spans per row. Insert mode, character-set shifts, hyperlinks, grapheme joins,
+  wrapping and wide-cell repair retain scalar handling. Synchronized output retains
+  the same bounded action queue and rebuilds ASCII runs when that queue flushes.
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
   One nonblocking worker owns each PTY. Session state is mutex protected; logical
   serialization does not assume DispatchQueue calls stay on one OS thread.
+  Available short reads coalesce into at most 8 KiB before parsing, without waiting
+  for another byte. Each model lock covers at most one such parse; a 256 KiB pass
+  budget yields to input and resize commands. EOF and read errors flush any tail.
   Shutdown sends HUP, then KILL, and polls child status with a bounded deadline;
   it never blocks in `wait()`. If macOS delays reaping, one shared reaper retains
   ownership, with a 64-child limit including pending cleanup. Swift marks a
