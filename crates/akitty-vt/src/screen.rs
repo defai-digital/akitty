@@ -33,6 +33,10 @@ pub struct Row {
     /// bump and must call `unmark_blank`.
     blank_gen: u64,
     blank_bg: Color,
+    /// Cells beyond this bound still equal the last full blank, including style and
+    /// written-space state. Every cell mutation extends it; resize invalidates it.
+    modified_end: usize,
+    modified_gen: u64,
     /// Whether any cell in this row may own heap (combining marks or a hyperlink).
     /// `false` certifies every cell is heap-free, letting `bytes()` skip the per-cell
     /// scan. It is set when combining/link is attached and cleared only by a full
@@ -81,6 +85,33 @@ impl Row {
         self.blank_gen = self.generation;
         self.blank_bg = bg;
         self.has_heap = false;
+        self.modified_end = 0;
+        self.modified_gen = self.generation;
+    }
+    #[inline]
+    pub(crate) fn record_write(&mut self, end: usize, advances: u64) {
+        debug_assert!(end <= self.cells.len());
+        let previous = self.generation;
+        self.generation = self.generation.wrapping_add(advances);
+        if self.modified_end == self.cells.len() { return; }
+        // An untracked generation change invalidates the prefix certificate.
+        if self.modified_gen != previous { self.modified_end = self.cells.len(); return; }
+        self.modified_end = self.modified_end.max(end);
+        self.modified_gen = self.generation;
+    }
+    #[inline]
+    pub(crate) fn record_full_write(&mut self, advances: u64) {
+        self.generation = self.generation.wrapping_add(advances);
+        self.modified_end = self.cells.len();
+    }
+    /// Clear only the possibly changed prefix when the untouched suffix has the
+    /// requested background. Changing the blank colour requires a complete fill.
+    pub(crate) fn reset_cells(&mut self, bg: Color) {
+        let end = if self.is_blank(bg) { 0 }
+            else if self.blank_bg == bg && self.modified_gen == self.generation { self.modified_end }
+            else { self.cells.len() };
+        self.cells[..end].fill(Cell::blank(bg));
+        self.mark_blank(bg);
     }
     /// Record that a cell in this row now owns heap (combining marks or a hyperlink).
     pub(crate) fn mark_heap(&mut self) {
@@ -92,6 +123,8 @@ impl Row {
     /// falsely re-certify a row that now holds text. A past generation is never revisited.
     fn unmark_blank(&mut self) {
         self.blank_gen = self.generation.wrapping_sub(1);
+        self.modified_end = self.cells.len();
+        self.modified_gen = self.generation;
     }
 }
 
@@ -103,7 +136,7 @@ pub struct Anchor {
 
 #[derive(Debug)]
 pub struct Screen {
-    pub rows: Vec<Row>,
+    pub rows: VecDeque<Row>,
     pub history: VecDeque<Row>,
     pub cursor: Cursor,
     pub saved_cursor: Cursor,
@@ -117,13 +150,13 @@ pub struct Screen {
     history_limit: usize,
     history_bytes: usize,
     next_row_id: u64,
-    spare: Option<Vec<Cell>>,
+    spare: Option<(Vec<Cell>, usize, Color)>,
 }
 
 impl Screen {
     pub fn new(cols: usize, rows: usize, history: usize, alternate: bool) -> Self {
         let mut screen = Self {
-            rows: Vec::new(),
+            rows: VecDeque::new(),
             history: VecDeque::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
@@ -141,7 +174,7 @@ impl Screen {
         };
         for _ in 0..rows {
             let row = screen.blank(Color::Background);
-            screen.rows.push(row);
+            screen.rows.push_back(row);
         }
         screen
     }
@@ -150,8 +183,9 @@ impl Screen {
         let id = self.next_row_id;
         self.next_row_id = self.next_row_id.wrapping_add(1);
         let cells = match self.spare.take() {
-            Some(mut cells) if cells.len() == self.cols => {
-                cells.fill(Cell::blank(background));
+            Some((mut cells, modified_end, bg)) if cells.len() == self.cols => {
+                let end = if bg == background { modified_end } else { cells.len() };
+                cells[..end].fill(Cell::blank(background));
                 cells
             }
             _ => vec![Cell::blank(background); self.cols],
@@ -165,6 +199,8 @@ impl Screen {
             history_cost: 0,
             blank_gen: 0,
             blank_bg: background,
+            modified_end: 0,
+            modified_gen: 0,
             has_heap: false,
         }
     }
@@ -179,13 +215,8 @@ impl Screen {
         for row in &mut self.rows {
             row.id = next_id;
             next_id = next_id.wrapping_add(1);
-            // A row already blank with the clear colour needs no refill; any cell write
-            // since the last blank bumped generation and invalidated the marker.
-            let already_blank = row.cells.len() == cols && row.is_blank(Color::Background);
             if row.cells.len() == cols {
-                if !already_blank {
-                    row.cells.fill(Cell::blank(Color::Background));
-                }
+                row.reset_cells(Color::Background);
             } else {
                 row.cells = vec![Cell::blank(Color::Background); cols];
             }
@@ -237,7 +268,8 @@ impl Screen {
 
     fn recycle(&mut self, row: Row) {
         if row.cells.len() == self.cols {
-            self.spare = Some(row.cells);
+            let end = if row.modified_gen == row.generation { row.modified_end } else { row.cells.len() };
+            self.spare = Some((row.cells, end, row.blank_bg));
         }
     }
     fn remember(&mut self, mut row: Row) {
@@ -269,6 +301,27 @@ impl Screen {
         self.history_bytes
     }
 
+    #[cfg(test)]
+    pub(crate) fn state_for_test(&self) -> String {
+        let rows = |rows: &VecDeque<Row>| rows.iter().map(|r| {
+            format!("{:?}", (r.id, &r.cells, r.wrapped, r.wrap_padding, r.generation,
+                             r.history_cost, r.blank_gen, r.blank_bg, r.has_heap))
+        }).collect::<Vec<_>>();
+        format!("{:?}{:?}{:?}{:?}", rows(&self.rows), rows(&self.history),
+            (self.cursor, self.saved_cursor, self.offset, self.selection, &self.keyboard_stack,
+             self.keyboard_flags, &self.region, &self.tabs, self.cols),
+            (self.history_limit, self.history_bytes, self.next_row_id,
+             self.spare.as_ref().map(|(cells, _, bg)| (cells, bg))))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_full_reset_for_test(&mut self) {
+        for row in self.rows.iter_mut().chain(self.history.iter_mut()) {
+            row.modified_end = row.cells.len();
+        }
+        if let Some((cells, end, _)) = &mut self.spare { *end = cells.len(); }
+    }
+
     /// Rotate a region. Positive counts move text up; only a top-anchored region
     /// can add history. The returned count is the movement actually performed.
     pub fn scroll(
@@ -284,7 +337,7 @@ impl Screen {
         let count = lines.unsigned_abs().min((region.end - region.start) as u32) as usize;
         for _ in 0..count {
             if lines > 0 {
-                let removed = self.rows.remove(region.start);
+                let removed = self.rows.remove(region.start).expect("validated scroll region");
                 if history && region.start == 0 {
                     self.remember(removed);
                 } else {
@@ -293,7 +346,7 @@ impl Screen {
                 let blank = self.blank(bg);
                 self.rows.insert(region.end - 1, blank);
             } else {
-                let removed = self.rows.remove(region.end - 1);
+                let removed = self.rows.remove(region.end - 1).expect("validated scroll region");
                 self.recycle(removed);
                 let blank = self.blank(bg);
                 self.rows.insert(region.start, blank);
@@ -565,11 +618,14 @@ impl Screen {
         // heap-free may now hold combining/link cells. Conservatively re-arm the heap
         // flag before remember() recomputes history_cost; over-counting is safe, but a
         // stale false here would under-count the history budget.
+        // Invalidate blank/range certificates before history eviction can recycle
+        // a rebuilt row whose cells moved without a generation advance.
         for row in &mut all {
             row.has_heap = true;
+            row.unmark_blank();
         }
         let history_count = all.len().saturating_sub(rows);
-        self.rows = all.split_off(history_count);
+        self.rows = all.split_off(history_count).into();
         // Rebuilding retained history is not new terminal output. In particular,
         // remember() must not advance a scrolled viewport for each retained row.
         self.offset = 0;
@@ -600,13 +656,36 @@ impl Screen {
         } else {
             0
         };
-        // Resize mutates cells without bumping generation (reflow moves cells into
-        // rebuilt rows; the non-reflow path resizes/truncates), so every blank marker
-        // is stale and must be invalidated before a later clear could trust it.
-        for row in self.rows.iter_mut().chain(self.history.iter_mut()) {
-            row.unmark_blank();
-        }
         self.selection = None;
         history_count as i32 - old_history as i32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn untracked_generation_changes_force_full_clear_and_recycle() {
+        let mut screen = Screen::new(12, 1, 0, false);
+        for tracked_write_after in [false, true] {
+            let row = &mut screen.rows[0];
+            row.cells[10].ch = 'X';
+            row.cells[10].written = true;
+            row.generation = row.generation.wrapping_add(1);
+            if tracked_write_after {
+                row.record_write(1, 1);
+                row.cells[0].ch = 'Y';
+            }
+            row.reset_cells(Color::Background);
+            assert!(row.cells.iter().all(|c| *c == Cell::default()));
+        }
+        let mut row = screen.rows.pop_front().unwrap();
+        row.cells[11].written = true;
+        row.cells[11].ch = 'Z';
+        row.generation = row.generation.wrapping_add(1);
+        screen.recycle(row);
+        let row = screen.blank(Color::Background);
+        assert!(row.cells.iter().all(|c| *c == Cell::default()));
     }
 }

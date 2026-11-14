@@ -96,3 +96,116 @@ and escapes, styled runs, wrapping, insert mode, DEC graphics, hyperlinks, Unico
 alternate screens, queries, bells and synchronized output. PTY batching tests
 cover short-read coalescing, tails on would-block/EOF/error, split Unicode/query
 sequences, reply ordering, model-feed bounds and yielding under endless output.
+
+## Row-reset and CSI follow-up
+
+The source review and CPU samples identified full recycled-row clearing, row
+movement and ANSI parameter allocations as separate costs. This pass addresses
+those costs before changing rendering or cell storage:
+
+1. Retain the last blank background and a conservative modified-prefix bound.
+   Track written spaces, styles, combining marks, hyperlinks and wide-cell repairs,
+   rather than deriving the bound from visible text. Complex scalar writes
+   conservatively invalidate the whole bound, avoiding per-scalar range tracking.
+   Clear only that prefix when the requested background matches; changing backgrounds, resizing/reflowing or
+   an untracked generation change requires a full reset. Recycling retains the
+   bound and background along with the cell allocation. Full clears still release
+   heap-owned cells and update history accounting and row generations. Wide writes
+   skip pre-clearing a span only when no wide neighbour outside it needs repair,
+   preserving generation advances.
+2. Store visible rows in the standard library's deque. Full-screen scrolling
+   rotates logical rows without shifting all row records. Region scrolling keeps
+   its existing bounds, identities, history and event semantics.
+3. Borrow a completed CSI during the terminal callback, retaining its bounded
+   parameter allocations for reuse. The public parser action API still returns
+   owned actions; synchronized output takes CSI data into its existing bounded
+   queue. Semicolon RGB decoding uses three stack slots instead of a temporary
+   vector. Parameter, subparameter and malformed-input limits are unchanged.
+4. Differentially compare prefix resets against conservative full resets across
+   background changes, written spaces, editing, Unicode, links, history, screen
+   switches and resizing. Compare borrowed and owned CSI actions across byte
+   boundaries, cancellation and overflow; retain synchronized-output tests.
+5. Rebuild committed WASM/provenance, run the canonical gate and build the app,
+   commit the implementation, then remeasure release-mode engine and actual PTY
+   throughput against the pinned parent on the same machine.
+
+The implementation is independently authored. Reference review informed the
+reset-range and logical-row-rotation concepts; no external implementation is
+copied or linked. Display-link changes, unfocused-pane pacing, texture damage
+history, compact cells and a GPU glyph atlas remain separate follow-up work.
+
+### Committed-candidate remeasurement
+
+Baseline: `12ddfbd473638b089ecd15c48fda71f3e534e1d6`.
+Implementation: `63f835d7282db254801c7e598c37c1ac1dac1bd2`.
+Both were measured from clean committed trees after the implementation commit,
+with the same harness and fixture hashes on Apple M3 Max / macOS 27.2.1,
+Rust 1.99.1 and Node 26.13.1. All raw samples, configuration, source/artifact
+fingerprints and qualifications are retained in the
+[measurement record](../benchmarks/results/row-reset-csi-2026-11-14.json).
+
+The canonical native/WASM engine measurement uses the same 120x40 grid, 1,000
+history rows, 128 rounds, three warmups and 30 samples per condition described
+above. Grapheme support is enabled on both builds. Rates are MiB/s at p50:
+
+| Workload | Native before | Native after | Ratio | WASM before | WASM after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ascii | 219.5 | 319.9 | 1.46x | 130.2 | 183.0 |
+| ansi | 123.7 | 218.5 | 1.77x | 92.2 | 149.9 |
+| unicode | 31.7 | 31.7 | 1.00x | 24.6 | 25.1 |
+| long-lines | 226.5 | 230.5 | 1.02x | 139.9 | 144.4 |
+| alternate-screen | 62.2 | 67.7 | 1.09x | 44.0 | 44.7 |
+| synchronized-screen | 93.4 | 91.6 | 0.98x | 76.7 | 76.3 |
+
+Unicode throughput is effectively unchanged. Long-line and small WASM differences
+should not be read as broad gains. Native synchronized-screen throughput is
+about 2% lower in this run; the pass does not improve every workload. All six
+native/WASM final text/cursor/history/active-screen summary hashes agree across
+versions. The deterministic tests separately compare cells, styles, generations,
+history accounting and events. A cross-version replay also matched both screens,
+cell contents/attributes, row identities/generations, public metadata and events
+for six settings with 1,000 operations each; reset certificates and parser scratch
+are excluded from that replay.
+
+The actual product PTY worker uses native defaults, with grapheme support off.
+It repeats the same 8 MiB transport probe with three warmups and 11 samples:
+
+| PTY workload | Before MiB/s | After MiB/s | Ratio |
+| --- | ---: | ---: | ---: |
+| ascii | 96.74 | 111.36 | 1.15x |
+| ansi | 63.32 | 84.80 | 1.34x |
+| unicode | 58.55 | 61.27 | 1.05x |
+
+These are worker/model throughput improvements, excluding snapshots and rendering.
+The Unicode mode and fixture differ from the canonical engine measurement; their
+absolute rates are not interchangeable.
+
+A separate local benchmark links the official, pinned `libghostty-vt 1.0.1` only
+into a benchmark executable. Both libraries receive identical inputs through the
+same C host: 120x40, history disabled, grapheme support enabled, 256 rounds,
+three warmups and 30 samples, with randomized paired execution order (seed
+314159). Every sample compares active/history cell text, widths, styles,
+wrapping and cursor metadata after feeding and after each narrow/restore resize.
+All accepted comparisons match. Native-default mixed-emoji comparisons are
+excluded because their cell-width policies differ.
+
+| Workload | Ghostty/native engine ratio before | After | Ghostty/common PTY host ratio before | After |
+| --- | ---: | ---: | ---: | ---: |
+| ascii | 5.60x | 3.66x | 1.19x | 1.11x |
+| ansi | 2.57x | 1.44x | 1.57x | 1.04x |
+| unicode | 5.97x | 5.98x | 4.97x | 4.91x |
+
+The common PTY host is not AkiTTY's actual worker or Ghostty's app. It isolates a
+shared transport path, excluding both applications' rendering. The Unicode
+comparison uses grapheme mode on and does not describe the Mac app's default
+Unicode behavior. These results narrow ASCII/ANSI throughput gaps; they do not
+establish full-app parity, physical input latency, or Unicode parity.
+
+The canonical gate passed locally, including 55 VT unit tests, two shared
+contracts, Rust workspace tests/clippy, WASM, TypeScript, ABI, Swift, release
+tooling, installer and public-file checks. Chromium and WebKit passed. The
+existing macOS Firefox startup failure caused the configured local Firefox skip;
+Firefox CI qualification remains outstanding. Swift ran 382 tests with three
+opt-in skips and no failures. Debug and clean committed release app builds,
+three-second startup smokes and ad-hoc signature verification passed. No
+notarization or release publication was performed.
