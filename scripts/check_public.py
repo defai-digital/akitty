@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Check the exact Git index (or committed tree) before public publication."""
+"""Check the exact Git index (or committed tree) before public publication.
+
+With --messages, check commit messages and author/committer identities instead:
+history is published with the tree and is far harder to correct afterwards.
+"""
 import argparse
+import getpass
 import hashlib
+import os
 import pathlib
 import re
 import subprocess
@@ -40,10 +46,57 @@ def violations(name, data):
         errors.append('possible credential or private machine/account data')
     return errors
 
+# Prose such as "a sibling such as /Users/alice2" names no real account, so a
+# message may mention a home directory only for these placeholder accounts.
+HOME_DIR = re.compile(rb'/(?:Users|home)/([A-Za-z0-9_.-]+)')
+PLACEHOLDER_ACCOUNT = re.compile(rb'(?:alice|bob|example|user|username|name|me|you|runner|shared)[0-9]*', re.I)
+
+def message_violations(text, private_words=()):
+    errors = []
+    # PATTERNS[0] (any home path) is replaced by the placeholder-aware HOME_DIR check.
+    if any(pattern.search(text) for pattern in PATTERNS[1:]):
+        errors.append('possible credential or private machine/account data')
+    if any(not PLACEHOLDER_ACCOUNT.fullmatch(m.group(1)) for m in HOME_DIR.finditer(text)):
+        errors.append('home directory of a real-looking account')
+    for word in private_words:
+        if re.search(rb'(?<![A-Za-z0-9])' + re.escape(word) + rb'(?![A-Za-z0-9])', text, re.I):
+            errors.append('local login name')
+    return errors
+
+def local_private_words():
+    # The developer's own login is a private identifier on their machine; CI
+    # runner accounts are not, and generic short names would be too noisy.
+    if os.environ.get('CI'):
+        return ()
+    try:
+        login = getpass.getuser()
+    except Exception:
+        return ()
+    if len(login) < 5 or PLACEHOLDER_ACCOUNT.fullmatch(login.encode()):
+        return ()
+    return (login.encode(),)
+
+def audit_messages(revision):
+    log = subprocess.check_output(['git', 'log', '-z', '--format=%H%n%an <%ae>%n%cn <%ce>%n%B', revision])
+    words = local_private_words()
+    count = 0
+    failed = False
+    for entry in filter(None, log.split(b'\0')):
+        commit, _, text = entry.partition(b'\n')
+        for error in message_violations(text, words):
+            print(f'commit {commit.decode()[:12]}: {error}')
+            failed = True
+        count += 1
+    print(f'Commit-message audit: {count} commits; {"FAILED" if failed else "passed"}.')
+    return int(failed)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--revision', help='scan committed tree instead of staged index')
+    parser.add_argument('--messages', metavar='REVISION', help='scan commit messages and identities reachable from REVISION')
     args = parser.parse_args()
+    if args.messages:
+        return audit_messages(args.messages)
     cmd = ['git', 'ls-tree', '-r', '--name-only', '-z', args.revision] if args.revision else ['git', 'ls-files', '--cached', '-z']
     files = subprocess.check_output(cmd).decode().split('\0')
     count = 0
