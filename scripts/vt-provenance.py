@@ -25,4 +25,6 @@ if sys.argv[1:] == ['--write']:
 else:
     assert not sys.argv[1:], 'Usage: vt-provenance.py [--write]'
     assert json.loads(manifest.read_text()) == record, 'WASM/source stamp is stale; rebuild WASM and stamp it'
+    documentation = root / 'packages/akitty-web/PROVENANCE.md'
+    assert f"`{record['sha256']}`" in documentation.read_text(), 'WASM provenance document is stale; update its artifact SHA-256'
     print('Owned VT WASM source and artifact hashes verified')
