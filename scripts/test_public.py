@@ -1,5 +1,5 @@
 import unittest
-from check_public import violations
+from check_public import message_violations, violations
 from pathlib import Path
 class PublicationTests(unittest.TestCase):
     def test_private_names_are_case_insensitive_at_any_depth(self):
@@ -18,4 +18,13 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(violations('fixtures/terminal.recording', data))
     def test_normal_public_source_is_allowed(self):
         self.assertEqual(violations('src/main.rs',b'fn main() {}'),[])
+    def test_messages_reject_real_home_directories_and_private_identities(self):
+        for value in [b'such as /'+b'Users/jdoe2 for the user', b'see /'+b'home/jdoe', b'Author <x'+b'@gmail.com>', b'ghp_'+b'A'*36]:
+            self.assertTrue(message_violations(value), value)
+    def test_messages_allow_placeholder_home_directories(self):
+        for value in [b'such as /'+b'Users/alice2 for the user alice', b'/'+b'home/runner/work', b'AutomatosX <1+automatosx@users.noreply.github.com>']:
+            self.assertEqual(message_violations(value), [], value)
+    def test_messages_reject_the_local_login_as_a_word(self):
+        self.assertTrue(message_violations(b'for the user Jdoe9, titled ~2', (b'jdoe9',)))
+        self.assertEqual(message_violations(b'xjdoe9y', (b'jdoe9',)), [])
 if __name__ == '__main__': unittest.main()
