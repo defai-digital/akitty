@@ -113,6 +113,7 @@ impl Shell {
 }
 
 fn directory(uri: &str) -> Result<String, ()> {
+    if uri.len() > 4096 { return Err(()); }
     let tail = uri.strip_prefix("file://").ok_or(())?;
     let slash = tail.find('/').ok_or(())?;
     let host = &tail[..slash];
@@ -161,5 +162,17 @@ mod tests {
         // A different command, or one after a prompt, is a new record.
         shell.observe(b"133;A"); start(&mut shell, b"KCBlY2hvIEEgKSB8IGNhdA=="); start(&mut shell, b"ZWNobyBoaQ==");
         assert_eq!(shell.history(1)["commands"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn directory_uri_limit_includes_the_scheme_and_host() {
+        let mut shell = Shell::default();
+        let prefix = "file://localhost/";
+        let uri = format!("{prefix}{}", "x".repeat(4096 - prefix.len()));
+        assert!(shell.observe(format!("7;{uri}").as_bytes()));
+        let directory = shell.cwd.clone();
+        assert!(!shell.observe(format!("7;{uri}x").as_bytes()));
+        assert_eq!(shell.cwd, directory, "a rejected URI must preserve the last observed directory");
+        assert_eq!(shell.rejected, 1);
     }
 }

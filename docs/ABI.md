@@ -281,7 +281,8 @@ See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinct
 
 Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
 untrusted=true) and `control` (owner, agent, audit_seq). OSC 7 file URIs are decoded
-into absolute paths (max 4096 URI bytes, no control characters), for display only;
+into absolute paths (max 4096 URI bytes including the scheme and hostname, no
+control characters), for display only;
 the authority is not used to access a remote filesystem. OSC 133 A/B/C/D and OSC
 772 base64 command text are consumed by the bounded stream filter. Metadata bodies
 over 8192 bytes or malformed messages are rejected. OSC 772 decodes at most 4096

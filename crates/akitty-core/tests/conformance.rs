@@ -32,6 +32,19 @@ impl Drop for Terminal {
     }
 }
 #[test]
+fn shell_directory_rejects_a_uri_over_the_documented_byte_limit() {
+    let t = Terminal::new(20, 4);
+    t.feed("\x1b]7;file://localhost/tmp/kept\x07");
+    let prefix = "file://localhost/";
+    let uri = format!("{prefix}{}", "x".repeat(4097 - prefix.len()));
+    t.feed(&format!("\x1b]7;{uri}\x07"));
+    let state = call(json!({"op":"shell_state","id":t.0}));
+    assert_eq!(state["shell"]["cwd"], "/tmp/kept");
+    assert_eq!(state["shell"]["rejected"], 1);
+    assert_eq!(state["control"]["owner"], "human");
+}
+
+#[test]
 fn program_status_is_additive_untrusted_and_never_creates_control_authority() {
     let t = Terminal::new(20, 4);
     let initial = t.snapshot();
