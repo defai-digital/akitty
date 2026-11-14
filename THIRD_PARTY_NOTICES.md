@@ -14,7 +14,8 @@ The native and Web terminal engine is the independently authored **akitty-vt**
   opentui and 2026 DEFAI Digital. Maintained in the AX Code repository as
   `@defai-digital/ax-tui`. Akitty does not depend on or bundle that package.
   It adapts the fuzzy command ranking only; see
-  third_party/ax-tui/NOTICE.md and LICENSE.
+  third_party/ax-tui/NOTICE.md and LICENSE; the license is bundled as
+  `AX_TUI_LICENSE` in the Mac app.
 
 Cargo.lock, package-lock.json, and macos/Package.resolved pin dependency graphs. The
 release build also includes THIRD_PARTY_LICENSES.txt, generated from the exact
