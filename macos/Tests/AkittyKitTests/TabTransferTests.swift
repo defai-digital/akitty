@@ -28,12 +28,12 @@ final class TabTransferTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
         return window.convertPoint(toScreen: chip.convert(NSPoint(x: chip.bounds.midX, y: chip.bounds.midY), to: nil))
     }
-    @MainActor private func waitUntil(_ predicate: () throws -> Bool) async throws {
+    @MainActor private func waitUntil(_ message: String = "tab transfer did not settle", _ predicate: () throws -> Bool) async throws {
         for _ in 0..<250 {
             if try predicate() { return }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTFail("tab transfer did not settle")
+        throw AkittyError.core(message)
     }
 
     @MainActor func testTransferPreservesSplitObjectsSessionsControlAndContent() throws {
@@ -281,11 +281,13 @@ final class TabTransferTests: XCTestCase {
         let source = try app.createTerminalWindow(), target = try app.createTerminalWindow(headless: true)
         let terminal = try XCTUnwrap(source.selectedPane), item = try XCTUnwrap(source.tabs.selectedTabViewItem)
         let id = terminal.session.id
-        try terminal.session.input("export AKITTY_TAB_TRANSFER_VALUE=retained\n")
-        try await waitUntil { try terminal.session.recentText().contains("AKITTY_TAB_TRANSFER_VALUE=retained") }
+        // A command's echo can wrap with the runner's prompt and does not prove it ran. Wait for
+        // short, newline-terminated output, so shell redraws cannot erase the completion marker.
+        try terminal.session.input("export AKITTY_TAB_TRANSFER_VALUE=retained; printf 'READY_%s_OK\\n' \"$AKITTY_TAB_TRANSFER_VALUE\"\r")
+        try await waitUntil("shell did not acknowledge the exported variable") { try terminal.session.recentText().contains("READY_retained_OK") }
         XCTAssertTrue(source.transferTab(item, to: target, at: 1))
-        try terminal.session.input("printf 'TAB_%s_OK' \"$AKITTY_TAB_TRANSFER_VALUE\"\n")
-        try await waitUntil { try terminal.session.recentText().contains("TAB_retained_OK") }
+        try terminal.session.input("printf 'TAB_%s_OK\\n' \"$AKITTY_TAB_TRANSFER_VALUE\"\r")
+        try await waitUntil("moved shell did not retain the exported variable") { try terminal.session.recentText().contains("TAB_retained_OK") }
         XCTAssertEqual(terminal.session.id, id)
         XCTAssertFalse(terminal.isShutdown)
         XCTAssertFalse(app.windows.contains { $0 === source })
@@ -374,6 +376,9 @@ final class TabTransferTests: XCTestCase {
         window.setFrame(NSRect(x: screen.minX + 20, y: screen.minY + 20, width: 450, height: 300), display: true)
         let original = source.tabs.tabViewItems, chip = source.tabChips[0]
         let start = try chipPoint(chip), end = NSPoint(x: window.frame.maxX + 200, y: start.y)
+        // This scenario drops onto the desktop. Unrelated windows retained by other suites must
+        // not turn it into a rejected drop; covered and nonterminal destinations have their own cases.
+        TerminalWindow.windowNumberAtPoint = { _ in 0 }
         chip.mouseDown(with: try mouse(.leftMouseDown, in: window, at: start))
         chip.mouseDragged(with: try mouse(.leftMouseDragged, in: window, at: end))
         XCTAssertEqual(source.tabs.tabViewItems, original, "strip height outside the window must not reorder")
