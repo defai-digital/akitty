@@ -93,6 +93,8 @@ cp macos/Info.plist "$app/Contents/Info.plist"
 python3 scripts/build-siri-metadata.py --build-dir "$PWD/macos/.build" --configuration "$config" --resources "$app/Contents/Resources" --binary "$app/Contents/MacOS/Akitty"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 cp third_party/unicode/LICENSE "$app/Contents/Resources/UNICODE_LICENSE"
+# features.js carries the adapted AX TUI ranking, so its MIT notice ships with it.
+cp third_party/ax-tui/LICENSE "$app/Contents/Resources/AX_TUI_LICENSE"
 cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 python3 scripts/dependency-licenses.py
 cp build/THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
