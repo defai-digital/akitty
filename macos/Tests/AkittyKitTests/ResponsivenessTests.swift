@@ -30,9 +30,9 @@ final class ResponsivenessTests: XCTestCase {
     // MARK: Polling
 
     func testHiddenPanesPollAtFourHertz() {
-        XCTAssertTrue(TerminalView.pollDue(hidden: false, sinceLast: 0), "a visible pane polls on every tick")
-        XCTAssertFalse(TerminalView.pollDue(hidden: true, sinceLast: 0.1))
-        XCTAssertTrue(TerminalView.pollDue(hidden: true, sinceLast: 0.25))
+        XCTAssertEqual(TerminalView.refreshInterval(visible: false, focused: false, recentInput: false), 0.25)
+        XCTAssertEqual(TerminalView.refreshInterval(visible: true, focused: true, recentInput: false), 0,
+                       "a focused visible pane keeps immediate polling")
     }
 
     /// The idle safety net is one poll per second; the core's wakeup pipe drives the rest.

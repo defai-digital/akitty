@@ -242,3 +242,27 @@ Any cadence change must preserve the final update, events, focus transitions and
 shutdown. Texture history is deferred when full uploads correspond to genuinely
 changed bitmap rows. VT/grapheme optimization and a new glyph renderer remain
 separate work; this pass changes neither the Rust engine nor the browser artifact.
+
+### Native refresh implementation
+
+`FrameRefresh` retains one automatic refresh deadline and re-evaluates the current
+interval when it fires. Earlier deadlines replace later ones; generations reject
+stale cancelled callbacks. A visible unfocused pane uses 1/30 second, a hidden
+pane 1/4 second, and focused or recently interacted-with panes bypass pacing.
+Local input and grid resizing keep the bypass for 100 ms. Explicit polls for
+scrolling, selection and visibility continue immediately. Shutdown invalidates
+pending work before closing the session; the one-second safety timer is unchanged.
+
+Deterministic clock/scheduler regressions cover burst coalescing, the final update
+without another wake, focus gain, visibility restoration, hiding before a deadline,
+stale callbacks and shutdown. A headless native-view integration regression also
+checks that a burst's final text/title/bell arrive and late work does not poll a
+closed session. Existing image animation, focus, input and raster tests remain
+part of the full gate.
+
+The initial 60-sample native preflight met the CPU-improvement criterion in all
+three multi-pane scenes. Texture history was deferred: the Unicode scroll path
+repaints the full bitmap, so those uploads are real damage, not only stale texture
+copies. This pass reduces unnecessary refresh work and leaves pixel rendering,
+protocol handling and frame damage semantics unchanged. Committed-candidate
+measurements below determine the accepted scope of the improvement.

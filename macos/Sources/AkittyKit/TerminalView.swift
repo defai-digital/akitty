@@ -60,8 +60,13 @@ enum NativeFrameEvent {
     private var pollDeferred = false
     /// A wake arrived while a poll was in flight: that poll may predate the change, so run one more after it.
     private var pollAgain = false
-    /// Uptime of the last low-rate poll of a hidden pane (see `pollDue`).
-    private var lastHiddenPoll: Double = 0
+    private var lastLocalInteraction: Double = -.infinity
+    private lazy var automaticRefresh = FrameRefresh(interval: { [weak self] in
+        guard let self else { return hiddenPollInterval }
+        return Self.refreshInterval(visible: self.paneVisible,
+            focused: self.window?.isKeyWindow == true && self.window?.firstResponder === self,
+            recentInput: ProcessInfo.processInfo.systemUptime - self.lastLocalInteraction < 0.1)
+    }, perform: { [weak self] in self?.poll() })
     /// Trackpad points accumulated towards the next scroll line.
     private var scrollRemainder: CGFloat = 0
     /// Last string published through `onStatus`, so repeated frames do not rewrite the status line.
@@ -74,8 +79,6 @@ enum NativeFrameEvent {
     /// Core wakeup pipe: readable whenever the PTY worker advanced the model, so an idle pane sleeps.
     private var wakeSource: DispatchSourceRead?
     private var wakeFD: Int32 = -1
-    /// A hidden pane's deferred wake is already queued (see `scheduleHiddenPoll`).
-    private var hiddenPollScheduled = false
     private var accessibilityValueTimer: Timer?
     /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
@@ -215,6 +218,7 @@ enum NativeFrameEvent {
         if !stopped {
             onWillShutdown?(); onWillShutdown = nil
             stopped = true
+            automaticRefresh.invalidate()
             timer?.invalidate(); timer = nil
             accessibilityValueTimer?.invalidate(); accessibilityValueTimer = nil
             stopRefreshLink()
@@ -257,7 +261,10 @@ enum NativeFrameEvent {
             // Key-ups for held keys go to whatever took focus; release them now so none stay stuck.
             releaseHeldKittyKeys()
             if snapshot?.focus_reporting == true { send("\u{1b}[O") }
-        } else if snapshot?.focus_reporting == true { send("\u{1b}[I") }
+        } else {
+            if snapshot?.focus_reporting == true { send("\u{1b}[I") }
+            lastLocalInteraction = ProcessInfo.processInfo.systemUptime; requestAutomaticRefresh()
+        }
     }
     @objc private func visibilityChanged(_ note: Notification) {
         guard !stopped else { return }
@@ -276,6 +283,7 @@ enum NativeFrameEvent {
         let pixels = (min(256, max(1, Int((cellSize.width * scale).rounded()))), min(512, max(1, Int((cellSize.height * scale).rounded()))))
         if pixels != lastCellPixels, (try? session.call("cell_size", ["width": pixels.0, "height": pixels.1])) != nil { lastCellPixels = pixels }
         guard lastGrid != (cols, rows) else { return }
+        lastLocalInteraction = ProcessInfo.processInfo.systemUptime
         do { _ = try session.call("resize", ["cols": cols, "rows": rows]); lastGrid = (cols, rows) }
         catch { show(error) }
     }
@@ -298,7 +306,7 @@ enum NativeFrameEvent {
         }
         refreshLink?.isPaused = false
     }
-    /// Whether the display link is polling now, rather than only the 1 Hz safety timer.
+    /// Whether the display link is active; automatic snapshots may still be coalesced.
     var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
     /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
@@ -313,15 +321,19 @@ enum NativeFrameEvent {
         if window.isVisible { shownWindow = window; return window.occlusionState.contains(.visible) }
         return shownWindow !== window
     }
-    /// Hidden panes poll four times a second instead of at the display rate.
-    nonisolated static func pollDue(hidden: Bool, sinceLast: Double) -> Bool { !hidden || sinceLast >= hiddenPollInterval }
+    /// Focused panes and recent local input retain immediate refreshes. Other
+    /// visible panes coalesce at 30 Hz; hidden panes retain their 4 Hz backstop.
+    nonisolated static func refreshInterval(visible: Bool, focused: Bool, recentInput: Bool) -> TimeInterval {
+        if !visible { return hiddenPollInterval }
+        return focused || recentInput ? 0 : 1.0 / 30
+    }
+    func requestAutomaticRefresh() {
+        guard !stopped else { return }
+        automaticRefresh.request()
+    }
     private func timerTick() {
-        let now = ProcessInfo.processInfo.systemUptime, hidden = !paneVisible
-        // An occluded window paused the display link; resume it as soon as the pane is back in view.
-        if !hidden, refreshLink?.isPaused == true { updatePolling() }
-        guard Self.pollDue(hidden: hidden, sinceLast: now - lastHiddenPoll) else { return }
-        if hidden { lastHiddenPoll = now }
-        poll()
+        if paneVisible, refreshLink?.isPaused == true { updatePolling() }
+        requestAutomaticRefresh()
     }
     /// Reads the core's "model changed" pipe on the main queue through a duplicate descriptor that the
     /// source's cancel handler closes; the core still owns and closes its own ends with the session.
@@ -339,16 +351,13 @@ enum NativeFrameEvent {
         source.resume()
         wakeSource = source
     }
-    /// One worker pass advanced the model. Visible panes refresh now; hidden panes coalesce to
-    /// 4 Hz but keep one deferred poll so the last change is never lost.
+    /// Automatic refreshes retain one trailing poll; explicit user operations
+    /// still call poll() directly and keep their existing responsiveness.
     private func wakeFromCore() {
         drainWake()
         guard !stopped else { return }
-        let now = ProcessInfo.processInfo.systemUptime, hidden = !paneVisible
-        if !hidden { updatePolling(); poll(); return }
-        let since = now - lastHiddenPoll
-        if Self.pollDue(hidden: true, sinceLast: since) { lastHiddenPoll = now; poll() }
-        else { scheduleHiddenPoll(after: hiddenPollInterval - since) }
+        if paneVisible { updatePolling() }
+        requestAutomaticRefresh()
     }
     /// Drain every pending wake byte; the source only signals readiness. EAGAIN ends the drain.
     private func drainWake() {
@@ -363,22 +372,9 @@ enum NativeFrameEvent {
             break
         }
     }
-    private func scheduleHiddenPoll(after delay: TimeInterval) {
-        guard !hiddenPollScheduled else { return }
-        hiddenPollScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay)) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, !self.stopped else { return }
-                self.hiddenPollScheduled = false
-                guard !self.paneVisible else { self.updatePolling(); self.poll(); return }
-                self.lastHiddenPoll = ProcessInfo.processInfo.systemUptime
-                self.poll()
-            }
-        }
-    }
     fileprivate func displayTick(_ link: CADisplayLink) {
         guard !stopped, paneVisible else { link.isPaused = true; return }
-        poll()
+        requestAutomaticRefresh()
     }
     public func runAgentCommand(actor: String, command: String) async throws -> (lease: UInt64, dispatch: AgentDispatch) {
         guard let window else { throw AkittyError.core("Terminal must be in a window for command approval.") }
@@ -610,6 +606,7 @@ enum NativeFrameEvent {
     public func send(_ text: String, paste: Bool = false) {
         guard !stopped else { return }
         // One serial queue keeps keystrokes and pastes in order without blocking main on the model lock.
+        lastLocalInteraction = ProcessInfo.processInfo.systemUptime
         let session = self.session
         write { try session.input(text, paste: paste) }
         // The echo arrives within milliseconds; poll at the display rate to show it on the next frame.
@@ -847,6 +844,7 @@ enum NativeFrameEvent {
         return true
     }
     public override func becomeFirstResponder() -> Bool {
+        lastLocalInteraction = ProcessInfo.processInfo.systemUptime; requestAutomaticRefresh()
         if snapshot?.focus_reporting == true { send("\u{1b}[I") }
         return true
     }

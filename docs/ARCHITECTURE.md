@@ -71,6 +71,10 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   Integer-pixel text scrolls move retained bitmap rows and repaint exposed rows, cursor damage and complex or
   decorated text. Coalesced updates relocate their pending dirty rows too. Images, composition, cropped grids
   and fractional geometry retain the full repaint path. Metal receives the moved pixel rows as well.
+  Automatic refreshes of visible unfocused panes coalesce at 30 Hz, retaining one trailing update. Focused panes,
+  recent local input and grid resizing bypass this pacing; explicit scroll/selection refreshes remain immediate.
+  Hidden panes retain their 4 Hz cadence. Focus/visibility changes re-evaluate the pending deadline, and shutdown
+  invalidates it before closing the session.
   The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
   frames are always full.
   Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
