@@ -363,4 +363,61 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertEqual(try session.snapshot()?.control?.agent, true)
         try session.reclaimControl()
     }
+
+    @MainActor func testRecorderDrainsUnseenAuditOnStopWhileLocalRequestsRemainOff() throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")))
+        defer { service.stop(); terminal.shutdown() }
+        service.startRecording()
+        terminal.applySnapshot(.success(try terminal.session.snapshot()))
+        XCTAssertFalse(service.enabled)
+        XCTAssertEqual(terminal.snapshot?.control?.audit_seq, 0)
+        let lease = try terminal.session.acquireControl(actor: "test recorder")
+        XCTAssertThrowsError(try terminal.session.input("blocked human input"))
+        try terminal.session.releaseControl(lease)
+        // The view still holds its caught-up, unleased snapshot. Stop must drain the core anyway.
+        XCTAssertEqual(terminal.snapshot?.control?.audit_seq, 0)
+        service.stop()
+        let records = try service.store.export().split(separator: 10).map {
+            try JSONSerialization.jsonObject(with: Data($0)) as! [String: Any]
+        }
+        let events = records.compactMap { $0["event"] as? String }
+        XCTAssertTrue(events.contains("acquired")); XCTAssertTrue(events.contains("human_input_blocked"))
+        XCTAssertTrue(events.contains("released"))
+        XCTAssertFalse(String(decoding: try service.store.export(), as: UTF8.self).contains("blocked human input"))
+    }
+
+    @MainActor func testRecorderObservesProgramStatusWhenIdleAuditReadsAreSkipped() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let terminal = try TerminalView(headless: true, forceSoftware: true)
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")))
+        defer { service.stop(); terminal.shutdown() }
+        service.startRecording()
+        _ = try terminal.session.call("feed", ["text": "\u{1b}]7501;state=blocked:kind=permission:app=test\u{7}"])
+        terminal.applySnapshot(.success(try terminal.session.snapshot()))
+        XCTAssertFalse(service.enabled)
+        XCTAssertEqual(terminal.snapshot?.control?.audit_seq, 0)
+        try await waitUntil {
+            let records = try service.store.export().split(separator: 10).map {
+                try JSONSerialization.jsonObject(with: Data($0)) as! [String: Any]
+            }
+            return records.contains {
+                guard $0["event"] as? String == "program_status_observed",
+                      let fields = $0["fields"] as? [String: Any], let counts = fields["state_counts"] as? [String: Int] else { return false }
+                return counts["blocked"] == 1
+            }
+        }
+    }
+
+    func testIdleAuditReadIsSkippedOnlyForACaughtUpPaneWithNoLease() {
+        XCTAssertTrue(AgentRequests.canSkipAuditRead(agent: false, auditSeq: 0, cursor: 0))
+        XCTAssertTrue(AgentRequests.canSkipAuditRead(agent: false, auditSeq: 4, cursor: 4))
+        XCTAssertFalse(AgentRequests.canSkipAuditRead(agent: false, auditSeq: 5, cursor: 4))
+        XCTAssertFalse(AgentRequests.canSkipAuditRead(agent: true, auditSeq: 4, cursor: 4))
+        XCTAssertFalse(AgentRequests.canSkipAuditRead(agent: nil, auditSeq: 0, cursor: 0))
+        XCTAssertFalse(AgentRequests.canSkipAuditRead(agent: false, auditSeq: nil, cursor: 0))
+    }
 }

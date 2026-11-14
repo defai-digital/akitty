@@ -43,7 +43,7 @@ import AgentIPC
         terminal.onWillShutdown = { [weak self, weak terminal] in
             defer { previous?() }
             guard let self, let terminal else { return }
-            self.record(terminal)
+            self.record(terminal, drain: true)
             self.persist(event: "session_closed", id: id)
             self.cursors.removeValue(forKey: id); self.reports.removeValue(forKey: id); self.sessions.removeValue(forKey: id)
         }
@@ -63,7 +63,7 @@ import AgentIPC
             if pendingLocalRequest { cancelPendingApproval() }
         }
     }
-    func stop() { stopped = true; cancelPendingApproval(); try? setEnabled(false); collectAll(); timer?.invalidate(); timer = nil }
+    func stop() { stopped = true; cancelPendingApproval(); try? setEnabled(false); collectAll(drain: true); timer?.invalidate(); timer = nil }
     private func cancelPendingApproval() {
         if let sheet = pendingSheet, pendingWindow?.attachedSheet === sheet { pendingWindow?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
     }
@@ -74,32 +74,42 @@ import AgentIPC
     private func later(_ event: String, session: String, provenance: String, fields: [String: Any]) {
         store.appendLater(event: event, session: session, provenance: provenance, fields: fields) { [weak self] message in self?.failure = message }
     }
-    private func collectAll() {
-        for terminal in source() where !terminal.isShutdown { register(terminal); record(terminal) }
+    private func collectAll(drain: Bool = false) {
+        for terminal in source() where !terminal.isShutdown { register(terminal); record(terminal, drain: drain) }
     }
-    private func record(_ terminal: TerminalView) {
+    /// The timer can skip `control_audit` only when the snapshot already shows no agent lease and no unseen sequence.
+    /// Blocked keystrokes under a lease are audited without bumping that revision, so a leased pane is always read.
+    /// A missing snapshot is not proof of idleness. `drain` is the shutdown, export, and approval path.
+    nonisolated static func canSkipAuditRead(agent: Bool?, auditSeq: UInt64?, cursor: UInt64) -> Bool {
+        guard agent == false, let auditSeq else { return false }
+        return auditSeq <= cursor
+    }
+    private func record(_ terminal: TerminalView, drain: Bool = false) {
         let id = terminal.session.id, after = cursors[id] ?? 0
-        do {
-            let page = try JSONSerialization.jsonObject(with: terminal.session.controlAudit(after: after)) as? [String: Any]
-            if let oldest = page?["oldest_seq"] as? UInt64, oldest > after + 1 {
-                later("source_gap", session: sessions[id] ?? "unknown", provenance: "host", fields: ["after": after, "oldest_available": oldest])
-            }
-            for event in page?["events"] as? [[String: Any]] ?? [] {
-                guard let sequence = event["seq"] as? UInt64, let name = event["event"] as? String else { continue }
-                var fields: [String: Any] = ["pane_session_id": id, "core_sequence": sequence, "observed_time_ms": event["time_ms"] ?? NSNull()]
-                if let command = event["command"] as? String { fields["command_sha256"] = AgentEventStore.digest(command); fields["command_bytes"] = command.utf8.count }
-                if let actor = event["actor"] as? String { fields["host_actor_label"] = actor }
-                later(name, session: sessions[id] ?? "unknown", provenance: name.contains("untrusted") ? "shell_untrusted" : "host", fields: fields)
-                cursors[id] = sequence
-            }
-            if let status = terminal.snapshot?.program_status {
-                let counts = Dictionary(grouping: status.records, by: \.state).mapValues(\.count)
-                if reports[id] != counts {
-                    later("program_status_observed", session: sessions[id] ?? "unknown", provenance: "program_untrusted", fields: ["pane_session_id": id, "state_counts": counts])
-                    reports[id] = counts
+        let control = terminal.snapshot?.control
+        if drain || !Self.canSkipAuditRead(agent: control?.agent, auditSeq: control?.audit_seq, cursor: after) {
+            do {
+                let page = try JSONSerialization.jsonObject(with: terminal.session.controlAudit(after: after)) as? [String: Any]
+                if let oldest = page?["oldest_seq"] as? UInt64, oldest > after + 1 {
+                    later("source_gap", session: sessions[id] ?? "unknown", provenance: "host", fields: ["after": after, "oldest_available": oldest])
                 }
+                for event in page?["events"] as? [[String: Any]] ?? [] {
+                    guard let sequence = event["seq"] as? UInt64, let name = event["event"] as? String else { continue }
+                    var fields: [String: Any] = ["pane_session_id": id, "core_sequence": sequence, "observed_time_ms": event["time_ms"] ?? NSNull()]
+                    if let command = event["command"] as? String { fields["command_sha256"] = AgentEventStore.digest(command); fields["command_bytes"] = command.utf8.count }
+                    if let actor = event["actor"] as? String { fields["host_actor_label"] = actor }
+                    later(name, session: sessions[id] ?? "unknown", provenance: name.contains("untrusted") ? "shell_untrusted" : "host", fields: fields)
+                    cursors[id] = sequence
+                }
+            } catch { failure = error.localizedDescription }
+        }
+        if let status = terminal.snapshot?.program_status {
+            let counts = Dictionary(grouping: status.records, by: \.state).mapValues(\.count)
+            if reports[id] != counts {
+                later("program_status_observed", session: sessions[id] ?? "unknown", provenance: "program_untrusted", fields: ["pane_session_id": id, "state_counts": counts])
+                reports[id] = counts
             }
-        } catch { failure = error.localizedDescription }
+        }
     }
     private func paneID(_ terminal: TerminalView) -> String { "\(instance)/\(terminal.session.id)" }
     enum Origin {
@@ -170,7 +180,7 @@ import AgentIPC
                     if Task.isCancelled { throw CancellationError() }
                     return accepted && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
                 }
-                record(terminal)
+                record(terminal, drain: true)
                 guard failure == nil else { throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.") }
                 return ["accepted": receipt.dispatch.accepted, "after_command_id": receipt.dispatch.after_command_id, "event_session": eventSession,
                     "completion_untrusted": true, "input_remains_leased": true,
@@ -182,7 +192,7 @@ import AgentIPC
                 }
             }
         } catch {
-            collectAll()
+            collectAll(drain: true)
             if error is CancellationError {
                 // The intent was cancelled (not denied by a human); record who ended the wait before rethrowing.
                 do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host") }
@@ -228,7 +238,7 @@ import AgentIPC
             } else { throw AkittyError.core("Unsupported request operation.") }
             return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys, .withoutEscapingSlashes])
         } catch {
-            collectAll()
+            collectAll(drain: true)
             return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription], options: [.withoutEscapingSlashes])) ?? Data()
         }
     }
@@ -261,7 +271,7 @@ import AgentIPC
         }
     }
     func showTimeline() {
-        collectAll()
+        collectAll(drain: true)
         do {
             let data = try store.export()
             let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 820, height: 460)); text.isEditable = false; text.isSelectable = true
@@ -300,7 +310,7 @@ import AgentIPC
         } catch { NSAlert(error: error).runModal() }
     }
     func exportEvents() {
-        collectAll()
+        collectAll(drain: true)
         let panel = NSSavePanel(); panel.nameFieldStringValue = "akitty-events.jsonl"
         panel.message = "Exports retained local metadata with command hashes. Program and shell reports are unverified; records may have gaps."
         guard panel.runModal() == .OK, let url = panel.url else { return }

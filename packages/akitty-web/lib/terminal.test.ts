@@ -16,6 +16,57 @@ import { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 import { mouseReport } from './mouse';
 
+for (const action of ["reset", "dispose"] as const) {
+  test(`link hover exit cannot enter another link after ${action}`, async () => {
+    const term = await createIsolatedTerminal()
+    const container = document.createElement("div")
+    container.style.cursor = "text"
+    term.open(container)
+    const internal = term as any
+    const entered: boolean[] = []
+    let column = 0
+    const links = [
+      { text: "a", range: { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } }, activate() {},
+        hover(active: boolean) { if (!active) term[action]() } },
+      { text: "b", range: { start: { x: 1, y: 0 }, end: { x: 1, y: 0 } }, activate() {},
+        hover(active: boolean) { entered.push(active) } },
+    ]
+    term.registerLinkProvider({ provideLinks(_row, callback) { callback(links) } })
+    internal.pointer = () => ({ x: column, y: 0 })
+    try {
+      term.write("ab")
+      internal.processMouseMove(new MouseEvent("mousemove"))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(internal.currentHoveredLink).toBe(links[0])
+      column = 1
+      internal.processMouseMove(new MouseEvent("mousemove"))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(entered.filter(Boolean)).toEqual([])
+      expect(container.style.cursor).toBe("text")
+    } finally { term.dispose() }
+  })
+}
+
+test("link hover entry that resets the terminal leaves its new cursor clear", async () => {
+  const term = await createIsolatedTerminal()
+  const container = document.createElement("div")
+  container.style.cursor = "text"
+  term.open(container)
+  const internal = term as any
+  term.registerLinkProvider({ provideLinks(_row, callback) {
+    callback([{ text: "a", range: { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } }, activate() {},
+      hover(active) { if (active) term.reset() } }])
+  } })
+  internal.pointer = () => ({ x: 0, y: 0 })
+  try {
+    term.write("a")
+    internal.processMouseMove(new MouseEvent("mousemove"))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(container.style.cursor).toBe("text")
+    expect(internal.currentHoveredLink).toBeUndefined()
+  } finally { term.dispose() }
+})
+
 test('legacy mouse releases preserve modifiers and UTF-8 coordinates stay two bytes', () => {
   expect(mouseReport(16, 2, 1, true, false, false)).toBe('\x1b[M3#"');
   const report = mouseReport(0, 3000, 3000, false, false, true);

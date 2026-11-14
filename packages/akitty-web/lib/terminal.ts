@@ -519,13 +519,18 @@ export class Terminal implements ITerminalCore {
   };
   private processMouseMove(event: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.wasmTerm || !this.linkDetector) return;
-    const request = ++this.hoverRequest, { x, y } = this.pointer(event);
+    const request = ++this.hoverRequest, terminal = this.wasmTerm, { x, y } = this.pointer(event);
+    const current = (): boolean => this.isOpen && !this.isDisposed && request === this.hoverRequest && terminal === this.wasmTerm;
     const row = this.getScrollbackLength() + y - Math.floor(this.viewportY);
     void this.linkDetector.getLinkAt(x, row).then(link => {
-      if (!this.isOpen || this.isDisposed || request !== this.hoverRequest) return;
+      if (!current()) return;
       if (link === this.currentHoveredLink) return;
-      const previous = this.currentHoveredLink; this.currentHoveredLink = link;
-      previous?.hover?.(false); link?.hover?.(true);
+      const previous = this.currentHoveredLink; this.currentHoveredLink = undefined;
+      // Provider callbacks can reset/dispose the terminal or start another hover.
+      previous?.hover?.(false);
+      if (!current()) return;
+      this.currentHoveredLink = link; link?.hover?.(true);
+      if (!current()) return;
       if (this.element) this.element.style.cursor = link ? 'pointer' : 'text';
       const base = this.getScrollbackLength() - Math.floor(this.viewportY);
       this.renderer?.setHoveredLinkRange(link ? { startX: link.range.start.x, startY: link.range.start.y - base,
