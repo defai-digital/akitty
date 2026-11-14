@@ -246,6 +246,17 @@ impl Terminal {
         let mut parser = std::mem::take(&mut self.parser);
         parser.feed_runs(bytes, |input| match input {
             Input::Ascii(bytes) => self.print_ascii(bytes, now_ms, &mut emit),
+            Input::Csi(csi) => {
+                let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
+                    && matches!(csi.final_byte, b'h' | b'l')
+                    && csi.params.iter().any(|p| p.first() == Some(&Some(2026)));
+                if self.sync_deadline.is_some() || sync_control {
+                    self.dispatch(Action::Csi(std::mem::take(csi)), now_ms, &mut emit);
+                } else {
+                    self.grapheme_target = None;
+                    self.csi(csi, &mut emit);
+                }
+            }
             Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
         });
         self.parser = parser;
@@ -395,8 +406,9 @@ impl Terminal {
     }
     fn clear_wide_at(&mut self, row: usize, col: usize, bg: Color) {
         let cols = self.cols();
-        self.screen_mut().rows[row].generation = self.screen().rows[row].generation.wrapping_add(1);
-        let cells = &mut self.screen_mut().rows[row].cells;
+        let line = &mut self.screen_mut().rows[row];
+        line.record_full_write(1);
+        let cells = &mut line.cells;
         if cells[col].width == 0 && col > 0 {
             cells[col - 1] = Cell::blank(bg);
         }
@@ -433,10 +445,10 @@ impl Terminal {
             let style = self.style;
             let screen = self.screen_mut();
             let row = &mut screen.rows[pos.row];
+            row.record_write(pos.col + count, count as u64);
             for (cell, &byte) in row.cells[pos.col..pos.col + count].iter_mut().zip(bytes) {
                 *cell = Cell { ch: char::from(byte), width: 1, style, link: None, combining: Combining::new(), written: true };
             }
-            row.generation = row.generation.wrapping_add(count as u64);
             screen.cursor.position.col = (pos.col + count).min(cols - 1);
             screen.cursor.pending_wrap = pos.col + count == cols;
             self.last_printed = Some(char::from(bytes[count - 1]));
@@ -464,9 +476,9 @@ impl Terminal {
                 col = col.saturating_sub(1);
             }
             if row.cells[col].combining.len() < cell::MAX_COMBINING {
+                row.record_full_write(1);
                 row.cells[col].combining.push(ch);
                 row.cells[col].written = true;
-                row.generation = row.generation.wrapping_add(1);
                 row.mark_heap();
             }
             return;
@@ -490,13 +502,14 @@ impl Terminal {
         if self.modes.insert {
             self.edit_chars(width, true, false);
         }
-        // Overwriting a plain width-1 cell needs no wide-neighbour repair and no
-        // pre-blank (the cell is overwritten below); only the generation bump is
-        // required. This is the common ASCII path, where clear_wide_at's self-blank
-        // was redundant. Wide halves and width-2 writes keep the full repair.
-        if width == 1 && self.screen().rows[pos.row].cells[pos.col].width == 1 {
-            let row = &mut self.screen_mut().rows[pos.row];
-            row.generation = row.generation.wrapping_add(1);
+        // Pre-clearing cells that will both be overwritten is redundant unless a
+        // wide neighbour outside the span needs repair. Preserve the generation
+        // advances of the scalar clear path even when the assignments are skipped.
+        let cells = &self.screen().rows[pos.row].cells;
+        let contained = if width == 1 { cells[pos.col].width == 1 }
+            else { cells[pos.col].width != 0 && cells[pos.col + 1].width != 2 };
+        if contained {
+            self.screen_mut().rows[pos.row].record_full_write(width as u64);
         } else {
             self.clear_wide_at(pos.row, pos.col, self.style.bg);
             if width == 2 {
@@ -592,11 +605,11 @@ impl Terminal {
             ..Cell::default()
         };
         let row = &mut self.screen_mut().rows[position.row];
+        row.record_full_write(1);
         row.cells[position.col] = cell;
         if width == 2 {
             row.cells[position.col + 1] = trail;
         }
-        row.generation = row.generation.wrapping_add(1);
         row.mark_heap();
         let cols = self.cols();
         self.screen_mut().cursor = Cursor {
@@ -705,7 +718,7 @@ impl Terminal {
         if intermediate == b"#" && byte == b'8' {
             for row in &mut self.screen_mut().rows {
                 row.wrapped = false;
-                row.generation = row.generation.wrapping_add(1);
+                row.record_full_write(1);
                 row.cells.fill(Cell {
                     ch: 'E',
                     written: true,
@@ -775,14 +788,9 @@ impl Terminal {
         let start = range.start.min(cols);
         let end = range.end.min(cols);
         if start < end {
-            // A full-row erase of a row already blank with this colour has no wide
-            // cells to repair and no cells to fill; just advance the generation.
-            if start == 0
-                && end == cols
-                && self.screen().rows[row].cells.len() == cols
-                && self.screen().rows[row].is_blank(bg)
-            {
+            if start == 0 && end == cols {
                 let row = &mut self.screen_mut().rows[row];
+                row.reset_cells(bg);
                 row.generation = row.generation.wrapping_add(1);
                 row.mark_blank(bg);
             } else {
@@ -790,10 +798,8 @@ impl Terminal {
                 if end < cols && self.screen().rows[row].cells[end].width == 0 {
                     self.clear_wide_at(row, end, bg);
                 }
+                self.screen_mut().rows[row].record_write(end, 0);
                 self.screen_mut().rows[row].cells[start..end].fill(Cell::blank(bg));
-                if start == 0 && end == cols {
-                    self.screen_mut().rows[row].mark_blank(bg);
-                }
             }
         }
         if end == cols {
@@ -848,8 +854,7 @@ impl Terminal {
         let cols = self.cols();
         let count = count.min(cols - pos.col);
         let blank = Cell::blank(self.style.bg);
-        self.screen_mut().rows[pos.row].generation =
-            self.screen().rows[pos.row].generation.wrapping_add(1);
+        self.screen_mut().rows[pos.row].record_full_write(1);
         // ICH, DCH and ECH edit in place; the next print must not wrap first.
         self.screen_mut().cursor.pending_wrap = false;
         let cells = &mut self.screen_mut().rows[pos.row].cells;
@@ -1241,12 +1246,9 @@ impl Terminal {
                                 .map(|n| Color::Indexed(n as u8));
                             index = (index + 2).min(params.len());
                         } else if kind == 2 {
-                            let channels: Vec<_> = params
-                                .iter()
-                                .skip(index + 2)
-                                .take(3)
-                                .map(|p| p.first().copied().flatten())
-                                .collect();
+                            let channels: [Option<u16>; 3] = std::array::from_fn(|offset| {
+                                params.get(index + 2 + offset).and_then(|p| p.first()).copied().flatten()
+                            });
                             color = parse_channels(&channels);
                             index = (index + 4).min(params.len());
                         }
@@ -1491,9 +1493,10 @@ impl Terminal {
         // RIS clears both screens, but keeps configured history capacity.
         self.main.clear_history();
         for row in 0..rows {
-            self.main.rows[row].cells.fill(Cell::default());
+            self.main.rows[row].reset_cells(Color::Background);
             self.main.rows[row].wrapped = false;
             self.main.rows[row].generation = self.main.rows[row].generation.wrapping_add(1);
+            self.main.rows[row].mark_blank(Color::Background);
         }
         self.main.cursor = Cursor::default();
         self.main.saved_cursor = Cursor::default();
@@ -1598,6 +1601,17 @@ mod tests {
         term.feed(bytes, 0, |e| events.push(e));
         events
     }
+    // Compare all protocol and cell state, excluding only reset-range certificates
+    // and retained parameter allocations, which may differ between fast/scalar paths.
+    fn state(term: &Terminal) -> String {
+        format!("{:?}{:?}{:?}{:?}{:?}{:?}", term.parser,
+            term.main.state_for_test(), term.alternate.state_for_test(),
+            (&term.modes, &term.palette, term.style, term.cell_pixels, term.revision,
+             &term.title, &term.link, term.link_id, &term.title_stack, &term.saved_state),
+            (term.charsets, term.charset, term.single_shift, term.last_printed, term.sync_deadline,
+             &term.sync_actions, term.sync_bytes, term.grapheme_supported, term.grapheme_target),
+            (&term.cluster_scratch, term.preserve_erased_screen, term.title_max_bytes, term.title_max_chars))
+    }
     /// The original scalar action path is an independent reference for run writes.
     fn feed_scalar(term: &mut Terminal, bytes: &[u8], now: u64) -> Vec<Event> {
         let mut events = Vec::new();
@@ -1640,7 +1654,7 @@ mod tests {
                             let mut events = Vec::new();
                             fast.feed(chunk, now, |event| events.push(event));
                             assert_eq!(events, feed_scalar(&mut scalar, chunk, now));
-                            assert_eq!(format!("{fast:?}"), format!("{scalar:?}"), "cols={cols}, history={history}, graphemes={graphemes}, step={step}");
+                            assert_eq!(state(&fast), state(&scalar), "cols={cols}, history={history}, graphemes={graphemes}, step={step}");
                         }
                     }
                 }
@@ -1662,6 +1676,79 @@ mod tests {
             assert_eq!(feed(&mut term, b"\x1b[6n\x1b[?6n"), vec![
                 Event::Reply(b"\x1b[4;4R".to_vec()), Event::Reply(b"\x1b[?4;4R".to_vec()),
             ]);
+        }
+    }
+
+    #[test]
+    fn wide_overwrites_repair_neighbours_outside_the_span_and_keep_generations() {
+        for (seed, col, expected) in [
+            ("中中", 0, [('界', 2), (' ', 0), ('中', 2), (' ', 0)]),
+            ("中中", 1, [(' ', 1), ('界', 2), (' ', 0), (' ', 1)]),
+            ("中中", 2, [('中', 2), (' ', 0), ('界', 2), (' ', 0)]),
+            ("a中b", 0, [('界', 2), (' ', 0), (' ', 1), ('b', 1)]),
+            ("abcd", 1, [('a', 1), ('界', 2), (' ', 0), ('d', 1)]),
+        ] {
+            let mut term = Terminal::new(4, 1, 0).unwrap();
+            feed(&mut term, seed.as_bytes());
+            feed(&mut term, format!("\x1b[1;{}H", col + 1).as_bytes());
+            let generation = term.screen().rows[0].generation;
+            feed(&mut term, "界".as_bytes());
+            let row = &term.screen().rows[0];
+            assert_eq!(row.generation, generation + 2);
+            assert_eq!(row.cells.iter().map(|c| (c.ch, c.width)).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn prefix_resets_match_full_resets_through_edits_backgrounds_history_and_resize() {
+        fn assert_screen(a: &Screen, b: &Screen) {
+            assert_eq!((a.cursor, a.saved_cursor, a.offset, a.selection),
+                       (b.cursor, b.saved_cursor, b.offset, b.selection));
+            assert_eq!((&a.region, &a.tabs, a.keyboard_flags, &a.keyboard_stack, a.cols),
+                       (&b.region, &b.tabs, b.keyboard_flags, &b.keyboard_stack, b.cols));
+            assert_eq!((a.rows.len(), a.history.len(), a.history_bytes_for_test()),
+                       (b.rows.len(), b.history.len(), b.history_bytes_for_test()));
+            for (a, b) in a.rows.iter().chain(&a.history).zip(b.rows.iter().chain(&b.history)) {
+                assert_eq!((a.id, &a.cells, a.wrapped, a.wrap_padding, a.generation),
+                           (b.id, &b.cells, b.wrapped, b.wrap_padding, b.generation));
+            }
+        }
+        let inputs = [
+            "short\r\n", "          \r\n", "\x1b[1;8H ", "中中😀e\u{301}",
+            "\x1b[48;2;1;2;3m\x1b[2K", "\x1b[49m\x1b[2J", "\x1b[31;4m styled ",
+            "\x1b[H\x1b[2@", "\x1b[1;2H\x1b[3P", "\x1b[2;1H\x1b[4X", "\x1b[0K\x1b[1K",
+            "\x1b[2;3r\x1b[3;1Hscroll\n\x1b[r", "\x1b[2S\x1b[T", "\x1b[L\x1b[M",
+            "\x1b]8;;https://example.test\x1b\\linked\x1b]8;;\x1b\\",
+            "\x1b[?1049h alternate 中\x1b[?1049l", "\x1b#8", "\x1bc", "\x1b[6n\x07",
+            "\x1b[?2026h中 styled\x1b[48:2::7:8:9m \x1b[?2026l",
+        ];
+        for history in [0, 1, 10] {
+            for graphemes in [false, true] {
+                let mut fast = Terminal::new(11, 4, history).unwrap();
+                let mut full = Terminal::new(11, 4, history).unwrap();
+                fast.enable_grapheme_support(graphemes); full.enable_grapheme_support(graphemes);
+                let mut rng = 42u64;
+                for step in 0..1000 {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let bytes = inputs[(rng >> 32) as usize % inputs.len()].as_bytes();
+                    for chunk in bytes.chunks([1, 3, bytes.len()][step % 3]) {
+                        full.main.force_full_reset_for_test(); full.alternate.force_full_reset_for_test();
+                        assert_eq!(feed(&mut fast, chunk), feed(&mut full, chunk));
+                        assert_screen(&fast.main, &full.main); assert_screen(&fast.alternate, &full.alternate);
+                        assert_eq!(format!("{:?}", fast.modes), format!("{:?}", full.modes));
+                    }
+                    if step % 17 == 0 {
+                        let cols = [1, 2, 7, 20][step / 17 % 4];
+                        let rows = [1, 3, 5][step / 17 % 3];
+                        full.main.force_full_reset_for_test(); full.alternate.force_full_reset_for_test();
+                        let mut actual = Vec::new(); let mut expected = Vec::new();
+                        fast.resize(cols, rows, |e| actual.push(e)).unwrap();
+                        full.resize(cols, rows, |e| expected.push(e)).unwrap();
+                        assert_eq!(actual, expected);
+                        assert_screen(&fast.main, &full.main); assert_screen(&fast.alternate, &full.alternate);
+                    }
+                }
+            }
         }
     }
 
@@ -1689,7 +1776,7 @@ mod tests {
             if timeout { assert!(fast.expire_sync(200, |event| actual.push(event))); }
             else { fast.feed(b"\x1b[?2026l", 1, |event| actual.push(event)); }
             assert_eq!(actual, expected);
-            assert_eq!(format!("{fast:?}"), format!("{scalar:?}"));
+            assert_eq!(state(&fast), state(&scalar));
         }
     }
     #[test]
