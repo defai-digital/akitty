@@ -1000,23 +1000,19 @@ impl Terminal {
             }
             (None, b's') => self.save_cursor(),
             (None, b'u') => self.restore_cursor(),
-            (None, b'n') => match c.value(0, 0) {
-                5 => emit(Event::Reply(b"\x1b[0n".to_vec())),
-                6 => {
-                    let row = if self.modes.origin {
-                        pos.row.saturating_sub(self.screen().region.start)
-                    } else {
-                        pos.row
-                    };
-                    emit(Event::Reply(
-                        format!("\x1b[{};{}R", row + 1, pos.col + 1).into_bytes(),
-                    ));
-                }
-                _ => {}
-            },
-            (Some(b'?'), b'n') if c.value(0, 0) == 6 => emit(Event::Reply(
-                format!("\x1b[?{};{}R", pos.row + 1, pos.col + 1).into_bytes(),
-            )),
+            (None | Some(b'?'), b'n') if c.value(0, 0) == 6 => {
+                // Both CPR forms report coordinates in the current origin mode.
+                let row = if self.modes.origin {
+                    pos.row.saturating_sub(self.screen().region.start)
+                } else {
+                    pos.row
+                };
+                emit(Event::Reply(
+                    format!("\x1b[{}{};{}R", if c.prefix.is_some() { "?" } else { "" }, row + 1, pos.col + 1)
+                        .into_bytes(),
+                ));
+            }
+            (None, b'n') if c.value(0, 0) == 5 => emit(Event::Reply(b"\x1b[0n".to_vec())),
             (None, b'c') if c.value(0, 0) == 0 => emit(Event::Reply(b"\x1b[?62;22c".to_vec())),
             (Some(b'>'), b'c') => emit(Event::Reply(b"\x1b[>1;139;0c".to_vec())),
             (Some(b'='), b'c') => emit(Event::Reply(b"\x1bP!|414b4954\x1b\\".to_vec())),
@@ -1649,6 +1645,23 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn private_cursor_reports_use_the_same_origin_as_standard_reports() {
+        for alternate in [false, true] {
+            let mut term = Terminal::new(8, 6, 0).unwrap();
+            if alternate { feed(&mut term, b"\x1b[?1049h"); }
+            feed(&mut term, b"\x1b[3;6r\x1b[?6h\x1b[2;4H");
+            assert_eq!(term.cursor(), Position { row: 3, col: 3 });
+            assert_eq!(feed(&mut term, b"\x1b[6n\x1b[?6n"), vec![
+                Event::Reply(b"\x1b[2;4R".to_vec()), Event::Reply(b"\x1b[?2;4R".to_vec()),
+            ]);
+            feed(&mut term, b"\x1b[?6l\x1b[4;4H");
+            assert_eq!(feed(&mut term, b"\x1b[6n\x1b[?6n"), vec![
+                Event::Reply(b"\x1b[4;4R".to_vec()), Event::Reply(b"\x1b[?4;4R".to_vec()),
+            ]);
         }
     }
 
