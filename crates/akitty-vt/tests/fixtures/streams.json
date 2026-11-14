@@ -511,5 +511,73 @@
     ],
     "history": 0,
     "replies": "\u001b[2;4R\u001b[?2;4R\u001b[4;4R\u001b[?4;4R"
+  },
+  {
+    "name": "soft reset restores cursor and G0 character set",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "kept\u001b(0\u001b[?25l\u001b[!pqq\u001b[?25$p\u001b[6n",
+    "lines": [
+      "keptqq  ",
+      "        "
+    ],
+    "cursor": [
+      6,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[?25;1$y\u001b[1;7R"
+  },
+  {
+    "name": "soft reset restores cursor and G1 character set on alternate screen",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "\u001b[?1049hkept\u001b)0\u000e\u001b[?25l\u001b[!pqq\u001b[?25$p\u001b[6n",
+    "lines": [
+      "keptqq  ",
+      "        "
+    ],
+    "cursor": [
+      6,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[?25;1$y\u001b[1;7R"
+  },
+  {
+    "name": "soft reset restores cursor and G2 character set",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "kept\u001b*0\u001bN\u001b[?25l\u001b[!pqq\u001b[?25$p\u001b[6n",
+    "lines": [
+      "keptqq  ",
+      "        "
+    ],
+    "cursor": [
+      6,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[?25;1$y\u001b[1;7R"
+  },
+  {
+    "name": "soft reset restores cursor and G3 character set on alternate screen",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "\u001b[?1049hkept\u001b+0\u001bO\u001b[?25l\u001b[!pqq\u001b[?25$p\u001b[6n",
+    "lines": [
+      "keptqq  ",
+      "        "
+    ],
+    "cursor": [
+      6,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[?25;1$y\u001b[1;7R"
   }
 ]

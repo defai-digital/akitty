@@ -904,6 +904,10 @@ impl Terminal {
         }
         if c.intermediates == b"!" && c.final_byte == b'p' {
             self.style = Style::default();
+            self.modes.cursor_visible = true;
+            self.charsets = [false; 4];
+            self.charset = 0;
+            self.single_shift = None;
             self.modes.origin = false;
             self.modes.insert = false;
             self.modes.app_cursor = false;
@@ -1659,6 +1663,33 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn soft_reset_restores_a_hidden_cursor_without_erasing_or_moving_it() {
+        for alternate in [false, true] {
+            let mut term = Terminal::new(8, 3, 10).unwrap();
+            if alternate { feed(&mut term, b"\x1b[?1049h"); }
+            feed(&mut term, b"kept\x1b[2;3H\x1b[?25l");
+            assert!(!term.modes.cursor_visible);
+            feed(&mut term, b"\x1b[!p");
+            assert!(term.modes.cursor_visible);
+            assert_eq!(term.cursor(), Position { row: 1, col: 2 });
+            assert_eq!(term.screen().rows[0].text(), "kept    ");
+        }
+    }
+
+    #[test]
+    fn soft_reset_restores_character_sets_and_cancels_a_single_shift() {
+        for setup in ["\x1b(0", "\x1b)0\x0e", "\x1b*0\x1bN", "\x1b+0\x1bO"] {
+            let mut term = Terminal::new(8, 2, 0).unwrap();
+            feed(&mut term, setup.as_bytes());
+            feed(&mut term, b"\x1b[!pqq");
+            assert_eq!(term.screen().rows[0].text(), "qq      ", "setup {setup:?}");
+            assert_eq!(term.charset, 0);
+            assert_eq!(term.charsets, [false; 4]);
+            assert_eq!(term.single_shift, None);
         }
     }
 
