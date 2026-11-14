@@ -524,8 +524,9 @@ AkiTTY's own code is **MIT licensed**; see [LICENSE](LICENSE). Original notices 
 preserved for adapted code. Third-party dependencies retain their own licenses;
 MIT does not relicense them. Historical notices are retained with their scope
 documented in the provenance ledger.
-The command-ranking adaptation comes from [AX TUI](https://github.com/defai-digital/ax-tui)
-(MIT); see [provenance](third_party/ax-tui/NOTICE.md) and
+The command-ranking adaptation comes from [AX TUI](https://github.com/defai-digital/ax-code/tree/main/packages/ax-tui)
+(MIT), now maintained in the AX Code repository. Akitty does not import that package; see
+[provenance](third_party/ax-tui/NOTICE.md) and
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
 The supplied [full logo](assets/logo.png) is retained; the

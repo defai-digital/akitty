@@ -73,7 +73,9 @@ Native and browser platform behavior and performance require separate qualificat
   the command authority. No Node runtime, shell bridge, dynamic plugin loading,
   AX TUI native renderer, or arbitrary user JavaScript is included.
 - Adapt only AX TUI's fuzzy ranking algorithm, with pinned provenance and license.
-  The original registry imports Node and renderer classes and is not copied whole.
+  AX TUI now lives in the AX Code repository at `packages/ax-tui`. Akitty does not
+  depend on that package. The original registry imports Node and renderer classes
+  and is not copied whole.
 
 ## Independent advice
 
