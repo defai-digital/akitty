@@ -76,6 +76,52 @@ final class TabTransferTests: XCTestCase {
         if let sheet = target.window?.attachedSheet { target.window?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
     }
 
+    @MainActor func testMovingATabWithFindOpenKeepsTheSearchedSplitFocused() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        _ = try source.splitPane(containing: source.selectedPane)
+        let searched = source.panes[1].terminal, item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        source.window?.makeFirstResponder(searched)
+        source.showFind(searched)
+        XCTAssertTrue(source.findBarVisible)
+        XCTAssertFalse(source.window?.firstResponder === searched)
+        XCTAssertTrue(source.transferTab(item, to: target, at: 1))
+        XCTAssertTrue(target.window?.firstResponder === searched, "moving a tab must preserve the Find bar's pane target")
+        XCTAssertFalse(source.findBarVisible)
+        XCTAssertFalse(searched.isShutdown)
+    }
+
+    @MainActor func testMovingABackgroundTabThatOwnsFindFocusesTheSearchedSplit() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        _ = try source.splitPane(containing: source.selectedPane)
+        let searched = source.panes[1].terminal, item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        source.showFind(searched)
+        try source.newTab()
+        let remaining = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        XCTAssertFalse(remaining === item)
+        XCTAssertTrue(source.findBarVisible)
+        XCTAssertTrue(source.transferTab(item, to: target, at: 1))
+        XCTAssertTrue(target.window?.firstResponder === searched, "a background tab must keep its Find target focused")
+        XCTAssertTrue(source.findBarVisible, "Find stays open for the tab still on screen")
+        XCTAssertTrue(source.tabs.selectedTabViewItem === remaining)
+    }
+
+    @MainActor func testMovingAnotherTabKeepsTheFindFieldFocused() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        let item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        try source.newTab()
+        source.showFind()
+        XCTAssertTrue(source.window?.firstResponder is NSTextView)
+        XCTAssertTrue(source.transferTab(item, to: target, at: 1))
+        XCTAssertTrue(source.findBarVisible)
+        XCTAssertTrue(source.window?.firstResponder is NSTextView, "moving a background tab must not steal the Find field's focus")
+    }
+
     @MainActor func testLastTabMovesWithoutShuttingDownOrChangingSessionIdentity() throws {
         _ = NSApplication.shared
         let app = AkittyApplication(); defer { cleanUp(app) }

@@ -473,9 +473,13 @@ import AppKit
               let split = item.view as? NSSplitView else { return false }
         let moved = split.arrangedSubviews.compactMap { $0 as? TerminalPane }
         guard !moved.isEmpty, moved.allSatisfy({ !$0.terminal.isShutdown }) else { return false }
-        let focused = moved.first { $0.terminal === window?.firstResponder }?.terminal ?? moved.first?.terminal
         let shares = fractions(of: moved), key = ObjectIdentifier(split)
-        if let findTarget, moved.contains(where: { $0.terminal === findTarget }) { closeFind() }
+        // The Find target is the pane the user was searching, even when the field editor holds focus
+        // or the tab is in the background, so it wins over the first responder.
+        let searched = findTarget.flatMap { target in moved.contains { $0.terminal === target } ? target : nil }
+        let focused = searched ?? moved.first { $0.terminal === window?.firstResponder }?.terminal ?? moved.first?.terminal
+        let movingSelected = tabs.selectedTabViewItem === item, keepFindFocus = editingFind && !movingSelected
+        if searched != nil { releaseFind(of: moved.map(\.terminal), hideBar: movingSelected) }
         reorderingTabs = true; destination.reorderingTabs = true
         let wasWorking = workingTabs.remove(key) != nil, wasFinished = finishedTabs.remove(key) != nil, wasBelled = belledTabs.remove(key) != nil
         tabs.removeTabViewItem(item)
@@ -496,6 +500,7 @@ import AppKit
         if let focused { destination.window?.makeFirstResponder(focused); focused.poll() }
         if destination.window?.isKeyWindow == true { destination.acknowledgeSelectedTab() }
         if tabs.numberOfTabViewItems == 0 { window?.close() }
+        else if keepFindFocus { window?.makeFirstResponder(findBar.field) }
         else { window?.makeFirstResponder(selectedPane) }
         return true
     }
@@ -692,6 +697,16 @@ import AppKit
         clearFindHighlights()
         findTarget = nil
         if let owner { window?.makeFirstResponder(owner) }
+    }
+    /// Drops a Find target that is leaving this window. Only the departing panes lose their highlights;
+    /// the bar stays open for the remaining tabs unless the departing tab was the one on screen.
+    private func releaseFind(of departing: [TerminalView], hideBar: Bool) {
+        for terminal in departing {
+            _ = try? terminal.session.call("find", ["clear": true])
+            terminal.poll()
+        }
+        findTarget = nil; searchedQuery = nil; findBar.status.stringValue = ""
+        if hideBar { findBar.isHidden = true; findBarHeight.constant = 0; findBarGap.constant = 0 }
     }
     /// The bar is one per window, and a search can have highlighted any pane, so clear them all.
     private func clearFindHighlights() {
