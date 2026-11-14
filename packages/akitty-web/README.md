@@ -35,6 +35,7 @@ behavior, physical IME or every OS/font combination.
 
 ## Status
 
+- Source version **0.6.10**, in the same tree as native AkiTTY 1.3.22. The package version moves on its own.
 - The package is **private** (`"private": true`) and is **not published** to npm or GitHub Packages. Consume it from
   source, for example through a workspace or Git dependency.
 - It exports TypeScript source (`lib/index.ts`) and `akitty-vt.wasm`; there is no prebuilt bundle. The consuming

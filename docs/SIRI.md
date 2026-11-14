@@ -13,9 +13,9 @@ upgrading the OS is not part of the macOS 27.2 setup.
 AkiTTY includes ten App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. System language, region, device support, and
-Siri settings affect discovery and speech recognition. This functionality is
-in the current source tree; check [unreleased changes](releases/unreleased.md)
-and the downloaded release's notes before expecting it in a published build.
+Siri settings affect discovery and speech recognition. These ten actions are in
+source 1.3.22. A published download may be older; check its notes and
+[unreleased changes](releases/unreleased.md).
 
 ## Get started on macOS 27.2
 

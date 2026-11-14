@@ -1,11 +1,11 @@
 # Accessibility in AkiTTY
 
-AkiTTY's native macOS app already exposes terminal text, selected text and ranges,
-UTF-16 character counts, range reads and the cursor's row through AppKit accessibility.
-Tabs have accessible labels and selection actions. Agent Overview already lists
-panes across windows, tabs, splits and the quick terminal, including when hidden.
-**VoiceOver user validation is not complete.** This page describes current development;
-it does not claim these improvements are in the published 1.2.5 binary.
+AkiTTY 1.3.22's native macOS app exposes terminal text, selected text and ranges,
+UTF-16 character counts, line and index queries, range reads and the cursor's row
+through AppKit accessibility. Tabs have accessible labels and selection actions.
+Agent Overview lists panes across windows, tabs, splits and the quick terminal,
+including when hidden. **VoiceOver user validation is not complete.** The behavior
+below is in the current source. A published download may be older; check its notes.
 
 ## Agent Overview
 
@@ -32,7 +32,7 @@ does not terminate commands. No approval capability is added to WebMCP.
 
 ## Terminal reading
 
-Current development adds line/index accessibility queries using UTF-16 offsets,
+The terminal exposes line and index queries using UTF-16 offsets,
 including CJK, emoji and combining text. It exposes the currently displayed grid;
 this is not a complete scrollback document. Accessible selection remains available.
 

@@ -21,10 +21,11 @@ provider, cloud account or AX product is required.
 | macOS 27.2+ · Apple Silicon | Stable | [Download and install](#quick-start) |
 
 [Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
-[Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.3.15.md) ·
+[Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.3.22.md) ·
 [Agent integration guide](docs/AGENT_NATIVE.md)
 
-This README describes the current source, including [unreleased changes](docs/releases/unreleased.md).
+This README describes source version 1.3.22.
+[Unreleased changes](docs/releases/unreleased.md) lists anything newer.
 Published downloads may contain an earlier feature set; check their release notes.
 
 See [Windows and Linux](#windows-and-linux) for the separate AkiTTY Web terminal
@@ -225,6 +226,8 @@ The native app keeps reported activity separate from command authority:
 - **Optional local MCP server:** `akitty-agent mcp` exposes pane listing and
   human-approved command requests to external agents. Use it for commands you
   want visible in a native pane; it does not read output or verify completion.
+  Cancelling the call, or closing its input, abandons an approval that has not
+  been dispatched. A command already queued keeps its lease.
   See [setup for Grok, Muse, and other MCP clients](docs/MCP.md).
 
 See the [protocol and ABI contract](docs/ABI.md),
@@ -258,9 +261,11 @@ is needed. See [engine ownership](third_party/TERMINAL_ENGINE.md) and
   intermediate reports, and are neither a complete transcript nor tamper-proof
   evidence. Hashes are not strong secret anonymization.
 - **The app keeps narrow local boundaries.** Local requests create no TCP/HTTP
-  listener. Terminal clipboard reads receive an empty reply; text writes require
-  approval. The bundled TypeScript palette has no shell, filesystem or network
-  bridge and loads no arbitrary user JavaScript.
+  listener. Terminal clipboard reads receive an empty reply. Program text writes
+  require approval until you choose **Always allow** (or turn off
+  **Settings → Sessions → Ask before programs copy to the clipboard**). The bundled
+  TypeScript palette has no shell, filesystem or network bridge and loads no
+  arbitrary user JavaScript.
 
 Read [architecture](docs/ARCHITECTURE.md) and the
 [native trust boundary](docs/AGENT_NATIVE.md#local-request-protocol-and-trust-boundary)
@@ -268,7 +273,7 @@ for implementation details.
 
 ## What is implemented
 
-- Native windows, tabs and split panes with interactive login shells; a visible
+- Native windows, tabs and vertical split panes with interactive login shells; a visible
   **+** opens a new tab. Normal shell exit closes its pane, then any empty tab/window,
   including when `exit` inherits a failed command's status.
 - Bash/zsh shell integration records bounded command observations without editing
@@ -276,10 +281,14 @@ for implementation details.
   A persistent quick terminal has an opt-in global shortcut; hiding
   it preserves its shell. File drops insert shell-quoted paths, and text drops use
   the clipboard confirmation policy.
-- Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <folder>`) starts
-  a window in that folder; a file opens in its folder. A new tab opens after the current tab,
-  in the focused pane's reported directory when that path still exists, and in the opened
-  folder otherwise. Splits start in the opened folder.
+- Opening a folder (Finder **Open With**, a Dock drop, or `open -a Akitty <path>`) starts
+  a window in that folder; a file opens in its folder. At most 8 folders open per request;
+  skipped items are reported. A new tab is inserted after the current tab and starts in the
+  focused pane's reported directory when that path still exists, otherwise in the folder that
+  pane started in. If neither path is available, it uses the profile's or Settings starting
+  directory. A tab opened from **New Tab with Profile** starts in that profile's folder.
+  Splits start in the window's folder, and use the same profile or Settings fallback when
+  that folder is gone. Restarting a pane keeps its own starting folder the same way.
 - Native **Settings… (⌘,)** for font/size, a separate CJK font, shell, starting directory, scrollback,
   Option-as-Alt, Silent mode and update checks. Appearance and sound changes apply to open terminals;
   shell, directory and scrollback changes apply to new terminals. Any installed fixed-pitch font can be chosen.
@@ -288,6 +297,12 @@ for implementation details.
   font, size, theme, cursor, shell, starting directory and scrollback together; open one with **Shell → New
   Window/Tab with Profile**. Tabs and splits keep the profile of the pane they open from, and without profiles
   nothing changes. Programs can still change colours with OSC 4/10/11 while they run.
+- Named window layouts (**Shell → Window Layouts → Save Windows as Layout…**) remember open
+  windows, tabs, vertical splits, each pane's folder and profile, and the split proportions.
+  Reopening starts fresh shells. **Include recent scrollback** is off unless you check it;
+  it stores plain text locally (at most 200 rows and 16 KiB per pane, 128 KiB per layout)
+  and restores it above the new shell, between session markers. **Remove Stored Scrollback**
+  keeps the layout. AkiTTY stores at most 20 layouts.
 - Rust-owned PTYs, bounded input, terminal parsing, configurable scrollback (5,000 lines by default), alternate
   screens, ANSI/truecolor output, Unicode cell widths and selection.
 - CoreText text rasterization and Metal presentation, with visible software
@@ -301,13 +316,16 @@ for implementation details.
 - IME marked text, accessible terminal text/selection, text copy/paste, clipboard
   write approval, scrollback search and font-size controls.
 - Multiline/control-text paste confirmation has a **Don't ask again** checkbox. Choose **Paste** to save it;
-  **Settings → Sessions → Clipboard** can restore confirmation for open terminals.
+  **Settings → Sessions → Confirm multiline and control-character pastes** restores it for open terminals.
+  A program's OSC 52 clipboard write asks first. **Always allow** in that prompt, or turning off
+  **Ask before programs copy to the clipboard**, lets later writes through and notes them in the status bar.
+  Programs cannot read the clipboard.
 - Copying selections preserves wrapped lines, significant spaces and wide glyphs.
   Web selections follow retained rows through scrollback eviction; native resizing preserves
   live/saved cursor positions and the scrolled view.
-- SGR and legacy mouse reporting; hold Option to select/scroll locally.
-- Open a folder from Finder (**Open With**), a Dock drop or `open -a Akitty <path>` to start a window there. Files
-  open in their folder, and at most 8 folders open per request; skipped items are reported.
+- SGR and legacy mouse reporting; hold Option to select or scroll locally. Double-click selects a
+  word and triple-click selects a line, including wide and combining text. On the alternate screen,
+  the wheel sends cursor keys only while DEC mode 1007 is enabled. Program mouse reporting keeps priority.
 - A native command palette ranked by bundled TypeScript through JavaScriptCore.
   It adapts AX TUI's fuzzy ranking without importing its Zig-backed renderer.
 - Built-in [Siri and App Shortcuts](docs/SIRI.md) to open and focus terminals,
@@ -327,7 +345,8 @@ lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-See [unreleased improvements](docs/releases/unreleased.md) for changes since the latest release.
+[Release notes for 1.3.22](docs/releases/1.3.22.md) record this version.
+[Unreleased changes](docs/releases/unreleased.md) lists anything newer.
 The [compatibility matrix](docs/COMPATIBILITY.md), [quality plan](docs/QUALITY_IMPROVEMENTS.md),
 [Native/WASM benchmark](benchmarks/README.md) and [agent approval demo](docs/AGENT_DEMO.md)
 separate implemented behavior, reproducible evidence and remaining qualification.
@@ -379,7 +398,7 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 ## Limitations and roadmap
 
-**Source version: 1.3.15.** AkiTTY is not a drop-in Ghostty replacement.
+**Source version: 1.3.22.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current

@@ -120,6 +120,11 @@ compiler and its standard library. Ordinary dependency versions were preserved;
 only now-unreachable engine dependencies were removed and the owned engine's
 Unicode segmentation library was added.
 
+Later releases raised the deployment target. Source 1.3.22 packages for macOS 27.2
+on Apple Silicon, and AkiTTY Web in this tree is 0.6.10. The table above is the
+2026-11-04 migration gate. Current behavior is in the README and
+[architecture](ARCHITECTURE.md).
+
 ## Performance observations
 
 Explicit release-mode native probe on this machine: colored input including JSON

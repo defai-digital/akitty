@@ -171,10 +171,10 @@ terminal. Terminal text, selection, UTF-16 character counts, range reads and cur
 line are already exposed through AppKit accessibility APIs. Improve and validate
 these foundations rather than scheduling them as new features.
 
-Current development preserves Overview cell objects during status updates, clears
+The current app preserves Overview cell objects during status updates, clears
 selection when a pane disappears, establishes keyboard focus and labels each cell's
 source. The approval sheet exposes the exact command and shell-reported directory,
-with Deny as the default. Terminal accessibility gains line/index queries,
+with Deny as the default. Terminal accessibility includes line and index queries,
 coalesced text-change notifications and concise state-transition announcements.
 
 Acceptance: regression tests for multiple windows/splits/hidden quick terminals,

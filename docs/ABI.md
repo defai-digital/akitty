@@ -4,7 +4,7 @@ The public header is `include/akitty.h`. Swift's mirrored header is checked byte
 for byte during verification. `akitty_abi_version()` must equal 1 before any call.
 No Rust layout, engine type or pointer to a session crosses this boundary.
 
-## Program status addition (source development after 1.2.5)
+## Program status addition (added in 1.3.0)
 
 Full and partial snapshots add `program_status`:
 
