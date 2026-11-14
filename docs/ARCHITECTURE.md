@@ -29,6 +29,11 @@ No Ghostty, Alacritty or VTE implementation is compiled or bundled. Historical
 notices and test origins are documented in the [provenance ledger](../third_party/TERMINAL_ENGINE.md).
 Native and browser platform behavior and performance require separate qualification.
 
+The [contributor guide](../CONTRIBUTING.md) maps these components to their source,
+tests, build commands, and generated artifacts. `akitty-core` composes `akitty-vt`
+with the shared protocols, authority primitives, and Unix child cleanup in
+`akitty-agent-core`; the VT engine depends on neither host crate.
+
 ## Decisions
 
 - Own the streaming parser, screens/history, protocol modes, mutation events and
