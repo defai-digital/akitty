@@ -96,3 +96,40 @@ and escapes, styled runs, wrapping, insert mode, DEC graphics, hyperlinks, Unico
 alternate screens, queries, bells and synchronized output. PTY batching tests
 cover short-read coalescing, tails on would-block/EOF/error, split Unicode/query
 sequences, reply ordering, model-feed bounds and yielding under endless output.
+
+## Row-reset and CSI follow-up
+
+The source review and CPU samples identified full recycled-row clearing, row
+movement and ANSI parameter allocations as separate costs. This pass addresses
+those costs before changing rendering or cell storage:
+
+1. Retain the last blank background and a conservative modified-prefix bound.
+   Track written spaces, styles, combining marks, hyperlinks and wide-cell repairs,
+   rather than deriving the bound from visible text. Complex scalar writes
+   conservatively invalidate the whole bound, avoiding per-scalar range tracking.
+   Clear only that prefix when the requested background matches; changing backgrounds, resizing/reflowing or
+   an untracked generation change requires a full reset. Recycling retains the
+   bound and background along with the cell allocation. Full clears still release
+   heap-owned cells and update history accounting and row generations. Wide writes
+   skip pre-clearing a span only when no wide neighbour outside it needs repair,
+   preserving generation advances.
+2. Store visible rows in the standard library's deque. Full-screen scrolling
+   rotates logical rows without shifting all row records. Region scrolling keeps
+   its existing bounds, identities, history and event semantics.
+3. Borrow a completed CSI during the terminal callback, retaining its bounded
+   parameter allocations for reuse. The public parser action API still returns
+   owned actions; synchronized output takes CSI data into its existing bounded
+   queue. Semicolon RGB decoding uses three stack slots instead of a temporary
+   vector. Parameter, subparameter and malformed-input limits are unchanged.
+4. Differentially compare prefix resets against conservative full resets across
+   background changes, written spaces, editing, Unicode, links, history, screen
+   switches and resizing. Compare borrowed and owned CSI actions across byte
+   boundaries, cancellation and overflow; retain synchronized-output tests.
+5. Rebuild committed WASM/provenance, run the canonical gate and build the app,
+   commit the implementation, then remeasure release-mode engine and actual PTY
+   throughput against the pinned parent on the same machine.
+
+The implementation is independently authored. Reference review informed the
+reset-range and logical-row-rotation concepts; no external implementation is
+copied or linked. Display-link changes, unfocused-pane pacing, texture damage
+history, compact cells and a GPU glyph atlas remain separate follow-up work.

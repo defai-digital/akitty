@@ -23,7 +23,7 @@ pub enum Terminator {
     St,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Csi {
     pub prefix: Option<u8>,
     pub params: Vec<Vec<Option<u16>>>,
@@ -64,6 +64,7 @@ pub enum Action {
 /// Borrowed text runs stay inside one feed call; the public action stream remains scalar.
 pub(crate) enum Input<'a> {
     Ascii(&'a [u8]),
+    Csi(&'a mut Csi),
     Action(Action),
 }
 
@@ -77,18 +78,35 @@ enum State {
     StringEscape(StringKind),
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct Parser {
     state: State,
     intermediates: Vec<u8>,
     prefix: Option<u8>,
     params: Vec<Vec<Option<u16>>>,
+    // A CSI callback borrows parameters. Keep their bounded allocations for the
+    // next sequence; owned actions and synchronized queues take that storage.
+    param_pool: Vec<Vec<Option<u16>>>,
     payload: Vec<u8>,
     discard: bool,
     utf8: [u8; 4],
     utf8_len: usize,
     utf8_expected: usize,
     string_utf8_remaining: usize,
+}
+
+// Retained scratch capacity is not parser state. Keep debug/state comparisons
+// focused on the active sequence, including incomplete UTF-8 and discard state.
+impl std::fmt::Debug for Parser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parser")
+            .field("state", &self.state).field("intermediates", &self.intermediates)
+            .field("prefix", &self.prefix).field("params", &self.params)
+            .field("payload", &self.payload).field("discard", &self.discard)
+            .field("utf8", &self.utf8).field("utf8_len", &self.utf8_len)
+            .field("utf8_expected", &self.utf8_expected)
+            .field("string_utf8_remaining", &self.string_utf8_remaining).finish()
+    }
 }
 
 impl Parser {
@@ -101,11 +119,12 @@ impl Parser {
             Input::Ascii(bytes) => {
                 for &byte in bytes { emit(Action::Print(char::from(byte))); }
             }
+            Input::Csi(csi) => emit(Action::Csi(std::mem::take(csi))),
             Input::Action(action) => emit(action),
         });
     }
 
-    pub(crate) fn feed_runs<'a>(&mut self, input: &'a [u8], mut emit: impl FnMut(Input<'a>)) {
+    pub(crate) fn feed_runs(&mut self, input: &[u8], mut emit: impl FnMut(Input<'_>)) {
         let mut index = 0;
         while index < input.len() {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
@@ -118,7 +137,7 @@ impl Parser {
                     break;
                 }
             }
-            self.byte(input[index], &mut |action| emit(Input::Action(action)));
+            self.byte(input[index], &mut emit);
             index += 1;
         }
     }
@@ -126,14 +145,15 @@ impl Parser {
     fn begin(&mut self, state: State) {
         self.state = state;
         self.intermediates.clear();
-        self.params.clear();
+        for parameter in &mut self.params { parameter.clear(); }
+        self.param_pool.append(&mut self.params);
         self.prefix = None;
         self.payload.clear();
         self.discard = false;
         self.string_utf8_remaining = 0;
     }
 
-    fn byte(&mut self, byte: u8, emit: &mut impl FnMut(Action)) {
+    fn byte(&mut self, byte: u8, emit: &mut impl FnMut(Input<'_>)) {
         if matches!(self.state, State::Text) && self.utf8_len != 0 {
             if byte & 0xc0 == 0x80 {
                 self.utf8[self.utf8_len] = byte;
@@ -144,12 +164,12 @@ impl Parser {
                         .and_then(|s| s.chars().next())
                         .unwrap_or('\u{fffd}');
                     self.utf8_len = 0;
-                    emit(Action::Print(ch));
+                    emit(Input::Action(Action::Print(ch)));
                 }
                 return;
             }
             self.utf8_len = 0;
-            emit(Action::Print('\u{fffd}'));
+            emit(Input::Action(Action::Print('\u{fffd}')));
         }
         if byte == 0x18 || byte == 0x1a {
             self.begin(State::Text);
@@ -179,8 +199,8 @@ impl Parser {
                 0x9f => self.begin(State::String(StringKind::Apc)),
                 0x9e => self.begin(State::String(StringKind::Pm)),
                 0x98 => self.begin(State::String(StringKind::Sos)),
-                0x00..=0x1f => emit(Action::Control(byte)),
-                0x20..=0x7e => emit(Action::Print(char::from(byte))),
+                0x00..=0x1f => emit(Input::Action(Action::Control(byte))),
+                0x20..=0x7e => emit(Input::Action(Action::Print(char::from(byte)))),
                 0x7f..=0x9f => {}
                 _ => {
                     self.utf8_expected = match byte {
@@ -190,7 +210,7 @@ impl Parser {
                         _ => 0,
                     };
                     if self.utf8_expected == 0 {
-                        emit(Action::Print('\u{fffd}'));
+                        emit(Input::Action(Action::Print('\u{fffd}')));
                     } else {
                         self.utf8[0] = byte;
                         self.utf8_len = 1;
@@ -199,7 +219,7 @@ impl Parser {
             },
             State::Escape => match byte {
                 0x1b => self.begin(State::Escape),
-                0x00..=0x1f => emit(Action::Control(byte)),
+                0x00..=0x1f => emit(Input::Action(Action::Control(byte))),
                 0x20..=0x2f => self.intermediate(byte),
                 b'[' if self.intermediates.is_empty() => self.begin(State::Csi),
                 b']' if self.intermediates.is_empty() => self.begin(State::String(StringKind::Osc)),
@@ -209,10 +229,10 @@ impl Parser {
                 b'X' if self.intermediates.is_empty() => self.begin(State::String(StringKind::Sos)),
                 0x30..=0x7e => {
                     if !self.discard {
-                        emit(Action::Escape {
+                        emit(Input::Action(Action::Escape {
                             intermediates: std::mem::take(&mut self.intermediates),
                             final_byte: byte,
-                        });
+                        }));
                     }
                     self.begin(State::Text);
                 }
@@ -221,7 +241,7 @@ impl Parser {
             },
             State::Csi => match byte {
                 0x1b => self.begin(State::Escape),
-                0x00..=0x1f => emit(Action::Control(byte)),
+                0x00..=0x1f => emit(Input::Action(Action::Control(byte))),
                 0x20..=0x2f => self.intermediate(byte),
                 b'0'..=b'9' if self.intermediates.is_empty() => {
                     self.ensure_parameter();
@@ -238,7 +258,7 @@ impl Parser {
                 b';' if self.intermediates.is_empty() => {
                     self.ensure_parameter();
                     if self.params.len() < MAX_PARAMETERS {
-                        self.params.push(vec![None]);
+                        self.push_parameter();
                     } else {
                         self.discard = true;
                     }
@@ -262,12 +282,15 @@ impl Parser {
                 }
                 0x40..=0x7e => {
                     if !self.discard {
-                        emit(Action::Csi(Csi {
+                        let mut csi = Csi {
                             prefix: self.prefix,
                             params: std::mem::take(&mut self.params),
                             intermediates: std::mem::take(&mut self.intermediates),
                             final_byte: byte,
-                        }));
+                        };
+                        emit(Input::Csi(&mut csi));
+                        self.params = csi.params;
+                        self.intermediates = csi.intermediates;
                     }
                     self.begin(State::Text);
                 }
@@ -304,8 +327,14 @@ impl Parser {
     }
     fn ensure_parameter(&mut self) {
         if self.params.is_empty() {
-            self.params.push(vec![None]);
+            self.push_parameter();
         }
+    }
+    fn push_parameter(&mut self) {
+        let mut parameter = self.param_pool.pop().unwrap_or_default();
+        parameter.clear();
+        parameter.push(None);
+        self.params.push(parameter);
     }
     fn append(&mut self, byte: u8) {
         if !self.discard {
@@ -321,14 +350,14 @@ impl Parser {
         &mut self,
         kind: StringKind,
         terminator: Terminator,
-        emit: &mut impl FnMut(Action),
+        emit: &mut impl FnMut(Input<'_>),
     ) {
         if !self.discard {
-            emit(Action::String {
+            emit(Input::Action(Action::String {
                 kind,
                 payload: std::mem::take(&mut self.payload),
                 terminator,
-            });
+            }));
         }
         self.begin(State::Text);
     }
@@ -406,6 +435,32 @@ mod tests {
             ]
         );
         assert_eq!(parse(&[b"\x1b]2;old\x1b[6n"]), parse(&[b"\x1b[6n"]));
+    }
+
+    #[test]
+    fn borrowed_csi_and_owned_actions_agree_across_reuse_overflow_and_cancellation() {
+        let maximal = format!("\x1b[{}m", (0..MAX_PARAMETERS).map(|_| {
+            (0..MAX_SUBPARAMETERS).map(|n| n.to_string()).collect::<Vec<_>>().join(":")
+        }).collect::<Vec<_>>().join(";"));
+        let bytes = format!("{maximal}\x1b[1m\x1b[m\x1b[38:2::1:2:3m\x1b[12\x18\x1b[6n\x1b[{}mOK",
+                            "1;".repeat(MAX_PARAMETERS + 1));
+        let expected = parse(&[bytes.as_bytes()]);
+        for size in [1, 3, 8192] {
+            let mut parser = Parser::default();
+            for _ in 0..3 {
+                let mut actual = Vec::new();
+                for chunk in bytes.as_bytes().chunks(size) {
+                    parser.feed_runs(chunk, |input| match input {
+                        Input::Ascii(bytes) => actual.extend(bytes.iter().map(|&b| Action::Print(char::from(b)))),
+                        Input::Csi(csi) => actual.push(Action::Csi(csi.clone())),
+                        Input::Action(action) => actual.push(action),
+                    });
+                }
+                assert_eq!(actual, expected);
+                assert!(parser.params.len() + parser.param_pool.len() <= MAX_PARAMETERS);
+                assert!(parser.param_pool.iter().all(|p| p.is_empty() && p.capacity() >= MAX_SUBPARAMETERS));
+            }
+        }
     }
 
     #[test]
