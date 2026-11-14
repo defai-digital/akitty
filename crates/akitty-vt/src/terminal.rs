@@ -908,6 +908,8 @@ impl Terminal {
             self.charsets = [false; 4];
             self.charset = 0;
             self.single_shift = None;
+            self.screen_mut().saved_cursor = Cursor::default();
+            self.saved_state[usize::from(self.modes.alternate)] = SavedState::default();
             self.modes.origin = false;
             self.modes.insert = false;
             self.modes.app_cursor = false;
@@ -1663,6 +1665,21 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn soft_reset_replaces_saved_cursor_position_and_attributes_with_defaults() {
+        for alternate in [false, true] {
+            let mut term = Terminal::new(8, 3, 10).unwrap();
+            if alternate { feed(&mut term, b"\x1b[?1049h"); }
+            feed(&mut term, b"kept\x1b[2;5H\x1b[31m\x1b(0\x1b7");
+            feed(&mut term, b"\x1b[!p");
+            assert_eq!(term.cursor(), Position { row: 1, col: 4 });
+            feed(&mut term, b"\x1b8q");
+            assert_eq!(term.cursor(), Position { row: 0, col: 1 });
+            assert_eq!(term.screen().rows[0].text(), "qept    ");
+            assert_eq!(term.screen().rows[0].cells[0].style, Style::default());
         }
     }
 

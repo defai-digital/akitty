@@ -579,5 +579,77 @@
     ],
     "history": 0,
     "replies": "\u001b[?25;1$y\u001b[1;7R"
+  },
+  {
+    "name": "soft reset clears saved DEC cursor",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "kept\u001b[2;5H\u001b[31m\u001b(0\u001b7\u001b[!p\u001b8q\u001bP$qm\u001b\\",
+    "lines": [
+      "qept    ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001bP1$r0m\u001b\\"
+  },
+  {
+    "name": "soft reset clears saved ANSI cursor",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "kept\u001b[2;5H\u001b[31m\u001b(0\u001b[s\u001b[!p\u001b[uq\u001bP$qm\u001b\\",
+    "lines": [
+      "qept    ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001bP1$r0m\u001b\\"
+  },
+  {
+    "name": "soft reset clears saved DEC cursor on alternate screen",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "\u001b[?1049hkept\u001b[2;5H\u001b[31m\u001b(0\u001b7\u001b[!p\u001b8q\u001bP$qm\u001b\\",
+    "lines": [
+      "qept    ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001bP1$r0m\u001b\\"
+  },
+  {
+    "name": "soft reset clears saved ANSI cursor on alternate screen",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "\u001b[?1049hkept\u001b[2;5H\u001b[31m\u001b(0\u001b[s\u001b[!p\u001b[uq\u001bP$qm\u001b\\",
+    "lines": [
+      "qept    ",
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001bP1$r0m\u001b\\"
   }
 ]
