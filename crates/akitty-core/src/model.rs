@@ -517,6 +517,11 @@ impl Model {
                         let (width, height) =
                             (if width > 0 { width } else { 8 }, if height > 0 { height } else { 16 });
                         replies.extend_from_slice(format!("\x1b[6;{height};{width}t").as_bytes());
+                        if replies.len() > 65536 {
+                            replies.clear();
+                            self.error = Some("terminal reply limit exceeded".into());
+                            *overflowed = true;
+                        }
                     }
                 }
             }
@@ -767,7 +772,7 @@ impl Model {
             }
         }
         // When every row changed a partial buys nothing, and a full snapshot also rebuilds the link table.
-        let partial = partial && dirty.iter().any(|changed| !changed);
+        let mut partial = partial && dirty.iter().any(|changed| !changed);
         if !partial {
             dirty.fill(true);
             shift = None;
@@ -778,6 +783,37 @@ impl Model {
         let selection = content.screen().selection_range();
         let mut cells = Vec::new();
         let mut text = vec![String::new(); rows];
+        // A partial snapshot extends the retained table so unchanged rows keep valid indices. When the
+        // dirty rows alone would push it past MAX_LINKS no partial table can index the screen, so rebuild
+        // the whole snapshot instead: every row is dirty and the table is rebuilt from scratch.
+        if partial {
+            let mut fresh: Vec<&str> = Vec::new();
+            let capacity = MAX_LINKS - self.links.len();
+            let mut overflow = false;
+            for indexed in view_cells(content) {
+                let row = indexed.line + content.screen().offset as i32;
+                if row < 0 || row as usize >= rows || !dirty[row as usize] {
+                    continue;
+                }
+                let Some(link) = indexed.cell.link_uri() else { continue };
+                if !link_target_usable(link)
+                    || self.links.iter().any(|known| known.as_str() == link)
+                    || fresh.contains(&link)
+                {
+                    continue;
+                }
+                if fresh.len() >= capacity {
+                    overflow = true;
+                    break;
+                }
+                fresh.push(link);
+            }
+            if overflow {
+                dirty.fill(true);
+                shift = None;
+                partial = false;
+            }
+        }
         // OSC 8 targets are deduplicated into a bounded table; cells reference them by index.
         // A full snapshot rebuilds it; a partial one extends it so unchanged rows stay valid.
         let mut links: Vec<String> = if partial { std::mem::take(&mut self.links) } else { Vec::new() };
@@ -1139,9 +1175,13 @@ pub(crate) const MAX_SNAPSHOT_BYTES: usize = 8 * 1_048_576 - 256;
 const MAX_LINK_BYTES: usize = 2048;
 /// Placeholder fragments per snapshot; rows already cap cells at 32,768.
 const MAX_FRAGMENTS: usize = 4096;
+/// Whether a hyperlink target is eligible for the table (it may still hit the MAX_LINKS cap).
+fn link_target_usable(uri: &str) -> bool {
+    !uri.is_empty() && uri.len() <= MAX_LINK_BYTES && !uri.chars().any(char::is_control)
+}
 /// Interns a hyperlink target; oversized, control-bearing or excess targets are dropped.
 fn link_index(links: &mut Vec<String>, uri: &str) -> Option<usize> {
-    if uri.is_empty() || uri.len() > MAX_LINK_BYTES || uri.chars().any(char::is_control) {
+    if !link_target_usable(uri) {
         return None;
     }
     if let Some(index) = links.iter().position(|known| known == uri) {
@@ -1218,6 +1258,35 @@ mod tests {
             assert_eq!(link_index(&mut links, &format!("https://h/{i}")), Some(i));
         }
         assert_eq!(link_index(&mut links, "https://overflow"), None);
+    }
+    #[test]
+    fn partial_snapshot_rebuilds_a_link_table_that_would_overflow() {
+        let mut model = Model::new(Size::validate(24, 24).unwrap(), 200);
+        let mut since = None;
+        for index in 0..MAX_LINKS / 2 {
+            model.feed(format!("\x1b]8;;https://old.test/{index}\x07x\x1b]8;;\x07\r\n").as_bytes());
+            let snapshot = model.snapshot(since);
+            since = Some(snapshot["revision"].as_u64().unwrap());
+        }
+        assert_eq!(model.links.len(), MAX_LINKS / 2);
+        let mut burst = String::new();
+        for row in 1..24 {
+            for col in 0..6 {
+                burst.push_str(&format!("\x1b[{};{}H\x1b]8;;https://new.test/{row}/{col}\x07x\x1b]8;;\x07", row + 1, col + 1));
+            }
+        }
+        model.feed(burst.as_bytes());
+        let snapshot = model.snapshot(since);
+        let cells = snapshot["cells"].as_array().unwrap();
+        assert!(cells.iter().all(|cell| cell["row"].as_u64().unwrap() == 0 || cell["text"] != "x" || cell.get("link").is_some()));
+        assert_eq!(snapshot["links"].as_array().unwrap().len(), 1 + 23 * 6);
+    }
+    #[test]
+    fn cell_size_queries_obey_the_terminal_reply_limit() {
+        let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
+        let replies = model.feed(&b"\x1b[16t".repeat(20_000));
+        assert!(replies.is_empty());
+        assert_eq!(model.error.as_deref(), Some("terminal reply limit exceeded"));
     }
     #[test]
     fn clearing_the_title_restores_the_default_instead_of_a_blank_tab() {

@@ -219,3 +219,22 @@ test("malformed and unsatisfiable byte ranges stay 416 at the endpoint", async (
     assert.equal(seen, null, `no body fetch for ${value}`)
   }
 })
+
+test("If-Range requires a strong matching entity tag", async () => {
+  const metadata: ReleaseMetadata = { ...makeMetadata("application/zip"), httpEtag: 'W/"identity"' }
+  const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
+  let seen: GetOptions | null = null
+  const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
+  const weak = await worker.fetch(new Request(url, { headers: { Range: "bytes=0-1", "If-Range": 'W/"identity"' } }), env)
+  assert.equal(weak.status, 200)
+  assert.equal(weak.headers.get("Content-Range"), null)
+  assert.equal(rangeOf(seen), undefined)
+  assert.equal(await weak.text(), "abc")
+
+  env.RELEASES.head = async () => makeMetadata("application/zip")
+  seen = null
+  const strong = await worker.fetch(new Request(url, { headers: { Range: "bytes=0-1", "If-Range": '"identity"' } }), env)
+  assert.equal(strong.status, 206)
+  assert.equal(strong.headers.get("Content-Range"), "bytes 0-1/3")
+  assert.deepEqual(rangeOf(seen), { offset: 0, length: 2 })
+})

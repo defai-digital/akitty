@@ -133,7 +133,11 @@ export default {
     if (!ifMatch(request.headers.get("If-Match"), metadata.httpEtag)) return failure(412, "Precondition failed", { ETag: metadata.httpEtag })
     if (ifNoneMatch(request.headers.get("If-None-Match"), metadata.httpEtag)) return new Response(null, { status: 304, headers })
     let range: RangeDecision
-    if (request.method === "GET" && request.headers.has("Range") && (!request.headers.has("If-Range") || request.headers.get("If-Range") === metadata.httpEtag)) {
+    const ifRange = request.headers.get("If-Range")
+    // RFC 9110 §13.1.5: If-Range uses the strong comparison, so a weak tag on
+    // either side never matches and the Range header is ignored (full 200).
+    const ifRangeMatches = ifRange === null || (!/^W\//.test(ifRange) && !/^W\//.test(metadata.httpEtag) && ifRange === metadata.httpEtag)
+    if (request.method === "GET" && request.headers.has("Range") && ifRangeMatches) {
       range = rangeFor(request.headers.get("Range") ?? "", metadata.size)
       if (range === null) return failure(416, "Invalid range", { "Content-Range": `bytes */${metadata.size}` })
       // Ignore unsupported units and valid multi-ranges; serve the full 200.
