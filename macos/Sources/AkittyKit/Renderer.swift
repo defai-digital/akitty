@@ -515,6 +515,14 @@ final class GridRasterizer: @unchecked Sendable {
     let batchesGlyphs: Bool
     /// Glyphs the last frame drew in batches rather than clipped one by one.
     private(set) var batchedGlyphs = 0
+    /// A fitted line can move only when both coordinate precisions retain the
+    /// same device-pixel phase. Integer row height alone does not guarantee this.
+    private static func translatedExactly(from old: CGFloat, to new: CGFloat, by pixels: CGFloat) -> Bool {
+        guard old.isFinite, new.isFinite, new - old == pixels,
+              old - floor(old) == new - floor(new) else { return false }
+        let a = Float(old), b = Float(new)
+        return b - a == Float(pixels) && a - floor(a) == b - floor(b)
+    }
     init(layer: Layer = .all, batchesGlyphs: Bool = true) { self.layer = layer; self.batchesGlyphs = batchesGlyphs }
     /// The layer passes, created on first layered frame and kept for their bitmaps and damage state while images show.
     /// A single-bitmap frame drops them, so their two window-sized bitmaps do not outlive the last image.
@@ -570,6 +578,7 @@ final class GridRasterizer: @unchecked Sendable {
         if reuse { self.context = context; layout = wanted } else { self.context = nil; layout = nil }
 
         var scrolledRows = 0
+        var scrollRepairs: [Int: [Range<Int>]] = [:]
         if scroll != 0 {
             let rowPixels = cellSize.height * scale, top = Self.margin * scale
             let bottom = top + CGFloat(snapshot.rows) * rowPixels
@@ -581,11 +590,51 @@ final class GridRasterizer: @unchecked Sendable {
                size.height * scale == CGFloat(height), bottom <= CGFloat(height),
                let data = context.data {
                 dirty.formUnion(snapshot.rows - scroll..<snapshot.rows)
-                // Fitted glyphs and stroked decorations may round their fractional
-                // positions differently at another row. Redraw those rows exactly.
-                for cell in snapshot.cells where cell.italic || cell.underline || cell.strike == true
-                    || cell.text.utf8.count != 1 || !(0x20...0x7e).contains(cell.text.utf8.first ?? 0) {
-                    dirty.insert(cell.row)
+                // Decorations still redraw. Complex glyphs additionally qualify
+                // their actual cached placement at both rows; cache misses and
+                // changed fractional phases retain the conservative repaint.
+                var complexRows = Set<Int>()
+                for cell in snapshot.cells {
+                    if cell.italic || cell.underline || cell.strike == true { dirty.insert(cell.row) }
+                    else if cell.text.utf8.count != 1 || !(0x20...0x7e).contains(cell.text.utf8.first ?? 0) { complexRows.insert(cell.row) }
+                }
+                if !complexRows.isEmpty {
+                    let gridTop = size.height - Self.margin, descent = CTFontGetDescent(base)
+                    for item in GlyphClusters.merge(snapshot.cells) where complexRows.contains(item.cell.row) && !dirty.contains(item.cell.row) {
+                        let cell = item.cell, text = item.text
+                        if text.isEmpty || text == " " || text.utf8.allSatisfy({ $0 < 0x80 }) { continue }
+                        let box = CGRect(x: Self.margin + CGFloat(cell.col) * cellSize.width,
+                                         y: gridTop - CGFloat(cell.row + 1) * cellSize.height,
+                                         width: cellSize.width * CGFloat(item.columns), height: cellSize.height)
+                        var source = box; source.origin.y = gridTop - CGFloat(cell.row + scroll + 1) * cellSize.height
+                        let delta = CGFloat(scroll) * rowPixels
+                        func repairGlyph() {
+                            // Cell clips are safe repaint boundaries only on the
+                            // device grid. Otherwise retain the whole-row fallback.
+                            if box.minX * scale == (box.minX * scale).rounded(),
+                               box.maxX * scale == (box.maxX * scale).rounded(),
+                               box.minY * scale == (box.minY * scale).rounded(),
+                               box.maxY * scale == (box.maxY * scale).rounded(),
+                               cell.col + item.columns <= snapshot.cols {
+                                scrollRepairs[cell.row, default: []].append(cell.col..<(cell.col + item.columns))
+                            } else { dirty.insert(cell.row) }
+                        }
+                        guard scale.rounded() == scale,
+                              Self.translatedExactly(from: source.minY * scale, to: box.minY * scale, by: delta) else {
+                            repairGlyph(); continue
+                        }
+                        if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first, CellGlyphs.handles(scalar) { continue }
+                        let key = GlyphKey(style: UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)), text: text)
+                        guard let ink = glyphs[key]?.ink else { repairGlyph(); continue }
+                        let old = GlyphFonts.placement(ink: ink, box: source, baseline: source.minY + descent + 2, centre: item.columns == 2)
+                        let next = GlyphFonts.placement(ink: ink, box: box, baseline: box.minY + descent + 2, centre: item.columns == 2)
+                        // Scaled CTLine drawing can quantize glyph-local geometry
+                        // differently despite equal translation phases. It redraws.
+                        if old.scale != 1 || next.scale != 1 || old.origin.x != next.origin.x
+                            || !Self.translatedExactly(from: old.origin.y * scale, to: next.origin.y * scale, by: delta) {
+                            repairGlyph()
+                        }
+                    }
                 }
                 if dirty.count < snapshot.rows {
                     let start = Int(top) * context.bytesPerRow
@@ -599,6 +648,7 @@ final class GridRasterizer: @unchecked Sendable {
             } else { rows = nil }
         }
 
+        if scrolledRows == 0 { scrollRepairs.removeAll() }
         let cursorRow = snapshot.cursor.row
         if var set = rows {
             // The cursor and any composition text are drawn over the row, so both its old and new rows need repainting.
@@ -621,16 +671,22 @@ final class GridRasterizer: @unchecked Sendable {
         }
         let background = appearance.backgroundColor
 
-        if let rows, rows.isEmpty { return Frame(context: context, damage: 0..<0) }
+        if let rows, rows.isEmpty, scrollRepairs.isEmpty { return Frame(context: context, damage: 0..<0) }
         context.saveGState(); defer { context.restoreGState() }
         // Layer bitmaps start transparent, so the Metal clear colour and the images below them show through.
         if layer != .all { context.setBlendMode(.copy) }
         context.setFillColor(layer == .all ? background : CGColor(gray: 0, alpha: 0))
         let cells: [Cell]
         if let rows {
-            context.clip(to: rows.map(band))
-            context.fill(rows.map(band))
-            cells = snapshot.cells(in: rows)
+            let repairs = scrollRepairs.flatMap { row, spans -> [CGRect] in
+                guard !rows.contains(row) else { return [] }
+                return spans.map { span in CGRect(x: Self.margin + CGFloat(span.lowerBound) * cellSize.width,
+                    y: gridTop - CGFloat(row + 1) * cellSize.height, width: CGFloat(span.count) * cellSize.width, height: cellSize.height) }
+            }
+            let clips = rows.map(band) + repairs
+            context.clip(to: clips)
+            context.fill(clips)
+            cells = snapshot.cells(in: rows.union(scrollRepairs.keys))
         } else {
             context.fill(CGRect(origin: .zero, size: size))
             cells = snapshot.cells
@@ -685,6 +741,8 @@ final class GridRasterizer: @unchecked Sendable {
             let cell = item.cell, text = item.text
             if text.isEmpty || text == " " { continue }
             var box = rect(cell); box.size.width = cellSize.width * CGFloat(item.columns)
+            if let rows, !rows.contains(cell.row),
+               !(scrollRepairs[cell.row] ?? []).contains(where: { $0.overlaps(cell.col..<(cell.col + item.columns)) }) { continue }
             // Box drawing, blocks and braille fill the cell exactly instead of going through the font, which leaves row gaps.
             if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first, CellGlyphs.handles(scalar) {
                 CellGlyphs.draw(scalar, in: box, scale: scale, color: color(cell.fg), context: context); continue

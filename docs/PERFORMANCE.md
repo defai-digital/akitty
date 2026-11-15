@@ -370,3 +370,49 @@ presentation-p95 improvement, without visual or foreground p50/p95 regression.
 An unsuccessful candidate is discarded rather than expanding into a renderer
 rewrite. After correctness gates and an implementation commit, alternating
 committed-baseline/candidate runs determine the accepted result.
+
+### Unicode scroll prototype and correctness qualification
+
+Fresh four-second sample captures on the instrumented baseline found raster
+self-weight estimates of 28.4% (Unicode scroll) and 32.1% (Unicode burst) among
+non-wait stacks, versus 5.1% for ASCII typing. Snapshot estimates were 4.0-7.6%,
+including changed and unchanged calls. Scheduler/unattributed leaves remain in
+the denominator; these are approximate stack shares, not measured thread CPU
+fractions. Profiled runs are excluded from performance comparisons.
+
+The first placement-phase-only prototype failed 14 pixel comparisons for Menlo
+17.25 pt at 3x. Rejecting scaled glyph reuse fixed those mismatches but made the
+mixed-emoji row path entirely conservative. The revised bounded prototype moves
+retained bitmap rows and redraws unsafe glyphs inside their existing cell clips,
+provided those clip edges are whole device pixels. It reuses an unscaled cached
+line only when source/destination placement has identical scale/x and an exact
+integer y translation with matching `CGFloat` and `Float` pixel phases. Cache
+misses and scaled lines redraw. Decorations still redraw their whole row;
+fractional cell boundaries, images, composition, cropped and changed layouts
+retain conservative fallbacks. Rendering and glyph-fitting rules are unchanged.
+
+Repair spans use the same merged-cluster box as the ordinary per-glyph clip;
+backgrounds and intersecting glyphs repaint within the union of those spans and
+full dirty rows. Old/new cursor rows remain full repairs. Every actual bitmap
+scroll still reports the entire grid as GPU damage, including all repaired spans.
+This prototype targets CPU painting work, not the upload region required by a
+scroll. A passing pixel matrix establishes correctness for its covered cases;
+committed-candidate remeasurement must still satisfy the performance gate above.
+For this evaluation, CPU acceptance requires at least 15% median reduction in a
+target Unicode scene with improvement in all three before/after pairs. The
+presentation alternative requires at least 10% and 2 ms pooled p95 improvement,
+with improvement in every pair beyond concurrent single/ASCII control movement.
+Neither route permits a visual mismatch or a foreground/control latency
+regression outside the observed run variation. An inconclusive result rejects
+the product candidate; no second optimization line follows in this pass.
+
+The extended matrix compares 270 coalesced Unicode frames against stateless full
+painting across Menlo/Courier, 13/13.5/17.25 pt and 1x/2x/3x, including selected
+text, cursor visibility, fitted emoji, combining marks, box drawing and decorated
+rows. Separate fractional-scale, cropped and IME cases check fallback equality.
+Existing randomized raster, glyph batching, layered rendering and font tests
+also remain required. `NativeInputTrace` rejects a new submission until the last
+GPU completion identifies its target, while earlier presentations can remain
+pending; overlapping submission rejection and stale-history eviction have
+explicit regressions. External CLI advice is independently checked against the
+unchanged full-grid damage and per-glyph clipping paths.
