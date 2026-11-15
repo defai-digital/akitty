@@ -38,15 +38,16 @@ struct NativeInputTrace {
         let completion = Completion(revision: revision, time: time)
         if kind == .gpu {
             gpu.append(completion)
-            if gpu.count > 32 { gpu.removeFirst(); noteOverflow() }
+            if gpu.count > 32 { noteOverflow(gpu.removeFirst()) }
         } else {
             presentations.append(completion)
-            if presentations.count > 32 { presentations.removeFirst(); noteOverflow() }
+            if presentations.count > 32 { noteOverflow(presentations.removeFirst()) }
         }
         match(completion, kind: kind)
     }
-    private mutating func noteOverflow() {
-        if samples.last?.target == nil, !samples.isEmpty { overflowBeforeTarget += 1 }
+    private mutating func noteOverflow(_ completion: Completion) {
+        if let pending = samples.last, pending.target == nil,
+           completion.revision > pending.base, completion.time >= pending.start { overflowBeforeTarget += 1 }
     }
     private mutating func match(_ completion: Completion, kind: Kind) {
         for index in samples.indices {

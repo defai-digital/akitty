@@ -43,6 +43,13 @@ import Foundation
         bounded.begin(base: 0, time: 1)
         for revision in 1...40 { bounded.receive(.gpu, revision: UInt64(revision), time: 1 + Double(revision)) }
         precondition(bounded.overflowBeforeTarget > 0, "dropping callbacks before target recognition must be reported")
+        var oldHistory = NativeInputTrace()
+        for revision in 1...32 { oldHistory.receive(.gpu, revision: UInt64(revision), time: Double(revision)) }
+        oldHistory.begin(base: 32, time: 33)
+        oldHistory.receive(.gpu, revision: 33, time: 33.1)
+        precondition(oldHistory.overflowBeforeTarget == 0, "evicting pre-input history cannot lose the new sample")
+        oldHistory.identify(revision: 33)
+        precondition(oldHistory.samples[0].gpu?.revision == 33)
         print("Native input trace: independent completion, reordering, stale/invalid callbacks, missing data and bounds passed")
     }
 }
