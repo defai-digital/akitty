@@ -12,9 +12,10 @@ import CryptoKit
         var enabled = false
         var snapshots = 0, rasters = 0, presents = 0, fullUploads = 0, partialUploads = 0, bytes = 0
         var snapshotStart: Double?, rasterStart: Double?, uploadStart: Double?
-        var snapshotMS: [Double] = [], rasterMS: [Double] = [], uploadMS: [Double] = [], latencyMS: [Double] = []
+        var snapshotMS: [Double] = [], rasterMS: [Double] = [], uploadMS: [Double] = []
+        var inputs = NativeInputTrace(), marker: String?
+        var changedSnapshots = 0, unchangedSnapshots = 0
         var positivePresentationTimes = 0, zeroPresentationTimes = 0
-        var pending: (marker: String?, base: UInt64, start: Double, target: UInt64?)?
         func event(_ event: NativeFrameEvent) {
             let now = CACurrentMediaTime()
             switch event {
@@ -23,10 +24,8 @@ import CryptoKit
             case .snapshotFinished(let revision):
                 if enabled, let start = snapshotStart, snapshotMS.count < 5000 { snapshotMS.append((now - start) * 1000) }
                 snapshotStart = nil
-                if let revision, var p = pending, p.target == nil, revision > p.base,
-                   p.marker == nil || terminal?.snapshot?.text.contains(p.marker!) == true {
-                    p.target = revision; pending = p
-                }
+                if enabled { if revision == nil { unchangedSnapshots += 1 } else { changedSnapshots += 1 } }
+                if let revision, marker == nil || terminal?.snapshot?.text.contains(marker!) == true { inputs.identify(revision: revision) }
             case .rasterStarted:
                 if enabled { rasters += 1; rasterStart = now }
             case .rasterReady:
@@ -37,17 +36,16 @@ import CryptoKit
             case .handedOff:
                 if enabled, let start = uploadStart, uploadMS.count < 5000 { uploadMS.append((now - start) * 1000) }
                 uploadStart = nil
-            case .presented(_, let time):
-                if enabled { if time > 0 { positivePresentationTimes += 1 } else { zeroPresentationTimes += 1 } }
+            case .presented(let revision, let time):
+                if enabled { if time.isFinite && time > 0 { positivePresentationTimes += 1 } else { zeroPresentationTimes += 1 } }
+                inputs.receive(.presentation, revision: revision, time: time)
             case .gpuCompleted(let revision, let time):
                 if enabled { presents += 1 }
-                if let p = pending, let target = p.target, revision >= target, time >= p.start {
-                    latencyMS.append((time - p.start) * 1000); pending = nil
-                }
+                inputs.receive(.gpu, revision: revision, time: time)
             }
         }
         var object: [String: Any] {
-            ["snapshot_builds": snapshots, "raster_builds": rasters, "gpu_completions": presents, "positive_presentation_timestamps": positivePresentationTimes, "zero_presentation_timestamps": zeroPresentationTimes,
+            ["snapshot_builds": snapshots, "changed_snapshots": changedSnapshots, "unchanged_snapshots": unchangedSnapshots, "raster_builds": rasters, "gpu_completions": presents, "positive_presentation_timestamps": positivePresentationTimes, "zero_presentation_timestamps": zeroPresentationTimes,
              "full_uploads": fullUploads, "partial_uploads": partialUploads, "uploaded_bytes": bytes,
              "snapshot_ms": snapshotMS, "raster_ms": rasterMS, "upload_ms": uploadMS]
         }
@@ -71,8 +69,13 @@ import CryptoKit
         let suite = "akitty.native-pipeline-probe.\(UUID().uuidString)"
         let defaults = try require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
+        let scenes = ["single-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll", "four-ascii-burst", "four-unicode-burst"]
+        let selected = environment["AKITTY_NATIVE_PROBE_SCENES"].flatMap { $0.isEmpty ? nil : $0 }?.split(separator: ",").map(String.init) ?? scenes
+        guard !selected.isEmpty, selected.count == Set(selected).count, selected.allSatisfy(scenes.contains) else { throw AkittyError.core("unknown or repeated native probe scene") }
+        let profile = environment["AKITTY_NATIVE_PROBE_PROFILE"].flatMap { $0.isEmpty ? nil : $0 }
         var results: [[String: Any]] = []
-        for condition in ["single-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll"] {
+        for condition in selected {
+            let lines = condition.hasSuffix("burst") ? 8 : 1
             let count = condition == "single-typing" ? 1 : 4
             var preferences = TerminalPreferences()
             preferences.shell = "/bin/sh"; preferences.shellIntegration = false
@@ -97,7 +100,7 @@ import CryptoKit
                     let pattern = condition.contains("unicode") ? "\u{1b}[38;2;90;180;240m漢字かな한글 👩🏽‍💻 e\u{301} log output\u{1b}[0m\r\n" : "\u{1b}[32mbuild log 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\u{1b}[0m\r\n"
                     let literal = String(data: try JSONSerialization.data(withJSONObject: [pattern]), encoding: .utf8)!
                     let ready = String(data: try JSONSerialization.data(withJSONObject: ["\u{1b}]2;probe-ready\u{7}"]), encoding: .utf8)!
-                    let js = "const s=\(literal)[0];let ready=true,n=0;process.stdout.write(\(ready)[0]);process.stdout.on('drain',()=>ready=true);setInterval(()=>{if(ready){let t='';for(let j=0;j<1;j++)t+=String(n++).padStart(8,'0')+' '+s;ready=process.stdout.write(t)}},8)"
+                    let js = "const s=\(literal)[0];let ready=true,n=0;process.stdout.write(\(ready)[0]);process.stdout.on('drain',()=>ready=true);setInterval(()=>{if(ready){let t='';for(let j=0;j<\(lines);j++)t+=String(n++).padStart(8,'0')+' '+s;ready=process.stdout.write(t)}},8)"
                     guard let node = environment["AKITTY_NATIVE_PROBE_NODE"], node.hasPrefix("/") else { throw AkittyError.core("probe requires an absolute Node executable") }
                     program = "'\(node.replacingOccurrences(of: "'", with: "'\\''"))' -e '\(js.replacingOccurrences(of: "'", with: "'\\''"))'"
                 }
@@ -113,19 +116,29 @@ import CryptoKit
                 throw AkittyError.core("probe requires a focused visible Metal window")
             }
             let foreground = terminals[0], trace = traces[0]
+            var sampler: Process?
             var cpuStart = cpuSeconds(), start = CACurrentMediaTime(), nextInput = CACurrentMediaTime()
             let intervals: [Double] = [0.083, 0.097, 0.113, 0.091, 0.109, 0.101]
             for i in 0..<(samples + 3) {
                 guard window.isKeyWindow, window.firstResponder === foreground else { throw AkittyError.core("probe lost foreground focus") }
                 if i == 3 {
                     for trace in traces { trace.enabled = true }
-                    trace.latencyMS = []; cpuStart = cpuSeconds(); start = CACurrentMediaTime(); nextInput = start
+                    cpuStart = cpuSeconds(); start = CACurrentMediaTime(); nextInput = start
+                    if let profile {
+                        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+                        process.arguments = [String(ProcessInfo.processInfo.processIdentifier), "4", "1", "-file", "\(profile).\(condition).sample.txt"]
+                        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+                        try process.run(); sampler = process
+                    }
                 }
                 let delay = nextInput - CACurrentMediaTime()
                 if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
                 let marker = condition.hasSuffix("scroll") ? nil : String(format: "NATIVE_FRAME_%04d", i)
+                trace.marker = marker
+                trace.inputs.begin(base: foreground.snapshot?.revision ?? 0, time: CACurrentMediaTime())
+                // Echo is disabled and awk emits complete lines only, so the marker
+                // cannot satisfy the target before Enter submits the input line.
                 if let marker { foreground.send(marker) }
-                trace.pending = (marker, foreground.snapshot?.revision ?? 0, CACurrentMediaTime(), nil)
                 if condition.hasSuffix("scroll") {
                     let cg = try require(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1,
                                                    wheel1: i % 2 == 0 ? 3 : -3, wheel2: 0, wheel3: 0))
@@ -140,21 +153,43 @@ import CryptoKit
                         characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
                     NSApp.sendEvent(release)
                 }
-                try await wait { trace.pending == nil }
+                try await wait { trace.inputs.samples.last?.gpu != nil }
                 nextInput = max(nextInput + intervals[i % intervals.count], CACurrentMediaTime())
             }
             let wall = CACurrentMediaTime() - start, cpu = cpuSeconds() - cpuStart
-            guard trace.latencyMS.count == samples else { throw AkittyError.core("missing native presentation samples") }
+            for trace in traces { trace.enabled = false }
+            // Presentation may arrive after GPU completion; retain all denominators
+            // and nulls rather than silently treating an unavailable callback as fast.
+            let presentationDeadline = CACurrentMediaTime() + 1
+            while trace.inputs.samples.contains(where: { $0.presentation == nil }), CACurrentMediaTime() < presentationDeadline {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            if let sampler {
+                try await wait { !sampler.isRunning }
+                guard sampler.terminationStatus == 0 else { throw AkittyError.core("native CPU sampler failed") }
+            }
+            let measured = Array(trace.inputs.samples.dropFirst(3))
+            let gpu = measured.compactMap(\.gpuMS)
+            guard measured.count == samples, gpu.count == samples, trace.inputs.overflowBeforeTarget == 0 else { throw AkittyError.core("missing or overflowed native input samples") }
+            let records: [[String: Any]] = measured.map { sample in
+                ["base_revision": sample.base, "target_revision": sample.target as Any? ?? NSNull(),
+                 "gpu_revision": sample.gpu?.revision as Any? ?? NSNull(), "gpu_ms": sample.gpuMS as Any? ?? NSNull(),
+                 "presentation_revision": sample.presentation?.revision as Any? ?? NSNull(), "presentation_ms": sample.presentationMS as Any? ?? NSNull()]
+            }
             results.append(["condition": condition, "samples": samples, "warmup": 3,
-                "event_to_gpu_ms": trace.latencyMS, "wall_seconds": wall, "cpu_seconds": cpu,
+                "event_to_gpu_ms": gpu, "input_samples": records,
+                "event_to_present_ms": measured.map { $0.presentationMS as Any? ?? NSNull() },
+                "missing_presentation_samples": measured.filter { $0.presentation == nil }.count,
+                "invalid_presentation_callbacks": trace.inputs.invalidPresentation, "invalid_gpu_callbacks": trace.inputs.invalidGPU,
+                "profiled": profile != nil, "wall_seconds": wall, "cpu_seconds": cpu,
                 "process_cpu_percent": cpu / wall * 100, "panes": traces.map(\.object),
                 "grids": terminals.map { ["cols": $0.snapshot?.cols ?? 0, "rows": $0.snapshot?.rows ?? 0] },
                 "scale": window.backingScaleFactor, "window_points": [1360, 900],
-                "input_intervals_seconds": intervals, "producer_interval_ms": 8, "producer_lines_per_tick": 1])
-            print("NATIVE_PIPELINE \(condition) cpu=\(cpu / wall * 100) samples=\(trace.latencyMS.count)")
+                "input_intervals_seconds": intervals, "producer_interval_ms": 8, "producer_lines_per_tick": lines])
+            print("NATIVE_PIPELINE \(condition) cpu=\(cpu / wall * 100) samples=\(gpu.count) missing_presentations=\(measured.filter { $0.presentation == nil }.count)")
         }
         let executable = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[0]))
-        let object: [String: Any] = ["schema": 1, "scope": "synthetic-native-event-to-gpu-completion",
+        let object: [String: Any] = ["schema": 2, "scope": "synthetic-native-input-to-gpu-and-presentation",
             "probe_binary_sha256": SHA256.hash(data: executable).map { String(format: "%02x", $0) }.joined(),
             "os": ProcessInfo.processInfo.operatingSystemVersionString, "results": results]
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output), options: .withoutOverwriting)

@@ -331,3 +331,42 @@ local skip, so fresh CI Firefox qualification remains outstanding. Debug and
 clean committed release app builds, three-second startup smokes and ad-hoc
 signature checks passed. WASM provenance was verified and its artifact is
 unchanged. No notarization or release publication was performed.
+
+## Native scroll qualification plan
+
+The next bounded pass starts from `263d509` (1.3.29), including the accepted
+unfocused refresh policy. It first attributes native work before changing the
+renderer. The candidates are Unicode full-scroll repaint and unchanged foreground
+polling; elapsed phase times and callback counts alone do not establish CPU share.
+Reference review remains ideas-only. No VT, WASM, cell-storage or ABI rewrite is
+part of this pass.
+
+The native probe now correlates GPU completion and drawable presentation
+independently. Each input records a base revision, a matching snapshot target,
+and the first qualifying callback timestamp at or after that target. Reordered
+delivery is reconciled by timestamp, and GPU completion cannot consume a pending
+presentation. Superseding revisions remain recorded, so a later frame is not
+mislabelled as the exact target frame. This is synthetic input-submission latency,
+not physical key-to-photon latency. Echo is disabled and the foreground helper
+emits complete lines only, so typing markers cannot appear before Enter submits
+the line. Missing presentation callbacks remain null with their denominator;
+invalid times and callback-buffer overflow are reported, not treated as fast.
+
+Two additional scenes emit eight lines every 8 ms with backpressure, alongside
+the existing one-line scenes. `AKITTY_NATIVE_PROBE_SCENES` selects a comma-separated
+subset. `AKITTY_NATIVE_PROBE_PROFILE` sets an output prefix for four-second macOS
+`sample` captures during each scene's measured window. Profiled runs are labelled
+and excluded from performance comparisons; original stack files remain local.
+Deterministic correlation checks run through `scripts/test-native-trace.sh` in
+the canonical gate. The same instrumented harness must be used for both versions.
+
+Only a confirmed material hotspot proceeds to a small prototype. Unicode bitmap
+scroll reuse must match full repaint bytes across fonts, scales, CJK, emoji,
+decorations, cursor and selection, preserving fallbacks for unsafe geometry or
+glyph placement. CPU bitmap scrolling changes all destination texture rows and
+does not by itself reduce the required GPU upload region. Adoption requires at
+least 15% representative process CPU reduction or a material reproducible
+presentation-p95 improvement, without visual or foreground p50/p95 regression.
+An unsuccessful candidate is discarded rather than expanding into a renderer
+rewrite. After correctness gates and an implementation commit, alternating
+committed-baseline/candidate runs determine the accepted result.

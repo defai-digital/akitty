@@ -31,7 +31,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macosx27.2 -I "$native_bin" -I macos/Bridge -F "$native_bin" \
-  benchmarks/native-pipeline.swift "$native_bin/AkittyKit.o" "$native_bin/AgentIPC.o" \
+  benchmarks/native-pipeline.swift benchmarks/native-input-trace.swift "$native_bin/AkittyKit.o" "$native_bin/AgentIPC.o" \
   -L "$AKITTY_RUST_LIB_DIR" -lakitty_core -framework Sparkle -framework AppKit -framework MetalKit \
   -framework Carbon -framework CoreText -framework JavaScriptCore -framework AppIntents \
   -Xlinker -rpath -Xlinker "$native_bin" -Xlinker -rpath -Xlinker "$AKITTY_RUST_LIB_DIR" \
@@ -42,6 +42,8 @@ if [[ -n ${AKITTY_NATIVE_PROBE_SAVE_APP:-} ]]; then
 fi
 native_node=$(command -v node)
 open -n -W --stdout "$stage/stdout.log" --stderr "$stage/stderr.log" \
+  --env "AKITTY_NATIVE_PROBE_SCENES=${AKITTY_NATIVE_PROBE_SCENES:-}" \
+  --env "AKITTY_NATIVE_PROBE_PROFILE=${AKITTY_NATIVE_PROBE_PROFILE:-}" \
   --env "AKITTY_NATIVE_PROBE_NODE=$native_node" --env "AKITTY_NATIVE_PROBE_SAMPLES=${2:-60}" --env "AKITTY_NATIVE_PROBE_OUTPUT=$output" "$app"
 cat "$stage/stdout.log" "$stage/stderr.log" >&2
 [[ -f $output ]] || { echo 'Probe returned without a measurement.' >&2; exit 1; }
