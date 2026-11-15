@@ -141,7 +141,7 @@ export class Terminal implements ITerminalCore {
   private config(): TerminalConfig {
     const theme = { ...DEFAULT_THEME, ...this.options.theme };
     return { scrollbackLimit: Number.isFinite(this.options.scrollback) ? clamp(Math.floor(this.options.scrollback), 0, 100000) : 0,
-      fgColor: color(theme.foreground), bgColor: color(this.options.theme.background) ?? 0, cursorColor: color(theme.cursor),
+      fgColor: color(theme.foreground), bgColor: color(theme.background), cursorColor: color(theme.cursor),
       palette: themeKeys.map(key => color(theme[key]) ?? 0) };
   }
   private handleOptionChange(key: keyof ITerminalOptions): void {

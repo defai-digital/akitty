@@ -2249,7 +2249,6 @@ describe('Buffer Access API', () => {
 
     term.open(container!);
 
-    // Write to main screen (default background = black)
     term.write('MAIN\r\n');
     term.wasmTerm?.update();
     term.wasmTerm?.markClean();
@@ -2276,14 +2275,12 @@ describe('Buffer Access API', () => {
     term.write('\x1b[?1049l');
     term.wasmTerm?.update();
 
-    // CRITICAL: Background colors must be restored to main screen values (black)
     const restoredViewport = term.wasmTerm?.getViewport();
     const firstCell = restoredViewport![0];
 
-    // Main screen cells should have default background (0, 0, 0 = black)
-    expect(firstCell.bg_r).toBe(0);
-    expect(firstCell.bg_g).toBe(0);
-    expect(firstCell.bg_b).toBe(0);
+    expect(firstCell.bg_r).toBe(30);
+    expect(firstCell.bg_g).toBe(30);
+    expect(firstCell.bg_b).toBe(30);
 
     // Verify text is also restored
     expect(String.fromCodePoint(firstCell.codepoint)).toBe('M');
@@ -2438,9 +2435,8 @@ describe('Terminal Config', () => {
       // Should still work and have reasonable defaults
       const colors = term.wasmTerm!.getColors();
 
-      // Default colors should be set (light gray foreground, black background)
-      expect(colors.foreground).toBeDefined();
-      expect(colors.background).toBeDefined();
+      expect(colors.foreground).toEqual({ r: 212, g: 212, b: 212 });
+      expect(colors.background).toEqual({ r: 30, g: 30, b: 30 });
     } finally {
       term.dispose();
     }
