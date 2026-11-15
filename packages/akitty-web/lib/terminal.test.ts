@@ -656,6 +656,19 @@ describe('Terminal', () => {
       term.dispose();
     });
 
+    test('synchronized output expiry invalidates cached links', async () => {
+      const term = await createIsolatedTerminal();
+      term.open(container!);
+      term.write('\x1b[?2026hhttps://example.com/docs');
+      const detector = (term as any).linkDetector;
+      const row = viewportRowToAbsolute(term, 0);
+      await expect(detector.getLinkAt(0, row)).resolves.toBeUndefined();
+      await new Promise(resolve => setTimeout(resolve, 220));
+      const link = await detector.getLinkAt(0, row);
+      expect(link?.text).toBe('https://example.com/docs');
+      term.dispose();
+    });
+
     test('clear() cancels a pending OSC so a later BEL rings instead of setting the title', async () => {
       const term = await createIsolatedTerminal();
       term.open(container!);

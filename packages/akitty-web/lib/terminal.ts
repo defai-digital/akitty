@@ -1,5 +1,5 @@
 /** Browser lifecycle and host policy around the shared AkiTTY terminal engine. */
-import { AkittyEngine, AkittyTerminal } from './engine';
+import { AkittyEngine, AkittyTerminal, DirtyState } from './engine';
 import type { EngineEvent } from './engine';
 import { getEngine } from './runtime';
 import { BufferNamespace } from './buffer';
@@ -273,9 +273,12 @@ export class Terminal implements ITerminalCore {
   /** Flush held output (synchronized-update expiry or a render tick) without losing a reader's scroll position. */
   private updateAndPreserve(terminal: AkittyTerminal): boolean {
     const viewport = this.captureViewport(terminal);
-    terminal.update();
+    const dirty = terminal.update();
     // A tick can fire title/bell events, and their listeners can reset or dispose the terminal.
     if (this.isDisposed || this.wasmTerm !== terminal) return false;
+    // A synchronized-update expiry flushes held output, so cached links for those rows are
+    // stale. Skip clean frames to avoid discarding the detector cache on every render tick.
+    if (dirty !== DirtyState.NONE) this.linkDetector?.invalidateCache();
     this.processTerminalResponses();
     if (this.isDisposed || this.wasmTerm !== terminal) return false;
     this.preserveViewportOnOutput(terminal, viewport);

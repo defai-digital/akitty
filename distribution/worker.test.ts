@@ -31,9 +31,12 @@ test("ranges reject malformed and unsatisfiable input", () => {
 test("valid multi-range headers are ignored so the full representation is served", () => {
   // This gateway omits multipart/byteranges, so a well-formed range set with more
   // than one range is ignored (`undefined`) rather than answered 416.
-  for (const range of ["bytes=0-1,4-5", "bytes=0-1,3-4", "BYTES=0-1,3-4", "bytes=0-1, 4-5", "bytes=-3,8-", "bytes=0-1,999-"]) assert.equal(rangeFor(range, 10), undefined)
+  for (const range of ["bytes=0-1,4-5", "bytes=0-1,3-4", "BYTES=0-1,3-4", "bytes=0-1, 4-5", "bytes=-3,8-", "bytes=0-1,999-", "bytes=0-1,,4-5"]) assert.equal(rangeFor(range, 10), undefined)
+  // RFC 9110 §5.6.1.2 requires recipients to ignore empty list elements.
+  assert.deepEqual(rangeFor("bytes=,0-1,", 10), { offset: 0, length: 2 })
+  assert.equal(rangeFor("bytes=,", 10), null)
   // A malformed member still fails the whole range set closed.
-  for (const range of ["bytes=0-1,4-2", "bytes=0-1,", "bytes=0-1,-", "bytes=0-1,abc", "bytes=0-1,,4-5", "bytes=,0-1"]) assert.equal(rangeFor(range, 10), null)
+  for (const range of ["bytes=0-1,4-2", "bytes=0-1,-", "bytes=0-1,abc"]) assert.equal(rangeFor(range, 10), null)
 })
 test("range units are case-insensitive and unsupported units are ignored", () => {
   for (const unit of ["Bytes", "BYTES", "bYtEs"]) assert.deepEqual(rangeFor(`${unit}=1-3`, 10), { offset: 1, length: 3 })
@@ -66,6 +69,8 @@ test("If-None-Match uses the RFC weak comparison function", () => {
   assert.equal(ifNoneMatch('"other", W/"id"', '"id"'), true)
   assert.equal(ifNoneMatch('W/"other", "id"', '"id"'), true)
   assert.equal(ifNoneMatch('"a,b"', '"a,b"'), true) // commas may occur inside an opaque-tag
+  assert.equal(ifNoneMatch(',"id",', '"id"'), true) // empty list elements are ignored
+  assert.equal(ifNoneMatch('"other",,"id",', '"id"'), true)
   assert.equal(ifNoneMatch('"other"', '"id"'), false)
   assert.equal(ifNoneMatch('W/"other", W/"third"', '"id"'), false)
   assert.equal(ifNoneMatch('"id', '"id"'), false) // malformed unterminated tag
@@ -77,6 +82,8 @@ test("If-Match uses the RFC strong comparison function", () => {
   assert.equal(ifMatch("*", '"id"'), true) // wildcard matches any current representation
   assert.equal(ifMatch("  *  ", '"id"'), true)
   assert.equal(ifMatch('"id"', '"id"'), true)
+  assert.equal(ifMatch(',"id",', '"id"'), true) // empty list elements are ignored
+  assert.equal(ifMatch('"other",,"id",', '"id"'), true)
   assert.equal(ifMatch('"other", "id"', '"id"'), true) // list hits on a strong tag
   assert.equal(ifMatch('W/"other", "id"', '"id"'), true) // weak siblings do not poison a strong hit
   assert.equal(ifMatch('"a,b"', '"a,b"'), true) // commas may occur inside an opaque-tag
@@ -211,7 +218,7 @@ test("malformed and unsatisfiable byte ranges stay 416 at the endpoint", async (
   const url = "https://download.automatosx.com/akitty/releases/download/v0.6.0/AkiTTY-0.6.0-macOS-arm64.zip"
   let seen: GetOptions | null = null
   const env: Env = { RELEASES: { head: async () => metadata, get: async (_key, options) => { seen = options ?? null; return { body: "abc" } } } }
-  for (const value of ["bytes=3-", "bytes=4-2", "bytes=-", "bytes=0-1,", "bytes=0-1,abc", "bytes=-0", "bytes=abc-def", "Bytes=9-"]) {
+  for (const value of ["bytes=3-", "bytes=4-2", "bytes=-", "bytes=0-1,abc", "bytes=-0", "bytes=abc-def", "Bytes=9-"]) {
     seen = null
     const response = await worker.fetch(new Request(url, { headers: { Range: value } }), env)
     assert.equal(response.status, 416, `Range: ${value}`)

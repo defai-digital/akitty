@@ -39,11 +39,14 @@ export function rangeFor(header: string, size: number): RangeDecision {
   // named bytes but its range set was malformed or unsatisfiable (416).
   if (separator < 0 || value.slice(0, separator).trim().toLowerCase() !== "bytes") return undefined
   const rangeSpec = /^(\d*)-(\d*)$/
-  const specs = value.slice(separator + 1).split(",").map(part => part.trim())
+  // RFC 9110 §5.6.1.2: recipients must ignore a reasonable number of empty list
+  // elements, so `bytes=,0-1,` is one range and `bytes=0-1,,` is still just one.
+  const specs = value.slice(separator + 1).split(",").map(part => part.trim()).filter(part => part.length > 0)
   // RFC 9110 §14.1.1 allows a comma-separated range set. This gateway does not
   // implement multipart/byteranges, so a syntactically valid multi-range is
   // ignored (`undefined` -> full 200) instead of answered 416. A malformed set
-  // (e.g. an empty or non-numeric member) still fails closed.
+  // (e.g. a non-numeric member) still fails closed, and a set with no members
+  // left after dropping empties is malformed (`null` -> 416).
   if (specs.length > 1) return specs.every(part => {
     const match = rangeSpec.exec(part)
     if (!match) return false
@@ -63,6 +66,8 @@ export function rangeFor(header: string, size: number): RangeDecision {
 }
 // Quote-aware entity-tag list parser shared by both conditional headers.
 // Commas may occur inside an opaque-tag, so the list cannot be split on `,`.
+// RFC 9110 §5.6.1.2 also requires reasonable empty list elements (leading,
+// trailing or consecutive commas) to be ignored rather than rejecting the field.
 // Returns null for a malformed field, `{ wildcard: true }` for `*`, and one
 // entry per entity-tag with its weakness preserved (RFC 9110 §8.8.3).
 type EntityTag = Readonly<{ weak: boolean; tag: string }>;
@@ -75,16 +80,19 @@ function entityTags(header: string): EntityTags | null {
   const tags: EntityTag[] = []
   let remaining = list
   while (remaining) {
+    // Skip any empty elements left by leading, trailing or consecutive commas.
+    remaining = remaining.replace(/^[\s,]+/, "")
+    if (!remaining) break
     const match = /^(W\/)?("[\x21\x23-\x7e\x80-\xff]*")/.exec(remaining)
     if (!match) return null
     const [, weak, tag] = match
     if (tag === undefined) return null
     tags.push({ weak: Boolean(weak), tag })
-    remaining = remaining.slice(match[0].length).trim()
-    if (!remaining) break
-    if (!remaining.startsWith(",")) return null
-    remaining = remaining.slice(1).trim()
-    if (!remaining) return null
+    // After a tag the next non-space character must be the list separator or the end.
+    const tail = remaining.slice(match[0].length).trimStart()
+    if (!tail) break
+    if (!tail.startsWith(",")) return null
+    remaining = tail
   }
   return { wildcard: false, tags }
 }
