@@ -16,6 +16,8 @@ import type { IBufferRange, IDisposable, IEvent, IKeyEvent, ITerminalAddon, ITer
 import type { ILink, ILinkProvider, TerminalCell, TerminalConfig } from './types';
 
 type Listener = [EventTarget, string, EventListener, AddEventListenerOptions | boolean | undefined];
+/** Scroll offsets captured before a write/update, with row anchors that survive index shifts. */
+interface ViewportAnchors { history: number; viewportY: number; targetViewportY: number; viewportAnchor: bigint | undefined; targetAnchor: bigint | undefined; }
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const timestamp = (): number => typeof performance === 'undefined' ? Date.now() : performance.now();
 const themeKeys: (keyof ITheme)[] = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
@@ -248,7 +250,7 @@ export class Terminal implements ITerminalCore {
         data = new Uint8Array(output);
       }
     }
-    const terminal = this.wasmTerm!, alternate = terminal.isAlternateScreen();
+    const terminal = this.wasmTerm!, alternate = terminal.isAlternateScreen(), viewport = this.captureViewport(terminal);
     terminal.write(data, this.engineEvent);
     // Each event boundary can reset or dispose the terminal. An old write must
     // never publish buffer changes, replies or viewport updates for its replacement.
@@ -258,7 +260,43 @@ export class Terminal implements ITerminalCore {
     if (this.isDisposed || this.wasmTerm !== terminal) return;
     this.processTerminalResponses();
     if (this.isDisposed || this.wasmTerm !== terminal) return;
-    this.scheduleSync(); this.linkDetector?.invalidateCache(); this.scrollToBottom();
+    this.scheduleSync(); this.linkDetector?.invalidateCache();
+    this.preserveViewportOnOutput(terminal, viewport);
+  }
+  /** Capture scroll offsets plus row anchors before output can shift either. */
+  private captureViewport(terminal: AkittyTerminal): ViewportAnchors {
+    const viewportY = this.viewportY, targetViewportY = this.targetViewportY;
+    // Row ids locate the same content after a write, even when a full scrollback keeps its length.
+    const anchor = (offset: number): bigint | undefined => Math.floor(offset) === 0 ? undefined : terminal.getRowId(-Math.floor(offset));
+    return { history: terminal.getScrollbackLength(), viewportY, targetViewportY, viewportAnchor: anchor(viewportY), targetAnchor: anchor(targetViewportY) };
+  }
+  /** Flush held output (synchronized-update expiry or a render tick) without losing a reader's scroll position. */
+  private updateAndPreserve(terminal: AkittyTerminal): boolean {
+    const viewport = this.captureViewport(terminal);
+    terminal.update();
+    // A tick can fire title/bell events, and their listeners can reset or dispose the terminal.
+    if (this.isDisposed || this.wasmTerm !== terminal) return false;
+    this.processTerminalResponses();
+    if (this.isDisposed || this.wasmTerm !== terminal) return false;
+    this.preserveViewportOnOutput(terminal, viewport);
+    return true;
+  }
+  /** New output shifts every bottom-relative offset, so a reader scrolled up must move with it.
+   *  Row anchors follow the same content past eviction, offset 0 tracks the live bottom and stays put,
+   *  and an evicted anchor falls back to shifting the current offset by the history delta. */
+  private preserveViewportOnOutput(terminal: AkittyTerminal, viewport: ViewportAnchors): void {
+    const scrollback = terminal.getScrollbackLength(), delta = scrollback - viewport.history;
+    const place = (current: number, captured: number, rowId: bigint | undefined): number => {
+      if (current === 0) return 0;
+      const absolute = rowId === undefined ? undefined : terminal.findRow(rowId);
+      // A retained anchor resolves to the same content exactly once. Re-resolving it (rather than
+      // shifting current) keeps a nested write from applying the same new row a second time.
+      if (absolute !== undefined) return clamp(scrollback - absolute + (captured - Math.floor(captured)), 0, scrollback);
+      // The anchor was evicted or never captured: shift the offset the host last chose.
+      return clamp(current + delta, 0, scrollback);
+    };
+    this.targetViewportY = place(this.targetViewportY, viewport.targetViewportY, viewport.targetAnchor);
+    this.setViewport(place(this.viewportY, viewport.viewportY, viewport.viewportAnchor));
   }
   private readonly engineEvent = (event: EngineEvent): void => {
     if (event.type === 'title') this.applyTitle(event.title);
@@ -274,7 +312,8 @@ export class Terminal implements ITerminalCore {
     this.syncTimer = setTimeout(() => {
       this.syncTimer = undefined;
       if (!this.isOpen || this.isDisposed) return;
-      this.wasmTerm?.update(); this.processTerminalResponses(); this.scheduleSync();
+      const terminal = this.wasmTerm; if (terminal) this.updateAndPreserve(terminal);
+      this.scheduleSync();
     }, Math.max(0, deadline - timestamp()));
   }
   writeln(data: string | Uint8Array, callback?: () => void): void {
@@ -560,13 +599,14 @@ export class Terminal implements ITerminalCore {
       this.animationFrameId = undefined;
       if (!this.isOpen || this.isDisposed || !this.onScreen) return;
       try {
-        this.wasmTerm!.update(); this.processTerminalResponses();
-        const painted = this.renderer!.render(this.wasmTerm!, this.renderFailed || this.redrawOnShow, this.viewportY, this, this.scrollbarOpacity);
-        const cursor = this.wasmTerm!.getCursor();
-        if (cursor.x !== this.lastCursor.x || cursor.y !== this.lastCursor.y) { this.lastCursor = cursor; this.cursorMoveEmitter.fire(); }
-        this.renderFailed = false; this.redrawOnShow = false;
-        // Only painted frames are announced, so idle frames cost nothing.
-        if (painted) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
+        if (this.updateAndPreserve(this.wasmTerm!)) {
+          const painted = this.renderer!.render(this.wasmTerm!, this.renderFailed || this.redrawOnShow, this.viewportY, this, this.scrollbarOpacity);
+          const cursor = this.wasmTerm!.getCursor();
+          if (cursor.x !== this.lastCursor.x || cursor.y !== this.lastCursor.y) { this.lastCursor = cursor; this.cursorMoveEmitter.fire(); }
+          this.renderFailed = false; this.redrawOnShow = false;
+          // Only painted frames are announced, so idle frames cost nothing.
+          if (painted) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
+        }
       } catch (error) { if (!this.renderFailed) console.error('akitty-web: render failed, retrying next frame', error); this.renderFailed = true; }
       if (this.isOpen && !this.isDisposed && this.onScreen) this.animationFrameId = requestAnimationFrame(frame);
     };

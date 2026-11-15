@@ -885,6 +885,80 @@ describe('Terminal', () => {
       } finally { term.dispose(); }
     });
 
+    test('new output preserves scrolled content and the smooth-scroll target', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
+      term.open(container);
+      const topText = () => term.buffer.active.getLine(term.buffer.active.baseY - Math.floor(term.getViewportY()))!.translateToString(true);
+      try {
+        term.write('line\r\n'.repeat(40));
+        term.scrollLines(-10);
+        (term as any).smoothScrollTo(30);
+        const viewport = term.getViewportY(), target = (term as any).targetViewportY, top = topText();
+        term.write('new output\r\n');
+        expect(term.getViewportY()).toBeCloseTo(viewport + 1);
+        expect((term as any).targetViewportY).toBe(target + 1);
+        expect((term as any).scrollAnimationFrame).toBeDefined();
+        expect(topText()).toBe(top);
+        (term as any).smoothScrollTo(0);
+        const descendingViewport = term.getViewportY(), descendingTop = topText();
+        term.write('still following\r\n');
+        expect(term.getViewportY()).toBeCloseTo(descendingViewport + 1);
+        expect((term as any).targetViewportY).toBe(0);
+        expect(topText()).toBe(descendingTop);
+        term.scrollToBottom();
+        term.write('bottom\r\n');
+        expect(term.getViewportY()).toBe(0);
+      } finally { term.dispose(); }
+    });
+
+    test('new output preserves scrolled content when scrollback is full', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, scrollback: 10, smoothScrollDuration: 100 });
+      term.open(container);
+      const topText = () => term.buffer.active.getLine(term.buffer.active.baseY - Math.floor(term.getViewportY()))!.translateToString(true);
+      try {
+        term.write('line\r\n'.repeat(40));
+        term.scrollLines(-5);
+        (term as any).smoothScrollTo(8);
+        const viewport = term.getViewportY(), target = (term as any).targetViewportY, top = topText();
+        expect(term.getScrollbackLength()).toBe(10);
+        term.write('new output\r\n');
+        expect(term.getScrollbackLength()).toBe(10);
+        expect(term.getViewportY()).toBeCloseTo(viewport + 1);
+        expect((term as any).targetViewportY).toBe(target + 1);
+        expect(topText()).toBe(top);
+      } finally { term.dispose(); }
+    });
+
+    test('nested writes preserve scrolled content exactly once per new row', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3 });
+      term.open(container);
+      const topText = () => term.buffer.active.getLine(term.buffer.active.baseY - Math.floor(term.getViewportY()))!.translateToString(true);
+      try {
+        term.write('line\r\n'.repeat(20));
+        term.scrollLines(-5);
+        term.onTitleChange(title => { if (title === 'outer') term.write('nested\r\n'); });
+        const viewport = term.getViewportY(), top = topText();
+        term.write('\x1b]2;outer\x07outer\r\n');
+        expect(term.getViewportY()).toBe(viewport + 2);
+        expect(topText()).toBe(top);
+      } finally { term.dispose(); }
+    });
+
+    test('synchronized output expiry preserves scrolled content', async () => {
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3 });
+      term.open(container);
+      const topText = () => term.buffer.active.getLine(term.buffer.active.baseY - Math.floor(term.getViewportY()))!.translateToString(true);
+      try {
+        term.write('line\r\n'.repeat(20));
+        term.scrollLines(-5);
+        const viewport = term.getViewportY(), top = topText();
+        term.write('\x1b[?2026hnew output\r\n');
+        await new Promise(resolve => setTimeout(resolve, 220));
+        expect(term.getViewportY()).toBe(viewport + 1);
+        expect(topText()).toBe(top);
+      } finally { term.dispose(); }
+    });
+
     test('quick wheel ticks during a smooth scroll add up instead of losing distance', async () => {
       const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
       term.open(container);
