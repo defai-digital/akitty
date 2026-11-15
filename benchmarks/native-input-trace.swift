@@ -18,9 +18,13 @@ struct NativeInputTrace {
     private var gpu: [Completion] = [], presentations: [Completion] = []
     private(set) var invalidGPU = 0, invalidPresentation = 0, overflowBeforeTarget = 0
 
-    mutating func begin(base: UInt64, time: Double) {
-        precondition(samples.count < 128 && time.isFinite && time > 0)
+    @discardableResult mutating func begin(base: UInt64, time: Double) -> Bool {
+        // The driver submits its next input only after GPU completion identifies
+        // the current target. Older presentations may remain pending independently.
+        guard samples.count < 128, time.isFinite, time > 0,
+              samples.last == nil || samples.last?.gpu != nil else { return false }
         samples.append(Sample(base: base, start: time))
+        return true
     }
     mutating func identify(revision: UInt64) {
         guard let index = samples.indices.last, samples[index].target == nil, revision > samples[index].base else { return }

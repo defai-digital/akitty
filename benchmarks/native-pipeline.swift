@@ -135,7 +135,9 @@ import CryptoKit
                 if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
                 let marker = condition.hasSuffix("scroll") ? nil : String(format: "NATIVE_FRAME_%04d", i)
                 trace.marker = marker
-                trace.inputs.begin(base: foreground.snapshot?.revision ?? 0, time: CACurrentMediaTime())
+                guard trace.inputs.begin(base: foreground.snapshot?.revision ?? 0, time: CACurrentMediaTime()) else {
+                    throw AkittyError.core("native input trace requires serialized GPU-completed submissions")
+                }
                 // Echo is disabled and awk emits complete lines only, so the marker
                 // cannot satisfy the target before Enter submits the input line.
                 if let marker { foreground.send(marker) }
