@@ -371,7 +371,7 @@ An unsuccessful candidate is discarded rather than expanding into a renderer
 rewrite. After correctness gates and an implementation commit, alternating
 committed-baseline/candidate runs determine the accepted result.
 
-### Unicode scroll prototype and correctness qualification
+### Rejected Unicode scroll experiment
 
 Fresh four-second sample captures on the instrumented baseline found raster
 self-weight estimates of 28.4% (Unicode scroll) and 32.1% (Unicode burst) among
@@ -382,7 +382,7 @@ fractions. Profiled runs are excluded from performance comparisons.
 
 The first placement-phase-only prototype failed 14 pixel comparisons for Menlo
 17.25 pt at 3x. Rejecting scaled glyph reuse fixed those mismatches but made the
-mixed-emoji row path entirely conservative. The revised bounded prototype moves
+mixed-emoji row path entirely conservative. The revised, subsequently rejected prototype moved
 retained bitmap rows and redraws unsafe glyphs inside their existing cell clips,
 provided those clip edges are whole device pixels. It reuses an unscaled cached
 line only when source/destination placement has identical scale/x and an exact
@@ -416,3 +416,57 @@ GPU completion identifies its target, while earlier presentations can remain
 pending; overlapping submission rejection and stale-history eviction have
 explicit regressions. External CLI advice is independently checked against the
 unchanged full-grid damage and per-glyph clipping paths.
+
+### Committed-candidate evaluation and rejection
+
+The instrumented baseline is `a29537a`; the experimental implementation is
+`7a89fe893d85897b2011e426550aa401fecb864f`. Six alternating runs used frozen
+release probes, the same Rust sources, harness, geometry and dependencies, with
+three runs per version, six scenes and 60 inputs per scene/run. All 2,160 inputs
+had valid GPU and presentation samples. CPU values are medians of three process
+user/system CPU percentages; presentation quantiles pool 180 samples per
+scene/version. No sampler, build or test ran during timed comparisons.
+
+| Scene | CPU baseline | Candidate | CPU change | Presentation p95 baseline | Candidate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Single typing | 15.37% | 14.73% | -4.2% | 38.05 ms | 37.84 ms |
+| ASCII streams + typing | 39.81% | 39.35% | -1.2% | 32.29 ms | 31.71 ms |
+| Unicode streams + typing | 47.22% | 49.74% | +5.3% | 31.01 ms | 31.58 ms |
+| Unicode streams + scroll | 48.06% | 49.08% | +2.1% | 31.58 ms | 33.76 ms |
+| ASCII burst + typing | 49.17% | 48.68% | -1.0% | 31.54 ms | 32.65 ms |
+| Unicode burst + typing | 46.05% | 53.25% | +15.6% | 30.97 ms | 32.80 ms |
+
+The candidate failed both declared acceptance routes. No target scene reached a
+15% CPU reduction; presentation p95 did not improve. Unicode scroll/burst tails
+also regressed. Single/ASCII control movement is not evidence of a Unicode win.
+The one-batch preflight's apparent 0-9% CPU reductions and shorter burst tail did
+not hold in the committed-candidate comparison. The results do not identify a
+single causal mechanism for the extra cost; eligibility scans, merged-cell
+work and complex clip regions add work that component raster counts alone do
+not capture. These remain hypotheses, not a second optimization plan.
+
+The renderer experiment was reverted. The native refresh policy and renderer
+therefore retain their baseline behavior. The benchmark-only independent
+GPU/presentation correlation, burst scenes, overlap/overflow regressions and
+expanded Unicode pixel-equivalence tests remain. The latter intentionally do
+not require the rejected Unicode reuse branch: they protect the conservative
+fallback and can reject future unsafe changes. No additional GPU, cell-layout,
+VT or polling optimization follows in this pass.
+
+[The evaluation record](../benchmarks/results/native-scroll-rejected-2026-11-14.json)
+retains all critical latency samples, per-run CPU windows, phase quantiles,
+geometry, source/binary fingerprints, approximate profile summaries and hashes
+of full local raw files. Presentation is a drawable timestamp for a target or
+later revision, not physical key-to-photon time. Process CPU excludes producer
+children and WindowServer; no energy or full-app Ghostty parity claim is made.
+
+Both the experimental and restored trees passed the full local canonical gate:
+391 Swift tests, three opt-in skips and no failures, plus the standalone trace
+regressions and Rust/ABI/WASM/TypeScript/release-tooling checks. Chromium and
+WebKit passed. The existing Firefox profile-folder startup failure caused its
+configured local skip; fresh CI Firefox qualification remains outstanding.
+Experimental debug and clean committed release app builds, startup and signature
+checks passed, as did the real four-PTY/two-tab `TerminalWindow` smoke. Final app
+build/startup qualification follows the restoration commit. No release or
+notarization was performed. Grok, agy, Muse and Kimi supplied substantive scoped
+close-out reviews supporting rejection; their advice is not test evidence.

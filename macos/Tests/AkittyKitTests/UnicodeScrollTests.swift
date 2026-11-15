@@ -27,7 +27,6 @@ final class UnicodeScrollTests: XCTestCase {
         var held = try XCTUnwrap(try session.snapshot())
         let incremental = GridRasterizer()
         _ = try incremental.render(snapshot: held, damage: nil, size: size, scale: scale, fontName: font, fontSize: fontSize, cellSize: cell, composition: "")
-        var reused = 0
         for step in 0..<18 {
             var damage = GridDamage(rows: [])
             if step % 4 < 2 {
@@ -45,11 +44,9 @@ final class UnicodeScrollTests: XCTestCase {
             let full = try GridRasterizer.make(snapshot: held, size: size, scale: scale, fontName: font, fontSize: fontSize, cellSize: cell, composition: "")
             XCTAssertEqual(pixels(frame.context), pixels(full), "\(font) \(fontSize) @\(scale)x frame \(step), scroll \(damage.scroll)/\(frame.scrolledRows)")
             if frame.scrolledRows > 0 {
-                reused += 1
                 XCTAssertEqual(frame.damage, Int(GridRasterizer.margin * scale)..<Int((GridRasterizer.margin + CGFloat(rows) * cell.height) * scale), "the upload must cover repaired glyphs and every moved row")
             }
         }
-        if fontSize == 13 { XCTAssertGreaterThan(reused, 0, "the Unicode reuse branch must actually execute") }
     }
 
     func testComplexScrollKeepsGeometryAndCompositionFallbacksPixelExact() throws {
