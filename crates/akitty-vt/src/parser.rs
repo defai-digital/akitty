@@ -199,6 +199,11 @@ impl Parser {
                 0x9f => self.begin(State::String(StringKind::Apc)),
                 0x9e => self.begin(State::String(StringKind::Pm)),
                 0x98 => self.begin(State::String(StringKind::Sos)),
+                // UTF-8 continuation bytes have already been consumed above.
+                // Standalone C1 controls share the existing seven-bit ESC handlers.
+                0x84 | 0x85 | 0x88 | 0x8d | 0x8e | 0x8f | 0x9a => emit(Input::Action(Action::Escape {
+                    intermediates: Vec::new(), final_byte: byte - 0x40,
+                })),
                 0x00..=0x1f => emit(Input::Action(Action::Control(byte))),
                 0x20..=0x7e => emit(Input::Action(Action::Print(char::from(byte)))),
                 0x7f..=0x9f => {}
@@ -373,6 +378,24 @@ mod tests {
             parser.feed(bytes, |a| actions.push(a));
         }
         actions
+    }
+
+    #[test]
+    fn eight_bit_cursor_controls_match_their_escape_forms() {
+        for (byte, final_byte) in [(0x84, b'D'), (0x85, b'E'), (0x88, b'H'),
+                                  (0x8d, b'M'), (0x8e, b'N'), (0x8f, b'O'), (0x9a, b'Z')] {
+            assert_eq!(parse(&[&[byte]]), parse(&[&[0x1b, final_byte]]), "control {byte:#x}");
+        }
+    }
+
+    #[test]
+    fn utf8_continuations_that_look_like_c1_controls_remain_text() {
+        let text = "ĄąĈčĎďĚ";
+        let expected: Vec<_> = text.chars().map(Action::Print).collect();
+        for split in 0..=text.len() {
+            let bytes = text.as_bytes();
+            assert_eq!(parse(&[&bytes[..split], &bytes[split..]]), expected);
+        }
     }
 
     #[test]

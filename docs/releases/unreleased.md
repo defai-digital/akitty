@@ -1,3 +1,3 @@
 # Unreleased changes
 
-No changes since AkiTTY 1.3.29.
+No changes since AkiTTY 1.3.30.

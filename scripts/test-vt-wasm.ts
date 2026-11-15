@@ -32,6 +32,7 @@ type WasmApi = {
 type Fixture = {
   readonly name: string;
   readonly input: string;
+  readonly input_bytes?: readonly number[];
   readonly cols: number;
   readonly rows: number;
   readonly history_limit: number;
@@ -129,7 +130,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const scratch = api.akitty_vt_alloc(length);
 for (const fixture of fixtures) {
-  const bytes = encoder.encode(fixture.input);
+  const bytes = fixture.input_bytes ? Uint8Array.from(fixture.input_bytes) : encoder.encode(fixture.input);
   for (let split = 0; split <= bytes.length; split++) {
     const terminal = api.akitty_vt_create(fixture.cols, fixture.rows, fixture.history_limit);
     assert.ok(terminal);

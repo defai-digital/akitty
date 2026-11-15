@@ -7,7 +7,11 @@ use serde_json::Value;
 fn shared_protocol_contracts() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!("fixtures/streams.json")).unwrap();
     for fixture in fixtures {
-        let input = fixture["input"].as_str().unwrap().as_bytes();
+        let input = if let Some(bytes) = fixture["input_bytes"].as_array() {
+            bytes.iter().map(|b| u8::try_from(b.as_u64().unwrap()).unwrap()).collect::<Vec<_>>()
+        } else {
+            fixture["input"].as_str().unwrap().as_bytes().to_vec()
+        };
         for split in 0..=input.len() {
             let mut term = Terminal::new(
                 fixture["cols"].as_u64().unwrap() as usize,

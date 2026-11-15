@@ -651,5 +651,156 @@
     ],
     "history": 0,
     "replies": "\u001bP1$r0m\u001b\\"
+  },
+  {
+    "name": "eight-bit index and next line",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "",
+    "input_bytes": [
+      65,
+      132,
+      66,
+      133,
+      67
+    ],
+    "lines": [
+      "A       ",
+      " B      ",
+      "C       "
+    ],
+    "cursor": [
+      1,
+      2
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "eight-bit reverse index",
+    "cols": 8,
+    "rows": 3,
+    "history_limit": 0,
+    "input": "",
+    "input_bytes": [
+      116,
+      111,
+      112,
+      27,
+      91,
+      72,
+      141,
+      82
+    ],
+    "lines": [
+      "R       ",
+      "top     ",
+      "        "
+    ],
+    "cursor": [
+      1,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "eight-bit tab stop",
+    "cols": 12,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "",
+    "input_bytes": [
+      27,
+      91,
+      51,
+      103,
+      97,
+      98,
+      99,
+      136,
+      13,
+      9,
+      88
+    ],
+    "lines": [
+      "abcX        ",
+      "            "
+    ],
+    "cursor": [
+      4,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "eight-bit single shifts",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "",
+    "input_bytes": [
+      27,
+      42,
+      48,
+      27,
+      43,
+      48,
+      142,
+      113,
+      97,
+      143,
+      113,
+      66
+    ],
+    "lines": [
+      "─a─B    ",
+      "        "
+    ],
+    "cursor": [
+      4,
+      0
+    ],
+    "history": 0,
+    "replies": ""
+  },
+  {
+    "name": "eight-bit terminal identification",
+    "cols": 8,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "",
+    "input_bytes": [
+      154
+    ],
+    "lines": [
+      "        ",
+      "        "
+    ],
+    "cursor": [
+      0,
+      0
+    ],
+    "history": 0,
+    "replies": "\u001b[?62;22c"
+  },
+  {
+    "name": "UTF8 continuations resembling C1 controls remain text",
+    "cols": 12,
+    "rows": 2,
+    "history_limit": 0,
+    "input": "ĄąĈčĎďĚ",
+    "lines": [
+      "ĄąĈčĎďĚ     ",
+      "            "
+    ],
+    "cursor": [
+      7,
+      0
+    ],
+    "history": 0,
+    "replies": ""
   }
 ]
