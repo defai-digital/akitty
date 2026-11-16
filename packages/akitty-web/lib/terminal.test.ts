@@ -972,6 +972,27 @@ describe('Terminal', () => {
       });
     }
 
+    for (const smooth of [false, true]) {
+      test(`callback scrolling stays anchored through later output chunks (smooth=${smooth})`, async () => {
+        const term = await createIsolatedTerminal({ cols: 20, rows: 3, smoothScrollDuration: 100 });
+        term.open(container);
+        let chosenViewport = 0, chosenTarget = 0;
+        try {
+          term.write('line\r\n'.repeat(20));
+          term.scrollLines(-5);
+          term.onTitleChange(title => {
+            if (title !== 'scroll') return;
+            if (smooth) (term as any).smoothScrollTo(8);
+            else term.scrollToTop();
+            chosenViewport = term.getViewportY(); chosenTarget = (term as any).targetViewportY;
+          });
+          term.write('\x1b]2;scroll\x07' + '\0'.repeat(1 << 20) + 'more\r\n');
+          expect(term.getViewportY()).toBeCloseTo(chosenViewport + 1);
+          expect((term as any).targetViewportY).toBe(chosenTarget + 1);
+        } finally { term.dispose(); }
+      });
+    }
+
     test('synchronized output expiry preserves scrolled content', async () => {
       const term = await createIsolatedTerminal({ cols: 20, rows: 3 });
       term.open(container);

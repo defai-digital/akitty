@@ -80,6 +80,7 @@ export class Terminal implements ITerminalCore {
   viewportY = 0;
   private targetViewportY = 0;
   private scrollIntent = 0;
+  private chosenViewport?: ViewportAnchors;
   private alternateWheelRemainder = 0;
   private scrollAnimationFrame?: number;
   private scrollbarAnimationFrame?: number;
@@ -289,8 +290,12 @@ export class Terminal implements ITerminalCore {
    *  Row anchors follow the same content past eviction, offset 0 tracks the live bottom and stays put,
    *  and an evicted anchor falls back to shifting the current offset by the history delta. */
   private preserveViewportOnOutput(terminal: AkittyTerminal, viewport: ViewportAnchors): void {
-    // A callback may deliberately scroll after parsing. Its choice supersedes the old row anchors.
-    if (viewport.scrollIntent !== this.scrollIntent) return;
+    // A callback may deliberately scroll between output chunks. Follow its chosen row anchors
+    // through any remaining output instead of restoring the position from before the callback.
+    if (viewport.scrollIntent !== this.scrollIntent) {
+      if (!this.chosenViewport) return;
+      viewport = this.chosenViewport;
+    }
     const scrollback = terminal.getScrollbackLength(), delta = scrollback - viewport.history;
     const place = (current: number, captured: number, rowId: bigint | undefined): number => {
       if (current === 0) return 0;
@@ -431,6 +436,7 @@ export class Terminal implements ITerminalCore {
     if (this.scrollAnimationFrame !== undefined) { cancelAnimationFrame(this.scrollAnimationFrame); this.scrollAnimationFrame = undefined; }
     this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
     this.setViewport(this.targetViewportY);
+    if (this.wasmTerm) this.chosenViewport = this.captureViewport(this.wasmTerm);
   }
   private setViewport(value: number): void {
     const target = clamp(value, 0, this.getScrollbackLength());
@@ -441,17 +447,19 @@ export class Terminal implements ITerminalCore {
     if (!this.wasmTerm) return;
     this.scrollIntent++;
     this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
-    if (this.options.smoothScrollDuration <= 0 || !this.onScreen) { this.setViewport(this.targetViewportY); return; }
-    if (this.scrollAnimationFrame !== undefined) return;
-    const animate = (): void => {
-      this.scrollAnimationFrame = undefined;
-      if (!this.isOpen || this.isDisposed) return;
-      const distance = this.targetViewportY - this.viewportY;
-      if (!this.onScreen || Math.abs(distance) < 0.01) { this.setViewport(this.targetViewportY); return; }
-      this.setViewport(this.viewportY + distance * clamp(16 / Math.max(1, this.options.smoothScrollDuration), 0.05, 1));
-      this.scrollAnimationFrame = requestAnimationFrame(animate);
-    };
-    animate();
+    if (this.options.smoothScrollDuration <= 0 || !this.onScreen) this.setViewport(this.targetViewportY);
+    else if (this.scrollAnimationFrame === undefined) {
+      const animate = (): void => {
+        this.scrollAnimationFrame = undefined;
+        if (!this.isOpen || this.isDisposed) return;
+        const distance = this.targetViewportY - this.viewportY;
+        if (!this.onScreen || Math.abs(distance) < 0.01) { this.setViewport(this.targetViewportY); return; }
+        this.setViewport(this.viewportY + distance * clamp(16 / Math.max(1, this.options.smoothScrollDuration), 0.05, 1));
+        this.scrollAnimationFrame = requestAnimationFrame(animate);
+      };
+      animate();
+    }
+    if (this.wasmTerm) this.chosenViewport = this.captureViewport(this.wasmTerm);
   }
   private showScrollbar(): void {
     if (this.isDisposed) return;
