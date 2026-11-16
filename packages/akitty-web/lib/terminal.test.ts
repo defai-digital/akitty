@@ -957,6 +957,21 @@ describe('Terminal', () => {
       } finally { term.dispose(); }
     });
 
+    for (const synchronized of [false, true]) {
+      test(`an output callback can choose a new scroll position (synchronized=${synchronized})`, async () => {
+        const term = await createIsolatedTerminal({ cols: 20, rows: 3 });
+        term.open(container);
+        try {
+          term.write('line\r\n'.repeat(20));
+          term.scrollLines(-5);
+          term.onTitleChange(title => { if (title === 'scroll') term.scrollLines(-3); });
+          term.write(`${synchronized ? '\x1b[?2026h' : ''}\x1b]2;scroll\x07`);
+          if (synchronized) await new Promise(resolve => setTimeout(resolve, 220));
+          expect(term.getViewportY()).toBe(8);
+        } finally { term.dispose(); }
+      });
+    }
+
     test('synchronized output expiry preserves scrolled content', async () => {
       const term = await createIsolatedTerminal({ cols: 20, rows: 3 });
       term.open(container);

@@ -17,7 +17,7 @@ import type { ILink, ILinkProvider, TerminalCell, TerminalConfig } from './types
 
 type Listener = [EventTarget, string, EventListener, AddEventListenerOptions | boolean | undefined];
 /** Scroll offsets captured before a write/update, with row anchors that survive index shifts. */
-interface ViewportAnchors { history: number; viewportY: number; targetViewportY: number; viewportAnchor: bigint | undefined; targetAnchor: bigint | undefined; }
+interface ViewportAnchors { scrollIntent: number; history: number; viewportY: number; targetViewportY: number; viewportAnchor: bigint | undefined; targetAnchor: bigint | undefined; }
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const timestamp = (): number => typeof performance === 'undefined' ? Date.now() : performance.now();
 const themeKeys: (keyof ITheme)[] = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
@@ -79,6 +79,7 @@ export class Terminal implements ITerminalCore {
   private readonly outputQueue = new OutputQueue(bytes => this.writeNow(bytes));
   viewportY = 0;
   private targetViewportY = 0;
+  private scrollIntent = 0;
   private alternateWheelRemainder = 0;
   private scrollAnimationFrame?: number;
   private scrollbarAnimationFrame?: number;
@@ -268,7 +269,7 @@ export class Terminal implements ITerminalCore {
     const viewportY = this.viewportY, targetViewportY = this.targetViewportY;
     // Row ids locate the same content after a write, even when a full scrollback keeps its length.
     const anchor = (offset: number): bigint | undefined => Math.floor(offset) === 0 ? undefined : terminal.getRowId(-Math.floor(offset));
-    return { history: terminal.getScrollbackLength(), viewportY, targetViewportY, viewportAnchor: anchor(viewportY), targetAnchor: anchor(targetViewportY) };
+    return { scrollIntent: this.scrollIntent, history: terminal.getScrollbackLength(), viewportY, targetViewportY, viewportAnchor: anchor(viewportY), targetAnchor: anchor(targetViewportY) };
   }
   /** Flush held output (synchronized-update expiry or a render tick) without losing a reader's scroll position. */
   private updateAndPreserve(terminal: AkittyTerminal): boolean {
@@ -288,6 +289,8 @@ export class Terminal implements ITerminalCore {
    *  Row anchors follow the same content past eviction, offset 0 tracks the live bottom and stays put,
    *  and an evicted anchor falls back to shifting the current offset by the history delta. */
   private preserveViewportOnOutput(terminal: AkittyTerminal, viewport: ViewportAnchors): void {
+    // A callback may deliberately scroll after parsing. Its choice supersedes the old row anchors.
+    if (viewport.scrollIntent !== this.scrollIntent) return;
     const scrollback = terminal.getScrollbackLength(), delta = scrollback - viewport.history;
     const place = (current: number, captured: number, rowId: bigint | undefined): number => {
       if (current === 0) return 0;
@@ -424,6 +427,7 @@ export class Terminal implements ITerminalCore {
   scrollToLine(line: number): void { if (!Number.isFinite(line)) throw new RangeError('scrollToLine line must be finite'); this.jumpViewport(this.getScrollbackLength() - line); }
   /** A direct scroll replaces any smooth scroll in flight, so the animation cannot pull the viewport back. */
   private jumpViewport(value: number): void {
+    this.scrollIntent++;
     if (this.scrollAnimationFrame !== undefined) { cancelAnimationFrame(this.scrollAnimationFrame); this.scrollAnimationFrame = undefined; }
     this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
     this.setViewport(this.targetViewportY);
@@ -435,6 +439,7 @@ export class Terminal implements ITerminalCore {
   }
   private smoothScrollTo(value: number): void {
     if (!this.wasmTerm) return;
+    this.scrollIntent++;
     this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
     if (this.options.smoothScrollDuration <= 0 || !this.onScreen) { this.setViewport(this.targetViewportY); return; }
     if (this.scrollAnimationFrame !== undefined) return;
