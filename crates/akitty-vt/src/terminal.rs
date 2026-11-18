@@ -923,12 +923,34 @@ impl Terminal {
                 }
             }
         }
-        self.materialize();
         self.write_run_cells(text, pos, cols, template)
     }
     /// One character at a time, for everything the batched prefix cannot take.
     #[allow(clippy::too_many_lines)]
+    #[inline(never)]
     fn write_run_cells(&mut self, text: &str, pos: Position, cols: usize, template: &CellStyle) -> RunWrite {
+        // A pending refill is this row's (see `write_run`), and the line feed that left
+        // it cleared the cluster target. The row reads as blanks, so every cell is a
+        // contained single-column cell and the containment loads are skipped (a stale
+        // cell read anyway would only send the character to `print`, which completes
+        // the refill first). The refill is completed around the written cells. Each
+        // case has its own loop, so neither tests the other's condition per character.
+        if self.blank_pending {
+            debug_assert_eq!(self.screen().pending_row(), Some(pos.row));
+            debug_assert!(self.grapheme_target.is_none());
+            self.blank_pending = false;
+            return self.write_run_cells_with::<true>(text, pos, cols, template);
+        }
+        self.write_run_cells_with::<false>(text, pos, cols, template)
+    }
+    #[inline(always)]
+    fn write_run_cells_with<const PENDING: bool>(
+        &mut self,
+        text: &str,
+        pos: Position,
+        cols: usize,
+        template: &CellStyle,
+    ) -> RunWrite {
         let graphemes = self.modes.grapheme_clusters;
         // Only the cell recorded before the run can hold a cluster to join into.
         let target = self.grapheme_target;
@@ -1006,11 +1028,12 @@ impl Terminal {
             if width == 0 || col + width > cols {
                 break;
             }
-            let contained = if width == 1 {
-                row.cells[col].width() == 1
-            } else {
-                row.cells[col].width() != 0 && row.cells[col + 1].width() != 2
-            };
+            let contained = PENDING
+                || if width == 1 {
+                    row.cells[col].width() == 1
+                } else {
+                    row.cells[col].width() != 0 && row.cells[col + 1].width() != 2
+                };
             if !contained {
                 break;
             }
@@ -1053,6 +1076,10 @@ impl Terminal {
                 break;
             }
         }
+        if PENDING {
+            screen.finish_pending(pos.col..col);
+        }
+        let row = &mut screen.rows[pos.row];
         if bytes != 0 {
             let advance = col - pos.col;
             row.record_write(col, advance as u64);
@@ -2496,8 +2523,10 @@ mod tests {
         for cols in [1, 4, 9] {
             for history in [0, 5] {
                 for graphemes in [false, true] {
-                    for case in follow {
-                        let fill = "#########\r\n%%%%%%%%%\r\n@@@@@@@@@";
+                    // Stale narrow cells, and stale wide cells and spacers.
+                    for (case, fill) in follow.iter().flat_map(|case| {
+                        ["#########\r\n%%%%%%%%%\r\n@@@@@@@@@", "中中中中#\r\n#中中中中\r\n中中中中"].map(|fill| (*case, fill))
+                    }) {
                         let input = format!("{fill}\n{case}\n{case}");
                         let mut deferred = Terminal::new(cols, 3, history).unwrap();
                         let mut reference = Terminal::new(cols, 3, history).unwrap();

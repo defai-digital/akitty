@@ -1613,3 +1613,37 @@ Engine results, rotated order, seven passes, history 0
 
 Long lines lost 4%: they wrap without line feeds, so they pay only for the checks.
 They remain about 1.8 times Ghostty's throughput.
+
+## Pending rows taken by the per-character writer
+
+The previous step left a scrolled-in row's refill to the ASCII store only; a line
+that starts with other text completed the refill and then overwrote it. A profile of
+CJK-only lines put two thirds of the time in the run writer and a third in the
+parser. The per-character writer now takes a pending row too. The row reads as
+blanks, so its containment loads are skipped, and the refill is completed around
+the cells written. It has its own copy of the loop (a const parameter), kept out of
+line; a single loop with a per-character test of the pending flag cost Unicode 4%,
+and two copies inlined into `write_run` cost ASCII 7% and synchronized output 9%.
+The pending-row test now also starts from rows of stale wide cells and spacers.
+Mutation checks: skipping the refill around the written cells is caught. Restoring
+the containment loads is equivalent, since a stale cell read anyway only sends the
+character to `print`, which completes the refill first. The guards for a pending
+row elsewhere or a cluster target on the row cannot be reached after a line feed
+and are debug assertions.
+
+Per-character cost, median of three runs: CJK lines 7.22 to 6.20 ns, `é` lines
+5.57 to 5.24 ns, CJK separated by spaces 5.52 to 4.79 ns. The Unicode workload is
+flat (0.99x): most of its time is in the emoji, ZWJ and flag clusters that go
+through `print`.
+
+Engine results, rotated order, seven passes, history 0
+([raw record](../benchmarks/results/pending-rows-for-wide-text-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Unicode | 164.5 | 162.8 | 0.99x |
+| ASCII | 1238.6 | 1274.0 | 1.03x |
+| Synchronized screen | 850.9 | 850.4 | 1.00x |
+| Long lines | 892.3 | 898.9 | 1.01x |
+| ANSI | 316.1 | 317.4 | 1.00x |
+| Alternate screen | 170.7 | 172.1 | 1.01x |
