@@ -1898,3 +1898,56 @@ is about 3%. Per character against libghostty-vt: lone pictographs 8.16 against
 3.87 (9.98 before), CJK 5.29 against 2.82, and flags 23.74 against 15.65.
 
 Raw record: [stretch-entry-and-ascii-classes](../benchmarks/results/stretch-entry-and-ascii-classes-2026-11-18.json).
+
+## Flags inside runs
+
+A flag's second regional indicator always left the run writer: the pair verdict
+was `Yes`, so the run broke to `print`, which grew the cell from one column to two
+in `join_grapheme`'s direct branch, and the rest of the line started a new run.
+Since every pair of regional indicators measures two columns (a test checks all
+676), the run writer now does that growth itself when the first indicator was
+written in the same run as a plain one-column cell and the next cell is narrow or
+the row is pending. The net effect is the direct branch's: the indicator appended,
+the width and spacer, three generation steps, the heap flag and charge, and the
+flag's text left in the cluster scratch. The next character then consults the
+flag's cell, as at the start of a run, so a third indicator is decided against the
+whole cluster.
+
+The first version did this inline in the loop. Flags got faster, but a line without
+any flag lost 7 ns (229.8 to 237.1) because the extra loop state cost registers, and
+the Unicode line got slower overall. `grow_flag` is now out of line and records its
+own two generation steps, heap flag and charge, so the loop only carries the flag's
+column.
+
+The growth oracle test (in-run growth against the general repair, whole and one
+character per feed) gained runs of indicators, a mark after an indicator written in
+the run, a wide glyph after the first indicator, and pending rows. The run tests now
+expect a flag to be written by the run, with the same three classifications.
+Mutation checks catch dropping either indicator test, the edge, the narrow-cell
+check, the generation steps, the heap flag, the charge, the width, the spacer, the
+`previous` reset, the scratch text and the last character. Four mutants are
+equivalent:
+- checking a pending row's stale cell only sends some flags to `print`, which gives
+  the same result;
+- the growth's own end column is always covered by the run's final write;
+- leaving the old target in place can only add breaks to `print`;
+- a remembered scratch position, if not reset, can never match the new generation.
+
+Per line, median of three: four flags 304.5 to 195.1 ns, the Unicode workload's line
+317.6 to 294.8 ns, the same line without its flag 229.2 to 230.7 ns. Flags now cost
+13.29 ns per character against libghostty-vt's 15.69 (23.74 before).
+
+Also rejected: calling an out-of-line scan of scalars from the parser's multi-byte
+branch, which kept ASCII flat but measured Unicode 0.93x (one call per short CJK
+word).
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 173.7 | 182.2 | 1.05x | 188.9 | 1.04x |
+| ASCII | 1295.2 | 1286.6 | 0.99x | 1269.9 | 0.99x |
+| Synchronized screen | 930.2 | 914.6 | 0.98x | 900.5 | 0.97x |
+| Long lines | 897.4 | 901.0 | 1.00x | 485.2 | 0.55x |
+| ANSI | 337.1 | 334.7 | 0.99x | 264.7 | 0.78x |
+| Alternate screen | 177.6 | 175.1 | 0.99x | 162.3 | 0.93x |
+
+Raw record: [flags-in-runs](../benchmarks/results/flags-in-runs-2026-11-18.json).

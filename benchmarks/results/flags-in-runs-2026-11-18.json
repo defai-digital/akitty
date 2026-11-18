@@ -1,0 +1,154 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "062d482",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "per_line_ns_median_of_3": {
+  "flags_only_line": {
+   "before": 304.5,
+   "after": 195.1
+  },
+  "x_family_flag_text": {
+   "before": 213.2,
+   "after": 200.9
+  },
+  "unicode_workload_line": {
+   "before": 317.6,
+   "after": 294.8
+  },
+  "unicode_line_without_flag": {
+   "before": 229.2,
+   "after": 230.7
+  }
+ },
+ "first_attempt_inline": {
+  "unicode_workload_line": "311.4 -> 317.7",
+  "line_without_flag": "229.8 -> 237.1",
+  "note": "the flag work inline in the loop slowed every other character"
+ },
+ "per_character_ns_flags_vs_libghostty": {
+  "before": 23.74,
+  "after": 13.29,
+  "libghostty": 15.69
+ },
+ "rotated_ab_5_passes_text": [
+  "unicode 173.7 -> 182.2 (1.05x)",
+  "ascii 1295.2 -> 1286.6 (0.99x)",
+  "synchronized-screen 930.2 -> 914.6 (0.98x)",
+  "long-lines 897.4 -> 901.0 (1.00x)",
+  "ansi 337.1 -> 334.7 (0.99x)",
+  "alternate-screen 177.6 -> 175.1 (0.99x)"
+ ],
+ "rejected": {
+  "parser_scan_of_scalars_out_of_line_at_the_multibyte_branch": "unicode 0.93x (a call for every short CJK word)"
+ },
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 1285.3,
+   "ghostty_mib_s": 1269.9,
+   "ghostty_over_akitty": 0.99,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    801.9,
+    1285.3,
+    1307.3
+   ],
+   "ghostty_passes": [
+    1002.8,
+    1289.9,
+    1269.9
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 337.7,
+   "ghostty_mib_s": 264.7,
+   "ghostty_over_akitty": 0.78,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    258.6,
+    338.1,
+    337.7
+   ],
+   "ghostty_passes": [
+    235.7,
+    264.7,
+    270.6
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 182.5,
+   "ghostty_mib_s": 188.9,
+   "ghostty_over_akitty": 1.04,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    142.0,
+    183.6,
+    182.5
+   ],
+   "ghostty_passes": [
+    126.0,
+    188.9,
+    190.4
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 883.9,
+   "ghostty_mib_s": 485.2,
+   "ghostty_over_akitty": 0.55,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    882.3,
+    915.1,
+    883.9
+   ],
+   "ghostty_passes": [
+    399.0,
+    485.2,
+    491.8
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 174.2,
+   "ghostty_mib_s": 162.3,
+   "ghostty_over_akitty": 0.93,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    149.3,
+    176.9,
+    174.2
+   ],
+   "ghostty_passes": [
+    157.1,
+    162.3,
+    164.2
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 929.8,
+   "ghostty_mib_s": 900.5,
+   "ghostty_over_akitty": 0.97,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    929.8,
+    927.1,
+    929.8
+   ],
+   "ghostty_passes": [
+    876.1,
+    900.5,
+    900.6
+   ]
+  }
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence."
+}

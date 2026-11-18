@@ -3,7 +3,7 @@
 //! Every input chunk is applied in order. Content movement events describe actual
 //! grid mutations, so consumers never need to simulate scrolling a second time.
 
-use crate::cell::{self, Cell, CellStyle, Color, Link, Palette, Style};
+use crate::cell::{self, Cell, CellStyle, Color, Link, Palette, RecordPool, Style};
 use crate::grapheme::{self, Join};
 use crate::parser::{Action, Csi, Input, Parser, StringKind, Terminator};
 use crate::screen::{Cursor, Position, Row, Screen};
@@ -996,8 +996,15 @@ impl Terminal {
         template: &CellStyle,
     ) -> RunWrite {
         let graphemes = self.modes.grapheme_clusters;
-        // Only the cell recorded before the run can hold a cluster to join into.
-        let target = self.grapheme_target;
+        // Only the cell recorded before the run can hold a cluster to join into, until
+        // a flag joins inside the run and becomes the cell to consult.
+        let mut target = self.grapheme_target;
+        #[cfg(test)]
+        let in_run_flags = !self.general_repair;
+        #[cfg(not(test))]
+        let in_run_flags = true;
+        // The column of the last flag joined in this run.
+        let mut flag = None;
         let mut col = pos.col;
         let mut bytes = 0;
         let mut join = None;
@@ -1078,6 +1085,32 @@ impl Terminal {
                 // pictograph after a ZWJ, or an unmodelled script — reports `Yes` or
                 // `Unknown` when it arrives, so it breaks to `print`, which decides from
                 // the complete cluster stored in the cell.
+                // A flag's second regional indicator after the first, written in this
+                // run as a plain one-column cell over a narrow cell: `print` would grow
+                // the cell to two columns in place (the direct branch of
+                // `join_grapheme`, since every pair measures two columns). That net
+                // effect is stored here: the indicator appended, the width and spacer,
+                // and three generation steps for the growth. The next character then
+                // consults the flag's cell, as at the start of a run.
+                if verdict == Join::Yes
+                    && in_run_flags
+                    && previous.is_some_and(regional_indicator)
+                    && regional_indicator(ch)
+                    && col < cols
+                    && (PENDING || row.cells[col].width() == 1)
+                {
+                    debug_assert_eq!(col, last_col + 1);
+                    grow_flag(row, &mut screen.pool, last_col, ch);
+                    flag = Some(last_col);
+                    col += 1;
+                    bytes += ch.len_utf8();
+                    last_char = ch;
+                    target = Some(Position { row: pos.row, col: last_col });
+                    previous = None;
+                    previous_class = None;
+                    previous_simple = false;
+                    continue;
+                }
                 if verdict != Join::No {
                     join = Some(verdict);
                     break;
@@ -1157,6 +1190,19 @@ impl Terminal {
             screen.cursor.pending_wrap = col >= cols;
             self.last_printed = Some(last_char);
             self.grapheme_target = Some(Position { row: pos.row, col: last_col });
+            // As `print` leaves them: the last flag's text, remembered for its cell
+            // while it is still the cell to join (later writes advance the generation
+            // past the remembered one either way).
+            if let Some(at) = flag {
+                let mut scratch = std::mem::take(&mut self.cluster_scratch);
+                let row = &self.screen().rows[pos.row];
+                let cell = &row.cells[at];
+                scratch.clear();
+                scratch.push(cell.ch);
+                scratch.extend(cell.combining());
+                self.cluster_scratch_at = (at == last_col).then_some((Position { row: pos.row, col: at }, row.id, row.generation));
+                self.cluster_scratch = scratch;
+            }
         }
         RunWrite { bytes, join }
     }
@@ -2549,6 +2595,28 @@ fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
     tail.iter().position(|&byte| byte == needle).map(|offset| words.len() * 8 + offset)
 }
 
+/// Grow the plain one-column regional indicator at `col` of `row` into a flag with
+/// `second`, as `join_grapheme`'s direct branch would: the indicator appended, the
+/// width and spacer, two more generation steps (the run records the third with its
+/// advance), and the heap flag and charge for the record the cell now owns.
+#[inline(never)]
+fn grow_flag(row: &mut Row, pool: &mut RecordPool, col: usize, second: char) {
+    let cell = &mut row.cells[col];
+    debug_assert!(cell.width() == 1 && cell.combining_len() == 0);
+    let appended = cell.push_combining_from(second, pool);
+    debug_assert!(appended, "a fresh cell has room for a mark");
+    cell.set_width(2);
+    let trail = cell.spacer();
+    row.cells[col + 1] = trail;
+    row.record_write(col + 2, 2);
+    row.mark_heap();
+    row.charge_unknown();
+}
+
+/// Whether `ch` is a regional indicator.
+fn regional_indicator(ch: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch)
+}
 fn char_width(ch: char, cols: usize) -> usize {
     if ch.is_ascii() {
         1
@@ -2789,6 +2857,19 @@ mod tests {
     }
 
     #[test]
+    fn every_regional_indicator_pair_measures_two_columns() {
+        use unicode_width::UnicodeWidthStr;
+        for first in '\u{1f1e6}'..='\u{1f1ff}' {
+            assert!(regional_indicator(first));
+            assert_eq!(char_width(first, 8), 1);
+            for second in '\u{1f1e6}'..='\u{1f1ff}' {
+                assert_eq!(format!("{first}{second}").width(), 2, "{first}{second}");
+            }
+        }
+        assert!(!regional_indicator('\u{1f1e5}') && !regional_indicator('\u{1f200}'));
+    }
+
+    #[test]
     fn clusters_growing_in_place_match_the_general_repair() {
         // Flags and presentation selectors grow a cell from one column to two, over
         // blanks, text, wide glyphs, spacers and styled cells, at and near the edge,
@@ -2801,6 +2882,12 @@ mod tests {
             "\x1b[?7l\x1b[1;8H🇯🇵\x1b[?7h",
             "\x1b[48;2;1;2;3m\x1b[1;1H\x1b]8;;https://example.test\x1b\\🇯🇵\x1b]8;;\x1b\\\x1b[0m",
             "\x1b[1;1Hx\u{301}\x1b[1;1H🇯🇵 ok",
+            // Runs of indicators, flags before text and marks, and pending rows.
+            "\x1b[2;1H🇯🇵🇺🇸🇬\x1b[2;1H🇯🇵🇺\u{301}🇸x🇯🇵\u{200d}🇺🇸",
+            "\x1b[3;1H\n\n\n🇯🇵 🇺🇸 \x1b[1;1H中🇯🇵\x1b[1;2H🇯🇵",
+            // Over narrow cells: a mark after an indicator written in the run, and a
+            // wide glyph right after the first indicator.
+            "\x1b[1;1Habcdefgh\x1b[1;1H🇯🇵🇺\u{301}x\x1b[2;1Hab中中\x1b[2;2H🇯🇵",
         ];
         for cols in [2, 3, 8] {
             for whole in [true, false] {
@@ -4326,7 +4413,9 @@ mod tests {
         }
         assert_eq!(run("中文字"), 9, "CJK is written as one run");
         assert_eq!(run("😀😀"), 8, "lone pictographs are written as a run");
-        assert_eq!(run("🇯🇵"), 4, "a flag breaks after its first indicator");
+        assert_eq!(run("🇯🇵"), 8, "a flag joins inside the run");
+        assert_eq!(run("🇯🇵🇺🇸 x"), 18, "flags in a row each join inside the run");
+        assert_eq!(run("🇯🇵\u{301}"), 8, "a mark after a joined flag breaks to print");
         assert_eq!(run("\u{1100}\u{1161}"), 3, "jamo break before composing");
     }
 
@@ -4455,8 +4544,9 @@ mod tests {
         assert_eq!(run("e\u{301}"), (1, 0));
         // Pure ASCII pairs are decided by the character test alone.
         assert_eq!(run("abc"), (3, 0));
-        // The pair itself, plus the exact look-behind that counts the regional run.
-        assert_eq!(run("🇯🇵"), (4, 3));
+        // The pair itself, plus the exact look-behind that counts the regional run; the
+        // flag joins inside the run.
+        assert_eq!(run("🇯🇵"), (8, 3));
         // Unmodelled scripts still classify each side once before deferring.
         let (bytes, classes) = run("\u{915}\u{94d}\u{937}");
         assert_eq!(bytes, 3, "only the base character is written by the run");
