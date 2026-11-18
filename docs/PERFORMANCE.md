@@ -799,3 +799,54 @@ before inline storage. The [inline-combining raw record](../benchmarks/results/u
 contains direct samples, paired history measurements, rejected-experiment results, source hashes
 and the canonical result. Ghostty remains faster, and no full-application or physical-input parity
 is claimed.
+
+## PTY refill bridging and filter pass-through
+
+Attribution came before any change. On Apple M3 Max, a single-thread C reader with
+no processing drains `cat` through a raw macOS PTY at about 141 MiB/s, because the
+kernel hands the master at most 1 KiB per read. The release model alone applied
+the PTY benchmark's payloads at 372 (ASCII), 147 (ANSI) and 179 (Unicode) MiB/s.
+The PTY path still delivered only 92–115 MiB/s. Two costs explained the gap:
+
+1. The reader published a 64 KiB slot on every would-block, so each slot carried
+   about 1 KiB. Four slots then made a 4 KiB backlog, and the reader, and with it
+   the program, stalled behind every parse pass.
+2. Any escape byte made the chrome and APC filters copy the whole chunk
+   byte-by-byte into owned pass segments. That was 43% overhead over the engine
+   for SGR-heavy output, which those filters pass through unchanged.
+
+Changes:
+
+1. Both filters accept a chunk as unchanged pass-through when it ends in ground state
+   and every escape is followed, inside the chunk, by a byte that cannot start
+   their sequences: OSC and a repeated ESC for chrome; APC, a repeated ESC and a
+   whole or truncated `CSI 16 t` for graphics. The vectorized no-escape check
+   still runs first. Exhaustive tests over short strings of state-driving bytes
+   check that every accepted input comes back from `feed` unchanged, as one
+   segment, in ground state, and mutation checks confirm that both tests catch a
+   wrong condition.
+2. A slot with at least 1 KiB that would block is treated as a saturated stream's
+   refill gap. The reader re-reads up to 16 times, then polls for 1 ms while the
+   parser still has published bytes, within 3 ms per slot. Under the ring lock,
+   the parser writes a ring-owned idle pipe when it runs dry during a bridge.
+   A short read, an idle parser, a quiet stream, a stop or a hangup publishes at
+   once.
+
+The refill-gap bridging approach was learned from reviewing Ghostty's macOS PTY
+reader under `.internal/reference`. AkiTTY's implementation, names, structure and
+tests are its own; no reference code was copied.
+
+Results on a heavily loaded host (load average 15–25), rotated variant order,
+median of all rounds ([raw measurements](../benchmarks/results/pty-bridge-2026-11-18.json)):
+
+| PTY MiB/s | Base | Filters + re-reads | + bridge poll (shipped) |
+| --- | ---: | ---: | ---: |
+| ASCII | 114.8 | 171.5 / 135.9 | 148.8 / 174.3 |
+| ANSI | 91.3 | 115.0 / 101.8 | 126.0 / 149.8 |
+| Unicode | 107.6 | 132.3 / 111.8 | 153.6 / 149.6 |
+
+The two figures per cell come from two separate rotated sets. The model probe
+moved ANSI from 146.5 to 176.9 MiB/s, with ASCII and Unicode unchanged. User-initiated
+QoS on the reader and worker threads showed no measurable gain on this host and
+was not adopted; it should be measured again on an idle machine. These rates exclude snapshots and
+rendering and make no Ghostty parity claim.

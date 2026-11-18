@@ -312,11 +312,24 @@ fn osc_is_intercepted(body: &[u8]) -> bool {
 }
 
 impl Filter {
-    /// True when `feed` would hand every byte through unchanged: the state machine is in ground
-    /// state and no escape in `bytes` can start a sequence. Callers use it to skip the copy a
-    /// pass segment would make of an ordinary run of text.
+    /// True when `feed` would hand every byte through unchanged and end in ground state. That holds
+    /// from ground when every escape in `bytes` is followed, inside `bytes`, by a byte that neither
+    /// starts an OSC nor is another escape (which would replace the pending one): `feed` then copies
+    /// each escape and its follower straight back out. Callers use it to skip the copy a pass
+    /// segment would make of ordinary text, including CSI and SGR-heavy output.
     pub fn passes_through(&self, bytes: &[u8]) -> bool {
-        self.state == State::Ground && !bytes.contains(&0x1b)
+        if self.state != State::Ground { return false; }
+        // `contains` is std's vectorized byte search; most output has no escape at all.
+        if !bytes.contains(&0x1b) { return true; }
+        let mut at = 0;
+        while let Some(offset) = bytes[at..].iter().position(|&byte| byte == 0x1b) {
+            let esc = at + offset;
+            match bytes.get(esc + 1) {
+                Some(b']') | Some(0x1b) | None => return false,
+                Some(_) => at = esc + 2,
+            }
+        }
+        true
     }
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
@@ -492,6 +505,44 @@ impl Filter {
 
 #[cfg(test)]
 mod tests {
+    /// Every input the widened `passes_through` accepts must come back from `feed` unchanged, as
+    /// one pass segment, with the filter left in ground state. Exhaustive over short strings of the
+    /// bytes that drive the state machine, plus longer realistic runs.
+    #[test]
+    fn passes_through_matches_feed_exactly() {
+        const ALPHABET: &[u8] = b"a\x1b]_[16t\x07\\\x18";
+        fn check(bytes: &[u8]) {
+            let mut filter = Filter::default();
+            if !filter.passes_through(bytes) { return; }
+            let out = filter.feed(bytes);
+            let passed: Vec<u8> = out.iter().flat_map(|segment| match segment {
+                Segment::Pass(data) => data.clone(),
+                _ => panic!("passes_through accepted a sequence feed intercepts: {bytes:?}"),
+            }).collect();
+            assert_eq!(passed, bytes, "feed changed accepted bytes");
+            assert!(out.len() <= 1, "accepted bytes split into segments: {bytes:?}");
+            assert!(filter.state == State::Ground, "accepted bytes left the filter mid-sequence: {bytes:?}");
+        }
+        let mut accepted = 0usize;
+        let mut current = Vec::new();
+        fn walk(current: &mut Vec<u8>, depth: usize, accepted: &mut usize) {
+            check(current);
+            if Filter::default().passes_through(current) { *accepted += 1; }
+            if depth == 0 { return; }
+            for &byte in ALPHABET {
+                current.push(byte);
+                walk(current, depth - 1, accepted);
+                current.pop();
+            }
+        }
+        walk(&mut current, 5, &mut accepted);
+        assert!(accepted > 1000, "the check must accept escape-bearing input, got {accepted}");
+        for sample in [&b"\x1b]0;title\x07x"[..], b"\x1b[1mx\x1b", b"\x1b\x1b[m", b"\x1b]133;A\x07"] { check(sample); }
+        let sgr = "\x1b[38;2;23;175;92mcolored output\x1b[0m regular output 0123456789\r\n".repeat(200);
+        assert!(Filter::default().passes_through(sgr.as_bytes()), "SGR-heavy output must take the fast path");
+        check(sgr.as_bytes());
+    }
+
     use super::*;
 
     fn passed(segments: Vec<Segment>) -> Vec<u8> {

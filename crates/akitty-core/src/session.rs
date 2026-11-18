@@ -799,6 +799,10 @@ enum Fill {
 /// instead of growing memory, and a short tail is published with the reads that produced it.
 struct Ring {
     shared: Mutex<RingShared>,
+    /// Parser-idle pipe for a bridging reader: [`Ring::recycle`] writes it only while the reader
+    /// is bridging and the parser has just run out of published bytes, so an interactive
+    /// terminal never pays for it. `None` in tests that drive the ring without a reader.
+    idle: Option<Wake>,
     /// The parser waits here for a published slot, and for the reader's end.
     ready: Condvar,
     /// The reader waits here for a slot the parser has finished with.
@@ -811,18 +815,52 @@ struct RingShared {
     in_flight: usize,
     /// `None` while the reader keeps reading; otherwise why it stopped.
     end: Option<Result<(), String>>,
+    /// The reader is waiting in a bridge poll with a partly filled slot while the parser is busy.
+    /// Set and cleared under the ring lock, so the parser's idle signal cannot be missed.
+    bridging: bool,
 }
 /// A condvar wait never blocks a stop check for longer than this.
 const RING_WAIT_MS: u64 = 10;
 
 impl Ring {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::build(None)
+    }
+    /// A ring whose reader may bridge refill gaps (see [`fill_ring_coalescing`]).
+    fn with_idle_wake() -> Result<Self, String> {
+        Ok(Self::build(Some(Wake::new()?)))
+    }
+    fn build(idle: Option<Wake>) -> Self {
         let free = (0..RING_SLOTS).map(|_| vec![0u8; SLOT_BYTES].into_boxed_slice()).collect();
         Self {
-            shared: Mutex::new(RingShared { free, ready: VecDeque::with_capacity(RING_SLOTS), in_flight: 0, end: None }),
+            shared: Mutex::new(RingShared {
+                free, ready: VecDeque::with_capacity(RING_SLOTS), in_flight: 0, end: None, bridging: false,
+            }),
+            idle,
             ready: Condvar::new(),
             space: Condvar::new(),
         }
+    }
+    /// Read end of the parser-idle pipe, when this ring has one.
+    fn idle_fd(&self) -> Option<i32> {
+        self.idle.as_ref().map(Wake::read_fd)
+    }
+    /// Enter a bridge wait if the parser still has published bytes to apply. Waiting is only free
+    /// while it hides behind parse time: with an idle parser every held microsecond is output
+    /// latency, and a program waiting on a reply to bytes in the held slot would never refill.
+    fn begin_bridge(&self) -> bool {
+        if self.idle.is_none() { return false; }
+        let mut shared = self.lock();
+        let busy = !shared.ready.is_empty() || shared.in_flight > 0;
+        shared.bridging = busy;
+        busy
+    }
+    /// Leave a bridge wait. Clearing under the lock ends the parser's idle writes, so the drain
+    /// that follows cannot leave a stale byte to cut the next bridge short.
+    fn end_bridge(&self) {
+        self.lock().bridging = false;
+        if let Some(idle) = &self.idle { idle.drain(); }
     }
     /// A poisoned ring still has to drain and report its end: no host data sits behind this lock.
     fn lock(&self) -> std::sync::MutexGuard<'_, RingShared> {
@@ -854,8 +892,12 @@ impl Ring {
         let mut shared = self.lock();
         shared.free.push(slot);
         shared.in_flight = shared.in_flight.saturating_sub(1);
+        // The parser just ran dry while the reader bridges: interrupt its poll so it publishes now.
+        let idle = shared.bridging && shared.in_flight == 0 && shared.ready.is_empty();
+        if idle { shared.bridging = false; }
         drop(shared);
         self.space.notify_one();
+        if idle && let Some(wake) = &self.idle { wake.signal(); }
     }
     /// Return a slot the reader took but never filled. It was never in flight, so only the free
     /// list changes; the parser's outstanding slots keep their count.
@@ -941,16 +983,59 @@ impl Ring {
 /// it is full, when a read would block, when the stream ends, when the reader must stop, or before a
 /// read failure is reported. Nothing ever waits for a buffer to fill, so a prompt, bell or query
 /// still reaches the parser with the reads that produced it.
+#[cfg(test)]
 fn fill_ring(
     ring: &Ring,
     stopping: impl Fn() -> bool,
     wake: &Wake,
+    read: impl FnMut(&mut [u8]) -> Result<Option<usize>, String>,
+) -> Result<Fill, String> {
+    fill_ring_coalescing(ring, stopping, wake, read, || Bridge::Deliver)
+}
+
+/// How a reader's bridge wait ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bridge {
+    /// The master has bytes again: keep filling the slot.
+    Readable,
+    /// Quiet for the poll window, the parser went idle, a stop arrived or the master hung up:
+    /// publish what the slot holds.
+    Deliver,
+}
+
+/// Bytes a slot must hold before a would-block read counts as a refill gap of a saturated stream
+/// rather than the end of an interactive burst. macOS hands a PTY master at most 1 KiB per read,
+/// so one full read means the writer filled the kernel queue; anything shorter is published at once.
+const SATURATED_BYTES: usize = 1024;
+/// Immediate re-reads after a would-block on a saturated stream before the reader sleeps in poll.
+/// The writer usually refills the queue within microseconds, sooner than a poll sleep and wakeup,
+/// so sleeping on every gap would run reader and writer in lockstep at 1 KiB per wakeup.
+const BRIDGE_SPINS: usize = 16;
+/// One bridge poll: quiet for this long means the burst is over.
+const BRIDGE_POLL_MS: libc::c_int = 1;
+/// The most time one slot may spend bridging before it is published regardless, well under a frame.
+const BRIDGE_BUDGET: Duration = Duration::from_millis(3);
+
+/// [`fill_ring`], plus bridging of a saturated stream's refill gaps. Publishing on every
+/// would-block spends a 64 KiB slot, a worker wake and a parse pass on each 1 KiB macOS read, and
+/// four such slots stall the reader, and with it the program, behind a 4 KiB backlog. Once a slot
+/// holds [`SATURATED_BYTES`], a would-block is retried [`BRIDGE_SPINS`] times, then `bridge` waits
+/// for more bytes while the parser is still busy, within [`BRIDGE_BUDGET`] per slot. A short read,
+/// an idle parser, a quiet stream or a stop publishes immediately, so interactive output and a
+/// program waiting on a reply are never delayed.
+fn fill_ring_coalescing(
+    ring: &Ring,
+    stopping: impl Fn() -> bool,
+    wake: &Wake,
     mut read: impl FnMut(&mut [u8]) -> Result<Option<usize>, String>,
+    mut bridge: impl FnMut() -> Bridge,
 ) -> Result<Fill, String> {
     loop {
         if stopping() { return Ok(Fill::Idle); }
         let Some(mut slot) = ring.checkout() else { return Ok(Fill::Full) };
         let mut filled = 0usize;
+        let mut spins = 0usize;
+        let mut bridge_started: Option<Instant> = None;
         loop {
             match read(&mut slot[filled..]) {
                 // The stream ended: the bytes before it are still published, then EOF is reported.
@@ -961,11 +1046,26 @@ fn fill_ring(
                 // Nothing more is readable right now, which is where a tail is published rather
                 // than held back for a fuller buffer.
                 Ok(None) => {
+                    if filled >= SATURATED_BYTES && !stopping() {
+                        if spins < BRIDGE_SPINS {
+                            spins += 1;
+                            continue;
+                        }
+                        let now = Instant::now();
+                        let started = *bridge_started.get_or_insert(now);
+                        if now.duration_since(started) < BRIDGE_BUDGET && ring.begin_bridge() {
+                            let outcome = bridge();
+                            ring.end_bridge();
+                            if outcome == Bridge::Readable && !stopping() { continue; }
+                        }
+                    }
                     publish_slot(ring, wake, slot, filled);
                     return Ok(Fill::Idle);
                 }
                 Ok(Some(count)) => {
                     filled += count;
+                    // Each refill gap gets a fresh retry allowance.
+                    spins = 0;
                     if filled == slot.len() {
                         ring.publish(slot, filled);
                         wake.signal();
@@ -1062,7 +1162,23 @@ fn read_loop(fd: i32, ring: &Ring, control: &ReaderControl, wake: &Wake, deliver
         if ready == 0 { continue; }
         hung_up |= poll[0].revents & libc::POLLHUP != 0;
         let stopping = || control.stopping();
-        match fill_ring(ring, stopping, wake, |buffer| read_pty(fd, buffer, hung_up)) {
+        // A bridge wait ends on more output, the parser's idle signal, a control wake or the poll
+        // window. Only plain readability keeps filling: the control wake is left pending for the
+        // loop above, and a hangup publishes so that loop handles the descriptor.
+        let bridge = || {
+            let idle = ring.idle_fd().unwrap_or(-1);
+            let mut poll = [
+                libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: control.wake.read, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: idle, events: libc::POLLIN, revents: 0 },
+            ];
+            // SAFETY: poll references three pollfds owned by this frame; a negative fd is ignored.
+            let ready = unsafe { libc::poll(poll.as_mut_ptr(), 3, BRIDGE_POLL_MS) };
+            let readable = poll[0].revents & libc::POLLIN != 0
+                && poll[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0;
+            if ready > 0 && readable && poll[1].revents == 0 && poll[2].revents == 0 { Bridge::Readable } else { Bridge::Deliver }
+        };
+        match fill_ring_coalescing(ring, stopping, wake, |buffer| read_pty(fd, buffer, hung_up), bridge) {
             Ok(Fill::Idle) => {}
             // The parser holds every slot: wait for one back before reading the readable bytes.
             Ok(Fill::Full) => ring.wait_space(stopping),
@@ -1497,7 +1613,7 @@ fn run(
     Wakes { wake, notify }: Wakes,
 ) -> Result<(), String> {
     let fd = master.as_raw_fd().ok_or("PTY descriptor missing")?;
-    let ring = Arc::new(Ring::new());
+    let ring = Arc::new(Ring::with_idle_wake()?);
     let finish = Arc::new(AtomicBool::new(false));
     let delivered = Arc::new(AtomicBool::new(false));
     // The reader gets its own wake pipe: it must never drain the worker's, or a queued command
@@ -2818,6 +2934,130 @@ mod reply_tests {
         assert!(!ring.idle(), "output the parser still holds is not applied yet");
         ring.recycle(slot);
         assert!(ring.idle(), "the parser returned the last slot, so the ring is idle");
+    }
+
+    /// A ring whose parser holds one applied-but-unreturned slot, so the reader sees it busy.
+    fn busy_bridging_ring() -> (Ring, Box<[u8]>) {
+        let ring = Ring::with_idle_wake().unwrap();
+        let slot = ring.checkout().unwrap();
+        ring.publish(slot, 1);
+        let (slot, _) = ring.take_ready_up_to(usize::MAX).unwrap();
+        (ring, slot)
+    }
+
+    /// Scripted master: `Some(n)` reads n bytes, `None` would block; past the end it keeps blocking.
+    fn scripted(script: Vec<Option<usize>>) -> impl FnMut(&mut [u8]) -> Result<Option<usize>, String> {
+        let mut steps = script.into_iter();
+        move |buffer: &mut [u8]| match steps.next().flatten() {
+            Some(count) => { buffer[..count].fill(b'x'); Ok(Some(count)) }
+            None => Ok(None),
+        }
+    }
+
+    #[test]
+    fn a_short_read_is_published_without_bridging_even_when_the_parser_is_busy() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        let mut bridged = 0;
+        let result = fill_ring_coalescing(&ring, || false, &wake, scripted(vec![Some(100)]), || { bridged += 1; Bridge::Readable });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert_eq!(bridged, 0, "interactive output below one full read is never held");
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("published at once");
+        assert_eq!(len, 100);
+        ring.recycle(slot);
+        ring.recycle(held);
+    }
+
+    #[test]
+    fn an_idle_parser_gets_a_saturated_read_without_a_bridge_wait() {
+        let ring = Ring::with_idle_wake().unwrap();
+        let wake = Wake::new().unwrap();
+        let mut bridged = 0;
+        let result = fill_ring_coalescing(&ring, || false, &wake, scripted(vec![Some(1024)]), || { bridged += 1; Bridge::Readable });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert_eq!(bridged, 0, "holding bytes from an idle parser would only add latency");
+        assert_eq!(ring.take_ready_up_to(usize::MAX).map(|(_, len)| len), Some(1024));
+    }
+
+    #[test]
+    fn a_saturated_stream_bridges_refill_gaps_into_one_slot_while_the_parser_is_busy() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        // A short gap the retries cover, then a gap longer than the retries that needs one bridge wait.
+        let mut script = vec![Some(1024), None, None, None, Some(1024)];
+        script.extend(std::iter::repeat_n(None, BRIDGE_SPINS + 1));
+        script.push(Some(1024));
+        let mut bridged = 0;
+        let result = fill_ring_coalescing(&ring, || false, &wake, scripted(script), || {
+            bridged += 1;
+            if bridged == 1 { Bridge::Readable } else { Bridge::Deliver }
+        });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert_eq!(bridged, 2, "one wait bridged the long gap; the final quiet wait delivered");
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("one coalesced slot");
+        assert_eq!(len, 3 * 1024, "three 1 KiB reads share one slot instead of three");
+        assert!(!ring.pending());
+        ring.recycle(slot);
+        ring.recycle(held);
+    }
+
+    #[test]
+    fn the_parser_going_idle_interrupts_a_bridge_wait() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        let idle_fd = ring.idle_fd().unwrap();
+        let mut held = Some(held);
+        let mut signalled = false;
+        let result = fill_ring_coalescing(&ring, || false, &wake, scripted(vec![Some(1024)]), || {
+            // The parser returns its last slot during the wait: the reader must be told at once.
+            ring.recycle(held.take().unwrap());
+            let mut poll = libc::pollfd { fd: idle_fd, events: libc::POLLIN, revents: 0 };
+            signalled = unsafe { libc::poll(&mut poll, 1, 0) } == 1;
+            Bridge::Deliver
+        });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert!(signalled, "recycle must write the idle pipe while the reader bridges");
+        let mut poll = libc::pollfd { fd: idle_fd, events: libc::POLLIN, revents: 0 };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0, "ending the bridge drains the idle wake");
+        assert_eq!(ring.take_ready_up_to(usize::MAX).map(|(_, len)| len), Some(1024));
+        // Outside a bridge the parser never writes the idle pipe.
+        let slot = ring.checkout().unwrap();
+        ring.publish(slot, 1);
+        let (slot, _) = ring.take_ready_up_to(usize::MAX).unwrap();
+        ring.recycle(slot);
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0, "an interactive terminal pays no idle syscall");
+    }
+
+    #[test]
+    fn the_bridge_budget_publishes_a_slot_that_keeps_waiting() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        let mut bridged = 0;
+        let started = Instant::now();
+        // The master never refills, yet every wait reports readable: only the budget ends the slot.
+        let result = fill_ring_coalescing(&ring, || false, &wake, scripted(vec![Some(1024)]), || {
+            bridged += 1;
+            std::thread::sleep(Duration::from_millis(1));
+            Bridge::Readable
+        });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert!(bridged >= 1 && started.elapsed() < Duration::from_millis(200), "bounded by the budget: {bridged}");
+        assert_eq!(ring.take_ready_up_to(usize::MAX).map(|(_, len)| len), Some(1024));
+        ring.recycle(held);
+    }
+
+    #[test]
+    fn a_stop_during_a_bridge_publishes_what_was_gathered() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        let stop = AtomicBool::new(false);
+        let result = fill_ring_coalescing(&ring, || stop.load(Ordering::SeqCst), &wake, scripted(vec![Some(1024)]), || {
+            stop.store(true, Ordering::SeqCst);
+            Bridge::Readable
+        });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        assert_eq!(ring.take_ready_up_to(usize::MAX).map(|(_, len)| len), Some(1024), "a stop never drops gathered bytes");
+        ring.recycle(held);
     }
 
     #[test]

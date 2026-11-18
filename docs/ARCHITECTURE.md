@@ -57,9 +57,15 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   between the stages, so a read is never copied and a parser that falls behind
   stops the reader instead of growing memory. Every read that is available at once
   fills one slot up to its full size, which is published when it is full and
-  otherwise on would-block, EOF or a read error; a slot is never held back waiting
-  for more, so a prompt, bell or query still arrives with the reads that produced
-  it, and bytes gathered before a failure are applied before it is reported. The
+  otherwise on would-block, EOF or a read error. macOS hands a PTY master at most
+  1 KiB per read, so a slot holding less than 1 KiB is published on its first
+  would-block: a prompt, bell or query still arrives with the reads that produced
+  it. A saturated stream instead bridges the writer's refill gaps: 16 immediate
+  re-reads, then 1 ms polls while the parser still has published bytes, within
+  3 ms per slot. The parser interrupts a bridge through a ring-owned idle pipe the
+  moment it runs dry, and a stop or hangup publishes at once, so bridging only
+  overlaps parse time and never delays an idle terminal. Bytes gathered before a
+  failure are applied before it is reported. The
   worker applies at most one ring (256 KiB) per pass, with each model lock covering
   at most 8 KiB, so input and resize keep their turn, and it wakes the host once
   per applied batch rather than once per parsed chunk.

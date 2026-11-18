@@ -2717,4 +2717,49 @@ mod tests {
             "the fragments still reach the client"
         );
     }
+
+    /// Model overhead over the bare engine for the PTY benchmark's payloads, in the worker's 8 KiB
+    /// pieces. `cargo test --release -p akitty-core --lib model_feed_overhead -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark; run explicitly in release mode"]
+    fn model_feed_overhead() {
+        let workloads = [
+            ("ascii", "the quick brown fox jumps over the lazy dog 0123456789\r\n"),
+            ("ansi", "\x1b[38;2;23;175;92mcolored output\x1b[0m regular output 0123456789\r\n"),
+            ("unicode", "漢字かな한글 👩‍💻 e\u{301} terminal output\r\n"),
+        ];
+        for (label, pattern) in workloads {
+            let payload = pattern.repeat((8 * 1024 * 1024) / pattern.len());
+            let bytes = payload.as_bytes();
+            let size = Size { cols: 120, rows: 40 };
+            let mut engine = Vec::new();
+            let mut model = Vec::new();
+            let mut engine_1k = Vec::new();
+            for sample in 0..12 {
+                let mut term = Terminal::new(size.cols, size.rows, 0).unwrap();
+                let start = std::time::Instant::now();
+                for piece in bytes.chunks(8192) { term.feed(piece, 0, |_| {}); }
+                let elapsed = start.elapsed().as_secs_f64();
+                if sample >= 2 { engine.push(elapsed); }
+                let mut term = Terminal::new(size.cols, size.rows, 0).unwrap();
+                let start = std::time::Instant::now();
+                for piece in bytes.chunks(1024) { term.feed(piece, 0, |_| {}); }
+                let elapsed = start.elapsed().as_secs_f64();
+                if sample >= 2 { engine_1k.push(elapsed); }
+                let mut state = Model::new(size, 0);
+                let start = std::time::Instant::now();
+                for piece in bytes.chunks(8192) { state.feed(piece); }
+                let elapsed = start.elapsed().as_secs_f64();
+                if sample >= 2 { model.push(elapsed); }
+            }
+            engine.sort_by(f64::total_cmp);
+            model.sort_by(f64::total_cmp);
+            engine_1k.sort_by(f64::total_cmp);
+            println!("FEED {label}: engine in 1 KiB pieces {:.1} MiB/s", bytes.len() as f64 / 1048576.0 / engine_1k[engine_1k.len() / 2]);
+            let mib = bytes.len() as f64 / 1048576.0;
+            let (e, m) = (engine[engine.len() / 2], model[model.len() / 2]);
+            println!("FEED {label}: engine {:.1} MiB/s, model {:.1} MiB/s, model overhead {:.1}%",
+                     mib / e, mib / m, (m / e - 1.0) * 100.0);
+        }
+    }
 }
