@@ -237,6 +237,50 @@ fn cell_image(cell: &Cell) -> u128 {
     unsafe { std::mem::transmute_copy(cell) }
 }
 
+/// The leading sixteen-byte groups of `store_ascii_heap_free`, built in vector
+/// registers: when a cell's image is its packed word in bytes 8..12 and its character
+/// in bytes 12..16 over a null record pointer, which `base` and `unit` confirm, each
+/// group of four characters is zipped with the packed word and then with zero into
+/// four whole cells. Returns the number of cells stored; with another layout, none.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn store_ascii_vectors(cells: &mut [Cell], bytes: &[u8], packed: u32, base: u128, unit: u128) -> usize {
+    use std::arch::aarch64::{
+        vdupq_n_u32, vdupq_n_u64, vget_low_u8, vget_low_u16, vld1q_u8, vmovl_high_u8, vmovl_high_u16, vmovl_u8,
+        vmovl_u16, vreinterpretq_u64_u32, vst1q_u64, vzip1q_u32, vzip1q_u64, vzip2q_u32, vzip2q_u64,
+    };
+    if base != u128::from(packed) << 64 || unit != 1 << 96 {
+        return 0;
+    }
+    let groups = cells.len().min(bytes.len()) / 16;
+    let out = cells.as_mut_ptr().cast::<u64>();
+    // SAFETY: NEON is part of the aarch64 baseline. Every load reads sixteen bytes of
+    // `bytes` and every store writes whole cells of `cells`, both inside the `groups`
+    // full groups. The caller guarantees that no target owns a side record, so the
+    // overwritten cells leak nothing, and each stored image is exactly
+    // `from_packed(byte, packed)` by the layout check above.
+    unsafe {
+        let words = vdupq_n_u32(packed);
+        let zero = vdupq_n_u64(0);
+        for group in 0..groups {
+            let chars = vld1q_u8(bytes.as_ptr().add(group * 16));
+            let low = vmovl_u8(vget_low_u8(chars));
+            let high = vmovl_high_u8(chars);
+            let quads = [vmovl_u16(vget_low_u16(low)), vmovl_high_u16(low), vmovl_u16(vget_low_u16(high)), vmovl_high_u16(high)];
+            for (index, quad) in quads.into_iter().enumerate() {
+                let first = vreinterpretq_u64_u32(vzip1q_u32(words, quad));
+                let second = vreinterpretq_u64_u32(vzip2q_u32(words, quad));
+                let cell = out.add((group * 16 + index * 4) * 2);
+                vst1q_u64(cell, vzip1q_u64(zero, first));
+                vst1q_u64(cell.add(2), vzip2q_u64(zero, first));
+                vst1q_u64(cell.add(4), vzip1q_u64(zero, second));
+                vst1q_u64(cell.add(6), vzip2q_u64(zero, second));
+            }
+        }
+    }
+    groups * 16
+}
+
 impl PartialEq for Cell {
     /// Compares the values a host can observe, not the internal sharing: two cells
     /// with the same character, presentation, width, written flag, combining marks
@@ -346,6 +390,11 @@ impl Cell {
         {
             let base = cell_image(&Cell::from_packed('\0', packed));
             let unit = cell_image(&Cell::from_packed('\u{1}', packed)) ^ base;
+            #[cfg(target_arch = "aarch64")]
+            let (cells, bytes) = {
+                let done = store_ascii_vectors(cells, bytes, packed, base, unit);
+                (&mut cells[done..], &bytes[done.min(bytes.len())..])
+            };
             for (cell, &byte) in cells.iter_mut().zip(bytes) {
                 // SAFETY: the target owns no side record, so overwriting it leaks nothing.
                 // The image differs from `base` only in the character field, which holds

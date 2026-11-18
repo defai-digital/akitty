@@ -1539,3 +1539,32 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/kep
 | Long lines | 864.9 | 906.0 | 1.05x | 498.9 | 0.56x |
 | Synchronized screen | 796.6 | 801.2 | 1.01x | 894.0 | 1.1x |
 | Alternate screen | 175.4 | 176.1 | 1.00x | 174.2 | 0.98x |
+
+## ASCII cells built in vector registers
+
+A probe that parsed text and discarded it put the parser at 0.05 ns per ASCII
+character; the cell writer took the remaining 0.35 ns. Its loop widened bytes in
+vector registers and then moved each one back to a general register for an
+eight-byte pair store. On aarch64 the writer now builds whole cells in vector
+registers, sixteen characters at a time: each group of four characters is zipped
+with the packed word and then with zero, giving four sixteen-byte cells. It runs only
+when the cell images computed from two reference cells confirm that layout, and the
+scalar loop takes the tail and every other target. The per-character slope fell from
+0.395 to 0.345 ns. The existing store test compares exact images for 0 to 128
+characters in two presentations, and mutation checks confirm swapped zips, a wrong
+half, a wrong address, a wrong count and a wrong widening are caught.
+
+The ASCII workload measured flat (0.99x over seven passes): its 54-character lines
+get three groups and a six-character tail.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/vector-cells-2026-11-18.json));
+this run was noisy, so the record also holds a seven-pass ASCII rerun:
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 1104.7 | 1046.7 | 0.95x | 1306.0 | 1.2x |
+| Synchronized screen | 802.9 | 824.8 | 1.03x | 884.6 | 1.08x |
+| Long lines | 885.0 | 901.5 | 1.02x | 464.1 | 0.51x |
+| ANSI | 311.3 | 308.7 | 0.99x | 262.9 | 0.84x |
+| Unicode | 158.1 | 162.0 | 1.02x | 189.1 | 1.18x |
+| Alternate screen | 171.1 | 167.5 | 0.98x | 161.3 | 0.98x |
