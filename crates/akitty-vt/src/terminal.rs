@@ -21,6 +21,8 @@ const SYNC_RETAINED_ENTRIES: usize = 1024;
 const SYNC_RETAINED_TEXT: usize = 64 * 1024;
 /// Deferred CSI records kept for reuse, so their parameter storage is not reallocated.
 const SYNC_SPARE_CSI: usize = 64;
+/// Parameter vectors kept for reuse between recycled CSI records.
+const SYNC_SPARE_PARAMS: usize = 256;
 
 /// One synchronized-output queue entry. Printable text stays a run (a range of the
 /// queue's text) so it replays through row writes when the update ends.
@@ -28,6 +30,8 @@ const SYNC_SPARE_CSI: usize = 64;
 enum Deferred {
     Text(std::ops::Range<usize>),
     Csi(Csi),
+    /// A C0 control, the deferred `Action::Control`.
+    Control(u8),
     Action(Action),
 }
 
@@ -40,6 +44,9 @@ struct SyncQueue {
     /// Bytes charged against `MAX_SYNC_MEMORY`, at the scalar-action rate.
     bytes: usize,
     spare_csi: Vec<Csi>,
+    /// Parameter vectors released when a recycled record held more parameters than the
+    /// sequence copied into it, reused when one holds fewer.
+    spare_params: Vec<Vec<Option<u16>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,9 +400,13 @@ impl Terminal {
             }
             // Outside synchronized output a control is applied at once, as `dispatch`
             // would, without the general action path.
-            Input::Action(Action::Control(byte)) if self.sync_deadline.is_none() => {
-                self.grapheme_target = None;
-                self.control(byte, &mut emit);
+            Input::Action(Action::Control(byte)) => {
+                if self.sync_deadline.is_some() {
+                    self.defer_control(byte, &mut emit);
+                } else {
+                    self.grapheme_target = None;
+                    self.control(byte, &mut emit);
+                }
             }
             Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
         });
@@ -434,6 +445,10 @@ impl Terminal {
                         self.sync.spare_csi.push(csi);
                     }
                 }
+                Deferred::Control(byte) => {
+                    self.grapheme_target = None;
+                    self.control(byte, emit);
+                }
                 Deferred::Action(action) => self.apply(action, emit),
             }
         }
@@ -460,8 +475,19 @@ impl Terminal {
             Some(Deferred::Text(range)) if range.end == start => range.end = end,
             _ => queue.entries.push(Deferred::Text(start..end)),
         }
-        let chars = text.bytes().filter(|byte| byte & 0xc0 != 0x80).count();
+        let chars = text.chars().count();
         queue.bytes += chars * std::mem::size_of::<Action>();
+        if queue.bytes >= MAX_SYNC_MEMORY {
+            self.flush_sync(emit);
+        }
+    }
+    /// Queue a C0 control during synchronized output, charged as `dispatch` charges
+    /// an `Action::Control`.
+    #[inline(never)]
+    fn defer_control(&mut self, byte: u8, emit: &mut impl FnMut(Event)) {
+        let queue = &mut *self.sync;
+        queue.bytes += std::mem::size_of::<Action>();
+        queue.entries.push(Deferred::Control(byte));
         if queue.bytes >= MAX_SYNC_MEMORY {
             self.flush_sync(emit);
         }
@@ -476,6 +502,17 @@ impl Terminal {
         owned.prefix = csi.prefix;
         owned.final_byte = csi.final_byte;
         owned.intermediates.clone_from(&csi.intermediates);
+        // Match the parameter count from the pool first, so `clone_from` reuses every
+        // vector instead of dropping or allocating one.
+        while owned.params.len() > csi.params.len() {
+            let released = owned.params.pop().expect("longer than the source");
+            if queue.spare_params.len() < SYNC_SPARE_PARAMS {
+                queue.spare_params.push(released);
+            }
+        }
+        while owned.params.len() < csi.params.len() {
+            owned.params.push(queue.spare_params.pop().unwrap_or_default());
+        }
         owned.params.clone_from(&csi.params);
         queue.bytes += std::mem::size_of::<Action>()
             + csi.params.iter().map(|p| p.len() * std::mem::size_of::<Option<u16>>()).sum::<usize>();
@@ -2209,6 +2246,7 @@ mod tests {
             match entry {
                 Deferred::Text(range) => actions.extend(term.sync.text[range.clone()].chars().map(Action::Print)),
                 Deferred::Csi(csi) => actions.push(Action::Csi(csi.clone())),
+                Deferred::Control(byte) => actions.push(Action::Control(*byte)),
                 Deferred::Action(action) => actions.push(action.clone()),
             }
         }
@@ -2594,8 +2632,11 @@ mod tests {
 
     #[test]
     fn synchronized_ascii_runs_flush_like_scalar_actions_on_end_and_timeout() {
-        let text = format!("{}\x1b[31mstyled\x1b[0m中\x1b[1;1Hwide overwrite\x1b(0qqq\x1b(Bascii\x1b[6n\x07",
-                           "ordinary text 0123456789 ".repeat(600));
+        // Controls clear the grapheme target before a following mark, and CSIs with
+        // changing parameter counts pass through recycled records.
+        let text = format!("{}\x1b[31mstyled\x1b[0m中\x1b[1;1Hwide overwrite\x1b(0qqq\x1b(Bascii{}\x1b[6n\x07",
+                           "ordinary text 0123456789 ".repeat(600),
+                           "a\n\u{301}b\x1b[1;2;3mc\x1b[m\x1b[38;5;1;4md\x0b\u{301}\x1b[2;3H");
         for timeout in [false, true] {
             let mut fast = Terminal::new(17, 4, 10).unwrap();
             let mut scalar = Terminal::new(17, 4, 10).unwrap();

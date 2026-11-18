@@ -1181,3 +1181,31 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/cel
 | Alternate screen | 170.5 | 172.9 | 1.01x | 174.1 | 1.02x |
 | Synchronized screen | 566.6 | 567.0 | 1.00x | 894.1 | 1.56x |
 
+## Lighter synchronized-queue entries
+
+The benchmark frame (`?2026h`, a cursor move, two rows of text with colour changes,
+`?2026l`) cost 296 ns synchronized and 185 ns without the mode, against 189 and 140
+ns for libghostty-vt. An empty mode pair costs about the same in both engines, so the
+remaining difference is the queue: AkiTTY holds the frame's actions, replies included,
+until the frame ends, where libghostty-vt applies them and holds only rendering.
+That semantics is kept. Three costs in it were cut:
+
+1. C0 controls were queued as full actions through the general dispatcher; they are
+   now one-byte entries, charged the same, and replayed through the control handler
+   after clearing the grapheme target as `apply` does.
+2. Queued text counted its characters byte by byte for its charge; it now uses the
+   standard library's word-at-a-time count.
+3. A recycled CSI record whose parameter count differed from the sequence dropped or
+   allocated parameter vectors; a bounded pool of 256 now supplies and keeps them.
+
+The synchronized-output equivalence test now feeds controls followed by combining
+marks and CSIs with changing parameter counts, and mutation checks confirm the
+charge, the grapheme reset, the character count and the control routing are caught.
+
+| Engine MiB/s ([raw record](../benchmarks/results/sync-entries-2026-11-18.json)) | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Synchronized screen | 561.0 | 578.7 | 1.03x |
+| ASCII | 921.4 | 919.0 | 1.00x |
+| Unicode | 141.4 | 141.8 | 1.00x |
+| Long lines | 405.4 | 403.8 | 1.00x |
+

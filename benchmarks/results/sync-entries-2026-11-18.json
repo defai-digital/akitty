@@ -1,0 +1,24 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "df97572e913f2c27f5b5308042a47c03b357fe5f",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "frame_ns_text": [
+  "sync         296.4 ns/frame |  284.1 ns/frame | ghostty  189.1",
+  "nosync       185.1 ns/frame |  196.3 ns/frame | ghostty  140.2",
+  "sync-empty   453.7 ns/frame |  447.0 ns/frame | ghostty  421.3"
+ ],
+ "rotated_ab_5_passes_text": [
+  "synchronized-screen  base   561.0  new   578.7   1.03x  base=[564, 570, 552, 561, 557] new=[583, 584, 579, 566, 568]",
+  "ascii                base   921.4  new   919.0   1.00x  base=[918, 939, 936, 919, 921] new=[920, 919, 919, 914, 918]",
+  "ansi                 base   323.7  new   323.0   1.00x  base=[325, 317, 326, 324, 323] new=[323, 323, 321, 321, 328]",
+  "unicode              base   141.4  new   141.8   1.00x  base=[141, 141, 141, 143, 141] new=[143, 144, 142, 139, 141]",
+  "long-lines           base   405.4  new   403.8   1.00x  base=[406, 405, 406, 401, 405] new=[404, 402, 406, 404, 403]",
+  "alternate-screen     base   171.3  new   170.1   0.99x  base=[160, 171, 171, 170, 172] new=[170, 170, 173, 168, 170]"
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}
