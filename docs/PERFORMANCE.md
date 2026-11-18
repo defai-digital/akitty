@@ -2026,3 +2026,45 @@ character in the stretch and 2.1 ns in the parser, against libghostty-vt's 2.9 n
 both; the stretch stores 32 bytes per wide character, well under one cycle of store
 bandwidth, so it is bound by instructions, and halving the cell size alone would not
 close this.
+
+## Validating text sixteen bytes at a time
+
+The parser checked each multi-byte scalar on its own (`scalar_width`) and tried an
+ASCII word after it. Once per run, after the first multi-byte scalar, it now takes
+whole sixteen-byte chunks with NEON: a compare for C0 controls and DEL, and the
+lookup-table UTF-8 validation of Keiser and Lemire ("Validating UTF-8 In Less Than
+One Instruction Per Byte", 2021), whose three nibble tables give each byte's error
+classes from the byte before it and its own high nibble, matched against the
+continuation bytes that three- and four-byte leads two and three bytes back require.
+A sequence cut by the last chunk is backed off, and the per-scalar scan continues
+from there as before, so the run ends exactly where it did. Other targets take no
+chunks.
+
+Tests compare it with the per-scalar scan: every byte value at forty positions in
+text of each sequence length, every pair of bytes across a chunk edge, and 200,000
+random mixtures of valid and invalid sequences. The taken prefix is never past the
+scan's end, is valid UTF-8, and holds every whole chunk inside the scan's prefix
+except a backed-off sequence. Mutation checks catch the control and DEL compares,
+the continuation requirement, the four-byte lead, single table entries (surrogates,
+two-byte overlongs, too-large four-byte leads, the C0..CF row), the previous-byte
+shift, the carried chunk and each part of the back-off.
+
+The Unicode workload line falls from 295.2 to 263.7 ns, a CJK line from 115.0 to
+106.0 ns, French from 137.7 to 124.8 ns and German from 128.5 to 113.0 ns. Emoji
+and ASCII lines are flat.
+
+Engine results, rotated order, five passes against the build before and seven
+against libghostty-vt 1.0.1, history 0
+([raw record](../benchmarks/results/neon-text-chunks-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 183.2 | 199.7 | 1.09x | 192.4 | 0.97x |
+| ASCII | 1294.4 | 1287.0 | 0.99x | 1302.5 | 1.01x |
+| Synchronized screen | 938.0 | 922.5 | 0.98x | 897.2 | 0.98x |
+| Long lines | 928.4 | 911.1 | 0.98x | 485.0 | 0.54x |
+| ANSI | 341.9 | 335.4 | 0.98x | 268.2 | 0.80x |
+| Alternate screen | 178.6 | 176.6 | 0.99x | 174.4 | 1.00x |
+
+The ASCII, synchronized and ANSI workloads never reach the new code; their changes
+are within the host's noise.

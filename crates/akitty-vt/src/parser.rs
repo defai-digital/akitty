@@ -117,6 +117,137 @@ impl std::fmt::Debug for Parser {
     }
 }
 
+/// The length of a prefix of `input` (which starts at a character boundary) that the
+/// run scan would take whole: printable ASCII and complete valid multi-byte scalars,
+/// with no C0 control, DEL or invalid byte. Takes whole sixteen-byte chunks, then backs
+/// off a trailing incomplete sequence, so it may stop short of the scan's end (the scan
+/// continues from there) but never past it.
+#[inline(never)]
+fn text_chunks(input: &[u8]) -> usize {
+    let mut taken = chunks::valid_chunks(input);
+    // Every taken chunk was valid given the bytes before it, so only a sequence that
+    // starts in the last three bytes can be cut short by the end of the prefix.
+    for back in 1..=3.min(taken) {
+        let byte = input[taken - back];
+        if byte >= 0xc0 {
+            let length = match byte {
+                0xc0..=0xdf => 2,
+                0xe0..=0xef => 3,
+                _ => 4,
+            };
+            if length > back {
+                taken -= back;
+            }
+            break;
+        }
+    }
+    taken
+}
+
+#[cfg(target_arch = "aarch64")]
+mod chunks {
+    use std::arch::aarch64::*;
+
+    const TOO_SHORT: u8 = 1 << 0;
+    const TOO_LONG: u8 = 1 << 1;
+    const OVERLONG_3: u8 = 1 << 2;
+    const TOO_LARGE: u8 = 1 << 3;
+    const SURROGATE: u8 = 1 << 4;
+    const OVERLONG_2: u8 = 1 << 5;
+    const TOO_LARGE_1000: u8 = 1 << 6;
+    const OVERLONG_4: u8 = 1 << 6;
+    const TWO_CONTS: u8 = 1 << 7;
+    const CARRY: u8 = TOO_SHORT | TOO_LONG | TWO_CONTS;
+
+    /// Error classes by the previous byte's high nibble.
+    const FIRST_HIGH: [u8; 16] = [
+        TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+        TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+        TOO_SHORT | OVERLONG_2,
+        TOO_SHORT,
+        TOO_SHORT | OVERLONG_3 | SURROGATE,
+        TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+    ];
+    /// Error classes by the previous byte's low nibble.
+    const FIRST_LOW: [u8; 16] = [
+        CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4,
+        CARRY | OVERLONG_2,
+        CARRY,
+        CARRY,
+        CARRY | TOO_LARGE,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000 | SURROGATE,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+        CARRY | TOO_LARGE | TOO_LARGE_1000,
+    ];
+    /// Error classes by the current byte's high nibble.
+    const SECOND_HIGH: [u8; 16] = [
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | OVERLONG_3 | TOO_LARGE,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+        TOO_LONG | OVERLONG_2 | TWO_CONTS | SURROGATE | TOO_LARGE,
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    ];
+
+    /// The length of the leading whole sixteen-byte chunks of `input` that hold no C0
+    /// control or DEL and are valid UTF-8 given the chunks before them (the input
+    /// starts at a character boundary). A sequence may run on past the last chunk.
+    /// This is the lookup-table validation of Keiser and Lemire, "Validating UTF-8 In
+    /// Less Than One Instruction Per Byte" (2021): each byte's error classes from the
+    /// byte before it and its own high nibble must match the continuation bytes that
+    /// three- and four-byte leads two and three bytes back require.
+    pub(super) fn valid_chunks(input: &[u8]) -> usize {
+        // SAFETY: NEON is part of the aarch64 baseline; every load reads sixteen bytes
+        // inside `input`.
+        unsafe {
+            let first_high = vld1q_u8(FIRST_HIGH.as_ptr());
+            let first_low = vld1q_u8(FIRST_LOW.as_ptr());
+            let second_high = vld1q_u8(SECOND_HIGH.as_ptr());
+            let mut previous = vdupq_n_u8(0);
+            let mut taken = 0;
+            while let Some(chunk) = input[taken..].first_chunk::<16>() {
+                let bytes = vld1q_u8(chunk.as_ptr());
+                let control = vorrq_u8(vcltq_u8(bytes, vdupq_n_u8(0x20)), vceqq_u8(bytes, vdupq_n_u8(0x7f)));
+                let prev1 = vextq_u8::<15>(previous, bytes);
+                let special = vandq_u8(
+                    vandq_u8(
+                        vqtbl1q_u8(first_high, vshrq_n_u8::<4>(prev1)),
+                        vqtbl1q_u8(first_low, vandq_u8(prev1, vdupq_n_u8(0x0f))),
+                    ),
+                    vqtbl1q_u8(second_high, vshrq_n_u8::<4>(bytes)),
+                );
+                let prev2 = vextq_u8::<14>(previous, bytes);
+                let prev3 = vextq_u8::<13>(previous, bytes);
+                let third = vqsubq_u8(prev2, vdupq_n_u8(0xe0 - 0x80));
+                let fourth = vqsubq_u8(prev3, vdupq_n_u8(0xf0 - 0x80));
+                let required = vandq_u8(vorrq_u8(third, fourth), vdupq_n_u8(0x80));
+                let error = vorrq_u8(veorq_u8(required, special), control);
+                if vmaxvq_u8(error) != 0 {
+                    break;
+                }
+                previous = bytes;
+                taken += 16;
+            }
+            taken
+        }
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+mod chunks {
+    pub(super) fn valid_chunks(_input: &[u8]) -> usize {
+        0
+    }
+}
+
 /// Byte width of a complete printable multi-byte scalar at `index`, or `None` when the
 /// byte needs the state machine: a control, a sequence introducer, or invalid UTF-8.
 #[inline]
@@ -179,6 +310,7 @@ impl Parser {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
                 let mut ascii = true;
+                let mut chunked = false;
                 // Printable ASCII is skipped a word at a time where a run opens and
                 // after each multi-byte scalar, up to the exact first other byte. The
                 // byte loop takes a short tail and the rest, and a complete multi-byte scalar
@@ -193,6 +325,12 @@ impl Parser {
                         Some(width) => {
                             ascii = false;
                             index += width;
+                            // Once per run, take whole chunks of text after the first
+                            // multi-byte scalar at a time.
+                            if !chunked {
+                                chunked = true;
+                                index += text_chunks(&input[index..]);
+                            }
                             index += whole_printable_words(&input[index..]);
                         }
                         None => break,
@@ -779,6 +917,83 @@ mod tests {
                                   (0x8d, b'M'), (0x8e, b'N'), (0x8f, b'O'), (0x9a, b'Z')] {
             assert_eq!(parse(&[&[byte]]), parse(&[&[0x1b, final_byte]]), "control {byte:#x}");
         }
+    }
+
+    /// The run scan's longest prefix of `input`: printable ASCII and `scalar_width`
+    /// scalars.
+    fn scan_prefix(input: &[u8]) -> usize {
+        let mut index = 0;
+        while index < input.len() {
+            if (0x20..=0x7e).contains(&input[index]) {
+                index += 1;
+            } else if let Some(width) = scalar_width(input, index) {
+                index += width;
+            } else {
+                break;
+            }
+        }
+        index
+    }
+
+    fn check_chunks(input: &[u8]) {
+        let taken = text_chunks(input);
+        let longest = scan_prefix(input);
+        assert!(taken <= longest, "{taken} > {longest}: {input:x?}");
+        assert!(std::str::from_utf8(&input[..taken]).is_ok(), "{input:x?}");
+        #[cfg(target_arch = "aarch64")]
+        assert!(taken + 3 >= longest / 16 * 16, "every whole chunk inside the scan's prefix: {taken} of {longest}: {input:x?}");
+    }
+
+    #[test]
+    fn text_chunks_take_only_what_the_scan_takes() {
+        // Every byte value at every position of a chunk inside valid text of each
+        // sequence length, every pair of adjacent bytes at a chunk edge, and random
+        // mixtures of valid and invalid sequences.
+        let fills = ["a", "é", "中", "😀", "aé中😀", "\u{80}\u{7ff}\u{800}\u{ffff}\u{10000}\u{10ffff}\u{d7ff}\u{e000}"];
+        for fill in fills {
+            let base: Vec<u8> = fill.repeat(60).into_bytes();
+            for at in 0..40 {
+                for byte in 0..=255u8 {
+                    let mut input = base.clone();
+                    input[at] = byte;
+                    check_chunks(&input);
+                }
+            }
+        }
+        for first in 0..=255u8 {
+            for second in 0..=255u8 {
+                let mut input = vec![b'a'; 48];
+                input[15] = first;
+                input[16] = second;
+                check_chunks(&input);
+                input[16] = 0x80;
+                input[17] = second;
+                check_chunks(&input);
+            }
+        }
+        let pieces: [&[u8]; 14] = [
+            b"a", b" ", "é".as_bytes(), "中".as_bytes(), "😀".as_bytes(), "\u{10ffff}".as_bytes(), b"\x1b",
+            b"\x7f", b"\x80", b"\xc0\x80", b"\xed\xa0\x80", b"\xf4\x90\x80\x80", b"\xe4\xb8", b"\x9c",
+        ];
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..200_000 {
+            let mut input = Vec::new();
+            while input.len() < 70 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let piece = pieces[(state % 100) as usize % pieces.len()];
+                // Mostly valid text.
+                let piece = if state % 100 < 90 { pieces[(state >> 8) as usize % 6] } else { piece };
+                input.extend_from_slice(piece);
+            }
+            check_chunks(&input);
+        }
+        let line = "中文 日本語 한국어 é 😀 👩🏽\u{200d}💻 🇯🇵 text\r\n".repeat(3);
+        let taken = text_chunks(line.as_bytes());
+        assert!(line.is_char_boundary(taken));
+        #[cfg(target_arch = "aarch64")]
+        assert!(taken >= 48, "{taken}");
     }
 
     #[test]
