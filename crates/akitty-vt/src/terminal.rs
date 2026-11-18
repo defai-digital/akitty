@@ -243,6 +243,8 @@ pub struct Terminal {
     sync: Box<SyncQueue>,
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
+    /// A screen may hold a pending blank refill (see `materialize`).
+    blank_pending: bool,
     cluster_scratch: String,
     /// The cell whose complete cluster text `cluster_scratch` holds: its position, row
     /// id and row generation. Every cell write advances the generation and a recycled
@@ -263,6 +265,9 @@ pub struct Terminal {
     /// Number of templates built, for tests that prove reuse.
     #[cfg(test)]
     template_builds: usize,
+    /// Line feeds blank their new row at once, for tests that use it as a reference.
+    #[cfg(test)]
+    blank_at_once: bool,
     pub preserve_erased_screen: bool,
     pub title_max_bytes: usize,
     pub title_max_chars: usize,
@@ -345,6 +350,7 @@ impl Terminal {
             sync: Box::default(),
             grapheme_supported: false,
             grapheme_target: None,
+            blank_pending: false,
             cluster_scratch: String::new(),
             cluster_scratch_at: None,
             cluster_cache: [None; CLUSTER_SLOTS],
@@ -354,6 +360,8 @@ impl Terminal {
             current_slot: None,
             #[cfg(test)]
             template_builds: 0,
+            #[cfg(test)]
+            blank_at_once: false,
             preserve_erased_screen: true,
             title_max_bytes: crate::parser::MAX_STRING_BYTES,
             title_max_chars: 128,
@@ -458,9 +466,28 @@ impl Terminal {
             Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
         });
         self.parser = parser;
+        // A host reads cells only between calls, so none is left pending.
+        self.materialize();
         if !bytes.is_empty() {
             self.revision = self.revision.wrapping_add(1);
         }
+    }
+    /// Complete any pending blank refill (see `Screen::materialize`). Every path that
+    /// reads or writes cells calls it first, except the ASCII write that resolves it.
+    /// `blank_pending` is set whenever a screen may hold one, so the common case is
+    /// one flag test.
+    #[inline(always)]
+    fn materialize(&mut self) {
+        if self.blank_pending {
+            self.materialize_screens();
+        }
+    }
+    #[cold]
+    #[inline(never)]
+    fn materialize_screens(&mut self) {
+        self.blank_pending = false;
+        self.main.materialize();
+        self.alternate.materialize();
     }
 
     pub fn expire_sync(&mut self, now_ms: u64, mut emit: impl FnMut(Event)) -> bool {
@@ -469,6 +496,7 @@ impl Terminal {
             .is_some_and(|deadline| deadline <= now_ms)
         {
             self.flush_sync(&mut emit);
+            self.materialize();
             self.revision = self.revision.wrapping_add(1);
             true
         } else {
@@ -633,6 +661,8 @@ impl Terminal {
     /// A C0 control, as `apply(Action::Control(byte))` performs it after clearing the
     /// grapheme target.
     fn control(&mut self, byte: u8, emit: &mut impl FnMut(Event)) {
+        // No control reads or writes cells except through `Screen::scroll`, which
+        // completes a pending refill itself, so none needs `materialize` here.
         match byte {
             7 => emit(Event::Bell),
             8 => {
@@ -642,7 +672,7 @@ impl Terminal {
             }
             9 => self.tab(1, false),
             10..=12 => {
-                self.linefeed(emit);
+                self.linefeed_deferring(emit);
                 if self.modes.newline {
                     self.screen_mut().cursor.position.col = 0;
                 }
@@ -658,6 +688,7 @@ impl Terminal {
         }
     }
     fn apply(&mut self, action: Action, emit: &mut impl FnMut(Event)) {
+        self.materialize();
         if !matches!(&action, Action::Print(_)) {
             self.grapheme_target = None;
         }
@@ -832,6 +863,11 @@ impl Terminal {
             return RunWrite::default();
         }
         let pos = cursor.position;
+        // A pending refill is the cursor row's: only a line feed leaves one, and any
+        // other way of moving the cursor (a CSI or escape) completes it first. It stays
+        // pending only for the ASCII store into blanks below, which completes it; any
+        // other write fills the row first.
+        debug_assert!(!self.blank_pending || self.screen().pending_row().is_none_or(|row| row == pos.row));
         if self.plain_ascii_run_start(text) {
             let span = (cols - pos.col).min(text.len());
             // A text run holds printable ASCII and whole multi-byte scalars only, so its
@@ -849,6 +885,7 @@ impl Terminal {
                 if count > 0 {
                     let packed = template.packed_written_column();
                     let side_data = template.has_side_data();
+                    let finish = std::mem::replace(&mut self.blank_pending, false);
                     let screen = self.screen_mut();
                     let row = &mut screen.rows[pos.row];
                     let heap_free = row.heap_free();
@@ -874,6 +911,10 @@ impl Terminal {
                     }
                     row.charge_write(pos.col, count, template.side_identity());
                     let end = pos.col + count;
+                    debug_assert!(screen.pending_row().is_none_or(|row| row == pos.row));
+                    if finish {
+                        screen.finish_pending(pos.col..end);
+                    }
                     screen.cursor.position.col = end.min(cols - 1);
                     screen.cursor.pending_wrap = end >= cols;
                     self.last_printed = Some(char::from(bytes[count - 1]));
@@ -882,6 +923,7 @@ impl Terminal {
                 }
             }
         }
+        self.materialize();
         self.write_run_cells(text, pos, cols, template)
     }
     /// One character at a time, for everything the batched prefix cannot take.
@@ -1057,6 +1099,7 @@ impl Terminal {
         self.print_with_verdict(ch, None, emit);
     }
     fn print_with_verdict(&mut self, mut ch: char, verdict: Option<Join>, emit: &mut impl FnMut(Event)) {
+        self.materialize();
         let charset = self.single_shift.take().unwrap_or(self.charset);
         if self.charsets[charset] {
             ch = dec_graphic(ch);
@@ -1325,12 +1368,22 @@ impl Terminal {
         to_history: bool,
         emit: &mut impl FnMut(Event),
     ) {
+        self.scroll_deferring(region, lines, to_history, false, emit);
+    }
+    fn scroll_deferring(
+        &mut self,
+        region: Range<usize>,
+        lines: i32,
+        to_history: bool,
+        defer: bool,
+        emit: &mut impl FnMut(Event),
+    ) {
         let alternate = self.modes.alternate;
         let to_history = to_history && !alternate && region.start == 0;
         let bg = self.style.bg;
         let moved = self
             .screen_mut()
-            .scroll(region.clone(), lines, to_history, bg);
+            .scroll_deferring(region.clone(), lines, to_history, bg, defer);
         if moved != 0 {
             emit(Event::Scroll {
                 alternate,
@@ -1343,10 +1396,26 @@ impl Terminal {
         }
     }
     fn linefeed(&mut self, emit: &mut impl FnMut(Event)) {
+        self.linefeed_with(false, emit);
+    }
+    /// A line feed that may leave the new bottom row's blank refill pending. Only the
+    /// line-feed control uses it: the next cell access then comes from another entry
+    /// point, each of which completes or consumes the refill first.
+    fn linefeed_deferring(&mut self, emit: &mut impl FnMut(Event)) {
+        #[cfg(test)]
+        if self.blank_at_once {
+            self.linefeed(emit);
+            return;
+        }
+        self.linefeed_with(true, emit);
+        self.blank_pending = self.screen().has_pending();
+    }
+    #[inline(always)]
+    fn linefeed_with(&mut self, defer: bool, emit: &mut impl FnMut(Event)) {
         let pos = self.cursor();
         let region = self.screen().region.clone();
         if pos.row + 1 == region.end {
-            self.scroll(region, 1, true, emit);
+            self.scroll_deferring(region, 1, true, defer, emit);
         } else if pos.row + 1 < self.rows() {
             self.screen_mut().cursor.position.row += 1;
         }
@@ -1583,6 +1652,7 @@ impl Terminal {
         }
     }
     fn csi(&mut self, c: &Csi, emit: &mut impl FnMut(Event)) {
+        self.materialize();
         let n = c.count(0);
         let pos = self.cursor();
         if c.intermediates == b"$" && c.final_byte == b'p' {
@@ -2398,8 +2468,62 @@ mod tests {
         let mut parser = std::mem::take(&mut term.parser);
         parser.feed(bytes, |action| term.dispatch(action, now, &mut |event| events.push(event)));
         term.parser = parser;
+        // As `feed` does: a scroll may leave its new row's refill pending.
+        term.materialize();
         if !bytes.is_empty() { term.revision = term.revision.wrapping_add(1); }
         events
+    }
+
+    #[test]
+    fn rows_left_pending_by_a_line_feed_match_rows_blanked_at_once() {
+        // Each case follows a line feed that scrolls a full screen (so the recycled row
+        // holds stale text) with one way of reaching cells before the next store.
+        let follow = [
+            "after", "\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b[J", "\x1b[1J", "\x1b[3@", "\x1b[2P",
+            "\x1b[3X", "\x1b[L", "\x1b[M", "\x1b[S", "\x1b[T", "\x1b[2;3r\x1b[3;1H\n",
+            "\x1bD", "\x1bE", "\x1bM", "\x1b7\x1b[H\x1b8x", "\x1b[?1049hx\x1b[?1049ly",
+            "\x08\x08z", "\tq", "\r\nnext", "\n\n\nthree", "中wide", "e\u{301}", "\u{301}x",
+            "\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\", "\x1b[4hins\x1b[4l",
+            "\x1b(0qqq\x1b(B", "a\x1b[3b", "\x1b#8", "\x1bcreset", "\x1b[5Cmid", "\x1b[48;2;1;2;3mbg\x1b[0m",
+            "\x1b[48;2;1;2;3m\nbg\x1b[0m", "\x1b[41m\n\x1b[0mx", "\x1b[?2026hframe\nrow\x1b[?2026l",
+            "\x1b[?2026h\nrow", "\x1b]0;title\x07t", "\x1bPq\x1b\\d", "\x1b[6n", "\x1b[?7lnowrapnowrap\x1b[?7h",
+            "full line", "\x1b[1;3;4:3;58;2;9;9;9mul\x1b[0m", "\x1b[3b", "\x1b(0\nqqq\x1b(B",
+            "\x1b[4h\nins\x1b[4l", "\x1b*0\x1bN\nq", "\x1b[?2026hrow\n", "\x1b[?2026h\x1b[2;3r\n\x1b[3b",
+            "\x1b[2;3r\x1b[3;1H\n\x1b[r\x1b[3;1H\n\x1b[3b", "\x1b[?7l\n\x1b[3b\x1b[?7h", "\x1b[3S\x1b[3b",
+            "\x1b[?1049h\n\x1b[?1049l\x1b[3b", "\x1b[?2026h\n\x1b#8\x1b[?2026l", "\x1b[?2026h\n\x1b[3b\x1b[?2026l",
+            "\x1b[?2026h\n\x1b(0q\x1b(B\x1b[?2026l",
+        ];
+        for cols in [1, 4, 9] {
+            for history in [0, 5] {
+                for graphemes in [false, true] {
+                    for case in follow {
+                        let fill = "#########\r\n%%%%%%%%%\r\n@@@@@@@@@";
+                        let input = format!("{fill}\n{case}\n{case}");
+                        let mut deferred = Terminal::new(cols, 3, history).unwrap();
+                        let mut reference = Terminal::new(cols, 3, history).unwrap();
+                        reference.blank_at_once = true;
+                        deferred.enable_grapheme_support(graphemes);
+                        reference.enable_grapheme_support(graphemes);
+                        // An open synchronized frame is also applied by its timeout.
+                        for (now, chunk) in [Some(input.as_bytes()), None, Some(b"tail\n"), Some(b"")].into_iter().enumerate() {
+                            let now = now as u64 * 1_000;
+                            let mut events = Vec::new();
+                            let mut expected = Vec::new();
+                            if let Some(chunk) = chunk {
+                                deferred.feed(chunk, now, |event| events.push(event));
+                                reference.feed(chunk, now, |event| expected.push(event));
+                            } else {
+                                deferred.expire_sync(u64::MAX, |event| events.push(event));
+                                reference.expire_sync(u64::MAX, |event| expected.push(event));
+                            }
+                            assert_eq!(events, expected, "cols={cols} history={history} case={case:?}");
+                            assert!(!deferred.blank_pending && !deferred.main.has_pending() && !deferred.alternate.has_pending());
+                            assert_eq!(state(&deferred), state(&reference), "cols={cols} history={history} graphemes={graphemes} case={case:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

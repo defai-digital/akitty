@@ -1,0 +1,129 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "42fe95e",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "rotated_ab_7_passes_text": [
+  "ascii                base  1097.2  new  1255.6   1.14x  base=[1086, 1103, 1094, 1125, 1097, 1108, 1095] new=[1258, 1254, 1220, 1264, 1262, 1256, 1249]",
+  "synchronized-screen  base   837.9  new   848.6   1.01x  base=[848, 832, 824, 842, 833, 838, 851] new=[832, 850, 826, 853, 849, 844, 849]",
+  "long-lines           base   932.5  new   896.6   0.96x  base=[935, 935, 933, 929, 912, 927, 941] new=[897, 913, 895, 897, 885, 903, 885]",
+  "unicode              base   165.6  new   163.0   0.98x  base=[161, 168, 167, 167, 166, 160, 160] new=[156, 158, 163, 163, 160, 166, 167]",
+  "ansi                 base   320.4  new   317.2   0.99x  base=[320, 313, 313, 321, 319, 321, 322] new=[316, 316, 318, 320, 311, 317, 317]",
+  "alternate-screen     base   174.3  new   172.4   0.99x  base=[174, 175, 175, 172, 174, 174, 176] new=[172, 174, 170, 172, 172, 176, 172]"
+ ],
+ "probe_no_refill_upper_bound": "ascii 1044.6 -> 1329.2 (1.27x), synchronized-screen 1.03x, with incorrect output; measurement only",
+ "rejected": {
+  "parser_scan_with_std_validator": "unicode 0.98x, ascii 0.97x, long-lines 0.88x; no per-character gain (CJK 7.07 ns both)",
+  "four_cell_vector_fill": "0.99x on every workload against a rebuilt baseline",
+  "ascii_wrap_inside_run_writer": "ascii 1.04x, synchronized-screen 0.95x, unicode 0.95x"
+ },
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 1239.5,
+   "ghostty_mib_s": 1306.6,
+   "ghostty_over_akitty": 1.05,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    1243.6,
+    1189.4,
+    1239.5
+   ],
+   "ghostty_passes": [
+    1306.6,
+    1305.1,
+    1311.8
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 313.7,
+   "ghostty_mib_s": 275.9,
+   "ghostty_over_akitty": 0.88,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    309.1,
+    313.7,
+    329.9
+   ],
+   "ghostty_passes": [
+    275.9,
+    273.9,
+    278.0
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 166.3,
+   "ghostty_mib_s": 197.7,
+   "ghostty_over_akitty": 1.19,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    163.7,
+    166.3,
+    166.9
+   ],
+   "ghostty_passes": [
+    197.4,
+    198.8,
+    197.7
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 901.3,
+   "ghostty_mib_s": 496.5,
+   "ghostty_over_akitty": 0.55,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    907.6,
+    901.3,
+    898.7
+   ],
+   "ghostty_passes": [
+    498.5,
+    495.4,
+    496.5
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 168.2,
+   "ghostty_mib_s": 174.7,
+   "ghostty_over_akitty": 1.04,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    170.1,
+    168.2,
+    165.0
+   ],
+   "ghostty_passes": [
+    178.7,
+    174.5,
+    174.7
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 841.5,
+   "ghostty_mib_s": 897.9,
+   "ghostty_over_akitty": 1.07,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    827.2,
+    841.5,
+    845.9
+   ],
+   "ghostty_passes": [
+    858.1,
+    909.3,
+    897.9
+   ]
+  }
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}

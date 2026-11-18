@@ -1568,3 +1568,48 @@ this run was noisy, so the record also holds a seven-pass ASCII rerun:
 | ANSI | 311.3 | 308.7 | 0.99x | 262.9 | 0.84x |
 | Unicode | 158.1 | 162.0 | 1.02x | 189.1 | 1.18x |
 | Alternate screen | 171.1 | 167.5 | 0.98x | 161.3 | 0.98x |
+
+## Rows a line feed leaves for the next write
+
+When a line feed scrolls the whole screen, the top row rotates to the bottom and is
+refilled with blanks, and in ordinary output the next text overwrites those blanks
+straight away. A probe that skipped the refill (wrong output, measurement only) put
+the cost at 27% of ASCII throughput. A line-feed control now records the refill as
+pending instead (`PendingBlank`: the row's id, how many cells hold stale text, the
+background) when neither the old cells nor the blank own a side record. The row's
+metadata is already that of the blank row. An ASCII store into the row refills only
+the cells it did not write; every other access completes the refill first: CSI and
+escape handling, the per-character and scalar print paths, deferred actions replayed
+from a synchronized frame, any scroll, and the end of each `feed` and `expire_sync`,
+so hosts never see a pending row. Wraps and other scrolls still refill at once,
+since a cell write follows them directly. A one-flag test keeps the checks off the
+other paths.
+
+A new test feeds 56 follow-up sequences after a full-screen line feed (erases,
+insertions, scrolls, scroll regions, the alternate screen, wide and combining text,
+hyperlinks, insert mode, character sets, repeats, synchronized frames applied by
+their end and by their timeout) at three widths, with and without history and
+grapheme clustering. It compares state and events with a terminal that refills at
+once. Mutation checks confirm that each completion point, the flag, both refill
+ranges and both record conditions are needed. The control-byte check, the in-loop
+scroll check and the resize check proved redundant and became debug assertions.
+
+Rejected on the way: finding run ends with the standard UTF-8 validator (no
+per-character gain; long lines 0.88x), a four-cell vector blank fill (0.99x
+everywhere), and wrapping inside the run writer so wrapped rows also defer (ASCII
+only 1.04x; Unicode and synchronized output 0.95x).
+
+Engine results, rotated order, seven passes, history 0
+([raw record](../benchmarks/results/pending-blank-rows-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 1097.2 | 1255.6 | 1.14x | 1306.6 | 1.05x |
+| Synchronized screen | 837.9 | 848.6 | 1.01x | 897.9 | 1.07x |
+| Long lines | 932.5 | 896.6 | 0.96x | 496.5 | 0.55x |
+| ANSI | 320.4 | 317.2 | 0.99x | 275.9 | 0.88x |
+| Unicode | 165.6 | 163.0 | 0.98x | 197.7 | 1.19x |
+| Alternate screen | 174.3 | 172.4 | 0.99x | 174.7 | 1.04x |
+
+Long lines lost 4%: they wrap without line feeds, so they pay only for the checks.
+They remain about 1.8 times Ghostty's throughput.

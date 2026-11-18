@@ -81,13 +81,32 @@ fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background
 /// `Screen::blank(background)` would produce, in place, so its cells and metadata are
 /// not moved through the spare slot.
 fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color, pool: &mut RecordPool) {
+    reblank_deferring::<false>(row, spare, next_row_id, cols, background, pool);
+}
+
+/// `reblank`, except that with `DEFER` a refill of cells that own no records with a
+/// blank that owns none is left undone and returned as a `PendingBlank` instead.
+#[inline(always)]
+fn reblank_deferring<const DEFER: bool>(
+    row: &mut Row,
+    spare: &mut Spare,
+    next_row_id: &mut u64,
+    cols: usize,
+    background: Color,
+    pool: &mut RecordPool,
+) -> Option<PendingBlank> {
     if row.cells.len() != cols {
         // `recycle` keeps no cells of another width, so `blank` uses the spare.
         *row = build_blank(spare, next_row_id, cols, background, pool);
-        return;
+        return None;
     }
     let end = if row.blank_bg == background { row.blank_from() } else { row.cells.len() };
-    refill_blank(&mut row.cells[..end], row.has_heap, background, pool);
+    let pending = if DEFER && !row.has_heap && !Cell::blank_owns_heap(background) && end != 0 {
+        Some(PendingBlank { row_id: *next_row_id, end, background })
+    } else {
+        refill_blank(&mut row.cells[..end], row.has_heap, background, pool);
+        None
+    };
     // `recycle` would have replaced the spare and `blank` taken it.
     *spare = None;
     row.id = *next_row_id;
@@ -104,6 +123,17 @@ fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize,
     row.single_gen = 0;
     row.has_heap = Cell::blank_owns_heap(background);
     row.charge = if row.has_heap { None } else { Some(Charge::fresh()) };
+    pending
+}
+
+/// A blank refill not yet done: cells `..end` of the row `row_id` hold stale text that
+/// reads as blanks of `background`. The row's metadata already describes the blank row.
+/// Neither the stale cells nor the blank own records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingBlank {
+    row_id: u64,
+    end: usize,
+    background: Color,
 }
 
 /// Fill recycled cells with blanks of `background`. `heap` says whether any of them
@@ -413,9 +443,50 @@ pub struct Screen {
     spare: Spare,
     /// Side records freed by blanking, for the next marks written on this screen.
     pub(crate) pool: RecordPool,
+    /// The bottom row's blank refill, left for the write that usually follows a
+    /// scroll. Every other access to cells first calls `materialize`.
+    pending: Option<PendingBlank>,
 }
 
 impl Screen {
+    /// Complete a pending blank refill.
+    #[inline(always)]
+    pub(crate) fn materialize(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.fill_pending(pending, 0..0);
+        }
+    }
+    /// Whether a blank refill is pending.
+    #[inline(always)]
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+    /// The index of the row whose refill is pending.
+    #[inline]
+    pub(crate) fn pending_row(&self) -> Option<usize> {
+        let pending = self.pending.as_ref()?;
+        let index = self.rows.len() - 1;
+        debug_assert_eq!(self.rows[index].id, pending.row_id, "only the bottom row is left pending");
+        Some(index)
+    }
+    /// The pending row's cells `written` were just stored by a heap-free write; refill
+    /// the rest of the pending cells.
+    pub(crate) fn finish_pending(&mut self, written: std::ops::Range<usize>) {
+        if let Some(pending) = self.pending.take() {
+            self.fill_pending(pending, written);
+        }
+    }
+    #[cold]
+    #[inline(never)]
+    fn fill_pending(&mut self, pending: PendingBlank, skip: std::ops::Range<usize>) {
+        let row = self.rows.back_mut().expect("a screen has rows");
+        debug_assert_eq!(row.id, pending.row_id, "only the bottom row is left pending");
+        let blank = Cell::blank(pending.background);
+        let end = pending.end;
+        let skip = skip.start.min(end)..skip.end.min(end);
+        Cell::fill_heap_free(&mut row.cells[..skip.start], &blank);
+        Cell::fill_heap_free(&mut row.cells[skip.end..end], &blank);
+    }
     pub fn new(cols: usize, rows: usize, history: usize, alternate: bool) -> Self {
         let mut screen = Self {
             rows: VecDeque::new(),
@@ -434,6 +505,7 @@ impl Screen {
             next_row_id: if alternate { 1 << 63 } else { 1 },
             spare: None,
             pool: RecordPool::default(),
+            pending: None,
         };
         for _ in 0..rows {
             let row = screen.blank(Color::Background);
@@ -579,6 +651,19 @@ impl Screen {
         history: bool,
         bg: Color,
     ) -> i32 {
+        self.scroll_deferring(region, lines, history, bg, false)
+    }
+    /// `scroll`; with `defer`, a whole-screen scroll may leave the new bottom row's
+    /// blank refill pending (see `PendingBlank`).
+    pub(crate) fn scroll_deferring(
+        &mut self,
+        region: std::ops::Range<usize>,
+        lines: i32,
+        history: bool,
+        bg: Color,
+        defer: bool,
+    ) -> i32 {
+        self.materialize();
         if region.start >= region.end || region.end > self.rows.len() {
             return 0;
         }
@@ -594,9 +679,24 @@ impl Screen {
                     if self.rows.capacity() != self.rows.len() {
                         self.rows.shrink_to_fit();
                     }
+                    // Only a one-line scroll defers, and it completed any earlier
+                    // refill on entry, so no pending row rotates away from the bottom.
+                    debug_assert!(!defer || count == 1);
+                    debug_assert!(self.pending.is_none());
                     self.rows.rotate_left(1);
                     let last = self.rows.back_mut().expect("validated scroll region");
-                    reblank(last, &mut self.spare, &mut self.next_row_id, self.cols, bg, &mut self.pool);
+                    if defer {
+                        self.pending = reblank_deferring::<true>(
+                            last,
+                            &mut self.spare,
+                            &mut self.next_row_id,
+                            self.cols,
+                            bg,
+                            &mut self.pool,
+                        );
+                    } else {
+                        reblank(last, &mut self.spare, &mut self.next_row_id, self.cols, bg, &mut self.pool);
+                    }
                     continue;
                 }
                 let removed = self.rows.remove(region.start).expect("validated scroll region");
@@ -732,6 +832,8 @@ impl Screen {
     /// Reflow logical wrapped lines and relocate the cursor into the new grid.
     /// History is rebuilt through the same resource accounting as ordinary scroll.
     pub fn resize(&mut self, cols: usize, rows: usize, reflow: bool) -> i32 {
+        // Hosts resize between feeds, and every feed completes its refills.
+        debug_assert!(self.pending.is_none(), "resize with a pending blank refill");
         let old_history = self.history.len();
         let scrolled = self.offset != 0;
         let old_viewport_row = old_history.saturating_sub(self.offset);
