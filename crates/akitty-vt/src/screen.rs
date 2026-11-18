@@ -70,6 +70,8 @@ fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background
         blank_bg: background,
         modified_end: 0,
         modified_gen: 0,
+        single_end: 0,
+        single_gen: 0,
         has_heap: Cell::blank_owns_heap(background),
         charge: if Cell::blank_owns_heap(background) { None } else { Some(Charge::fresh()) },
     }
@@ -98,6 +100,8 @@ fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize,
     row.blank_bg = background;
     row.modified_end = 0;
     row.modified_gen = 0;
+    row.single_end = 0;
+    row.single_gen = 0;
     row.has_heap = Cell::blank_owns_heap(background);
     row.charge = if row.has_heap { None } else { Some(Charge::fresh()) };
 }
@@ -138,6 +142,12 @@ pub struct Row {
     /// written-space state. Every cell mutation extends it; resize invalidates it.
     modified_end: usize,
     modified_gen: u64,
+    /// Cells before this bound are single-column, valid while `single_gen ==
+    /// generation`. Every cell mutation advances the generation (resize, which does
+    /// not, empties it in `unmark_blank`), so a write elsewhere ends the certificate
+    /// and only single-column ASCII stores extend it.
+    single_end: usize,
+    single_gen: u64,
     /// Whether any cell in this row may own heap (combining marks, a hyperlink, or
     /// presentation kept in a cell's side record).
     /// `false` certifies every cell is heap-free, letting `bytes()` skip the per-cell
@@ -292,6 +302,18 @@ impl Row {
         self.modified_end = self.modified_end.max(end);
         self.modified_gen = self.generation;
     }
+    /// The column before which every cell is known to be single-column.
+    #[inline]
+    pub(crate) fn single_end(&self) -> usize {
+        if self.single_gen == self.generation { self.single_end } else { 0 }
+    }
+    /// Single-column cells were stored over `from..end` and the generation advanced;
+    /// `prior` is `single_end()` from before the store.
+    #[inline]
+    pub(crate) fn note_single(&mut self, prior: usize, from: usize, end: usize) {
+        self.single_end = if from <= prior { prior.max(end) } else { prior };
+        self.single_gen = self.generation;
+    }
     #[inline]
     pub(crate) fn record_full_write(&mut self, advances: u64) {
         self.generation = self.generation.wrapping_add(advances);
@@ -352,6 +374,8 @@ impl Row {
         self.blank_gen = self.generation.wrapping_sub(1);
         self.modified_end = self.cells.len();
         self.modified_gen = self.generation;
+        self.single_end = 0;
+        self.single_gen = self.generation;
     }
 }
 

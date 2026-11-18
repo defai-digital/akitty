@@ -1432,3 +1432,43 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/cur
 | Long lines | 775.5 | 781.9 | 1.01x | 490.2 | 0.63x |
 | Synchronized screen | 742.2 | 735.1 | 0.99x | 898.7 | 1.22x |
 | Alternate screen | 175.5 | 172.9 | 0.98x | 170.0 | 0.99x |
+
+## Single-column certificates for rewritten rows
+
+An ASCII run over cells that are not certified blank first checks that none of them
+is a wide glyph or its spacer, because writing over half of one needs repair. Rows
+that a program redraws in place, as the synchronized-output frame does, paid that
+check on every frame. A row now also records the column before which every cell is
+single-column, valid while the row's generation is unchanged: the same invariant the
+blank certificate relies on, since every cell mutation advances the generation.
+Only single-column ASCII stores over older cells extend it, so a redrawn row earns it
+on its first rewrite and later rewrites skip the check up to it. Stores over blanks
+leave it alone, which keeps the common blank-row path as it was; keeping that path
+untouched was worth about 3% on the ASCII and long-line workloads in earlier drafts.
+Resize, the one mutation that does not advance the generation, empties it.
+
+The same work found that the scalar print path recorded a full-row write for every
+character it placed without wide repair, which discarded the blank certificate of
+each wrapped row and sent the rest of the row through the overwrite checks. It now
+records the columns it actually changes.
+
+In debug builds every use of the certificate is checked against a full scan. A new
+differential test rewrites rows in place and then edits them with wide glyphs inside
+and past the certified columns, marks, inserts, deletes, erases and resizes between
+widths, comparing with the scalar path after every chunk. Mutation checks confirm an
+extension over a gap, an ignored generation, a too-short print record, a wrong count
+and a certificate extended by blank stores are caught. Three are equivalent: leaving
+a stale bound after a reblank (the cells are blank and the next write ends it), a
+looser clamp (the certificate never passes the blank bound) and not emptying it on
+resize (resize only truncates, pads with single-column cells or rebuilds rows fresh).
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/single-column-rows-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Synchronized screen | 746.5 | 798.8 | 1.07x | 919.2 | 1.15x |
+| ASCII | 1114.7 | 1132.1 | 1.02x | 1296.6 | 1.15x |
+| ANSI | 335.1 | 331.9 | 0.99x | 271.6 | 0.83x |
+| Unicode | 151.5 | 151.6 | 1.00x | 191.8 | 1.3x |
+| Long lines | 795.6 | 915.9 | 1.15x | 497.7 | 0.56x |
+| Alternate screen | 175.0 | 173.3 | 0.99x | 177.2 | 1.02x |

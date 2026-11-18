@@ -6,7 +6,7 @@
 use crate::cell::{self, Cell, CellStyle, Color, Link, Palette, Style};
 use crate::grapheme::{self, Join};
 use crate::parser::{Action, Csi, Input, Parser, StringKind, Terminator};
-use crate::screen::{Cursor, Position, Screen};
+use crate::screen::{Cursor, Position, Row, Screen};
 use base64::Engine;
 use std::ops::Range;
 use std::sync::Arc;
@@ -280,6 +280,19 @@ fn ascii_prefix(bytes: &[u8]) -> usize {
 
 /// The length of the leading single-column cells, checked eight at a time without an
 /// early exit inside each group so the check needs no per-cell branch.
+/// How many of the `ascii` cells from `col` of `row`, which starts before the row's
+/// blank certificate, are single-column, and the row's single-column certificate
+/// before the store.
+#[inline(never)]
+fn overwrite_prefix(row: &Row, col: usize, ascii: usize) -> (usize, Option<usize>) {
+    let prior = row.single_end();
+    let checked = (col + ascii).min(row.blank_from());
+    let known = prior.clamp(col, checked);
+    debug_assert_eq!(single_width_prefix(&row.cells[col..known]), known - col);
+    let scanned = single_width_prefix(&row.cells[known..checked]);
+    (if known + scanned == checked { ascii } else { known + scanned - col }, Some(prior))
+}
+
 fn single_width_prefix(cells: &[Cell]) -> usize {
     let mut length = 0;
     for group in cells.as_chunks::<8>().0 {
@@ -822,11 +835,12 @@ impl Terminal {
             if ascii > 0 {
                 let line = &self.screen().rows[pos.row];
                 // Cells past the blank certificate are single-column blanks already.
-                let count = if pos.col >= line.blank_from() {
-                    ascii
-                } else {
-                    single_width_prefix(&line.cells[pos.col..pos.col + ascii])
-                };
+                // Over older cells, those before the single-column certificate need no
+                // check either, and the store extends the certificate; a store over
+                // blanks leaves it to lapse, so a rewritten row earns it on its first
+                // rewrite.
+                let (count, prior) =
+                    if pos.col >= line.blank_from() { (ascii, None) } else { overwrite_prefix(line, pos.col, ascii) };
                 if count > 0 {
                     let packed = template.packed_written_column();
                     let side_data = template.has_side_data();
@@ -834,6 +848,9 @@ impl Terminal {
                     let row = &mut screen.rows[pos.row];
                     let heap_free = row.heap_free();
                     row.record_write(pos.col + count, count as u64);
+                    if let Some(prior) = prior {
+                        row.note_single(prior, pos.col, pos.col + count);
+                    }
                     let bytes = &text.as_bytes()[..count];
                     let cells = &mut row.cells[pos.col..pos.col + count];
                     if side_data {
@@ -1091,7 +1108,9 @@ impl Terminal {
             cells[pos.col].width() != 0 && cells[pos.col + 1].width() != 2
         };
         if contained {
-            self.screen_mut().rows[pos.row].record_full_write(width as u64);
+            // Only the cells this character takes change, so the blank certificate
+            // past them still holds.
+            self.screen_mut().rows[pos.row].record_write(pos.col + width, width as u64);
         } else {
             self.clear_wide_at(pos.row, pos.col, self.style.bg);
             if width == 2 {
@@ -2429,6 +2448,63 @@ mod tests {
                     state(&scalar),
                     "cols={cols} rows={rows} history={history} graphemes={graphemes} chunk={chunk} text={text:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn rewritten_rows_match_scalar_writes() {
+        // The same rows rewritten in place, earning the single-column certificate,
+        // then edited by every other kind of write before the next rewrite: wide
+        // glyphs inside and past the certified columns, marks, inserts, deletes,
+        // erases, wrapped first characters and partial rewrites that start past it.
+        let corpus = [
+            "\x1b[Habcdefghijkl\r\nmnopqrstuvwx",
+            "\x1b[Habcdefghijkl\r\nmnopqrstuvwx",
+            "\x1b[Habcdefghijkl\x1b[1;4H中\x1b[Habcdefghijkl",
+            "\x1b[Habcdefghijkl\x1b[1;11H中\x1b[Habcdefghijkl",
+            "\x1b[Habcdef\x1b[1;3He\u{301}\x1b[Habcdefghijkl",
+            "\x1b[Habcdefghijkl\x1b[1;2H\x1b[2@中\x1b[Habcdefghijkl",
+            "\x1b[Habcdefghijkl\x1b[1;2H\x1b[3P\x1b[Habcdefghijkl",
+            "\x1b[Habcdefghijkl\x1b[1;5H\x1b[K\x1b[Habcdefghijkl",
+            "\x1b[Habcdefghijkl\x1b[1;8Hxyz\x1b[1;4H中中\x1b[1;7Habcdefgh",
+            "\x1b[1;9Habcd\x1b[Habcdefghijkl中\x1b[Habcdefghijkl",
+            "\x1b[2;1Habcdefghijklmnopqrstuvwxyz\x1b[2;1Habcdefghijklmnop",
+            "\x1b[Habcdefghijkl\x1b[1;1H\x1b[2J\x1b[Habcdefghijkl",
+        ];
+        for cols in [8usize, 12, 20] {
+            for chunk in [1usize, 5, 256] {
+                assert_corpus_matches_scalar(cols, 4, 4, true, &corpus, chunk);
+            }
+        }
+        // A resize moves cells between rows without advancing their generations: rows
+        // that earned the certificate receive wide glyphs from wrapped lines above.
+        for (before, after) in [(12usize, 6usize), (6, 12), (12, 8), (8, 12)] {
+            for setup in ["中中中中中中中中中中中中", "ab中cd中ef中gh中ij中kl中mn中", "abcdefgh中中中中中中中中"] {
+                let mut fast = Terminal::new(before, 4, 0).unwrap();
+                let mut scalar = Terminal::new(before, 4, 0).unwrap();
+                for term in [&mut fast, &mut scalar] {
+                    term.enable_grapheme_support(true);
+                }
+                let mut steps: Vec<Vec<u8>> = Vec::new();
+                for row in 1..=4 {
+                    for _ in 0..3 {
+                        steps.push(format!("\x1b[{row};1Habcdefghijkl").into_bytes());
+                    }
+                }
+                steps.push(format!("\x1b[H{setup}").into_bytes());
+                for step in &steps {
+                    feed(&mut fast, step);
+                    feed_scalar(&mut scalar, step, 0);
+                }
+                fast.resize(after, 4, |_| {}).unwrap();
+                scalar.resize(after, 4, |_| {}).unwrap();
+                for row in 1..=4 {
+                    let rewrite = format!("\x1b[{row};1Hxyzxyzxyzxyz\x1b[{row};1Hxyzxyzxyzxyz").into_bytes();
+                    feed(&mut fast, &rewrite);
+                    feed_scalar(&mut scalar, &rewrite, 0);
+                }
+                assert_eq!(state(&fast), state(&scalar), "{before} {after} {setup}");
             }
         }
     }
