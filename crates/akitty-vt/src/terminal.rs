@@ -382,7 +382,7 @@ impl Terminal {
         let mut sync_ends: Option<usize> = None;
         let mut sync_ends_seen = 0usize;
         parser.feed_runs(bytes, |input| match input {
-            Input::Text(text) => self.print_run(text, &mut emit),
+            Input::Text(text, ascii) => self.print_run(text, ascii, &mut emit),
             Input::Csi(csi) => {
                 let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
                     && matches!(csi.final_byte, b'h' | b'l')
@@ -463,7 +463,7 @@ impl Terminal {
         let mut text = std::mem::take(&mut self.sync.text);
         for entry in entries.drain(..) {
             match entry {
-                Deferred::Text(range) => self.print_run(&text[range], emit),
+                Deferred::Text(range) => self.print_run(&text[range], false, emit),
                 Deferred::Csi(csi) => {
                     self.grapheme_target = None;
                     self.csi(&csi, emit);
@@ -686,7 +686,8 @@ impl Terminal {
     /// whole run instead. Anything protocol-sensitive stays on the scalar path one
     /// character at a time: insert mode, character-set translation, a pending wrap,
     /// wide-cell repair, a combining mark, or a possible grapheme join.
-    fn print_text(&mut self, mut text: &str, emit: &mut impl FnMut(Event)) {
+    /// `ascii` promises that `text` is all ASCII; `false` promises nothing.
+    fn print_text(&mut self, mut text: &str, ascii: bool, emit: &mut impl FnMut(Event)) {
         if text.is_empty() {
             return;
         }
@@ -701,7 +702,7 @@ impl Terminal {
             let scalar = self.modes.insert
                 || self.single_shift.is_some()
                 || self.charsets[self.charset];
-            let written = if scalar { RunWrite::default() } else { self.write_run(text, &template) };
+            let written = if scalar { RunWrite::default() } else { self.write_run(text, ascii, &template) };
             text = &text[written.bytes..];
             if let Some(verdict) = written.join {
                 let ch = text.chars().next().expect("join stops inside the run");
@@ -730,8 +731,8 @@ impl Terminal {
     }
     /// Write a parser-validated printable run. `Input::Text` is already a `&str`, so no
     /// whole-run UTF-8 validation happens here.
-    fn print_run(&mut self, text: &str, emit: &mut impl FnMut(Event)) {
-        self.print_text(text, emit);
+    fn print_run(&mut self, text: &str, ascii: bool, emit: &mut impl FnMut(Event)) {
+        self.print_text(text, ascii, emit);
     }
     /// The prepared presentation for the current style and hyperlink, rebuilt only when
     /// both are absent from the bounded slot set. At most `STYLE_SLOTS` templates are
@@ -778,7 +779,8 @@ impl Terminal {
     /// combining marks, possible grapheme joins, hyperlinks and presentations with a
     /// side record) goes through the per-character loop below, which applies exactly
     /// the checks `print` applies.
-    fn write_run(&mut self, text: &str, template: &CellStyle) -> RunWrite {
+    fn write_run(&mut self, text: &str, all_ascii: bool, template: &CellStyle) -> RunWrite {
+        debug_assert!(!all_ascii || text.is_ascii());
         let cols = self.cols();
         let cursor = self.screen().cursor;
         // A pending wrap must go through `print`, which marks the row as wrapped and
@@ -791,7 +793,7 @@ impl Terminal {
             let span = (cols - pos.col).min(text.len());
             // A text run holds printable ASCII and whole multi-byte scalars only, so its
             // ASCII prefix ends at the first byte with the high bit set.
-            let ascii = ascii_prefix(&text.as_bytes()[..span]);
+            let ascii = if all_ascii { span } else { ascii_prefix(&text.as_bytes()[..span]) };
             if ascii > 0 {
                 let line = &self.screen().rows[pos.row];
                 // Cells past the blank certificate are single-column blanks already.
@@ -3650,7 +3652,7 @@ mod tests {
             let mut term = Terminal::new(20, 2, 0).unwrap();
             term.enable_grapheme_support(true);
             let template = term.style_template();
-            term.write_run(text, &template).bytes
+            term.write_run(text, false, &template).bytes
         }
         assert_eq!(run("中文字"), 9, "CJK is written as one run");
         assert_eq!(run("😀😀"), 8, "lone pictographs are written as a run");
@@ -3737,7 +3739,7 @@ mod tests {
             let mut term = Terminal::new(80, 2, 0).unwrap();
             term.enable_grapheme_support(true);
             let template = term.style_template();
-            term.write_run(text, &template).bytes
+            term.write_run(text, false, &template).bytes
         }
         let long = "a".repeat(ASCII_HANDOFF);
         let short = "a".repeat(ASCII_HANDOFF - 1);
@@ -3764,7 +3766,7 @@ mod tests {
             term.enable_grapheme_support(true);
             let template = term.style_template();
             grapheme::reset_classifications_for_test();
-            let written = term.write_run(text, &template);
+            let written = term.write_run(text, false, &template);
             (written.bytes, grapheme::classifications_for_test())
         }
         // Simple characters (CJK, kana, Hangul syllables, Latin) need no lookup at all.

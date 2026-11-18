@@ -66,8 +66,9 @@ pub(crate) enum Input<'a> {
     /// A run of printable text: ASCII `0x20..=0x7e` plus complete scalars from valid
     /// UTF-8. It never holds a control byte or a sequence introducer, and it is valid
     /// UTF-8 by construction (see the safety note where the run is scanned), so a host
-    /// receives it as `&str` and never revalidates it.
-    Text(&'a str),
+    /// receives it as `&str` and never revalidates it. The flag says the run is all
+    /// ASCII, which the scan learns for free.
+    Text(&'a str, bool),
     Csi(&'a mut Csi),
     /// A C0 control from the text fast path, the same as `Action(Action::Control(_))`
     /// but owning nothing, so dispatching it needs no drop check.
@@ -163,7 +164,7 @@ impl Parser {
 
     pub fn feed(&mut self, input: &[u8], mut emit: impl FnMut(Action)) {
         self.feed_runs(input, |item| match item {
-            Input::Text(text) => {
+            Input::Text(text, _) => {
                 for ch in text.chars() { emit(Action::Print(ch)); }
             }
             Input::Csi(csi) => emit(Action::Csi(std::mem::take(csi))),
@@ -177,6 +178,7 @@ impl Parser {
         while index < input.len() {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
+                let mut ascii = true;
                 // Whole eight-byte words of printable ASCII are skipped where a run
                 // opens and after each multi-byte scalar. The byte loop takes the rest,
                 // one inline test per ASCII byte, and a complete multi-byte scalar
@@ -189,6 +191,7 @@ impl Parser {
                     }
                     match scalar_width(input, index) {
                         Some(width) => {
+                            ascii = false;
                             index += width;
                             index += ascii_words(&input[index..]);
                         }
@@ -204,7 +207,7 @@ impl Parser {
                     // input never reaches this point: the scan stops and the byte state
                     // machine consumes it instead.
                     let text = unsafe { std::str::from_utf8_unchecked(&input[start..index]) };
-                    emit(Input::Text(text));
+                    emit(Input::Text(text, ascii));
                 }
                 if index == input.len() {
                     break;
@@ -560,7 +563,10 @@ mod tests {
                 let mut slow_actions = Vec::new();
                 fn collect(actions: &mut Vec<Action>) -> impl FnMut(Input<'_>) + '_ {
                     move |input| match input {
-                        Input::Text(text) => actions.extend(text.chars().map(Action::Print)),
+                        Input::Text(text, ascii) => {
+                            assert_eq!(ascii, text.is_ascii());
+                            actions.extend(text.chars().map(Action::Print));
+                        }
                         Input::Csi(csi) => actions.push(Action::Csi(csi.clone())),
                         Input::Control(byte) => actions.push(Action::Control(byte)),
                         Input::Action(action) => actions.push(action),
@@ -796,7 +802,10 @@ mod tests {
                 let mut actual = Vec::new();
                 for chunk in bytes.as_bytes().chunks(size) {
                     parser.feed_runs(chunk, |input| match input {
-                        Input::Text(text) => actual.extend(text.chars().map(Action::Print)),
+                        Input::Text(text, ascii) => {
+                            assert_eq!(ascii, text.is_ascii());
+                            actual.extend(text.chars().map(Action::Print));
+                        }
                         Input::Csi(csi) => actual.push(Action::Csi(csi.clone())),
                         Input::Control(byte) => actual.push(Action::Control(byte)),
                         Input::Action(action) => actual.push(action),

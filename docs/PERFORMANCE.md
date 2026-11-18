@@ -1350,3 +1350,24 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/clo
 | Unicode | 153.9 | 148.7 | 0.97x | 196.2 | 1.3x |
 | Long lines | 781.4 | 772.8 | 0.99x | 500.4 | 0.64x |
 | Alternate screen | 172.3 | 173.3 | 1.01x | 176.0 | 1.0x |
+
+## ASCII runs flagged by the parser
+
+The parser finds the end of every text run, and knows on the way whether it took a
+multi-byte scalar; the run writer then scanned the same bytes again for their ASCII
+prefix. `Input::Text` now carries that flag, and an all-ASCII run, or any suffix of
+it left after a row end, skips the second scan. Queue replay passes no promise. The
+parser tests assert the flag equals `str::is_ascii` for every run they produce, the
+run writer debug-asserts the promise, and mutation checks confirm a flag that is
+never cleared, an ignored flag and a writer that trusts every run are caught.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/ascii-flag-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| ASCII | 965.6 | 1040.1 | 1.08x |
+| Synchronized screen | 745.7 | 762.0 | 1.02x |
+| ANSI | 327.1 | 341.7 | 1.04x |
+| Unicode | 150.7 | 147.8 | 0.98x |
+| Long lines | 782.6 | 783.9 | 1.00x |
+| Alternate screen | 175.0 | 174.3 | 1.00x |

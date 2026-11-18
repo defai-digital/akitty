@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "9f2a01f5d1fb5f9c77e7d0a805d5cccd5c3ca42f",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "rotated_ab_5_passes_text": [
+  "ascii                base   965.6  new  1040.1   1.08x  base=[972, 966, 955, 962, 985] new=[1051, 1012, 1021, 1047, 1040]",
+  "synchronized-screen  base   745.7  new   762.0   1.02x  base=[746, 742, 750, 738, 756] new=[739, 748, 762, 765, 773]",
+  "ansi                 base   327.1  new   341.7   1.04x  base=[328, 327, 322, 329, 318] new=[333, 344, 335, 352, 342]",
+  "unicode              base   150.7  new   147.8   0.98x  base=[151, 151, 154, 145, 149] new=[147, 150, 147, 150, 148]",
+  "long-lines           base   782.6  new   783.9   1.00x  base=[776, 774, 792, 784, 783] new=[784, 788, 767, 779, 791]",
+  "alternate-screen     base   175.0  new   174.3   1.00x  base=[174, 175, 175, 178, 172] new=[174, 175, 174, 172, 177]"
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}
