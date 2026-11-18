@@ -3289,23 +3289,30 @@ mod reply_tests {
         let delivered = AtomicBool::new(false);
         // Three bursts, each written after the drain has already seen an empty read. A shared
         // idle budget spends itself on the earlier gaps and the last burst is never answered.
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (write_tx, write_rx) = std::sync::mpsc::sync_channel(0);
+        let (written_tx, written_rx) = std::sync::mpsc::sync_channel(0);
         let writer = std::thread::spawn(move || {
-            for (index, query) in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"].into_iter().enumerate() {
-                std::thread::sleep(Duration::from_millis(5));
+            for query in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"] {
+                write_rx.recv().unwrap();
                 // SAFETY: writing a valid slice into a descriptor this test owns.
                 assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, query.len() as isize);
-                if index == 0 { started_tx.send(()).unwrap(); }
+                written_tx.send(()).unwrap();
             }
         });
-        // Start the bounded drain only after the writer has actually been scheduled.
-        started_rx.recv().unwrap();
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let (mut pump, _) = pump_for(&session, &ring, master);
                 pump.drain_until_end(true, Instant::now() + Duration::from_secs(2));
             });
-            let failure = drain_after_exit(master, &ring, &wake, &delivered);
+            let mut bursts = 0;
+            let failure = drain_after_exit_with(&ring, &wake, &delivered,
+                |buffer| read_pty(master, buffer, true), |wait| {
+                    if bursts < 3 { write_tx.send(()).unwrap(); written_rx.recv().unwrap(); bursts += 1; }
+                    let mut poll = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };
+                    // SAFETY: poll references this test's live master descriptor.
+                    assert!(unsafe { libc::poll(&mut poll, 1, wait) } >= 0);
+                    Ok(())
+                });
             assert!(failure.is_ok(), "{failure:?}");
             ring.end(failure);
         });
