@@ -312,6 +312,12 @@ fn osc_is_intercepted(body: &[u8]) -> bool {
 }
 
 impl Filter {
+    /// True when `feed` would hand every byte through unchanged: the state machine is in ground
+    /// state and no escape in `bytes` can start a sequence. Callers use it to skip the copy a
+    /// pass segment would make of an ordinary run of text.
+    pub fn passes_through(&self, bytes: &[u8]) -> bool {
+        self.state == State::Ground && !bytes.contains(&0x1b)
+    }
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
         let mut pass = Vec::new();

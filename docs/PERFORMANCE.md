@@ -15,9 +15,13 @@ architecture. Native Mac app and browser rendering need separate measurements.
 3. Keep insert mode, character-set shifts, hyperlinks, Unicode grapheme joins and
    wide-cell repair on the scalar path. Reassemble ASCII runs when the existing
    bounded synchronized-output action queue flushes, including timeout flushes.
-4. Coalesce available short PTY reads into at most 8 KiB before feeding the model.
-   Never wait for a buffer to fill. Flush tails on would-block, EOF and errors;
-   preserve the 256 KiB pass budget and release the model lock before every read.
+4. Split the PTY worker into a reader and a parser over a fixed ring of four
+   64 KiB slots. Gather every immediately available read into one slot and publish it
+   when it is full, otherwise on would-block, EOF, a read error or a stop, so a tail
+   is never held back and bytes read before a failure are still applied. The reader
+   owns every `read(2)` and never takes the model lock; the worker applies one ring's
+   worth per pass with each model lock covering at most 8 KiB, so the 256 KiB pass
+   budget still yields to input and resize. Wake the host once per applied batch.
 5. Compare full terminal state and ordered events against scalar processing,
    rebuild WASM and its provenance, run the canonical gate and build the app.
 
@@ -75,8 +79,9 @@ The initial native rasterizer probe measured about 4.59 ms for a warm 200x50
 full repaint at 2x scale, 0.46 ms for a typing update including its snapshot,
 1.65 ms for a full texture upload and 0.03 ms for a one-row upload. These are
 component timings, not visible frame latency. This pass therefore targets engine
-and PTY throughput. A GPU glyph atlas, separate I/O/parser threads and rendering
-handoff changes remain candidates for a separately profiled rendering pass.
+and PTY throughput. Separate I/O/parser threads remain a candidate for a later
+hot-path pass; the GPU glyph atlas landed in the rendering follow-up at the end
+of this file.
 
 ## Reproduction and regression coverage
 
@@ -93,9 +98,11 @@ Build the release Rust core before the native Swift probe. Timing benchmarks are
 opt-in; deterministic correctness tests run in the canonical gate without speed
 thresholds. Differential tests exercise narrow grids, history limits, split UTF-8
 and escapes, styled runs, wrapping, insert mode, DEC graphics, hyperlinks, Unicode,
-alternate screens, queries, bells and synchronized output. PTY batching tests
-cover short-read coalescing, tails on would-block/EOF/error, split Unicode/query
-sequences, reply ordering, model-feed bounds and yielding under endless output.
+alternate screens, queries, bells and synchronized output. PTY pipeline tests
+cover ring backpressure and slot ownership, a tail reaching the parser on
+would-block/EOF/error, split Unicode and query sequences across slots, reply
+ordering, one bounded model lock per parse batch, one host wake per applied batch,
+post-exit reply delivery and bounded shutdown.
 
 ## Row-reset and CSI follow-up
 
@@ -132,7 +139,8 @@ those costs before changing rendering or cell storage:
 The implementation is independently authored. Reference review informed the
 reset-range and logical-row-rotation concepts; no external implementation is
 copied or linked. Display-link changes, unfocused-pane pacing, texture damage
-history, compact cells and a GPU glyph atlas remain separate follow-up work.
+history and compact cells remain separate follow-up work; the GPU glyph atlas is
+described at the end of this file.
 
 ### Committed-candidate remeasurement
 
@@ -470,3 +478,204 @@ checks passed, as did the real four-PTY/two-tab `TerminalWindow` smoke. Final ap
 build/startup qualification follows the restoration commit. No release or
 notarization was performed. Grok, agy, Muse and Kimi supplied substantive scoped
 close-out reviews supporting rejection; their advice is not test evidence.
+
+## GPU glyph atlas
+
+`MetalText.swift` adds a second Metal path for ordinary terminal text. It exists to stop re-rasterising and
+re-uploading a whole window bitmap when only a few rows of ASCII change; the software rasterizer stays the
+reference and the fallback.
+
+- A glyph is shaped and rasterised by CoreText once, at the exact device-pixel position the rasterizer would use,
+  and stored in one 2048x2048 R8 coverage texture (about 4 MiB). Masks are keyed by style, text and foreground
+  colour, because macOS font smoothing is colour-dependent: a colour-independent mask differed from the
+  reference by up to ~50/255, while a mask rasterised in the text colour stays within 2/255.
+- Shelf packing bounds the atlas in entry count as well as size. When it fills it is recreated and every row is
+  re-encoded, so eviction costs work but never correctness. Rebuilds are rationed per font/scale/grid/theme epoch:
+  a storm that would refill the atlas on every frame stands the path down to the software rasterizer instead of
+  rasterising the whole window through CoreText each frame, and a frame that needs more distinct masks than the
+  entry cap is refused outright rather than drawn with missing glyphs. Both cases redraw correctly through the
+  renderer at its ordinary incremental cost.
+- Instance rows live at a fixed per-row stride. While no frame is in flight, an update writes only the rows the
+  core damaged and zeroes the unused tail of each row, so a row that shrank needs no second draw call. While a
+  frame may still be reading the buffer, the upload instead publishes a complete replacement built from a
+  one-buffer CPU mirror, and the retired buffer returns to a pool of at most two once the frame that owned it
+  completes; no upload ever edits bytes the GPU may still read. The mirror, the draw buffer and that pool are the
+  hard bound (about four buffers of `rows x (2 x cols + 4)` instances at most). Unused slots are zeroed degenerate
+  quads. A row that would exceed the stride is an error that hands the frame to the rasterizer, never a truncation.
+- New masks are appended at atlas coordinates that were never written before, so an atlas upload cannot disturb a
+  texture a frame in flight is sampling; only a recreate allocates a new texture. The texture's lifetime matches the
+  mask cache: a frame drawn by another path (IME, CJK, an image) drops the instance buffers but keeps the atlas, so
+  returning to the atlas reuses every cached mask. Both are released together when the pane leaves its window.
+- Glyph quads are clipped to their cell box, matching the rasterizer's per-cell clip, and solid quads (cell fills,
+  selection and find highlights, cursor bands) are converted from `CGColor` through the same one-pixel device-RGB
+  bitmap the CPU bitmaps and the Metal clear colour use.
+- Frames with Kitty images keep the existing layered path, so image compositing is unchanged. IME composition,
+  non-ASCII text, wide cells, box drawing, underlined or struck-through cells and backing scales outside 1x-3x
+  keep the software rasterizer.
+
+`MetalTextRenderingTests` compares offscreen GPU frames against `GridRasterizer` output for ASCII at 1x, 2x and
+3x, ANSI colours and highlights, all four cursor styles and a non-default theme. The worst channel difference is
+2/255 with more than 95% of pixels byte-identical at every tested scale; the residual is blending rounding on
+antialiased edges. The same suite covers atlas reuse, the entry cap and eviction path, dirty-row-only uploads,
+layout invalidation and resource release. Component timings (raster versus atlas upload) are not yet measured,
+so this is an equivalence and correctness result, not a speed claim.
+
+## Native snapshot row certificate
+
+A partial snapshot has always rehashed every visible cell to decide which rows changed, so even a quiet
+poll paid for the whole grid. The certificate stage replaces that scan with a validity check: a row whose
+cells cannot have changed keeps its previous hash and is never read.
+
+- Each viewport position stores the row it held when its hash was sent, as `(row.id, row.generation)`
+  (`RowStamp`). Row identity alone is not enough, because a recycled or reflowed row can keep an id;
+  generation alone is not enough, because rows move between positions when the screen scrolls.
+- Content identity is not the whole picture. A palette change (OSC 4, 10, 11, 12, 104, 110-112 or a host
+  theme), DECSCNM reverse video, a selection drag and a search mark all repaint a row without moving any
+  cell generation. Those fold into one appearance stamp per snapshot, built from the resolved palette
+  (259 slots through `Palette::resolve`, plus `base_background` and `cursor`), the terminal geometry,
+  `reverse_video`, the resolved selection range, the search ranges and the active mark, and the cell pixel
+  size used to decode placeholder fragments. A row is reused only while that stamp is unchanged, and any
+  uncertain change costs a rescan rather than a stale frame.
+- Rows carrying placeholder cells are always rescanned. Decoding their image fragments reads the graphics
+  state. A cell generation does not cover an image retransmit or a moved placement, so certifying those
+  rows clean would silently drop visible image fragments.
+- The dirty flag, scroll-shift detection, the partial/full decision, the bounded link table, the crowded
+  table fallback, placeholder failure restoration and the one-shot event accounting are unchanged; the
+  certificate only decides whether a row's hash has to be recomputed. A crowded table or an oversized
+  build still drops the baseline, so the next poll is a full snapshot.
+- Both passes now walk rows instead of cells: the hash pass visits only rows without a certificate, and the
+  cell emitter visits only rows the comparison marked dirty. A partial that changes one row reads one row.
+
+`Model::scanned_cells`, present in test builds, records how many visible cells a snapshot's hash pass read,
+which is what makes the reuse observable instead of assumed. The tests assert that an unchanged screen reads
+zero cells, that a single recoloured or retyped row reads one row, and that palette, DECSCNM, selection,
+search, ED2, ED3 and RIS changes rescans rather than reusing a hash that would paint the old frame. Every
+case also merges the partial into a client copy and compares it with a second model that saw the same bytes
+and answers with a full snapshot, so the wire contract is checked alongside the fast path.
+
+This stage is an algorithmic change with correctness coverage only. No timing or profile measurement of the
+snapshot path was taken for it, so it carries no speedup figure and should not be read as one.
+
+
+## Integrated I/O, VT, snapshot and renderer pass
+
+Baseline for all controlled comparisons below is `dab8d910318034559b96b1525b4fca67ced3e51b`
+in an immutable worktree; the candidate is the integrated uncommitted performance change. The
+canonical `scripts/verify.sh` gate passed, including Rust, WebAssembly, TypeScript, ABI, release
+ tooling, installer, public-file and 411 Swift tests. The debug app bundle passed ad-hoc signature
+verification and a three-second startup smoke. The release bundle script itself requires a clean
+commit and was not run; no commit or publication was made.
+
+### Engine and real PTY throughput
+
+The canonical native/WASM benchmark used 120x40, 1,000 history rows, 32 rounds and 15 samples,
+with two baseline/candidate pairs. Rates are median MiB/s and final state agreement passed in every
+run. ANSI is near baseline rather than a regression; synchronized-screen is also close to baseline.
+
+| Workload | Native baseline | Native candidate | Change | WASM baseline | WASM candidate | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 296.26 | 368.17 | +24.3% | 175.55 | 195.60 | +11.4% |
+| ANSI | 195.60 | 190.29 | -2.7% | 144.61 | 149.06 | +3.1% |
+| Unicode | 31.67 | 39.19 | +23.7% | 24.74 | 29.76 | +20.3% |
+| Long lines | 226.94 | 268.68 | +18.4% | 148.27 | 172.94 | +16.6% |
+| Alternate screen | 65.13 | 68.12 | +4.6% | 42.18 | 52.38 | +24.2% |
+| Synchronized screen | 90.45 | 88.35 | -2.3% | 74.07 | 78.03 | +5.3% |
+
+The real PTY probe ran twice per version with the same 8 MiB fixtures. Reported values are the
+median of the two p50 rates; these are host/model measurements, excluding rendering.
+
+| Workload | Baseline MiB/s | Candidate MiB/s |
+| --- | ---: | ---: |
+| ASCII | 97.34 | 107.87 |
+| ANSI | 58.95 | 105.83 |
+| Unicode | 62.40 | 112.52 |
+
+The VT implementation uses a 16-byte common cell, bounded four-slot prepared-style templates,
+batched narrow/wide writes, conservative stateful-grapheme fallback, and parser-validated `&str`
+runs that avoid a second whole-run UTF-8 validation. History charging remains exact: distinct side
+records are counted once per row, with incremental common-path accounting and conservative full
+recomputation for complex edits, reflow and more than four records. RGB blanks and combining/link
+records cannot bypass the 64 MiB bound.
+
+The PTY host uses a bounded two-stage reader/parser ring with four 64 KiB slots. Gathering fills
+available bytes without waiting, publishes on full/would-block/EOF/error/stop, and preserves
+backpressure, reply order, final drains and bounded shutdown. Host notification is once per applied
+batch. Ordinary filter and parser event allocations are reused.
+
+### Snapshot and native pipeline
+
+Snapshot row certificates reuse a previous hash only while row identity, generation and appearance
+are unchanged. Appearance covers palette resolution, reverse video, selection, search and cell pixel
+state. Placeholder rows always rescan; dirty rows alone are emitted. Full-vs-partial reconstruction
+covers palette changes, selection/search, scrolling, resize/reflow and failure recovery.
+
+The native probe used 60 inputs per scene, with GPU completion and drawable presentation sampled
+independently. It is synthetic input-submission latency, not physical key-to-photon time. CPU is
+process user-plus-system time, excluding producer children and WindowServer.
+
+| Scene | CPU baseline | CPU candidate | Upload baseline MiB | Upload candidate MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Single typing | 13.50% | 11.77% | 1109.8 | 724.7 |
+| ASCII streams + typing | 37.92% | 29.02% | 268.8 | 72.5 |
+| Unicode streams + typing | 51.82% | 53.28% | 267.8 | 72.1 |
+| Unicode streams + scroll | 54.01% | 53.83% | 280.2 | 280.2 |
+| ASCII burst + typing | 52.56% | 30.89% | 269.3 | 73.2 |
+| Unicode burst + typing | 51.80% | 52.68% | 267.0 | 71.8 |
+
+ASCII multi-pane CPU falls 23-41% and upload volume about 73%. Single-pane CPU falls 13% and upload
+volume 35%. Unicode raster work remains on the conservative CPU fallback and is not a CPU or latency
+victory; upload savings there come from scheduling and upload behavior rather than a Unicode glyph
+atlas. Presentation p95 is similar to baseline, with run-to-run variation, so this pass does not claim
+a presentation-latency improvement.
+
+The Metal text path rasterizes ASCII masks once into a bounded atlas and keeps per-row instance
+buffers. Idle GPUs accept partial row updates; busy GPUs receive a complete replacement buffer from
+a bounded pool, never an in-flight rewrite. Non-ASCII, wide, decorated, image, IME and unsupported
+geometry cases retain the CPU rasterizer. CPU fall-through after an atlas frame repaints fully rather
+than using a stale bitmap. Solid fills are byte-identical; antialiased glyph comparisons stay within
+2/255 in the tested 1x/2x/3x matrix.
+
+These results close the targeted ASCII/Unicode engine and PTY bottlenecks without claiming full-app
+Ghostty parity, physical input latency parity, or identical performance for every terminal workload.
+
+## Unicode grapheme hot path
+
+A fresh matched-engine probe on Apple M3 Max measured the integrated candidate above at 41.21 MiB/s
+against 190.37 MiB/s for `libghostty-vt 1.0.1` (4.62x). CPU samples identified repeated grapheme
+classification, an unnecessary scalar fallback for every pictograph, repeated exact segmentation and
+width measurement of the same clusters, and avoidable combining/spacer allocations. Reference review
+informed the property-reuse and batching concepts; the implementation remains independently authored.
+
+The print path now carries one classification into the next pair decision, batches standalone narrow
+and wide codepoints, checks ordinary-script ranges before the mark table, prepares one style template
+per printable run, and removes a temporary regional-indicator allocation. Grapheme joins take the cell
+out of the grid rather than cloning its side record. Default-style wide spacers no longer allocate an
+empty record, and a cell's first combining allocation reserves eight marks while retaining the 16-mark
+limit and exact capacity-based history accounting.
+
+A bounded 16-slot cache remembers exact break and unclamped width results for repeated candidate
+clusters. Keys are complete UTF-8 strings in fixed 72-byte arrays (not hashes), so collisions cannot
+change behavior. An eight-slot version thrashed on an 11-cluster emoji workload; 16 slots removed that
+working-set eviction. Oversized keys are not retained. All column clamps, wrapping, row generations,
+history accounting and event behavior still run through the original mutation path.
+
+The direct comparison uses 120x40, no history, grapheme support enabled, 256 rounds, three warmups and
+30 samples with randomized per-sample engine order. Every sample compares text, widths, styles,
+wrapping and cursor metadata after feeding and both resize steps; all comparisons match. Rates are p50
+MiB/s. Before/after drivers ran sequentially with ordinary desktop activity present.
+
+| Unicode workload | Akitty before | Akitty after | Change | Ghostty after | Ghostty / Akitty after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed | 41.30 | 69.74 | +68.9% | 194.71 | 2.79x |
+| CJK | 79.64 | 154.42 | +93.9% | 398.14 | 2.58x |
+| Standalone emoji | 56.25 | 173.43 | +208.4% | 479.80 | 2.77x |
+| Complex emoji | 21.96 | 42.52 | +93.6% | 129.49 | 3.05x |
+| Combining text | 28.86 | 37.73 | +30.7% | 83.53 | 2.21x |
+
+The canonical 15-sample/32-round engine benchmark retains native/WASM state agreement in all six
+workloads. Its Unicode rates improve from 39.19 to 65.53 MiB/s native and 29.76 to 43.96 MiB/s WASM.
+The real native PTY probe reports 111.90 MiB/s Unicode (112.52 before this pass), 106.20 ASCII and
+107.27 ANSI; this is a different grapheme-default worker/model measurement, not a matched Ghostty
+comparison. No rendering or physical input latency improvement is claimed, and Ghostty remains faster
+in these engine probes. The [raw record](../benchmarks/results/unicode-hotpath-2026-11-17.json) retains
+source/artifact hashes, configuration, direct-comparison samples and the canonical engine result.

@@ -3,7 +3,8 @@
 //! Every input chunk is applied in order. Content movement events describe actual
 //! grid mutations, so consumers never need to simulate scrolling a second time.
 
-use crate::cell::{self, Cell, Color, Combining, Link, Palette, Style};
+use crate::cell::{self, Cell, CellStyle, Color, Link, Palette, Style};
+use crate::grapheme::{self, Join};
 use crate::parser::{Action, Csi, Input, Parser, StringKind, Terminator};
 use crate::screen::{Cursor, Position, Screen};
 use base64::Engine;
@@ -128,6 +129,56 @@ impl Default for SavedState {
     }
 }
 
+/// One prepared presentation for a style and hyperlink, so a print run or a scalar
+/// write reuses a packed template instead of repacking and reallocating it.
+///
+/// Slots are keyed on the *inputs* (the full `Style` and the hyperlink's identity), so a
+/// cached template can never go stale: every SGR attribute/colour change, OSC 8
+/// open/close/change, soft reset, RIS and alternate-screen switch simply stops matching.
+/// A slot's side record never holds combining marks: it is shared by reference and
+/// `Cell::push_combining` always detaches through `Arc::make_mut` because the slot keeps
+/// one reference.
+#[derive(Clone, Debug)]
+struct StyleCache {
+    style: Style,
+    link: Option<Arc<Link>>,
+    template: CellStyle,
+}
+
+/// Prepared presentations retained per terminal. Programs cycle through a handful of
+/// styles (a theme colour, the reset style, a truecolor accent measured per line), so a
+/// few slots stop the common alternating pattern from rebuilding — and reallocating a
+/// side record — on every style change. The footprint is fixed: at most this many
+/// templates and their side records exist per terminal, all shared with live cells.
+const STYLE_SLOTS: usize = 4;
+
+/// Cluster analyses retained per terminal.
+///
+/// Program output repeats the same emoji families, regional-indicator flags and marked
+/// letters, and every repeat otherwise pays an exact `unicode_segmentation` walk plus a
+/// `UnicodeWidthStr` measure of the same bytes. A slot remembers both answers for one
+/// complete candidate cluster, so it is independent of style, cursor and columns: only
+/// the column clamp depends on those, and it is applied after every read.
+const CLUSTER_SLOTS: usize = 16;
+
+/// Largest key a slot holds: a lead character, at most `cell::MAX_COMBINING` marks and
+/// the incoming character, each at most four UTF-8 bytes. Anything longer is simply not
+/// remembered, which keeps the footprint fixed and every key naturally bounded.
+const CLUSTER_KEY_BYTES: usize = 4 * (cell::MAX_COMBINING + 2);
+
+/// One remembered exact analysis of a candidate cluster.
+#[derive(Clone, Copy, Debug)]
+struct ClusterAnalysis {
+    key_len: u8,
+    key: [u8; CLUSTER_KEY_BYTES],
+    /// `UnicodeWidthStr::width` of the whole cluster before the column clamp. A cluster
+    /// is a lead plus at most `MAX_COMBINING` marks plus one character, so the value is
+    /// far below the stored maximum and never saturates.
+    width: u16,
+    /// Whether exact segmentation keeps the candidate in one cluster.
+    joins: bool,
+}
+
 #[derive(Debug)]
 pub struct Terminal {
     parser: Parser,
@@ -153,6 +204,17 @@ pub struct Terminal {
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
     cluster_scratch: String,
+    /// The bounded set of remembered cluster analyses (see `ClusterAnalysis`), with the
+    /// next slot to overwrite.
+    cluster_cache: [Option<ClusterAnalysis>; CLUSTER_SLOTS],
+    cluster_slot: usize,
+    /// The bounded set of prepared templates allowed for this terminal (see
+    /// `StyleCache`), with the next slot to overwrite.
+    style_cache: [Option<StyleCache>; STYLE_SLOTS],
+    style_slot: usize,
+    /// Number of templates built, for tests that prove reuse.
+    #[cfg(test)]
+    template_builds: usize,
     pub preserve_erased_screen: bool,
     pub title_max_bytes: usize,
     pub title_max_chars: usize,
@@ -197,6 +259,12 @@ impl Terminal {
             grapheme_supported: false,
             grapheme_target: None,
             cluster_scratch: String::new(),
+            cluster_cache: [None; CLUSTER_SLOTS],
+            cluster_slot: 0,
+            style_cache: [None, None, None, None],
+            style_slot: 0,
+            #[cfg(test)]
+            template_builds: 0,
             preserve_erased_screen: true,
             title_max_bytes: crate::parser::MAX_STRING_BYTES,
             title_max_chars: 128,
@@ -245,7 +313,7 @@ impl Terminal {
         self.expire_sync(now_ms, &mut emit);
         let mut parser = std::mem::take(&mut self.parser);
         parser.feed_runs(bytes, |input| match input {
-            Input::Ascii(bytes) => self.print_ascii(bytes, now_ms, &mut emit),
+            Input::Text(text) => self.print_run(text, now_ms, &mut emit),
             Input::Csi(csi) => {
                 let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
                     && matches!(csi.final_byte, b'h' | b'l')
@@ -289,15 +357,22 @@ impl Terminal {
                 ascii[count] = ch as u8;
                 count += 1;
                 if count == ascii.len() {
-                    self.print_ascii(&ascii, 0, emit);
+                    // The deferred buffer only ever holds bytes collected from
+                    // `Action::Print(ch @ ' '..='~')`, so it is valid ASCII.
+                    self.print_run(std::str::from_utf8(&ascii).unwrap_or_default(), 0, emit);
                     count = 0;
                 }
                 continue;
             }
-            if count > 0 { self.print_ascii(&ascii[..count], 0, emit); count = 0; }
+            if count > 0 {
+                self.print_run(std::str::from_utf8(&ascii[..count]).unwrap_or_default(), 0, emit);
+                count = 0;
+            }
             self.apply(action, emit);
         }
-        if count > 0 { self.print_ascii(&ascii[..count], 0, emit); }
+        if count > 0 {
+            self.print_run(std::str::from_utf8(&ascii[..count]).unwrap_or_default(), 0, emit);
+        }
     }
     fn dispatch(&mut self, action: Action, now: u64, emit: &mut impl FnMut(Event)) {
         if let Action::Csi(csi) = &action
@@ -405,56 +480,281 @@ impl Terminal {
         }
     }
     fn clear_wide_at(&mut self, row: usize, col: usize, bg: Color) {
+        let width = self.screen().rows[row].cells[col].width();
+        self.clear_wide(row, col, bg, width);
+    }
+    /// Clear the cell at `col` and the other half of a glyph `width` columns wide. A
+    /// caller that has already taken the cell out of the grid passes the width it holds,
+    /// because the slot no longer describes the glyph that occupied it.
+    fn clear_wide(&mut self, row: usize, col: usize, bg: Color, width: u8) {
         let cols = self.cols();
         let line = &mut self.screen_mut().rows[row];
         line.record_full_write(1);
-        let cells = &mut line.cells;
-        if cells[col].width == 0 && col > 0 {
-            cells[col - 1] = Cell::blank(bg);
+        // One blank per repair, so an RGB background shares one side record instead of
+        // allocating one per cleared cell. `put_blank` keeps the row's heap flag honest.
+        let spacer = width == 0 && col > 0;
+        let tail = width == 2 && col + 1 < cols;
+        if spacer {
+            line.put_blank(col - 1, bg);
         }
-        if cells[col].width == 2 && col + 1 < cols {
-            cells[col + 1] = Cell::blank(bg);
+        if tail {
+            line.put_blank(col + 1, bg);
         }
-        cells[col] = Cell::blank(bg);
+        line.put_blank(col, bg);
     }
-    /// Write ordinary text a row at a time, leaving protocol-sensitive cases on the
-    /// scalar path. The generation count and final grapheme target match scalar writes.
-    fn print_ascii(&mut self, mut bytes: &[u8], now: u64, emit: &mut impl FnMut(Event)) {
-        while !bytes.is_empty() {
-            let cursor = self.screen().cursor;
-            let complex_cluster = self.modes.grapheme_clusters && self.grapheme_target.is_some_and(|pos| {
-                let previous = &self.screen().rows[pos.row].cells[pos.col];
-                !previous.ch.is_ascii() || !previous.combining.is_empty()
-            });
-            if self.sync_deadline.is_some() || self.modes.insert || self.single_shift.is_some()
-                || self.charsets[self.charset] || self.link.is_some() || cursor.pending_wrap || complex_cluster {
-                self.dispatch(Action::Print(char::from(bytes[0])), now, emit);
-                bytes = &bytes[1..];
-                continue;
-            }
-            let pos = cursor.position;
-            let cols = self.cols();
-            let available = bytes.len().min(cols - pos.col);
-            let row = &self.screen().rows[pos.row];
-            let count = row.cells[pos.col..pos.col + available].iter().take_while(|cell| cell.width == 1).count();
-            if count == 0 {
-                self.print(char::from(bytes[0]), emit);
-                bytes = &bytes[1..];
-                continue;
-            }
-            let style = self.style;
-            let screen = self.screen_mut();
-            let row = &mut screen.rows[pos.row];
-            row.record_write(pos.col + count, count as u64);
-            for (cell, &byte) in row.cells[pos.col..pos.col + count].iter_mut().zip(bytes) {
-                *cell = Cell { ch: char::from(byte), width: 1, style, link: None, combining: Combining::new(), written: true };
-            }
-            screen.cursor.position.col = (pos.col + count).min(cols - 1);
-            screen.cursor.pending_wrap = pos.col + count == cols;
-            self.last_printed = Some(char::from(bytes[count - 1]));
-            self.grapheme_target = Some(Position { row: pos.row, col: pos.col + count - 1 });
-            bytes = &bytes[count..];
+    /// Write printable text a row at a time. Each run prepares one presentation
+    /// template and writes the cells in a single pass, so an ordinary character costs
+    /// one cell store instead of a full scalar dispatch. Anything protocol-sensitive
+    /// stays on the scalar path one character at a time: insert mode, character-set
+    /// translation, synchronized output, a pending wrap, wide-cell repair, a combining
+    /// mark, or a possible grapheme join.
+    fn print_text(&mut self, mut text: &str, now: u64, emit: &mut impl FnMut(Event)) {
+        if text.is_empty() {
+            return;
         }
+        // A printable run cannot change the style or the hyperlink — it only ever
+        // dispatches `Print` — so one presentation serves every chunk this run writes.
+        let template = self.style_template();
+        while !text.is_empty() {
+            let scalar = self.sync_deadline.is_some()
+                || self.modes.insert
+                || self.single_shift.is_some()
+                || self.charsets[self.charset];
+            let written = if scalar { 0 } else { self.write_run(text, &template) };
+            if written != 0 {
+                text = &text[written..];
+                continue;
+            }
+            let ch = text.chars().next().expect("non-empty text");
+            self.dispatch(Action::Print(ch), now, emit);
+            text = &text[ch.len_utf8()..];
+        }
+    }
+    /// Write a parser-validated printable run. `Input::Text` is already a `&str`, so no
+    /// whole-run UTF-8 validation happens here.
+    fn print_run(&mut self, text: &str, now: u64, emit: &mut impl FnMut(Event)) {
+        self.print_text(text, now, emit);
+    }
+    /// The prepared presentation for the current style and hyperlink, rebuilt only when
+    /// both are absent from the bounded slot set. At most `STYLE_SLOTS` templates are
+    /// retained per terminal.
+    fn style_template(&mut self) -> CellStyle {
+        let style = self.style;
+        let link = self.link.as_ref();
+        for slot in &self.style_cache {
+            let Some(cache) = slot else { continue };
+            if cache.style == style
+                && match (&cache.link, link) {
+                    (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
+                    (None, None) => true,
+                    _ => false,
+                }
+            {
+                return cache.template.clone();
+            }
+        }
+        let template = CellStyle::new(&style, link);
+        self.style_cache[self.style_slot % STYLE_SLOTS] = Some(StyleCache {
+            style,
+            link: link.cloned(),
+            template: template.clone(),
+        });
+        self.style_slot = (self.style_slot + 1) % STYLE_SLOTS;
+        #[cfg(test)]
+        {
+            self.template_builds += 1;
+        }
+        template
+    }
+    /// Templates built so far; a reuse regression shows up as a growing count.
+    #[cfg(test)]
+    fn template_builds_for_test(&self) -> usize {
+        self.template_builds
+    }
+    /// Write the leading characters of `text` that this row can take in place, and
+    /// return the bytes consumed (zero when the first character needs `print`).
+    ///
+    /// A printable ASCII prefix over single-column cells — the ordinary case — is one
+    /// store per byte against a prepared packed word. Everything else (wide glyphs,
+    /// combining marks, possible grapheme joins, hyperlinks and presentations with a
+    /// side record) goes through the per-character loop below, which applies exactly
+    /// the checks `print` applies.
+    fn write_run(&mut self, text: &str, template: &CellStyle) -> usize {
+        let cols = self.cols();
+        let cursor = self.screen().cursor;
+        // A pending wrap must go through `print`, which marks the row as wrapped and
+        // moves the cursor before any cell is written.
+        if cursor.pending_wrap {
+            return 0;
+        }
+        let pos = cursor.position;
+        if self.plain_ascii_run_start(text) {
+            let span = (cols - pos.col).min(text.len());
+            let ascii = text.as_bytes()[..span]
+                .iter()
+                .take_while(|byte| (0x20..=0x7e).contains(*byte))
+                .count();
+            if ascii > 0 {
+                let count = self.screen().rows[pos.row].cells[pos.col..pos.col + ascii]
+                    .iter()
+                    .take_while(|cell| cell.width() == 1)
+                    .count();
+                if count > 0 {
+                    let packed = template.packed_written_column();
+                    let side_data = template.has_side_data();
+                    let screen = self.screen_mut();
+                    let row = &mut screen.rows[pos.row];
+                    row.record_write(pos.col + count, count as u64);
+                    let bytes = &text.as_bytes()[..count];
+                    let cells = &mut row.cells[pos.col..pos.col + count];
+                    if side_data {
+                        // One reference bump per cell instead of one allocation.
+                        for (cell, &byte) in cells.iter_mut().zip(bytes) {
+                            *cell = template.written_column(char::from(byte));
+                        }
+                        row.mark_heap();
+                    } else {
+                        for (cell, &byte) in cells.iter_mut().zip(bytes) {
+                            *cell = Cell::from_packed(char::from(byte), packed);
+                        }
+                    }
+                    row.charge_write(pos.col, count, template.side_identity());
+                    let end = pos.col + count;
+                    screen.cursor.position.col = end.min(cols - 1);
+                    screen.cursor.pending_wrap = end >= cols;
+                    self.last_printed = Some(char::from(bytes[count - 1]));
+                    self.grapheme_target = Some(Position { row: pos.row, col: end - 1 });
+                    return count;
+                }
+            }
+        }
+        self.write_run_cells(text, pos, cols, template)
+    }
+    /// One character at a time, for everything the batched prefix cannot take.
+    #[allow(clippy::too_many_lines)]
+    fn write_run_cells(&mut self, text: &str, pos: Position, cols: usize, template: &CellStyle) -> usize {
+        let graphemes = self.modes.grapheme_clusters;
+        // Only the cell recorded before the run can hold a cluster to join into.
+        let target = self.grapheme_target;
+        let mut col = pos.col;
+        let mut bytes = 0;
+        let mut previous: Option<char> = None;
+        // The class `previous` got when the pair rules last looked at it, carried so a
+        // character is classified once instead of once as `next` and again as the tail
+        // of the following pair. `None` means the pair was an ordinary ASCII pair that
+        // needed no decision, and the class is filled in when one is needed.
+        let mut previous_class: Option<grapheme::Classes> = None;
+        let mut previous_is_ascii = false;
+        let mut last_col = pos.col;
+        let mut last_char = ' ';
+        let screen = self.screen_mut();
+        let row = &mut screen.rows[pos.row];
+        for ch in text.chars() {
+            // An ordinary ASCII character can never join the ASCII character written
+            // before it, so plain text does no grapheme work at all.
+            let mut carried = None;
+            if graphemes && !(previous_is_ascii && ch.is_ascii()) {
+                let verdict = match previous {
+                    Some(lead) => {
+                        let tail = previous_class.unwrap_or_else(|| grapheme::classes(lead));
+                        let next = grapheme::classes(ch);
+                        carried = Some(next);
+                        grapheme::join_classes(tail, next, lead, &[])
+                    }
+                    None => match target {
+                        Some(position)
+                            if position.row == pos.row
+                                && row.cells[position.col].width() != 0 =>
+                        {
+                            let cell = &row.cells[position.col];
+                            let next = grapheme::classes(ch);
+                            carried = Some(next);
+                            let tail = cell.combining().last().copied().unwrap_or(cell.ch);
+                            grapheme::join_classes(
+                                grapheme::classes(tail),
+                                next,
+                                cell.ch,
+                                cell.combining(),
+                            )
+                        }
+                        Some(_) => Join::Unknown,
+                        None => Join::No,
+                    },
+                };
+                // A run writes every character into its own cell and remembers only the
+                // one it wrote last. Anything whose cluster membership depends on more
+                // than that pair — a mark, a joiner, a regional indicator, a jamo, a
+                // pictograph after a ZWJ, or an unmodelled script — reports `Yes` or
+                // `Unknown` when it arrives, so it breaks to `print`, which decides from
+                // the complete cluster stored in the cell.
+                if verdict != Join::No {
+                    break;
+                }
+            }
+            let width = if ch.is_ascii() { 1 } else { char_width(ch, cols) };
+            if width == 0 || col + width > cols {
+                break;
+            }
+            let contained = if width == 1 {
+                row.cells[col].width() == 1
+            } else {
+                row.cells[col].width() != 0 && row.cells[col + 1].width() != 2
+            };
+            if !contained {
+                break;
+            }
+            row.cells[col] = template.cell(ch, width as u8, true);
+            if width == 2 {
+                let spacer = row.cells[col].spacer();
+                row.cells[col + 1] = spacer;
+            }
+            last_col = col;
+            last_char = ch;
+            col += width;
+            bytes += ch.len_utf8();
+            previous = Some(ch);
+            previous_class = carried;
+            previous_is_ascii = ch.is_ascii();
+        }
+        if bytes == 0 {
+            return 0;
+        }
+        let advance = col - pos.col;
+        row.record_write(col, advance as u64);
+        row.charge_write(pos.col, advance, template.side_identity());
+        if template.has_side_data() {
+            row.mark_heap();
+        }
+        screen.cursor.position.col = col.min(cols - 1);
+        screen.cursor.pending_wrap = col >= cols;
+        self.last_printed = Some(last_char);
+        self.grapheme_target = Some(Position { row: pos.row, col: last_col });
+        bytes
+    }
+    /// Whether the first character of `text` is certain to start a new cluster instead
+    /// of joining the cell recorded before this run.
+    fn plain_ascii_run_start(&self, text: &str) -> bool {
+        let Some(position) = self.grapheme_target else {
+            return true;
+        };
+        let Some(ch) = text.chars().next() else {
+            return false;
+        };
+        if !self.modes.grapheme_clusters {
+            return true;
+        }
+        let cursor = self.screen().cursor;
+        if position.row != cursor.position.row {
+            return false;
+        }
+        let cell = &self.screen().rows[position.row].cells[position.col];
+        if cell.width() == 0 {
+            return false;
+        }
+        if cell.ch.is_ascii() && cell.combining_len() == 0 && ch.is_ascii() {
+            return true;
+        }
+        grapheme::join(cell.ch, cell.combining(), ch) == Join::No
     }
     fn print(&mut self, mut ch: char, emit: &mut impl FnMut(Event)) {
         let charset = self.single_shift.take().unwrap_or(self.charset);
@@ -472,14 +772,15 @@ impl Terminal {
                 col = col.saturating_sub(1);
             }
             let row = &mut self.screen_mut().rows[cursor.position.row];
-            if row.cells[col].width == 0 {
+            if row.cells[col].width() == 0 {
                 col = col.saturating_sub(1);
             }
-            if row.cells[col].combining.len() < cell::MAX_COMBINING {
+            if row.cells[col].push_combining(ch) {
                 row.record_full_write(1);
-                row.cells[col].combining.push(ch);
-                row.cells[col].written = true;
+                row.cells[col].set_written(true);
                 row.mark_heap();
+                // The cell now owns a detached record, so the row must recount.
+                row.charge_unknown();
             }
             return;
         }
@@ -506,8 +807,11 @@ impl Terminal {
         // wide neighbour outside the span needs repair. Preserve the generation
         // advances of the scalar clear path even when the assignments are skipped.
         let cells = &self.screen().rows[pos.row].cells;
-        let contained = if width == 1 { cells[pos.col].width == 1 }
-            else { cells[pos.col].width != 0 && cells[pos.col + 1].width != 2 };
+        let contained = if width == 1 {
+            cells[pos.col].width() == 1
+        } else {
+            cells[pos.col].width() != 0 && cells[pos.col + 1].width() != 2
+        };
         if contained {
             self.screen_mut().rows[pos.row].record_full_write(width as u64);
         } else {
@@ -516,27 +820,17 @@ impl Terminal {
                 self.clear_wide_at(pos.row, pos.col + 1, self.style.bg);
             }
         }
-        let style = self.style;
-        let link = self.link.clone();
-        self.screen_mut().rows[pos.row].cells[pos.col] = Cell {
-            ch,
-            width: width as u8,
-            style,
-            link: link.clone(),
-            combining: Combining::new(),
-            written: true,
-        };
+        let template = self.style_template();
+        let row = &mut self.screen_mut().rows[pos.row];
+        row.cells[pos.col] = template.cell(ch, width as u8, true);
         if width == 2 {
-            self.screen_mut().rows[pos.row].cells[pos.col + 1] = Cell {
-                width: 0,
-                style,
-                link,
-                ..Cell::default()
-            };
+            let spacer = row.cells[pos.col].spacer();
+            row.cells[pos.col + 1] = spacer;
         }
-        if self.link.is_some() {
-            self.screen_mut().rows[pos.row].mark_heap();
+        if template.has_side_data() {
+            row.mark_heap();
         }
+        row.charge_write(pos.col, width, template.side_identity());
         let cols = self.cols();
         let cursor = &mut self.screen_mut().cursor;
         cursor.position.col = (pos.col + width).min(cols - 1);
@@ -548,62 +842,105 @@ impl Terminal {
         let Some(mut position) = self.grapheme_target else {
             return false;
         };
-        {
+        // Character properties answer the boundary question for ordinary pairs; the
+        // candidate cluster is still built below because a cluster's column width is
+        // not a sum of character widths (emoji sequences and variation selectors).
+        let verdict = {
             let previous = &self.screen().rows[position.row].cells[position.col];
-            if ch.is_ascii() && previous.ch.is_ascii() && previous.combining.is_empty() {
+            if ch.is_ascii() && previous.ch.is_ascii() && previous.combining_len() == 0 {
                 return false;
             }
+            if previous.width() == 0 {
+                Join::Unknown
+            } else {
+                grapheme::join(previous.ch, previous.combining(), ch)
+            }
+        };
+        if verdict == Join::No {
+            return false;
         }
         // Build the candidate cluster in a reused buffer instead of allocating a fresh
         // String for every printed non-ASCII character. It is moved back out below and
         // restored on every early return.
         let mut cluster = std::mem::take(&mut self.cluster_scratch);
         cluster.clear();
-        let previous = &self.screen().rows[position.row].cells[position.col];
-        if previous.width != 0 {
-            cluster.push(previous.ch);
-            cluster.extend(&previous.combining);
+        {
+            let previous = &self.screen().rows[position.row].cells[position.col];
+            if previous.width() != 0 {
+                cluster.push(previous.ch);
+                cluster.extend(previous.combining());
+            }
+            cluster.push(ch);
         }
-        cluster.push(ch);
-        if cluster.graphemes(true).nth(1).is_some() {
-            self.cluster_scratch = cluster;
-            return false;
+        // Programs repeat the same families, flags and marked letters, so the exact
+        // analysis of the complete candidate is remembered and reused verbatim.
+        let cached = self.cluster_analysis(&cluster);
+        if verdict == Join::Unknown {
+            let joins = match cached {
+                Some((joins, _)) => joins,
+                None => {
+                    let joins = cluster.graphemes(true).nth(1).is_none();
+                    if !joins {
+                        let width = cluster.width();
+                        self.remember_cluster(&cluster, false, width);
+                        self.cluster_scratch = cluster;
+                        return false;
+                    }
+                    joins
+                }
+            };
+            if !joins {
+                // A remembered break settles it without walking the segmentation again,
+                // and reaches exactly the answer the exact rules gave the first time.
+                self.cluster_scratch = cluster;
+                return false;
+            }
         }
-        if previous.combining.len() >= cell::MAX_COMBINING {
+        if self.screen().rows[position.row].cells[position.col].combining_len() >= cell::MAX_COMBINING {
             self.cluster_scratch = cluster;
             return true;
         }
-        let mut cell = previous.clone();
-        let old_width = usize::from(cell.width);
-        let mut width = cluster.width().clamp(1, 2).min(self.cols());
+        // Take the cell out of the grid instead of cloning it: the cluster is rebuilt
+        // here, so nothing can observe the slot meanwhile, and this value holds the only
+        // reference to its record. `push_combining` then grows that record in place
+        // instead of detaching a shared one and reallocating its storage on every mark.
+        let mut cell = std::mem::take(&mut self.screen_mut().rows[position.row].cells[position.col]);
+        let bg = cell.style().bg;
+        let old_width = cell.width();
+        // The remembered width is the unclamped `UnicodeWidthStr` measure; the column
+        // clamp below is the only part of the decision that depends on this terminal.
+        let measured = match cached {
+            Some((_, width)) => width,
+            None => {
+                let width = cluster.width();
+                self.remember_cluster(&cluster, true, width);
+                width
+            }
+        };
+        let mut width = measured.clamp(1, 2).min(self.cols());
         // DECAWM off: keep the cluster inside the last column instead of
         // wrapping and advancing a row (print() clamps the same way).
         if position.col + width > self.cols() && !self.modes.wrap {
             width = self.cols() - position.col;
         }
         self.cluster_scratch = cluster;
-        cell.combining.push(ch);
-        cell.width = width as u8;
+        cell.push_combining(ch);
+        cell.set_width(width as u8);
         if position.col + width > self.cols() {
-            self.clear_wide_at(position.row, position.col, cell.style.bg);
+            self.clear_wide(position.row, position.col, bg, old_width);
             self.screen_mut().rows[position.row].wrapped = true;
             self.screen_mut().rows[position.row].wrap_padding = true;
             self.screen_mut().cursor.position.col = 0;
             self.linefeed(emit);
             position = self.cursor();
         }
-        if width != old_width {
-            self.clear_wide_at(position.row, position.col, cell.style.bg);
+        if width != usize::from(old_width) {
+            self.clear_wide(position.row, position.col, bg, old_width);
             if width == 2 {
-                self.clear_wide_at(position.row, position.col + 1, cell.style.bg);
+                self.clear_wide_at(position.row, position.col + 1, bg);
             }
         }
-        let trail = Cell {
-            width: 0,
-            style: cell.style,
-            link: cell.link.clone(),
-            ..Cell::default()
-        };
+        let trail = cell.spacer();
         let row = &mut self.screen_mut().rows[position.row];
         row.record_full_write(1);
         row.cells[position.col] = cell;
@@ -611,6 +948,7 @@ impl Terminal {
             row.cells[position.col + 1] = trail;
         }
         row.mark_heap();
+        row.charge_unknown();
         let cols = self.cols();
         self.screen_mut().cursor = Cursor {
             position: Position {
@@ -622,6 +960,35 @@ impl Terminal {
         self.grapheme_target = Some(position);
         self.last_printed = Some(ch);
         true
+    }
+    /// The remembered exact analysis of `cluster`, if this terminal has seen it.
+    fn cluster_analysis(&self, cluster: &str) -> Option<(bool, usize)> {
+        let bytes = cluster.as_bytes();
+        self.cluster_cache
+            .iter()
+            .flatten()
+            .find(|slot| usize::from(slot.key_len) == bytes.len() && &slot.key[..bytes.len()] == bytes)
+            .map(|slot| (slot.joins, usize::from(slot.width)))
+    }
+    /// Remember one exact analysis, replacing `cluster_slot` round-robin so the footprint
+    /// stays fixed. A candidate longer than a key is not cached; the natural bound is a
+    /// lead character plus `MAX_COMBINING` marks plus the incoming one.
+    fn remember_cluster(&mut self, cluster: &str, joins: bool, width: usize) {
+        let bytes = cluster.as_bytes();
+        if bytes.len() > CLUSTER_KEY_BYTES {
+            return;
+        }
+        let mut key = [0u8; CLUSTER_KEY_BYTES];
+        key[..bytes.len()].copy_from_slice(bytes);
+        let analysis = ClusterAnalysis {
+            key_len: bytes.len() as u8,
+            key,
+            width: width.min(usize::from(u16::MAX)) as u16,
+            joins,
+        };
+        let slot = self.cluster_slot;
+        self.cluster_slot = (slot + 1) % CLUSTER_SLOTS;
+        self.cluster_cache[slot] = Some(analysis);
     }
     fn scroll(
         &mut self,
@@ -719,11 +1086,9 @@ impl Terminal {
             for row in &mut self.screen_mut().rows {
                 row.wrapped = false;
                 row.record_full_write(1);
-                row.cells.fill(Cell {
-                    ch: 'E',
-                    written: true,
-                    ..Cell::default()
-                });
+                row.cells.fill(Cell::plain('E'));
+                // Alignment fill: no cell owns a side record any more.
+                row.charge_plain();
             }
             return;
         }
@@ -795,11 +1160,12 @@ impl Terminal {
                 row.mark_blank(bg);
             } else {
                 self.clear_wide_at(row, start, bg);
-                if end < cols && self.screen().rows[row].cells[end].width == 0 {
+                if end < cols && self.screen().rows[row].cells[end].width() == 0 {
                     self.clear_wide_at(row, end, bg);
                 }
-                self.screen_mut().rows[row].record_write(end, 0);
-                self.screen_mut().rows[row].cells[start..end].fill(Cell::blank(bg));
+                let line = &mut self.screen_mut().rows[row];
+                line.record_write(end, 0);
+                line.fill_blank(start..end, bg);
             }
         }
         if end == cols {
@@ -853,28 +1219,29 @@ impl Terminal {
         let pos = self.cursor();
         let cols = self.cols();
         let count = count.min(cols - pos.col);
-        let blank = Cell::blank(self.style.bg);
-        self.screen_mut().rows[pos.row].record_full_write(1);
+        let bg = self.style.bg;
         // ICH, DCH and ECH edit in place; the next print must not wrap first.
+        self.screen_mut().rows[pos.row].record_full_write(1);
         self.screen_mut().cursor.pending_wrap = false;
-        let cells = &mut self.screen_mut().rows[pos.row].cells;
         if erase_only {
             self.erase(pos.row, pos.col..pos.col + count);
             return;
         }
+        let row = &mut self.screen_mut().rows[pos.row];
         if insert {
-            cells[pos.col..].rotate_right(count);
-            cells[pos.col..pos.col + count].fill(blank.clone());
+            row.cells[pos.col..].rotate_right(count);
+            row.fill_blank(pos.col..pos.col + count, bg);
         } else {
-            cells[pos.col..].rotate_left(count);
-            cells[cols - count..].fill(blank.clone());
+            row.cells[pos.col..].rotate_left(count);
+            row.fill_blank(cols - count..cols, bg);
         }
-        // Edits can split either boundary of a wide cell. Repair orphan halves.
+        // Edits can split either boundary of a wide cell. Repair orphan halves; the
+        // blank may own a side record (an RGB background), which `put_blank` records.
         for col in pos.col.saturating_sub(1)..cols {
-            if cells[col].width == 2 && (col + 1 == cols || cells[col + 1].width != 0)
-                || cells[col].width == 0 && (col == 0 || cells[col - 1].width != 2)
+            if row.cells[col].width() == 2 && (col + 1 == cols || row.cells[col + 1].width() != 0)
+                || row.cells[col].width() == 0 && (col == 0 || row.cells[col - 1].width() != 2)
             {
-                cells[col] = blank.clone();
+                row.put_blank(col, bg);
             }
         }
     }
@@ -1530,6 +1897,15 @@ impl Terminal {
     }
 }
 
+/// Width of one printed character, matching the scalar path's clamp exactly.
+#[inline]
+fn char_width(ch: char, cols: usize) -> usize {
+    if ch.is_ascii() {
+        1
+    } else {
+        ch.width().unwrap_or(0).min(2).min(cols)
+    }
+}
 fn parse_channels(parts: &[Option<u16>]) -> Option<Color> {
     let [Some(r), Some(g), Some(b), ..] = parts else {
         return None;
@@ -1603,8 +1979,17 @@ fn dec_graphic(ch: char) -> char {
 mod tests {
     use super::*;
     fn feed(term: &mut Terminal, bytes: &[u8]) -> Vec<Event> {
+        feed_at(term, bytes, 0)
+    }
+    fn feed_at(term: &mut Terminal, bytes: &[u8], now: u64) -> Vec<Event> {
         let mut events = Vec::new();
-        term.feed(bytes, 0, |e| events.push(e));
+        term.feed(bytes, now, |e| events.push(e));
+        #[cfg(test)]
+        for screen in [&term.main, &term.alternate] {
+            for row in screen.rows.iter().chain(&screen.history) {
+                row.assert_charge_matches_recount(std::str::from_utf8(bytes).unwrap_or("<bytes>"));
+            }
+        }
         events
     }
     // Compare all protocol and cell state, excluding only reset-range certificates
@@ -1668,6 +2053,182 @@ mod tests {
         }
     }
 
+    /// Replay `corpus` into both terminals in chunks of `chunk` bytes, comparing events
+    /// and complete state after every chunk.
+    fn assert_corpus_matches_scalar(
+        cols: usize,
+        rows: usize,
+        history: usize,
+        graphemes: bool,
+        corpus: &[&str],
+        chunk: usize,
+    ) {
+        let mut fast = Terminal::new(cols, rows, history).unwrap();
+        let mut scalar = Terminal::new(cols, rows, history).unwrap();
+        fast.enable_grapheme_support(graphemes);
+        scalar.enable_grapheme_support(graphemes);
+        for (index, text) in corpus.iter().enumerate() {
+            let now = index as u64;
+            for part in text.as_bytes().chunks(chunk.max(1)) {
+                assert_eq!(
+                    feed_at(&mut fast, part, now),
+                    feed_scalar(&mut scalar, part, now),
+                    "cols={cols} rows={rows} history={history} graphemes={graphemes} chunk={chunk} text={text:?}"
+                );
+                assert_eq!(
+                    state(&fast),
+                    state(&scalar),
+                    "cols={cols} rows={rows} history={history} graphemes={graphemes} chunk={chunk} text={text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_runs_match_scalar_writes_across_unicode_shapes_and_narrow_grids() {
+        // Ordinary text, wide glyphs, combining marks, ZWJ sequences, regional
+        // indicators, escape-driven edits, insert mode and wrapping in narrow grids.
+        let corpus = [
+            "ordinary ascii text 0123456789 !~",
+            "中文 日本語 한국어 e\u{301} 😀 👩🏽‍💻 🇯🇵 🇺🇸 text",
+            "\u{600}abc1\u{fe0f}\u{20e3}xyz ❤\u{fe0f} 🏳️‍🌈",
+            "\x1b[38;2;80;180;240mtruecolor run\x1b[0m plain",
+            "\x1b[4:3;58;5;9munderlined\x1b[59m\x1b[24m",
+            "\x1b[4hinsert\x1b[4l\x1b[2@\x1b[2P\x1b[2X",
+            "\x1b[1;3H中中\x1b[1;2Hwide repair\x1b[1;1H中",
+            "\x1b[?7lnarrow margins\x1b[?7h",
+            "\x1b[?1049halt screen 中\r\nsecond\x1b[?1049lback",
+            "\x1b]8;;https://example.test\x1b\\linked\x1b]8;;\x1b\\ plain",
+            "\x1b[3;1H\x1b[2K\x1b[1K\x1b[2J\x1b[3J",
+            "\x1b[2;3r\x1b[3;1Hscrolled\n\x1b[r\x1b[H",
+            "\x1b[5brepeat me\x1b[2b",
+            "\x1b[?2026hsynchronized 中 text\x1b[?2026l",
+            "malformed \u{fffd} replacement",
+        ];
+        for cols in [1usize, 2, 3, 5, 8, 17, 80] {
+            for graphemes in [false, true] {
+                for chunk in [1usize, 3, 7, 64] {
+                    assert_corpus_matches_scalar(cols, 4, 20, graphemes, &corpus, chunk);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_byte_streams_never_diverge_from_the_scalar_path() {
+        // Arbitrary bytes: invalid UTF-8, truncated sequences, escapes that never
+        // terminate, and long ordinary runs, in random chunk sizes.
+        let mut rng = 0x5eed_1234_9abc_def0u64;
+        for round in 0..24 {
+            let mut bytes = Vec::new();
+            for _ in 0..400 {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let pick = (rng >> 33) as usize;
+                bytes.push(match pick % 16 {
+                    0..=5 => b"aZ 09!~"[pick % 7],
+                    6 => 0x1b,
+                    7 => b"[28;5;12HmDdJKP@Xrhl"[(pick >> 8) % 18],
+                    8 => 0x0a,
+                    9 => 0x0d,
+                    10 => 0x09,
+                    11 => "\u{4e2d}".as_bytes()[0],
+                    12 => 0xc3,
+                    13 => 0xff,
+                    14 => "\u{301}".as_bytes()[pick % 2],
+                    _ => "\u{200d}".as_bytes()[(pick >> 4) % 3],
+                });
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let sanitized = text.as_bytes().iter().map(|&byte| byte as char).collect::<String>();
+            let mut fast = Terminal::new(11, 3, 6).unwrap();
+            let mut scalar = Terminal::new(11, 3, 6).unwrap();
+            fast.enable_grapheme_support(round % 2 == 0);
+            scalar.enable_grapheme_support(round % 2 == 0);
+            let mut index = 0;
+            while index < bytes.len() {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let size = 1 + ((rng >> 40) as usize % 9);
+                let end = (index + size).min(bytes.len());
+                let part = &bytes[index..end];
+                assert_eq!(feed_at(&mut fast, part, index as u64), feed_scalar(&mut scalar, part, index as u64));
+                assert_eq!(state(&fast), state(&scalar), "round {round} offset {index}");
+                index = end;
+            }
+            let _ = sanitized;
+        }
+    }
+
+    #[test]
+    fn run_writes_match_scalar_generations_and_history_bytes() {
+        // History accounting and the generation counter must agree cell for cell, not
+        // just in the visible text.
+        let corpus = [
+            "row one of plain text \r\n",
+            "中中中中 with wide glyphs\r\n",
+            "combining e\u{301}a\u{302} marks\r\n",
+            "\x1b]8;;https://a.test\x1b\\linked row\x1b]8;;\x1b\\\r\n",
+            "\x1b[38;2;1;2;3mtruecolor row\x1b[0m\r\n",
+            "plain row that scrolls into history\r\n",
+            "another scrolling row \r\n",
+        ];
+        for graphemes in [false, true] {
+            let mut fast = Terminal::new(12, 2, 100).unwrap();
+            let mut scalar = Terminal::new(12, 2, 100).unwrap();
+            fast.enable_grapheme_support(graphemes);
+            scalar.enable_grapheme_support(graphemes);
+            for (index, text) in corpus.iter().enumerate() {
+                let now = index as u64;
+                for part in text.as_bytes().chunks(5) {
+                    assert_eq!(feed_at(&mut fast, part, now), feed_scalar(&mut scalar, part, now));
+                    assert_eq!(
+                        fast.screen().history_bytes_for_test(),
+                        scalar.screen().history_bytes_for_test(),
+                        "history bytes differ at {text:?}"
+                    );
+                    for row in fast.screen().rows.iter().zip(scalar.screen().rows.iter()) {
+                        assert_eq!(row.0.generation, row.1.generation, "generation differs at {text:?}");
+                        assert_eq!(row.0.cells, row.1.cells, "cells differ at {text:?}");
+                    }
+                    for row in fast.screen().history.iter().zip(scalar.screen().history.iter()) {
+                        assert_eq!(row.0.generation, row.1.generation, "history generation differs");
+                        assert_eq!(row.0.cells, row.1.cells, "history cells differ");
+                    }
+                }
+            }
+            assert!(!fast.screen().history.is_empty(), "the corpus must scroll into history");
+        }
+    }
+
+    #[test]
+    fn resize_and_reflow_after_run_writes_match_the_scalar_path() {
+        let corpus = [
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            "中文字元 and ascii mixed text that wraps",
+            "👩🏽‍💻 emoji 🇯🇵 flags e\u{301} combining",
+        ];
+        for text in corpus {
+            for (cols, rows) in [(7usize, 4usize), (4, 3), (13, 5), (2, 6)] {
+                let mut fast = Terminal::new(19, 3, 50).unwrap();
+                let mut scalar = Terminal::new(19, 3, 50).unwrap();
+                fast.enable_grapheme_support(true);
+                scalar.enable_grapheme_support(true);
+                for part in text.as_bytes().chunks(6) {
+                    assert_eq!(feed_at(&mut fast, part, 0), feed_scalar(&mut scalar, part, 0));
+                }
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                fast.resize(cols, rows, |event| actual.push(event)).unwrap();
+                scalar.resize(cols, rows, |event| expected.push(event)).unwrap();
+                assert_eq!(actual, expected, "{text:?} resized to {cols}x{rows}");
+                assert_eq!(state(&fast), state(&scalar), "{text:?} resized to {cols}x{rows}");
+                for part in text.as_bytes().chunks(9) {
+                    assert_eq!(feed_at(&mut fast, part, 1), feed_scalar(&mut scalar, part, 1));
+                    assert_eq!(state(&fast), state(&scalar));
+                }
+            }
+        }
+    }
+
     #[test]
     fn soft_reset_replaces_saved_cursor_position_and_attributes_with_defaults() {
         for alternate in [false, true] {
@@ -1679,7 +2240,7 @@ mod tests {
             feed(&mut term, b"\x1b8q");
             assert_eq!(term.cursor(), Position { row: 0, col: 1 });
             assert_eq!(term.screen().rows[0].text(), "qept    ");
-            assert_eq!(term.screen().rows[0].cells[0].style, Style::default());
+            assert_eq!(term.screen().rows[0].cells[0].style(), Style::default());
         }
     }
 
@@ -1743,7 +2304,7 @@ mod tests {
             feed(&mut term, "界".as_bytes());
             let row = &term.screen().rows[0];
             assert_eq!(row.generation, generation + 2);
-            assert_eq!(row.cells.iter().map(|c| (c.ch, c.width)).collect::<Vec<_>>(), expected);
+            assert_eq!(row.cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(), expected);
         }
     }
 
@@ -1754,12 +2315,32 @@ mod tests {
                        (b.cursor, b.saved_cursor, b.offset, b.selection));
             assert_eq!((&a.region, &a.tabs, a.keyboard_flags, &a.keyboard_stack, a.cols),
                        (&b.region, &b.tabs, b.keyboard_flags, &b.keyboard_stack, b.cols));
-            assert_eq!((a.rows.len(), a.history.len(), a.history_bytes_for_test()),
-                       (b.rows.len(), b.history.len(), b.history_bytes_for_test()));
+            assert_eq!((a.rows.len(), a.history.len()), (b.rows.len(), b.history.len()));
             for (a, b) in a.rows.iter().chain(&a.history).zip(b.rows.iter().chain(&b.history)) {
                 assert_eq!((a.id, &a.cells, a.wrapped, a.wrap_padding, a.generation),
                            (b.id, &b.cells, b.wrapped, b.wrap_padding, b.generation));
             }
+            // Side records are shared by identity, so identical visible rows can hold a
+            // different number of distinct records depending on how they were written
+            // (one batched run versus one write per character). The charge must stay
+            // deduplicated and comparable; the exact per-row formula is asserted by
+            // `shared_presentation_rows_charge_one_record_not_one_per_cell` and friends.
+            for screen in [a, b] {
+                for row in screen.rows.iter().chain(&screen.history) {
+                    let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+                    let naive: usize = row.cells.iter().map(Cell::side_bytes).sum();
+                    assert!(row.bytes_for_test() >= base, "base storage is always charged");
+                    assert!(
+                        row.bytes_for_test() <= base + naive,
+                        "a shared record is never charged twice"
+                    );
+                }
+            }
+            let (left, right) = (a.history_bytes_for_test(), b.history_bytes_for_test());
+            assert!(
+                left.abs_diff(right) <= left.max(right) / 2 + 4 * std::mem::size_of::<Cell>(),
+                "history charges must stay comparable: {left} vs {right}"
+            );
         }
         let inputs = [
             "short\r\n", "          \r\n", "\x1b[1;8H ", "中中😀e\u{301}",
@@ -1838,7 +2419,7 @@ mod tests {
         assert_eq!(term.screen().history.len(), 0);
         assert!(!term.screen().rows[0].wrapped);
         assert_eq!(term.screen().rows[0].cells[3].ch, '\u{2764}');
-        assert!(term.screen().rows[0].cells[3].combining.contains(&'\u{fe0f}'));
+        assert!(term.screen().rows[0].cells[3].combining().contains(&'\u{fe0f}'));
         // With DECAWM on (the default) the cluster still wraps to the next row.
         let mut term = Terminal::new(4, 2, 10).unwrap();
         term.enable_grapheme_support(true);
@@ -2094,7 +2675,7 @@ mod tests {
         let mut term = Terminal::new(5, 2, 1).unwrap();
         feed(&mut term, format!("a{}", "\u{301}".repeat(1000)).as_bytes());
         assert_eq!(
-            term.screen().rows[0].cells[0].combining.len(),
+            term.screen().rows[0].cells[0].combining_len(),
             cell::MAX_COMBINING
         );
         let events = feed(&mut term, b"\x1b]52;c;?\x07");
@@ -2155,14 +2736,14 @@ mod tests {
         assert!(term.screen().rows.iter().all(|row| row
             .cells
             .iter()
-            .all(|c| c.style.bg == Color::Indexed(1))));
+            .all(|c| c.style().bg == Color::Indexed(1))));
         // A different BCE colour must refill, not reuse the red blank marker.
         feed(&mut term, b"\x1b[44m\x1b[2J");
         assert!(
             term.screen().rows.iter().all(|row| row
                 .cells
                 .iter()
-                .all(|c| c.style.bg == Color::Indexed(4))),
+                .all(|c| c.style().bg == Color::Indexed(4))),
             "erase with a new background must not skip the fill"
         );
     }
@@ -2235,8 +2816,8 @@ mod tests {
         // Overwriting the spacer tail must blank the wide lead (fast path must not fire).
         let mut term = Terminal::new(6, 2, 0).unwrap();
         feed(&mut term, "中".as_bytes());
-        assert_eq!(term.screen().rows[0].cells[0].width, 2);
-        assert_eq!(term.screen().rows[0].cells[1].width, 0);
+        assert_eq!(term.screen().rows[0].cells[0].width(), 2);
+        assert_eq!(term.screen().rows[0].cells[1].width(), 0);
         feed(&mut term, b"\x1b[1;2HX");
         assert_eq!(term.screen().rows[0].cells[1].ch, 'X');
         assert_eq!(term.screen().rows[0].cells[0].ch, ' ', "wide lead blanked when its tail is overwritten");
@@ -2275,6 +2856,688 @@ mod tests {
 
     fn history_base(term: &Terminal) -> usize {
         term.screen().history.len() * term.cols() * std::mem::size_of::<Cell>()
+    }
+
+    #[test]
+    fn repeated_runs_reuse_the_prepared_style_template() {
+        let mut term = Terminal::new(20, 4, 10).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, b"plain text\r\n");
+        let plain = term.template_builds_for_test();
+        assert_eq!(plain, 1, "the first write prepares one template");
+        for _ in 0..8 {
+            feed(&mut term, b"plain text\r\n");
+        }
+        assert_eq!(
+            term.template_builds_for_test(),
+            plain,
+            "an unchanged style and hyperlink must reuse the template"
+        );
+        feed(&mut term, b"\x1b[38;2;80;180;240m");
+        for _ in 0..8 {
+            feed(&mut term, b"truecolor text\r\n");
+        }
+        let rgb = term.template_builds_for_test();
+        assert_eq!(rgb, plain + 1, "one rebuild for the RGB style, none per run");
+        feed(&mut term, b"\x1b]8;;https://example.test\x1b\\");
+        for _ in 0..8 {
+            feed(&mut term, b"linked text\r\n");
+        }
+        assert_eq!(
+            term.template_builds_for_test(),
+            rgb + 1,
+            "one rebuild for the hyperlink, none per run"
+        );
+        // A combining mark shares the cached record without rebuilding it.
+        feed(&mut term, "e\u{301}".as_bytes());
+        feed(&mut term, b"more");
+        assert_eq!(term.template_builds_for_test(), rgb + 1);
+    }
+
+    #[test]
+    fn alternating_styles_reuse_the_bounded_slot_set() {
+        let mut term = Terminal::new(12, 3, 10).unwrap();
+        term.enable_grapheme_support(true);
+        // The shape that used to rebuild (and reallocate) once per line: a truecolor
+        // accent followed by the reset style, over and over.
+        for _ in 0..12 {
+            feed(&mut term, b"\x1b[38;2;80;180;240maccent\x1b[0m plain\r\n");
+        }
+        assert_eq!(
+            term.template_builds_for_test(),
+            2,
+            "two alternating styles keep both templates without a per-line rebuild"
+        );
+        // The slot set is bounded: more distinct styles than slots still builds once each
+        // and never grows the retained set.
+        for index in 0..8 {
+            let escape = format!("\x1b[38;2;{index};0;0mX");
+            feed(&mut term, escape.as_bytes());
+        }
+        assert_eq!(term.template_builds_for_test(), 2 + 8, "each new style builds once");
+        // The most recently used style is still resident, so it costs nothing again.
+        let settled = term.template_builds_for_test();
+        feed(&mut term, b"\x1b[38;2;7;0;0mY");
+        assert_eq!(
+            term.template_builds_for_test(),
+            settled,
+            "the newest style stays warm"
+        );
+        // A style pushed out of the bounded set rebuilds exactly once when it returns.
+        feed(&mut term, b"\x1b[38;2;80;180;240maccent");
+        assert_eq!(term.template_builds_for_test(), settled + 1);
+        assert_eq!(
+            term.screen().rows.back().unwrap().cells[0].style().fg,
+            Color::rgb(80, 180, 240)
+        );
+    }
+
+    #[test]
+    fn every_style_change_rebuilds_the_template_and_reaches_the_cells() {
+        let cases: &[(&str, Style)] = &[
+            ("", Style::default()),
+            ("\x1b[1m", Style { attrs: cell::BOLD, ..Style::default() }),
+            ("\x1b[2m", Style { attrs: cell::FAINT, ..Style::default() }),
+            ("\x1b[3m", Style { attrs: cell::ITALIC, ..Style::default() }),
+            ("\x1b[5m", Style { attrs: cell::BLINK, ..Style::default() }),
+            ("\x1b[7m", Style { attrs: cell::INVERSE, ..Style::default() }),
+            ("\x1b[8m", Style { attrs: cell::INVISIBLE, ..Style::default() }),
+            ("\x1b[9m", Style { attrs: cell::STRIKE, ..Style::default() }),
+            ("\x1b[4m", Style { underline: 1, ..Style::default() }),
+            ("\x1b[4:3m", Style { underline: 3, ..Style::default() }),
+            ("\x1b[21m", Style { underline: 2, ..Style::default() }),
+            ("\x1b[31m", Style { fg: Color::Indexed(1), ..Style::default() }),
+            ("\x1b[91m", Style { fg: Color::Indexed(9), ..Style::default() }),
+            ("\x1b[38;5;200m", Style { fg: Color::Indexed(200), ..Style::default() }),
+            ("\x1b[38;2;1;2;3m", Style { fg: Color::rgb(1, 2, 3), ..Style::default() }),
+            ("\x1b[41m", Style { bg: Color::Indexed(1), ..Style::default() }),
+            ("\x1b[48;5;17m", Style { bg: Color::Indexed(17), ..Style::default() }),
+            ("\x1b[48;2;4;5;6m", Style { bg: Color::rgb(4, 5, 6), ..Style::default() }),
+            (
+                "\x1b[58;2;7;8;9;4:4m",
+                Style {
+                    underline: 4,
+                    underline_color: Some(Color::rgb(7, 8, 9)),
+                    ..Style::default()
+                },
+            ),
+            (
+                "\x1b[58;5;42m",
+                Style { underline_color: Some(Color::Indexed(42)), ..Style::default() },
+            ),
+            ("\x1b[38;2;1;2;3m\x1b[39m", Style::default()),
+            ("\x1b[48;2;1;2;3m\x1b[49m", Style::default()),
+            ("\x1b[58;2;7;8;9m\x1b[59m", Style::default()),
+            ("\x1b[1;3;31;4:2m\x1b[0m", Style::default()),
+            (
+                "\x1b[1;3;31;4:2;58;2;9;9;9m",
+                Style {
+                    attrs: cell::BOLD | cell::ITALIC,
+                    fg: Color::Indexed(1),
+                    underline: 2,
+                    underline_color: Some(Color::rgb(9, 9, 9)),
+                    ..Style::default()
+                },
+            ),
+        ];
+        for (escape, expected) in cases {
+            let mut term = Terminal::new(8, 2, 4).unwrap();
+            feed(&mut term, escape.as_bytes());
+            let prepared = term.template_builds_for_test();
+            feed(&mut term, b"X");
+            assert_eq!(
+                term.screen().rows[0].cells[0].style(),
+                *expected,
+                "{escape:?} must reach the cell"
+            );
+            assert_eq!(
+                term.template_builds_for_test(),
+                prepared + 1,
+                "{escape:?} must rebuild exactly once"
+            );
+            // Repeating the write must not rebuild again.
+            feed(&mut term, b"Y");
+            assert_eq!(term.template_builds_for_test(), prepared + 1, "{escape:?} reused");
+        }
+    }
+
+    #[test]
+    fn hyperlink_changes_update_cells_without_stale_links() {
+        let mut term = Terminal::new(8, 2, 4).unwrap();
+        feed(&mut term, b"\x1b]8;;https://a.test\x1b\\");
+        feed(&mut term, b"A");
+        let opened = term.template_builds_for_test();
+        feed(&mut term, b"\x1b]8;;https://b.test\x1b\\");
+        feed(&mut term, b"B");
+        feed(&mut term, b"\x1b]8;;\x1b\\");
+        feed(&mut term, b"C");
+        feed(&mut term, b"D");
+        let row = &term.screen().rows[0];
+        assert_eq!(row.cells[0].link_uri(), Some("https://a.test"));
+        assert_eq!(row.cells[1].link_uri(), Some("https://b.test"));
+        assert_eq!(row.cells[2].link_uri(), None, "closing OSC 8 must not keep the link");
+        assert_eq!(row.cells[3].link_uri(), None);
+        assert_eq!(
+            term.template_builds_for_test(),
+            opened + 2,
+            "one rebuild per hyperlink change, none for repeated writes"
+        );
+        // A different hyperlink Arc always rebuilds, even with an equal target text.
+        feed(&mut term, b"\x1b]8;;https://b.test\x1b\\");
+        feed(&mut term, b"E");
+        assert_eq!(term.screen().rows[0].cells[4].link_uri(), Some("https://b.test"));
+    }
+
+    #[test]
+    fn alternate_screen_switch_and_reset_keep_the_template_honest() {
+        let mut term = Terminal::new(8, 2, 4).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[31mM");
+        feed(&mut term, b"\x1b[?1049h\x1b[32mA");
+        assert_eq!(term.screen().rows[0].cells[0].style().fg, Color::Indexed(2));
+        feed(&mut term, b"\x1b[?1049l");
+        let main = &term.screen().rows[0];
+        assert_eq!(main.cells[0].ch, 'M');
+        assert_eq!(main.cells[0].style().fg, Color::Indexed(1), "main keeps its own style");
+        feed(&mut term, b"\x1b[1;2HN");
+        assert_eq!(
+            term.screen().rows[0].cells[1].style().fg,
+            Color::Indexed(1),
+            "the red style survives an alternate-screen round trip"
+        );
+        // RIS restores defaults, so later writes must not reuse the old presentation.
+        feed(&mut term, b"\x1bc");
+        feed(&mut term, b"R");
+        assert_eq!(term.screen().rows[0].cells[0].style(), Style::default());
+    }
+
+    #[test]
+    fn cached_template_never_absorbs_combining_marks() {
+        let mut term = Terminal::new(8, 2, 4).unwrap();
+        feed(&mut term, b"\x1b[38;2;1;2;3m");
+        feed(&mut term, "e\u{301}".as_bytes());
+        let prepared = term.template_builds_for_test();
+        feed(&mut term, b"xyz");
+        let row = &term.screen().rows[0];
+        assert_eq!(row.cells[0].combining().len(), 1, "the mark stays on its own cell");
+        assert!(row.cells[1].combining().is_empty(), "the shared record stays combining-free");
+        assert!(row.cells[2].combining().is_empty());
+        assert_eq!(row.cells[1].style().fg, Color::rgb(1, 2, 3), "same prepared presentation");
+        assert_eq!(term.template_builds_for_test(), prepared, "no rebuild after a mark");
+    }
+
+    #[test]
+    fn stateful_grapheme_sequences_match_scalar_clustering_through_runs() {
+        // Clusters whose membership depends on more than the last written character:
+        // ZWJ pictographs, regional indicator runs of every length, keycaps, skin tone
+        // modifiers, tag sequences, and the same sequences mixed with plain text.
+        let corpus = [
+            "\u{1f469}\u{1f3fd}\u{200d}\u{1f4bb}",
+            "\u{1f469}\u{200d}\u{1f4bb}\u{1f468}\u{200d}\u{1f4bb}",
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            "\u{2764}\u{fe0f}\u{200d}\u{1f525}",
+            "\u{1f1ef}\u{1f1f5}",
+            "\u{1f1ef}\u{1f1f5}\u{1f1fa}\u{1f1f8}",
+            "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}\u{1f1eb}\u{1f1f7}",
+            "\u{1f1ef}",
+            "\u{1f1ef}\u{1f1f5}\u{1f1fa}",
+            "a\u{1f1ef}\u{1f1f5}b",
+            "中\u{1f469}\u{200d}\u{1f4bb}中",
+            "1\u{fe0f}\u{20e3}2\u{fe0f}\u{20e3}",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            "e\u{301}\u{302}x \u{915}\u{94d}\u{937}",
+            "\u{1f1ef}\u{1f1f5}\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}\u{1f1eb}\u{1f1f7}",
+        ];
+        for cols in [1usize, 2, 3, 4, 5, 9, 20] {
+            for graphemes in [false, true] {
+                for chunk in [1usize, 2, 3, 5, 64] {
+                    assert_corpus_matches_scalar(cols, 3, 10, graphemes, &corpus, chunk);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cluster_shaped_runs_match_scalar_prints_in_full_state() {
+        // Every cluster shape a batched run now writes itself: CJK, a lone pictograph, a
+        // skin tone modifier, the ZWJ family, regional indicator flags, conjoining and
+        // precomposed Hangul, combining marks, and plain text between them.
+        let corpus = [
+            "中文字元漢字",
+            "😀 😀 😀",
+            "😀🏽✌🏽👍🏿",
+            "👩🏽\u{200d}💻👨\u{200d}👩\u{200d}👧\u{200d}👦🏳️\u{200d}🌈",
+            "🇯🇵🇺🇸🇬🇧🇫🇷🇯",
+            "\u{1100}\u{1161}\u{11a8} 한 국 \u{ac00}\u{11a8}",
+            "e\u{301}\u{302}\u{303} a\u{308} 중\u{301}",
+            "中👩\u{200d}💻🇯🇵한e\u{301}plain ascii tail",
+            "\x1b[1;1H中\u{301}\x1b[1;2H👩\u{200d}💻wide repair",
+        ];
+        for cols in [1usize, 2, 3, 5, 9, 20] {
+            for graphemes in [false, true] {
+                for chunk in [1usize, 2, 3, 6, 64] {
+                    assert_corpus_matches_scalar(cols, 3, 12, graphemes, &corpus, chunk);
+                }
+            }
+        }
+        // The run must actually take these lead characters instead of handing every one
+        // of them to the scalar printer.
+        fn run(text: &str) -> usize {
+            let mut term = Terminal::new(20, 2, 0).unwrap();
+            term.enable_grapheme_support(true);
+            let template = term.style_template();
+            term.write_run(text, &template)
+        }
+        assert_eq!(run("中文字"), 9, "CJK is written as one run");
+        assert_eq!(run("😀😀"), 8, "lone pictographs are written as a run");
+        assert_eq!(run("🇯🇵"), 4, "a flag breaks after its first indicator");
+        assert_eq!(run("\u{1100}\u{1161}"), 3, "jamo break before composing");
+    }
+
+    #[test]
+    fn cluster_analysis_cache_hits_breaks_and_bounded_eviction() {
+        let mut term = Terminal::new(20, 3, 10).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "👩🏽\u{200d}💻".as_bytes());
+        assert_eq!(term.cluster_analysis("👩🏽"), Some((true, 2)));
+        assert_eq!(term.cluster_analysis("👩🏽\u{200d}💻"), Some((true, 2)));
+        // Every continuation of the second family reads the entries written above.
+        feed(&mut term, "👩🏽\u{200d}💻".as_bytes());
+        assert_eq!(term.screen().rows[0].cells[0].text(), "👩🏽\u{200d}💻");
+        assert_eq!(term.screen().rows[0].cells[2].text(), "👩🏽\u{200d}💻");
+
+        let mut unknown = Terminal::new(20, 3, 10).unwrap();
+        unknown.enable_grapheme_support(true);
+        feed(&mut unknown, "中\u{915}".as_bytes());
+        assert_eq!(unknown.cluster_analysis("中\u{915}").map(|entry| entry.0), Some(false));
+        feed(&mut unknown, "中\u{915}".as_bytes());
+        assert_eq!(unknown.screen().rows[0].cells[3].ch, '中');
+        assert_eq!(unknown.screen().rows[0].cells[5].ch, '\u{915}');
+
+        for index in 0..20 {
+            term.remember_cluster(&format!("cluster{index}"), true, 1);
+        }
+        assert_eq!(term.cluster_cache.iter().flatten().count(), CLUSTER_SLOTS);
+        assert_eq!(term.cluster_analysis("cluster0"), None);
+        assert_eq!(term.cluster_analysis("cluster19"), Some((true, 1)));
+        let slot = term.cluster_slot;
+        term.remember_cluster(&"x".repeat(CLUSTER_KEY_BYTES + 1), true, 1);
+        assert_eq!(term.cluster_slot, slot, "an oversized key is not retained");
+
+        let corpus = [
+            "👩🏽\u{200d}💻👩🏽\u{200d}💻 🇯🇵🇺🇸🇬🇧🇫🇷",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            "中\u{915}中\u{915} e\u{301}\u{302}e\u{301}\u{302}",
+            "🏳️\u{200d}🌈🏳️\u{200d}🌈 ❤\u{fe0f}❤\u{fe0f}",
+        ];
+        for cols in [2usize, 9, 20] {
+            for chunk in [1usize, 3, 64] {
+                assert_corpus_matches_scalar(cols, 3, 12, true, &corpus, chunk);
+            }
+        }
+    }
+
+    #[test]
+    fn classified_pair_runs_match_the_scalar_printer() {
+        // The run writer classifies each character once and carries that class into the
+        // next pair decision. The corpus covers ordinary text, the unmodelled scripts
+        // that must defer (`Unknown`), regional indicator runs of both parities, ZWJ
+        // sequences and the same shapes mixed together.
+        let corpus = [
+            "ordinary ascii text 0123456789",
+            "中文字元漢字 한국어",
+            "\u{915}\u{94d}\u{937} \u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}",
+            "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629} \u{5d0}\u{5d1}\u{5d2}",
+            "\u{e01}\u{e33}\u{e49}\u{e32}\u{e19} \u{1780}\u{17d2}\u{1799}\u{17b6}",
+            "🇯🇵 🇺🇸🇬🇧\u{1f1eb}\u{1f1f7}\u{1f1ef} 🇩",
+            "🇯🇵🇺🇸🇬🇧🇫🇷🇯🇩🇪🇮🇹",
+            "👩🏽\u{200d}💻 👨\u{200d}👩\u{200d}👧 🏳️\u{200d}🌈 ❤\u{fe0f}\u{200d}🔥",
+            "a🇯🇵b👩\u{200d}💻c\u{915}\u{94d}\u{937}d",
+            "e\u{301}\u{302} 중\u{301} 1\u{fe0f}\u{20e3}",
+            "\u{600}abc\u{604}xyz",
+            "\u{1100}\u{1161}\u{11a8}\u{ac00}\u{11a8}",
+            "mix 中👩\u{200d}💻🇯🇵한\u{301} tail",
+        ];
+        for cols in [1usize, 2, 3, 5, 9, 20] {
+            for graphemes in [false, true] {
+                for chunk in [1usize, 2, 3, 7, 64] {
+                    assert_corpus_matches_scalar(cols, 3, 12, graphemes, &corpus, chunk);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runs_classify_each_character_once() {
+        // The carried class is the whole point of this path: a run must never ask for a
+        // character's class twice (once as `next`, once as the tail of the next pair).
+        fn run(text: &str) -> (usize, usize) {
+            let mut term = Terminal::new(20, 2, 0).unwrap();
+            term.enable_grapheme_support(true);
+            let template = term.style_template();
+            grapheme::reset_classifications_for_test();
+            let written = term.write_run(text, &template);
+            (written, grapheme::classifications_for_test())
+        }
+        assert_eq!(run("中文字"), (9, 3), "one class per CJK character written");
+        assert_eq!(run("한국어"), (9, 3));
+        assert_eq!(run("中a中"), (7, 3), "an ASCII member of the run is classified once too");
+        // The packed ASCII prefix is batched before any pair decision is taken.
+        assert_eq!(run("e\u{301}"), (1, 0));
+        // Pure ASCII pairs are decided by the character test alone.
+        assert_eq!(run("abc"), (3, 0));
+        // The pair itself, plus the exact look-behind that counts the regional run.
+        assert_eq!(run("🇯🇵"), (4, 3));
+        // Unmodelled scripts still classify each side once before deferring.
+        let (bytes, classes) = run("\u{915}\u{94d}\u{937}");
+        assert_eq!(bytes, 3, "only the base character is written by the run");
+        assert!(classes <= 3, "{classes} classifications for two deferred pairs");
+    }
+
+    #[test]
+    fn repeated_combining_appends_keep_content_presentation_and_link() {
+        let mut term = Terminal::new(10, 2, 8).unwrap();
+        term.enable_grapheme_support(true);
+        // A linked truecolor cell: its record carries presentation, link and marks.
+        feed(&mut term, b"\x1b[38;2;7;8;9m\x1b]8;;https://example.test\x1b\\e\x1b]8;;\x1b\\");
+        let style = term.screen().rows[0].cells[0].style();
+        assert_eq!(style.fg, Color::rgb(7, 8, 9));
+        for step in 1..=cell::MAX_COMBINING {
+            feed(&mut term, "\u{301}".as_bytes());
+            let cell = &term.screen().rows[0].cells[0];
+            assert_eq!(cell.ch, 'e');
+            assert_eq!(cell.width(), 1);
+            assert_eq!(cell.combining_len(), step, "append {step}");
+            assert!(cell.combining().iter().all(|&mark| mark == '\u{301}'));
+            assert_eq!(cell.style(), style, "presentation survives append {step}");
+            assert_eq!(cell.link_uri(), Some("https://example.test"), "link survives append {step}");
+            assert_row_charge_matches_records(&term, 0);
+        }
+        assert_charges_exact(&term, "combining appends");
+        // The per-cell bound is exact: one more mark is dropped, not appended.
+        feed(&mut term, "\u{301}".as_bytes());
+        assert_eq!(term.screen().rows[0].cells[0].combining_len(), cell::MAX_COMBINING);
+        // The marks travel with the row when it scrolls, and history charges them once.
+        feed(&mut term, b"\r\nscrolled\r\n");
+        assert_charges_exact(&term, "after the marked row scrolls");
+        assert!(
+            term.screen().history.iter().any(|row| row.cells[0].combining_len() == cell::MAX_COMBINING),
+            "the marks stay with the row that scrolled away"
+        );
+        let summed: usize = term.screen().history.iter().map(|row| row.bytes_for_test()).sum();
+        assert_eq!(term.screen().history_bytes_for_test(), summed, "history keeps the exact charge");
+    }
+
+    /// A row's charge must be its cell storage plus each distinct side record once.
+    fn assert_row_charge_matches_records(term: &Terminal, row: usize) {
+        let row = &term.screen().rows[row];
+        let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+        let mut distinct: Vec<&Cell> = Vec::new();
+        for cell in &row.cells {
+            if cell.side_bytes() == 0 {
+                continue;
+            }
+            if distinct.iter().any(|seen| seen.shares_side_record(cell)) {
+                continue;
+            }
+            distinct.push(cell);
+        }
+        let expected = base + distinct.iter().map(|cell| cell.side_bytes()).sum::<usize>();
+        assert_eq!(row.bytes_for_test(), expected, "row {row_index} charge", row_index = row.id);
+        assert_eq!(row.bytes_for_test(), expected);
+    }
+
+    /// Every row's cached charge must equal an independent full recomputation.
+    fn assert_charges_exact(term: &Terminal, context: &str) {
+        for screen in [&term.main, &term.alternate] {
+            for row in screen.rows.iter().chain(&screen.history) {
+                assert_eq!(
+                    row.bytes_for_test(),
+                    row.recount_for_test(),
+                    "row {} charge after {context}",
+                    row.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overwrites_edits_and_blank_fills_keep_the_charge_exact() {
+        let mut term = Terminal::new(16, 3, 100).unwrap();
+        term.enable_grapheme_support(true);
+        let steps: &[&[u8]] = &[
+            b"\x1b[38;2;1;2;3mtruecolor run",
+            b"\x1b[0m plain overwrite",
+            b"\x1b[1;1Hback",
+            b"\x1b[48;2;9;8;7m\x1b[2K",
+            b"\x1b[49m\x1b[1;1H\x1b[2P",
+            b"\x1b[1;1H\x1b[3@",
+            b"\x1b[1;1H\x1b[4X",
+            b"\x1b[1;1H\x1b[0K",
+            b"\x1b]8;;https://example.test\x1b\\linked\x1b]8;;\x1b\\",
+            "\u{1b}[1;1H中中中".as_bytes(),
+            "\u{1b}[1;2He\u{301}".as_bytes(),
+            b"\x1b[2;1H\x1b[L\x1b[M",
+            b"\x1b[#8",
+        ];
+        for (index, step) in steps.iter().enumerate() {
+            feed(&mut term, step);
+            assert_charges_exact(&term, &format!("step {index}"));
+        }
+    }
+
+    #[test]
+    fn reflow_rebuilds_charges_that_match_a_recount() {
+        let mut term = Terminal::new(17, 3, 100).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, b"\x1b[38;2;4;5;6mabcdefghijklmnopq");
+        feed(&mut term, "\u{1b}]8;;https://example.test\u{1b}\\linked text\u{1b}]8;;\u{1b}\\".as_bytes());
+        feed(&mut term, b"\x1b[1;1Habcdefghijklmnopqrstuvwxyz0123456789");
+        assert_charges_exact(&term, "before resize");
+        for (cols, rows) in [(9usize, 4usize), (4, 3), (23, 2), (2, 6), (17, 3)] {
+            term.resize(cols, rows, |_| {}).unwrap();
+            assert_charges_exact(&term, &format!("resize to {cols}x{rows}"));
+            for row in term.main.rows.iter().chain(&term.main.history) {
+                let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+                assert!(row.bytes_for_test() >= base, "base storage is always charged");
+            }
+        }
+    }
+
+    #[test]
+    fn recycled_and_pruned_rows_start_with_an_exact_charge() {
+        // A tight history limit forces remember/recycle, reusing row storage that held
+        // styled records. A recycled row must not inherit the previous charge.
+        let mut term = Terminal::new(12, 2, 3).unwrap();
+        for line in 0..24 {
+            let styled = format!("\x1b[38;2;{line};0;0mline {line} text\x1b[0m\r\n");
+            feed(&mut term, styled.as_bytes());
+            assert_charges_exact(&term, &format!("line {line}"));
+        }
+        assert!(term.screen().history.len() <= 3, "history pruning keeps the bound");
+        // Plain rows after styled rows must charge base only, never a stale record.
+        for _ in 0..6 {
+            feed(&mut term, b"plain rows only\r\n");
+        }
+        assert_charges_exact(&term, "plain after styled");
+        for row in term.screen().history.iter().chain(term.screen().rows.iter()) {
+            if row.cells.iter().all(|cell| cell.side_bytes() == 0) {
+                let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+                assert_eq!(row.bytes_for_test(), base, "a heap-free row is charged base only");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_presentation_rows_charge_one_record_not_one_per_cell() {
+        // An RGB blank fill and an RGB text run both share a single record across the
+        // whole row, so a per-cell charge would bill the row `cols` times for it.
+        let mut term = Terminal::new(40, 2, 100).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[48;2;1;2;3m\x1b[2J");
+        let row = &term.screen().rows[0];
+        let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+        let record = row.cells[0].side_bytes();
+        assert!(record > 0, "an RGB blank owns a record");
+        assert!(row.cells[0].shares_side_record(&row.cells[39]), "the fill shares one record");
+        assert_eq!(row.bytes_for_test(), base + record, "one record, not one per cell");
+        assert_row_charge_matches_records(&term, 0);
+
+        // The same invariant for a truecolor text row written as one run.
+        let mut term = Terminal::new(40, 2, 100).unwrap();
+        feed(&mut term, b"\x1b[38;2;9;8;7m");
+        feed(&mut term, b"truecolor text on one row");
+        let row = &term.screen().rows[0];
+        let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+        let record = row.cells[0].side_bytes();
+        assert_eq!(row.bytes_for_test(), base + record, "one record for the whole run");
+        assert_row_charge_matches_records(&term, 0);
+    }
+
+    #[test]
+    fn distinct_side_records_are_each_charged_once() {
+        // One row holding: a shared RGB run, a combining-mark cell and a linked cell.
+        let mut term = Terminal::new(40, 2, 100).unwrap();
+        feed(&mut term, b"\x1b[38;2;1;2;3mab");
+        feed(&mut term, "\u{1b}[0me\u{301}".as_bytes());
+        feed(&mut term, b"\x1b]8;;https://example.test\x1b\\L\x1b]8;;\x1b\\");
+        feed(&mut term, b"cd");
+        let row = &term.screen().rows[0];
+        let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+        // a and b share the run's record; c and d share it again after the link closes.
+        assert!(row.cells[0].shares_side_record(&row.cells[1]));
+        assert_ne!(row.cells[0].side_bytes(), 0);
+        let distinct: Vec<usize> = {
+            let mut sizes: Vec<usize> = Vec::new();
+            let mut seen: Vec<&Cell> = Vec::new();
+            for cell in &row.cells {
+                if cell.side_bytes() == 0 || seen.iter().any(|other| other.shares_side_record(cell)) {
+                    continue;
+                }
+                seen.push(cell);
+                sizes.push(cell.side_bytes());
+            }
+            sizes
+        };
+        assert!(distinct.len() >= 3, "the row holds at least three distinct records");
+        assert_eq!(
+            row.bytes_for_test(),
+            base + distinct.iter().sum::<usize>(),
+            "each distinct record charged once"
+        );
+        assert_row_charge_matches_records(&term, 0);
+        // Charging per cell would have been far larger.
+        let per_cell: usize = row.cells.iter().map(Cell::side_bytes).sum();
+        assert!(row.bytes_for_test() < base + per_cell, "shared records are deduplicated");
+    }
+
+    #[test]
+    fn styled_history_is_charged_one_record_per_row() {
+        // Scrolling styled rows must not multiply their record by the row width, or the
+        // history budget would evict them far earlier than plain rows.
+        let mut styled = Terminal::new(60, 2, 100).unwrap();
+        let mut plain = Terminal::new(60, 2, 100).unwrap();
+        for line in 0..30 {
+            let text = format!("\x1b[38;2;1;2;3mrow {line} styled text\x1b[0m\r\n");
+            feed(&mut styled, text.as_bytes());
+            feed(&mut plain, format!("row {line} styled text\r\n").as_bytes());
+        }
+        assert!(!styled.screen().history.is_empty());
+        assert_eq!(styled.screen().history.len(), plain.screen().history.len());
+        // Each history row is charged base + one record, and the totals stay close to
+        // the plain rows instead of ~cols times the record.
+        for row in &styled.screen().history {
+            let base = row.cells.capacity() * std::mem::size_of::<Cell>();
+            let record = row.cells[0].side_bytes();
+            assert!(record > 0, "styled history rows keep their record");
+            assert_eq!(row.bytes_for_test(), base + record, "one record per history row");
+        }
+        let styled_bytes = styled.screen().history_bytes_for_test();
+        let plain_bytes = plain.screen().history_bytes_for_test();
+        assert!(
+            styled_bytes < plain_bytes * 2,
+            "styled history ({styled_bytes}) must not be charged ~cols times the plain total ({plain_bytes})"
+        );
+    }
+
+    #[test]
+    fn rgb_blank_rows_count_their_heap_in_the_history_budget() {
+        assert!(Cell::blank_owns_heap(Color::rgb(1, 2, 3)));
+        assert!(!Cell::blank_owns_heap(Color::Indexed(4)));
+        assert!(!Cell::blank_owns_heap(Color::Background));
+        // A blanked row of an RGB background owns a side record per fill, so clearing
+        // the heap flag would under-count the history budget and let it be bypassed.
+        let mut term = Terminal::new(8, 2, 100).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[48;2;1;2;3m\x1b[2J");
+        assert!(term.screen().rows.iter().all(|row| row.cells[0].style().bg == Color::rgb(1, 2, 3)));
+        assert!(
+            term.screen().rows.iter().all(|row| row.cells[0].side_bytes() > 0),
+            "an RGB blank owns heap"
+        );
+        // Scroll those blank rows into history without writing text.
+        feed(&mut term, b"\n\n\n\n");
+        assert!(!term.screen().history.is_empty());
+        assert!(
+            term.screen().history_bytes_for_test() > history_base(&term),
+            "RGB blank history rows must count their heap, not base only"
+        );
+        // The same rows of a packed background stay certifiable as heap-free.
+        let mut term = Terminal::new(8, 2, 100).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[44m\x1b[2J\n\n\n\n");
+        assert!(!term.screen().history.is_empty());
+        assert_eq!(
+            term.screen().history_bytes_for_test(),
+            history_base(&term),
+            "an indexed background is packed, so its blank rows own no heap"
+        );
+    }
+
+    #[test]
+    fn partial_rgb_erases_and_edits_keep_the_history_bound() {
+        // Every path that installs a blank must keep the row's heap flag honest. Paint a
+        // row with packed blanks first, so a stale `false` would be the only way the
+        // RGB blank could go uncounted.
+        for escape in ["\x1b[0K", "\x1b[1;3H\x1b[0K", "\x1b[1;1H\x1b[P", "\x1b[1;1H\x1b[2@"] {
+            let mut term = Terminal::new(8, 2, 100).unwrap();
+            term.preserve_erased_screen = false;
+            feed(&mut term, b"\x1b[44m\x1b[2J");
+            assert!(term.screen().rows.iter().all(|row| row.cells[0].side_bytes() == 0));
+            // Switch to an RGB background and install blanks through the edit path.
+            feed(&mut term, b"\x1b[48;2;3;4;5m");
+            feed(&mut term, escape.as_bytes());
+            // Scroll the blanked row into history without writing text over it.
+            feed(&mut term, b"\x1b[1;1H\n\n\n");
+            assert!(!term.screen().history.is_empty(), "{escape:?}");
+            assert!(
+                term.screen().history_bytes_for_test() > history_base(&term),
+                "{escape:?} installs RGB blanks that must be counted"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_fills_share_one_side_record_instead_of_allocating_per_cell() {
+        let mut term = Terminal::new(24, 2, 10).unwrap();
+        term.preserve_erased_screen = false;
+        feed(&mut term, b"\x1b[48;2;9;8;7m\x1b[2J");
+        for row in &term.screen().rows {
+            assert!(row.cells[0].side_bytes() > 0, "RGB blanks own a record");
+            assert!(
+                row.cells[0].shares_side_record(&row.cells[23]),
+                "one fill must share a single record across the row"
+            );
+        }
+        // A full-line erase into the same background is also one fill, so the cells of
+        // the rewritten row still share a single record across the whole width.
+        feed(&mut term, b"\x1b[2K");
+        let row = &term.screen().rows[0];
+        assert!(row.cells[0].side_bytes() > 0);
+        assert!(
+            (1..row.cells.len()).all(|col| row.cells[0].shares_side_record(&row.cells[col])),
+            "one erase fill must share a single record across the row"
+        );
     }
 
     #[test]

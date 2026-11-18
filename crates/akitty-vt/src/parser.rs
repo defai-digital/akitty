@@ -63,7 +63,11 @@ pub enum Action {
 
 /// Borrowed text runs stay inside one feed call; the public action stream remains scalar.
 pub(crate) enum Input<'a> {
-    Ascii(&'a [u8]),
+    /// A run of printable text: ASCII `0x20..=0x7e` plus complete scalars from valid
+    /// UTF-8. It never holds a control byte or a sequence introducer, and it is valid
+    /// UTF-8 by construction (see the safety note where the run is scanned), so a host
+    /// receives it as `&str` and never revalidates it.
+    Text(&'a str),
     Csi(&'a mut Csi),
     Action(Action),
 }
@@ -109,6 +113,24 @@ impl std::fmt::Debug for Parser {
     }
 }
 
+/// Byte width of a complete printable multi-byte scalar at `index`, or `None` when the
+/// byte needs the state machine: a control, a sequence introducer, or invalid UTF-8.
+#[inline]
+fn scalar_width(input: &[u8], index: usize) -> Option<usize> {
+    let byte = input[index];
+    if byte < 0x80 {
+        return None;
+    }
+    let width = match byte {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    let sequence = input.get(index..index + width)?;
+    std::str::from_utf8(sequence).is_ok().then_some(width)
+}
+
 impl Parser {
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -116,8 +138,8 @@ impl Parser {
 
     pub fn feed(&mut self, input: &[u8], mut emit: impl FnMut(Action)) {
         self.feed_runs(input, |item| match item {
-            Input::Ascii(bytes) => {
-                for &byte in bytes { emit(Action::Print(char::from(byte))); }
+            Input::Text(text) => {
+                for ch in text.chars() { emit(Action::Print(ch)); }
             }
             Input::Csi(csi) => emit(Action::Csi(std::mem::take(csi))),
             Input::Action(action) => emit(action),
@@ -129,10 +151,29 @@ impl Parser {
         while index < input.len() {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
-                while index < input.len() && (0x20..=0x7e).contains(&input[index]) {
-                    index += 1;
+                // Plain ASCII stays a single inline test per byte; a complete
+                // multi-byte scalar extends the same run so hosts decode it once.
+                while index < input.len() {
+                    if (0x20..=0x7e).contains(&input[index]) {
+                        index += 1;
+                        continue;
+                    }
+                    match scalar_width(input, index) {
+                        Some(width) => index += width,
+                        None => break,
+                    }
                 }
-                if index > start { emit(Input::Ascii(&input[start..index])); }
+                if index > start {
+                    // SAFETY: every byte in `start..index` was accepted either as
+                    // printable ASCII or as a complete scalar sequence that
+                    // `str::from_utf8` validated for that exact slice, and the scan
+                    // only advances by whole ASCII bytes or whole scalars. The range is
+                    // therefore a concatenation of valid UTF-8 sequences. Malformed
+                    // input never reaches this point: the scan stops and the byte state
+                    // machine consumes it instead.
+                    let text = unsafe { std::str::from_utf8_unchecked(&input[start..index]) };
+                    emit(Input::Text(text));
+                }
                 if index == input.len() {
                     break;
                 }
@@ -474,7 +515,7 @@ mod tests {
                 let mut actual = Vec::new();
                 for chunk in bytes.as_bytes().chunks(size) {
                     parser.feed_runs(chunk, |input| match input {
-                        Input::Ascii(bytes) => actual.extend(bytes.iter().map(|&b| Action::Print(char::from(b)))),
+                        Input::Text(text) => actual.extend(text.chars().map(Action::Print)),
                         Input::Csi(csi) => actual.push(Action::Csi(csi.clone())),
                         Input::Action(action) => actual.push(action),
                     });

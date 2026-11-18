@@ -119,6 +119,12 @@ pub struct ApcFilter {
 }
 
 impl ApcFilter {
+    /// True when `feed` would hand every byte through unchanged: the state machine is in ground
+    /// state and no escape in `bytes` can start an APC string or the cell-size query. Callers use
+    /// it to hand an ordinary run of text to the parser without copying it into a pass segment.
+    pub fn passes_through(&self, bytes: &[u8]) -> bool {
+        self.state == ApcState::Ground && !bytes.contains(&0x1b)
+    }
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Segment> {
         let mut out = Vec::new();
         let mut pass = Vec::new();

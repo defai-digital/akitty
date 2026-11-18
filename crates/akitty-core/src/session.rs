@@ -6,9 +6,9 @@ use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const MAX_PENDING: usize = 1_048_576;
 /// Host-visible failure text after an engine panic: the pane is done, but restarting it is safe.
@@ -666,11 +666,17 @@ fn read_pty(fd: i32, buffer: &mut [u8], hung_up: bool) -> Result<Option<usize>, 
     Err(format!("PTY read failed: {error}"))
 }
 
-/// One syscall's read size, and the most a single pass pulls before servicing writes again.
-const READ_BUFFER: usize = 64 * 1024;
-/// Keep the model lock bounded to 8 KiB of parsing, even when many small reads coalesce.
+/// One hand-off slot between the PTY reader and the parser: also the largest single read.
+const SLOT_BYTES: usize = 64 * 1024;
+/// Fixed slot ring. Ownership of a slot moves between the stages, so a read is never copied and
+/// the ring is the whole backlog: a parser that falls behind stops the reader instead of growing.
+const RING_SLOTS: usize = 4;
+/// Keep the model lock bounded to 8 KiB of parsing, even when a whole slot is ready.
 const PARSE_BATCH: usize = 8 * 1024;
-const MAX_READ_PER_PASS: usize = 256 * 1024;
+/// Bytes one worker pass applies before it services input, resize and the host again. One ring
+/// covers it exactly, so a command never waits behind more than one full ring and a slot is never
+/// split across passes.
+const MAX_PARSE_PER_PASS: usize = RING_SLOTS * SLOT_BYTES;
 
 const MAX_REPLY_BACKLOG: usize = 65_536;
 const REPLY_BACKLOG_ERROR: &str = "terminal replies dropped: the program is not reading them";
@@ -776,67 +782,403 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     match (a, b) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) }
 }
 
-/// Feed terminal bytes and queue the replies they produced. The live loop and the post-exit
-/// drain both go through here, so the last answers a program asked for before exiting are
-/// not discarded with the parse result. `feed` bumps the revision, so one notification covers it.
-fn feed_and_queue(
-    model: &Arc<Mutex<Model>>,
-    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
-    response_pending: &mut usize,
-    bytes: &[u8],
-    notify: &Wake,
-) {
-    let mut state = lock_model(model);
-    let replies = state.feed(bytes);
-    queue_parser_replies(&mut state, output, response_pending, replies);
-    drop(state);
-    if !bytes.is_empty() { notify.signal(); }
+/// How one drain of ready bytes ended.
+enum Fill {
+    /// The read would block (or a stop/finish arrived): nothing more is readable now.
+    Idle,
+    /// The stream ended; the bytes before it were published.
+    Ended,
+    /// Every slot is waiting for the parser, so the reader must wait for one back.
+    Full,
 }
 
-/// Drain ready bytes before parsing: macOS PTYs can return much less than the buffer size.
-/// Coalescing those reads pays the model, protocol and host-notify costs once per 8 KiB.
-/// No read waits for more output, and the model lock is never held across a syscall.
-fn feed_batch(
-    fd: i32,
-    model: &Arc<Mutex<Model>>,
-    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
-    response_pending: &mut usize,
-    hung_up: bool,
-    notify: &Wake,
-) -> Result<Option<usize>, String> {
-    feed_batch_with(model, output, response_pending, notify, |buffer| read_pty(fd, buffer, hung_up))
+/// The two-stage hand-off. Stage one (the reader thread) owns every `read(2)` and never takes the
+/// model lock; stage two (the worker thread) owns the model, replies, writes, resize and the child.
+/// A slot's ownership moves from the free list to the ready queue to the parser and back, so a
+/// read is never copied and the ring itself is the whole backlog: backpressure stops the reader
+/// instead of growing memory, and a short tail is published with the reads that produced it.
+struct Ring {
+    shared: Mutex<RingShared>,
+    /// The parser waits here for a published slot, and for the reader's end.
+    ready: Condvar,
+    /// The reader waits here for a slot the parser has finished with.
+    space: Condvar,
+}
+struct RingShared {
+    free: Vec<Box<[u8]>>,
+    ready: VecDeque<(Box<[u8]>, usize)>,
+    /// Slots the parser took but has not returned, so `idle` cannot claim they were applied.
+    in_flight: usize,
+    /// `None` while the reader keeps reading; otherwise why it stopped.
+    end: Option<Result<(), String>>,
+}
+/// A condvar wait never blocks a stop check for longer than this.
+const RING_WAIT_MS: u64 = 10;
+
+impl Ring {
+    fn new() -> Self {
+        let free = (0..RING_SLOTS).map(|_| vec![0u8; SLOT_BYTES].into_boxed_slice()).collect();
+        Self {
+            shared: Mutex::new(RingShared { free, ready: VecDeque::with_capacity(RING_SLOTS), in_flight: 0, end: None }),
+            ready: Condvar::new(),
+            space: Condvar::new(),
+        }
+    }
+    /// A poisoned ring still has to drain and report its end: no host data sits behind this lock.
+    fn lock(&self) -> std::sync::MutexGuard<'_, RingShared> {
+        self.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    /// Take a free slot, or `None` when the parser still holds every one of them.
+    fn checkout(&self) -> Option<Box<[u8]>> {
+        self.lock().free.pop()
+    }
+    /// Wait up to `within` for a free slot. Bounded so a drain can never outlive its window.
+    fn checkout_within(&self, within: Duration) -> Option<Box<[u8]>> {
+        let deadline = Instant::now() + within;
+        let mut shared = self.lock();
+        loop {
+            if let Some(slot) = shared.free.pop() { return Some(slot); }
+            let now = Instant::now();
+            if now >= deadline { return None; }
+            shared = self.space.wait_timeout(shared, deadline - now).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+    fn publish(&self, slot: Box<[u8]>, len: usize) {
+        self.lock().ready.push_back((slot, len));
+        self.ready.notify_one();
+    }
+    /// Return a slot the parser has applied. This is what releases reader backpressure, and the
+    /// only place `in_flight` falls: an unused reader slot never entered the parser's hands, so
+    /// counting it here would let `idle` claim a slot another thread is still parsing was applied.
+    fn recycle(&self, slot: Box<[u8]>) {
+        let mut shared = self.lock();
+        shared.free.push(slot);
+        shared.in_flight = shared.in_flight.saturating_sub(1);
+        drop(shared);
+        self.space.notify_one();
+    }
+    /// Return a slot the reader took but never filled. It was never in flight, so only the free
+    /// list changes; the parser's outstanding slots keep their count.
+    fn release(&self, slot: Box<[u8]>) {
+        let mut shared = self.lock();
+        shared.free.push(slot);
+        drop(shared);
+        self.space.notify_one();
+    }
+    /// Take the next ready slot when it fits the remaining pass budget, so a slot is never split.
+    fn take_ready_up_to(&self, budget: usize) -> Option<(Box<[u8]>, usize)> {
+        let mut shared = self.lock();
+        if *shared.ready.front().map(|(_, len)| len)? > budget { return None; }
+        let (slot, len) = shared.ready.pop_front()?;
+        shared.in_flight += 1;
+        Some((slot, len))
+    }
+    /// Wait for a free slot, leaving early when the reader must stop. Called while the master has
+    /// readable bytes, so the wait only reflects how far the parser has fallen behind.
+    fn wait_space(&self, stopping: impl Fn() -> bool) {
+        let mut shared = self.lock();
+        while shared.free.is_empty() {
+            if stopping() { return; }
+            shared = self.space.wait_timeout(shared, Duration::from_millis(RING_WAIT_MS))
+                .unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+    /// Wait until the parser has applied everything published, so a reply still reaches the
+    /// program before the post-exit drain decides it is finished. Bounded by `within`.
+    fn wait_parsed(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        let mut shared = self.lock();
+        while !shared.ready.is_empty() || shared.in_flight > 0 {
+            let now = Instant::now();
+            if now >= deadline { return; }
+            shared = self.space.wait_timeout(shared, deadline - now).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+    /// Wait for a published slot or the reader's end, bounded by `within`.
+    fn wait_ready(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        let mut shared = self.lock();
+        while shared.ready.is_empty() && shared.end.is_none() {
+            let now = Instant::now();
+            if now >= deadline { return; }
+            shared = self.ready.wait_timeout(shared, deadline - now).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+    /// Record why the reader stopped. The first end wins: a drain that ran out of window cannot
+    /// replace the real reason with a later one.
+    fn end(&self, result: Result<(), String>) {
+        let mut shared = self.lock();
+        if shared.end.is_none() { shared.end = Some(result); }
+        drop(shared);
+        self.ready.notify_all();
+        self.space.notify_all();
+    }
+    fn ended(&self) -> bool {
+        self.lock().end.is_some()
+    }
+    /// A read failure the reader recorded, if it recorded one.
+    fn end_error(&self) -> Option<String> {
+        match self.lock().end.clone() { Some(Err(error)) => Some(error), _ => None }
+    }
+    /// Every published byte has been applied and the reader has stopped.
+    fn idle(&self) -> bool {
+        let shared = self.lock();
+        shared.end.is_some() && shared.ready.is_empty() && shared.in_flight == 0
+    }
+    /// Test-only: whether a published slot is still waiting for the parser.
+    #[cfg(test)]
+    fn pending(&self) -> bool {
+        !self.lock().ready.is_empty()
+    }
+    /// Test-only: slots the parser has taken and not returned yet.
+    #[cfg(test)]
+    fn in_flight(&self) -> usize {
+        self.lock().in_flight
+    }
 }
 
-fn feed_batch_with(
-    model: &Arc<Mutex<Model>>,
-    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
-    response_pending: &mut usize,
-    notify: &Wake,
+/// Gather immediately available bytes into one slot, up to its full size. A slot is published when
+/// it is full, when a read would block, when the stream ends, when the reader must stop, or before a
+/// read failure is reported. Nothing ever waits for a buffer to fill, so a prompt, bell or query
+/// still reaches the parser with the reads that produced it.
+fn fill_ring(
+    ring: &Ring,
+    stopping: impl Fn() -> bool,
+    wake: &Wake,
     mut read: impl FnMut(&mut [u8]) -> Result<Option<usize>, String>,
-) -> Result<Option<usize>, String> {
-    let mut buffer = [0u8; PARSE_BATCH];
-    let mut total = 0usize;
-    let mut filled = 0usize;
+) -> Result<Fill, String> {
     loop {
-        let result = read(&mut buffer[filled..]);
-        if let Ok(Some(count)) = result {
-            filled += count;
-            total += count;
-            if count > 0 && filled < buffer.len() { continue; }
-        }
-        // A short tail still has to reach the model on would-block, EOF or failure.
-        // Otherwise a final prompt, bell or terminal query would be lost.
-        if filled > 0 {
-            feed_and_queue(model, output, response_pending, &buffer[..filled], notify);
-            filled = 0;
-        }
-        match result {
-            Ok(Some(0)) => return Ok(None),
-            Ok(None) => return Ok(Some(total)),
-            Ok(Some(_)) => {
-                if total >= MAX_READ_PER_PASS { return Ok(Some(total)); }
+        if stopping() { return Ok(Fill::Idle); }
+        let Some(mut slot) = ring.checkout() else { return Ok(Fill::Full) };
+        let mut filled = 0usize;
+        loop {
+            match read(&mut slot[filled..]) {
+                // The stream ended: the bytes before it are still published, then EOF is reported.
+                Ok(Some(0)) => {
+                    publish_slot(ring, wake, slot, filled);
+                    return Ok(Fill::Ended);
+                }
+                // Nothing more is readable right now, which is where a tail is published rather
+                // than held back for a fuller buffer.
+                Ok(None) => {
+                    publish_slot(ring, wake, slot, filled);
+                    return Ok(Fill::Idle);
+                }
+                Ok(Some(count)) => {
+                    filled += count;
+                    if filled == slot.len() {
+                        ring.publish(slot, filled);
+                        wake.signal();
+                        break;
+                    }
+                    // A stop still publishes what was already gathered.
+                    if stopping() {
+                        ring.publish(slot, filled);
+                        wake.signal();
+                        return Ok(Fill::Idle);
+                    }
+                }
+                Err(error) => {
+                    // Bytes gathered before the failure are applied instead of dropped with it.
+                    publish_slot(ring, wake, slot, filled);
+                    return Err(error);
+                }
             }
-            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Publish gathered bytes to the parser, or hand an empty slot straight back to the free list so a
+/// reader that found nothing never waits for the parser to return it.
+fn publish_slot(ring: &Ring, wake: &Wake, slot: Box<[u8]>, filled: usize) {
+    if filled == 0 {
+        ring.release(slot);
+    } else {
+        ring.publish(slot, filled);
+        wake.signal();
+    }
+}
+
+/// Longest the reader sleeps with nothing readable. The wake pipe normally ends the wait, so this
+/// only bounds a missed wake and the re-check of the stop and finish flags.
+const READER_IDLE_MS: libc::c_int = 250;
+
+/// Why the reader stops: the host closed the pane, the child exited, or the worker unwound. The
+/// reader's own wake pipe is separate from the worker's, so a queued command never waits on it.
+struct ReaderControl {
+    stop: Arc<AtomicBool>,
+    finish: Arc<AtomicBool>,
+    abandon: Arc<AtomicBool>,
+    wake: Arc<Wake>,
+}
+impl ReaderControl {
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst) || self.finish.load(Ordering::SeqCst) || self.abandon.load(Ordering::SeqCst)
+    }
+    fn signal(&self) {
+        self.wake.signal();
+    }
+}
+
+/// Stage one: the only thread that reads the master. It takes no model lock, writes no reply and
+/// issues no ioctl, so a read and a parse overlap by construction and a read never runs with the
+/// terminal state held. A close and a child exit both end in a bounded drain that still publishes
+/// what the program wrote, then close the ring so the parser can finish.
+fn read_loop(fd: i32, ring: &Ring, control: &ReaderControl, wake: &Wake, delivered: &AtomicBool) {
+    let mut hung_up = false;
+    loop {
+        if control.abandon.load(Ordering::SeqCst) {
+            // The worker is unwinding: nobody would parse or answer anything read from here.
+            ring.end(Ok(()));
+            return;
+        }
+        if control.stop.load(Ordering::SeqCst) {
+            // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
+            drain_to_quiet(fd, ring, wake);
+            ring.end(Ok(()));
+            return;
+        }
+        if control.finish.load(Ordering::SeqCst) {
+            ring.end(drain_after_exit(fd, ring, wake, delivered));
+            return;
+        }
+        let mut poll = [
+            libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: control.wake.read, events: libc::POLLIN, revents: 0 },
+        ];
+        // SAFETY: poll references two valid pollfds owned by this loop.
+        let ready = unsafe { libc::poll(poll.as_mut_ptr(), 2, READER_IDLE_MS) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+            ring.end(Err(format!("PTY read failed: {error}")));
+            return;
+        }
+        if poll[1].revents != 0 {
+            control.wake.drain();
+            // Re-check the flags before touching the descriptor again.
+            continue;
+        }
+        if ready == 0 { continue; }
+        hung_up |= poll[0].revents & libc::POLLHUP != 0;
+        let stopping = || control.stopping();
+        match fill_ring(ring, stopping, wake, |buffer| read_pty(fd, buffer, hung_up)) {
+            Ok(Fill::Idle) => {}
+            // The parser holds every slot: wait for one back before reading the readable bytes.
+            Ok(Fill::Full) => ring.wait_space(stopping),
+            Ok(Fill::Ended) => {
+                // EOF or a hangup can arrive before the worker observes the exit, and a program
+                // that just died may still have output in flight. Run the same bounded post-exit
+                // drain the child-exit path uses, so a trailing query is published and answered
+                // instead of ending the ring on the first empty read.
+                ring.end(drain_after_exit(fd, ring, wake, delivered));
+                return;
+            }
+            Err(error) => {
+                ring.end(Err(error));
+                return;
+            }
+        }
+    }
+}
+
+/// Owns the reader thread. Signalling its wake pipe before the join keeps a close from waiting on
+/// a poll, and the drop join keeps the master descriptor alive for the whole reader lifetime.
+struct ReaderThread {
+    handle: Option<JoinHandle<()>>,
+    control: Arc<ReaderControl>,
+}
+impl ReaderThread {
+    fn signal(&self) {
+        self.control.signal();
+    }
+}
+impl Drop for ReaderThread {
+    fn drop(&mut self) {
+        // A panicking worker still has to release the reader before the master closes. This is
+        // the reader's own abandon flag: the session-wide stop still means "close", and the
+        // clock thread that keeps a timed status running must not see it from here.
+        self.control.abandon.store(true, Ordering::SeqCst);
+        self.control.signal();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Stage two's I/O: the ordered input/reply queue plus the accounting the host and the reader see.
+/// One value keeps the pass small and every write in its original order.
+struct Pump<'a> {
+    model: &'a Arc<Mutex<Model>>,
+    ring: &'a Ring,
+    output: VecDeque<(Vec<u8>, usize, bool)>,
+    response_pending: usize,
+    pending: Arc<AtomicUsize>,
+    /// Set once a reply byte actually reached the PTY, so the reader's exit drain can keep the
+    /// master open long enough for a descendant to read the answer.
+    delivered: Arc<AtomicBool>,
+    fd: i32,
+}
+
+impl Pump<'_> {
+    /// Apply terminal bytes and queue the replies they produced. The live loop and both drains go
+    /// through here, so the last answers a program asked for before exiting are not discarded
+    /// with the parse result. The model lock covers at most [`PARSE_BATCH`] bytes, so a snapshot
+    /// or a queued command is never held behind a whole 64 KiB slot.
+    fn feed(&mut self, bytes: &[u8]) {
+        for piece in bytes.chunks(PARSE_BATCH) {
+            let mut state = lock_model(self.model);
+            let replies = state.feed(piece);
+            queue_parser_replies(&mut state, &mut self.output, &mut self.response_pending, replies);
+        }
+    }
+    /// Consume ready slots for one pass, up to the per-pass budget. Returns whether any byte was
+    /// applied, so the worker wakes the host once for the whole batch instead of once per chunk.
+    fn parse_pass(&mut self) -> bool {
+        let mut budget = MAX_PARSE_PER_PASS;
+        let mut fed = false;
+        while let Some((slot, len)) = self.ring.take_ready_up_to(budget) {
+            self.feed(&slot[..len]);
+            self.ring.recycle(slot);
+            budget -= len;
+            fed |= len > 0;
+        }
+        fed
+    }
+    /// Write the front queued buffer once, recording a reply that actually reached the program.
+    fn write(&mut self) -> Result<bool, String> {
+        let reply = self.output.front().is_some_and(|(_, _, counted)| !counted);
+        let wrote = write_front(self.fd, &mut self.output, &mut self.response_pending, &self.pending)?;
+        if wrote && reply { self.delivered.store(true, Ordering::SeqCst); }
+        Ok(wrote)
+    }
+    /// Best-effort bounded delivery of the replies still queued (see [`flush_replies`]).
+    fn flush(&mut self) -> bool {
+        let delivered = flush_replies(self.fd, &mut self.output, &mut self.response_pending, &self.pending);
+        if delivered { self.delivered.store(true, Ordering::SeqCst); }
+        delivered
+    }
+    /// Apply published slots until the reader reports its end. Used once the live loop is done: a
+    /// post-exit query still reaches the model, and a closing pane still applies the prompt its
+    /// shell was writing. With `flush`, each batch is also written, which preserves the old
+    /// post-exit behavior where a reply reached the program before the master closed.
+    ///
+    /// Returns whether the reader really ended. `deadline` is a last-resort safety valve only: the
+    /// reader's own drains are bounded, so a healthy reader always ends first. That ordering is
+    /// what keeps the final flush from racing a slot that is still being published.
+    fn drain_until_end(&mut self, flush: bool, deadline: Instant) -> bool {
+        let mut fed = false;
+        loop {
+            while let Some((slot, len)) = self.ring.take_ready_up_to(usize::MAX) {
+                self.feed(&slot[..len]);
+                self.ring.recycle(slot);
+                fed |= len > 0;
+            }
+            if fed && flush { self.flush(); }
+            if self.ring.ended() { return true; }
+            let now = Instant::now();
+            if now >= deadline { return false; }
+            self.ring.wait_ready(deadline - now);
         }
     }
 }
@@ -969,82 +1311,116 @@ fn flush_replies(
     }
 }
 
+/// Longest the post-exit drain waits for a free slot before it gives up on publishing more.
+const DRAIN_SLOT_MS: u64 = 100;
+/// Longest the close drain waits for a free slot between reads.
+const CLOSE_SLOT_MS: u64 = 50;
+
 /// Read the child's final output after it exits, or after the PTY reports a hangup that can
-/// arrive before the exit is observed, and answer the queries it still contains.
-/// `Some` is an IO failure to record. An explicit stop ends the drain without flushing, and a
-/// descendant that keeps the slave open can never make this run past its bounds.
-fn drain_after_exit(
-    fd: i32,
-    model: &Arc<Mutex<Model>>,
-    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
-    response_pending: &mut usize,
-    pending: &AtomicUsize,
-    stop: &AtomicBool,
-    notify: &Wake,
-) -> Option<String> {
-    let mut buffer = [0u8; READ_BUFFER];
+/// arrive before the exit is observed, and publish it so the parser can answer the queries it
+/// still contains. `Err` is an IO failure to record. A descendant that keeps the slave open can
+/// never make this run past its bounds, and every published batch is applied before the next
+/// idle window starts, so an answer still reaches the program while the master is open.
+fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool) -> Result<(), String> {
     let mut idle_waits = 0;
-    let mut delivered = false;
     for _ in 0..32 {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        match read_pty(fd, &mut buffer, true) {
-            Ok(Some(0)) => break,
+        let Some(mut slot) = ring.checkout_within(Duration::from_millis(DRAIN_SLOT_MS)) else { return Ok(()) };
+        match read_pty(fd, &mut slot[..], true) {
+            Ok(Some(0)) => {
+                ring.release(slot);
+                return Ok(());
+            }
             Ok(None) => {
                 // Nothing buffered. A descendant that only noticed the shell exit may still be
                 // writing its last query, so wait a short window instead of closing the master
                 // on the first empty read. Once a reply has been delivered the descendant needs
                 // a longer window to read it before the master disappears with the answer.
+                ring.release(slot);
                 idle_waits += 1;
-                if idle_waits > DRAIN_IDLE_WAITS {
-                    break;
-                }
-                let wait = if delivered { DRAIN_SETTLE_MS } else { DRAIN_IDLE_MS };
+                if idle_waits > DRAIN_IDLE_WAITS { return Ok(()); }
+                let wait = if delivered.load(Ordering::SeqCst) { DRAIN_SETTLE_MS } else { DRAIN_IDLE_MS };
+                // Let the parser apply and answer what was published first: its reply is written
+                // in the same pass, so `delivered` reflects this drain rather than a previous one.
+                ring.wait_parsed(Duration::from_millis(wait as u64));
                 let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
                 // SAFETY: poll references one valid pollfd for this owned master.
-                if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 {
-                    break;
-                }
+                if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 { return Ok(()); }
             }
             Ok(Some(count)) => {
                 idle_waits = 0;
-                feed_and_queue(model, output, response_pending, &buffer[..count], notify);
-                // The live loop will not run again, so a query answered here only reaches the
-                // program if the drain writes it before the master closes.
-                delivered |= flush_replies(fd, output, response_pending, pending);
+                ring.publish(slot, count);
+                wake.signal();
             }
-            Err(error) => return Some(error),
+            Err(error) => {
+                ring.release(slot);
+                return Err(error);
+            }
         }
     }
-    None
+    Ok(())
 }
 
 /// Drain the terminal to quiescence before a close hangs the child up, so a prompt the shell was
 /// still writing lands instead of leaving that write stuck and the exit unreachable. Bounded:
 /// the quiet window ends the drain, and a descendant that keeps writing cannot hold the close
-/// open past [`CLOSE_DRAIN_MS`]. Bytes read here are fed to the model like any other output.
-fn drain_to_quiet(
-    fd: i32,
-    model: &Arc<Mutex<Model>>,
-    output: &mut VecDeque<(Vec<u8>, usize, bool)>,
-    response_pending: &mut usize,
-    notify: &Wake,
-) {
+/// open past [`CLOSE_DRAIN_MS`]. Bytes read here are published like any other output, so the
+/// closing pane still applies them.
+fn drain_to_quiet(fd: i32, ring: &Ring, wake: &Wake) {
+    drain_to_quiet_with(
+        ring,
+        wake,
+        || {
+            let mut probe = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            // SAFETY: poll references one valid pollfd for this owned master.
+            if unsafe { libc::poll(&mut probe, 1, CLOSE_QUIET_MS) } <= 0 { return None; }
+            Some(probe.revents & libc::POLLHUP != 0)
+        },
+        |buffer, hung_up| read_pty(fd, buffer, hung_up),
+    );
+}
+
+/// The close drain's policy, separated from the descriptor so a test can drive the exact poll and
+/// read sequence. A quiet poll spends one window; a would-block read is not quiet, so the drain
+/// polls again and keeps whatever the shell writes next.
+fn drain_to_quiet_with<P, R>(ring: &Ring, wake: &Wake, mut probe: P, mut read: R)
+where
+    P: FnMut() -> Option<bool>,
+    R: FnMut(&mut [u8], bool) -> Result<Option<usize>, String>,
+{
     let started = Instant::now();
     let mut quiet = 0usize;
     while started.elapsed().as_millis() < CLOSE_DRAIN_MS {
-        let mut probe = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        // SAFETY: poll references one valid pollfd for this owned master.
-        if unsafe { libc::poll(&mut probe, 1, CLOSE_QUIET_MS) } <= 0 {
+        let Some(hung_up) = probe() else {
             quiet += 1;
             if quiet >= CLOSE_QUIET_POLLS { return; }
             continue;
-        }
+        };
         quiet = 0;
-        let hung_up = probe.revents & libc::POLLHUP != 0;
-        if !matches!(feed_batch(fd, model, output, response_pending, hung_up, notify), Ok(Some(_))) {
-            return;
+        for _ in 0..RING_SLOTS {
+            let Some(mut slot) = ring.checkout_within(Duration::from_millis(CLOSE_SLOT_MS)) else { return };
+            match read(&mut slot[..], hung_up) {
+                Ok(Some(count)) => {
+                    if count == 0 {
+                        // The stream ended: nothing is left to keep the shell's final write from
+                        // completing.
+                        ring.release(slot);
+                        return;
+                    }
+                    ring.publish(slot, count);
+                    wake.signal();
+                }
+                // A would-block read is not the end. The shell is often between two writes of its
+                // final prompt, so keep the bounded quiet policy and poll again instead of giving
+                // up on output that is about to land.
+                Ok(None) => {
+                    ring.release(slot);
+                    break;
+                }
+                Err(_) => {
+                    ring.release(slot);
+                    return;
+                }
+            }
         }
     }
 }
@@ -1052,6 +1428,12 @@ fn drain_to_quiet(
 /// Longest the worker may sleep with nothing pending. Input and shutdown wake it through the
 /// self-pipe, so this only bounds silent child-exit detection.
 const IDLE_POLL_MS: libc::c_int = 250;
+/// How long the worker waits for the reader's bounded post-exit drain before it finalizes; the
+/// reader's own windows (two idle waits plus 32 reads) always end inside it.
+const POST_EXIT_WAIT_MS: u64 = 500;
+/// How long a closing worker waits for the reader's bounded quiet drain. Both are bounded, so
+/// this only keeps close from returning before the shell's final write landed.
+const CLOSE_WAIT_MS: u64 = 500;
 /// A blocked write still retries at the old cadence, so a reply is not held for a whole idle poll.
 const BLOCKED_WRITE_POLL_MS: libc::c_int = 10;
 /// Longest a busy loop goes without checking whether the child exited.
@@ -1097,13 +1479,41 @@ fn run(
     Wakes { wake, notify }: Wakes,
 ) -> Result<(), String> {
     let fd = master.as_raw_fd().ok_or("PTY descriptor missing")?;
-    let mut output: VecDeque<(Vec<u8>, usize, bool)> = VecDeque::new();
-    let mut response_pending = 0usize;
+    let ring = Arc::new(Ring::new());
+    let finish = Arc::new(AtomicBool::new(false));
+    let delivered = Arc::new(AtomicBool::new(false));
+    // The reader gets its own wake pipe: it must never drain the worker's, or a queued command
+    // would wait for the idle poll.
+    let control = Arc::new(ReaderControl {
+        stop: stop.clone(),
+        finish: finish.clone(),
+        abandon: Arc::new(AtomicBool::new(false)),
+        wake: Arc::new(Wake::new()?),
+    });
+    let reader = {
+        let (ring, control, thread_control, wake, delivered) =
+            (ring.clone(), control.clone(), control.clone(), wake.clone(), delivered.clone());
+        let handle = thread::Builder::new()
+            .name("akitty-pty-read".into())
+            .spawn(move || read_loop(fd, &ring, &thread_control, &wake, &delivered))
+            .map_err(|e| format!("cannot start PTY reader: {e}"))?;
+        // A panic below still releases the reader before the master descriptor closes.
+        ReaderThread { handle: Some(handle), control }
+    };
+    let mut pump = Pump {
+        model: &model,
+        ring: &ring,
+        output: VecDeque::new(),
+        response_pending: 0,
+        pending,
+        delivered: delivered.clone(),
+        fd,
+    };
     let mut io_error = None;
     let mut last_wait = Instant::now();
     let mut chrome_signalled = None;
     while !stop.load(Ordering::SeqCst) {
-        let deadline = expire_and_queue(&model, &mut output, &mut response_pending, &notify, &mut chrome_signalled);
+        let deadline = expire_and_queue(&model, &mut pump.output, &mut pump.response_pending, &notify, &mut chrome_signalled);
         let batch: Vec<Command> = rx.try_iter().take(MAX_COMMANDS_PER_PASS).collect();
         // Test-only: unwind with the state held, exactly like a parser panic during model.feed.
         #[cfg(test)]
@@ -1117,7 +1527,7 @@ fn run(
         }
         let (inputs, resize) = coalesce(batch);
         for bytes in inputs {
-            output.push_back((bytes, 0, true));
+            pump.output.push_back((bytes, 0, true));
         }
         if let Some(size) = resize {
             // The cell size is read before the ioctl so TIOCGWINSZ sees it.
@@ -1134,15 +1544,22 @@ fn run(
             // A resize reflows rows the host has not seen; it is a host-visible revision.
             notify.signal();
         }
+        // Stage two applies the whole published batch here, so the host is woken once for it
+        // instead of once per parsed chunk. Each model lock still covers at most `PARSE_BATCH`.
+        if pump.parse_pass() {
+            notify.signal();
+        }
+        // Every published byte is applied and the reader has stopped: no output can follow.
+        if ring.idle() { break; }
         let mut poll = [
             libc::pollfd {
                 fd,
-                events: libc::POLLIN | if output.is_empty() { 0 } else { libc::POLLOUT },
+                events: if pump.output.is_empty() { 0 } else { libc::POLLOUT },
                 revents: 0,
             },
             libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 },
         ];
-        let timeout = if output.is_empty() {
+        let timeout = if pump.output.is_empty() {
             poll_timeout(deadline)
         } else {
             poll_timeout(deadline).min(BLOCKED_WRITE_POLL_MS)
@@ -1158,31 +1575,17 @@ fn run(
         }
         if poll[1].revents != 0 { wake.drain(); }
         if poll[0].revents & libc::POLLOUT != 0
-            && let Err(error) = write_front(fd, &mut output, &mut response_pending, &pending)
+            && let Err(error) = pump.write()
         {
             io_error = Some(error);
             break;
         }
         let timed_out = ready == 0;
-        if poll[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-            match feed_batch(fd, &model, &mut output, &mut response_pending, poll[0].revents & libc::POLLHUP != 0, &notify) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    // A hangup can report EOF before try_wait sees the exit, so leaving here
-                    // without draining would drop a query the program sent as it died. The
-                    // post-loop flush still delivers whatever this drain queues.
-                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop, &notify) {
-                        io_error = Some(error);
-                    }
-                    break;
-                }
-                Err(error) => { io_error = Some(error); break; },
-            }
-        }
+        // Only the reader touches the master read side; a hangup reaches us as the ring's end.
         // waitpid does not run on every pass: a hangup or an idle poll checks at once, and a pass
         // kept busy by output (a background job still writing after the shell exited) checks at
         // most every WAIT_INTERVAL_MS.
-        if timed_out || poll[0].revents & libc::POLLHUP != 0 || last_wait.elapsed().as_millis() >= WAIT_INTERVAL_MS {
+        if timed_out || last_wait.elapsed().as_millis() >= WAIT_INTERVAL_MS {
             last_wait = Instant::now();
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1193,12 +1596,12 @@ fn run(
                     drop(state);
                     // `exited` is the one change no further output will announce.
                     notify.signal();
-                    // Drain available final output without waiting for inherited slave FDs.
-                    // A descendant can keep the slave writable after shell exit.
-                    // Bound this drain so close never joins an endless reader.
-                    if let Some(error) = drain_after_exit(fd, &model, &mut output, &mut response_pending, &pending, &stop, &notify) {
-                        io_error = Some(error);
-                    }
+                    // Ask the reader for its bounded post-exit drain. A descendant can keep the
+                    // slave writable after shell exit, so the drain is bounded there and its
+                    // answers are written while the master is still open.
+                    finish.store(true, Ordering::SeqCst);
+                    reader.signal();
+                    pump.drain_until_end(true, Instant::now() + Duration::from_millis(POST_EXIT_WAIT_MS));
                     break;
                 }
                 Ok(None) => {}
@@ -1210,18 +1613,29 @@ fn run(
         }
     }
     // Deliver what the drain queued before the master closes; this also covers an EOF break.
-    // An explicit stop/close tears the session down, so it does not flush. The delivery result
-    // only feeds the drain's settle decision, so it is discarded here.
+    // An explicit stop/close tears the session down, so it applies the reader's quiet drain and
+    // does not flush.
     if !stop.load(Ordering::SeqCst) {
-        let _ = flush_replies(fd, &mut output, &mut response_pending, &pending);
+        // The reader may still be finishing a bounded drain (an EOF or hangup that arrived before
+        // the exit was observed, or a descendant still writing). Joining it first would block it
+        // on a full ring, so keep applying its slots until it ends, then deliver every reply while
+        // the master is still open. `ReaderThread::drop` joins afterwards, bounded by `abandon`.
+        finish.store(true, Ordering::SeqCst);
+        reader.signal();
+        pump.drain_until_end(true, Instant::now() + Duration::from_millis(POST_EXIT_WAIT_MS));
+        let _ = pump.flush();
     } else {
         // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
-        drain_to_quiet(fd, &model, &mut output, &mut response_pending, &notify);
+        reader.signal();
+        pump.drain_until_end(false, Instant::now() + Duration::from_millis(CLOSE_WAIT_MS));
     }
+    if let Some(error) = ring.end_error() { io_error = Some(error); }
     let cleanup_error = child.finish().err();
     finalize(&model, child.exit_code(), io_error.as_deref(), cleanup_error.as_deref());
     // `finalize` is the last revision bump; a missed exit would strand the pane's status.
     notify.signal();
+    // Join the reader before the master descriptor closes under it.
+    drop(reader);
     drop(master);
     if let Some(error) = io_error.or(cleanup_error) {
         Err(error)
@@ -1719,6 +2133,60 @@ mod tests {
             assert!(Instant::now() < cleanup_deadline, "the poisoned session's child was not reaped");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_worker_panic_with_output_in_flight_still_exits_bounded() {
+        let dir = std::env::temp_dir().join(format!("akitty-panic-inflight-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("shell.pid");
+        let script = dir.join("shell.sh");
+        // Report the pid, then keep writing: the ring holds published output when the panic hits,
+        // so the reader must be released and joined without waiting for that backlog to drain.
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nwhile :; do printf 'busy\\n'; done\n", pid_file.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let session = Session::new(40, 8, Some(script.to_string_lossy().into_owned()), Some("/tmp".into()), false, 5000, None).unwrap();
+        let pid = {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<i32>() { break pid; }
+                assert!(Instant::now() < deadline, "the fixture shell never reported its pid");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        // Wait for real output to reach the model, so the panic lands with slots in flight.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !session.snapshot(None, true, false).unwrap().contains("busy") {
+            assert!(Instant::now() < deadline, "the fixture never wrote output");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        session.commands.as_ref().unwrap().try_send(Command::Panic).unwrap();
+        session.wake();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let state = lock_model(&session.model);
+            if state.exited {
+                assert_eq!(state.error.as_deref(), Some(ENGINE_FAILED));
+                break;
+            }
+            drop(state);
+            assert!(Instant::now() < deadline, "the panicking worker never finalized");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the shell survived a worker panic with output in flight");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let started = Instant::now();
+        let _ = session.close();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "close waited on a panicked worker: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2223,19 +2691,254 @@ mod reply_tests {
         }
     }
 
+    /// Stage two over a headless model, standing in for the worker while a test drives the
+    /// reader side directly. `fd` is where replies to the program are written.
+    fn pump_for<'a>(session: &'a Session, ring: &'a Ring, fd: i32) -> (Pump<'a>, Arc<AtomicBool>) {
+        let delivered = Arc::new(AtomicBool::new(false));
+        let pump = Pump {
+            model: &session.model,
+            ring,
+            output: VecDeque::new(),
+            response_pending: 0,
+            pending: Arc::new(AtomicUsize::new(0)),
+            delivered: delivered.clone(),
+            fd,
+        };
+        (pump, delivered)
+    }
+
+    /// Publish one already-gathered chunk, the unit the reader hands over once a slot is filled or
+    /// a read would block.
+    fn publish(ring: &Ring, bytes: &[u8]) {
+        let mut slot = ring.checkout().expect("the ring always has a free slot here");
+        assert!(bytes.len() <= slot.len(), "a test chunk must fit one slot");
+        slot[..bytes.len()].copy_from_slice(bytes);
+        ring.publish(slot, bytes.len());
+    }
+
+    /// Apply every published slot in ring order, as one worker pass does.
+    fn parse_all(pump: &mut Pump<'_>, ring: &Ring) {
+        while let Some((slot, len)) = ring.take_ready_up_to(usize::MAX) {
+            pump.feed(&slot[..len]);
+            ring.recycle(slot);
+        }
+    }
+
+    #[test]
+    fn a_burst_of_published_slots_is_applied_once_per_pass() {
+        let session = Session::new(80, 3, None, None, true, 0, None).unwrap();
+        let ring = Ring::new();
+        let (mut pump, _) = pump_for(&session, &ring, -1);
+        let revision = lock_model(&session.model).revision;
+        for _ in 0..RING_SLOTS {
+            publish(&ring, b"burst\r\n");
+        }
+        // One pass covers the whole burst, so the worker wakes the host once for it instead of
+        // once per parser chunk.
+        assert!(pump.parse_pass(), "one pass applies every ready slot");
+        assert!(!ring.pending(), "the burst is fully applied by that pass");
+        assert!(!pump.parse_pass(), "an empty ring asks for no further notification");
+        assert_eq!(
+            lock_model(&session.model).revision - revision,
+            RING_SLOTS as u64,
+            "each slot is one model feed"
+        );
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(snapshot["lines"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_partial_line_is_applied_before_the_rest_of_the_output_arrives() {
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let ring = Ring::new();
+        let (mut pump, _) = pump_for(&session, &ring, -1);
+        // A prompt with no terminator: it must be visible on the pass that read it, not held
+        // back until a buffer fills or the stream ends.
+        publish(&ring, b"prompt$ ");
+        assert!(pump.parse_pass());
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(snapshot["lines"][0].as_str().unwrap().trim_end(), "prompt$");
+        publish(&ring, b"x");
+        assert!(pump.parse_pass());
+        let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+        assert_eq!(snapshot["lines"][0].as_str().unwrap().trim_end(), "prompt$ x");
+    }
+
+    #[test]
+    fn a_slot_is_handed_out_again_only_after_the_parser_returns_it() {
+        let ring = Ring::new();
+        let held: Vec<_> = std::iter::from_fn(|| ring.checkout()).collect();
+        assert_eq!(held.len(), RING_SLOTS, "the ring allocates exactly its fixed slots");
+        // Backpressure is a bounded wait, never a new allocation.
+        assert!(ring.checkout().is_none());
+        assert!(ring.checkout_within(Duration::from_millis(1)).is_none());
+        for slot in held {
+            ring.publish(slot, 1);
+        }
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the first published slot");
+        assert_eq!(len, 1);
+        // A slot the parser holds is still not free, so a stalled parse cannot grow the backlog.
+        assert!(ring.checkout().is_none());
+        ring.recycle(slot);
+        assert!(ring.checkout().is_some(), "recycling a parsed slot releases the reader");
+        assert!(ring.take_ready_up_to(usize::MAX).is_some(), "published slots keep their order");
+    }
+
+    #[test]
+    fn an_unused_reader_slot_does_not_release_a_parsed_one() {
+        let ring = Ring::new();
+        publish(&ring, b"abc");
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the published slot");
+        assert_eq!(len, 3);
+        assert_eq!(ring.in_flight(), 1);
+        // The reader takes a free slot, finds nothing to read and hands it back while the parser
+        // still holds another. That release must not count as a finished parse.
+        let spare = ring.checkout().expect("a free slot");
+        ring.release(spare);
+        assert_eq!(ring.in_flight(), 1, "an unused reader slot is not a parsed one");
+        ring.end(Ok(()));
+        assert!(!ring.idle(), "output the parser still holds is not applied yet");
+        ring.recycle(slot);
+        assert!(ring.idle(), "the parser returned the last slot, so the ring is idle");
+    }
+
+    #[test]
+    fn immediately_available_small_reads_gather_into_one_slot() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let mut reads = 0;
+        // Three one-byte reads are all available, then a read would block. One slot must carry all
+        // three: publishing per read would waste the 64 KiB batching the ring exists for.
+        let result = fill_ring(&ring, || false, &wake, |buffer| {
+            if reads == 3 { return Ok(None); }
+            reads += 1;
+            buffer[0] = b'x';
+            Ok(Some(1))
+        });
+        assert!(matches!(result, Ok(Fill::Idle)), "would-block ends the gather, not the slot");
+        assert_eq!(ring.in_flight(), 0);
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("one gathered slot");
+        assert_eq!(len, 3, "three available reads share one slot");
+        ring.recycle(slot);
+        assert!(!ring.pending(), "the tail was published with the slot");
+    }
+
+    #[test]
+    fn a_full_slot_publishes_and_its_remainder_becomes_the_next_tail() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let total = SLOT_BYTES + 6 * 1024;
+        let mut produced = 0;
+        let result = fill_ring(&ring, || false, &wake, |buffer| {
+            if produced == total { return Ok(None); }
+            let count = 1024.min(buffer.len()).min(total - produced);
+            buffer[..count].fill(b'y');
+            produced += count;
+            Ok(Some(count))
+        });
+        assert!(matches!(result, Ok(Fill::Idle)));
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the full slot");
+        assert_eq!(len, SLOT_BYTES, "a full slot is published without waiting for more");
+        ring.recycle(slot);
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the remainder");
+        assert_eq!(len, 6 * 1024, "bytes after a full slot become a tail of their own");
+        ring.recycle(slot);
+        assert!(!ring.pending());
+    }
+
+    #[test]
+    fn bytes_gathered_before_a_read_failure_are_published_before_the_error() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let mut reads = 0;
+        let result = fill_ring(&ring, || false, &wake, |buffer| {
+            if reads == 2 { return Err("test read failed".to_owned()); }
+            reads += 1;
+            buffer[0] = b'z';
+            Ok(Some(1))
+        });
+        assert_eq!(result.err().as_deref(), Some("test read failed"));
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the gathered bytes");
+        assert_eq!(len, 2, "a failure must not discard the bytes already read");
+        ring.recycle(slot);
+    }
+
+    #[test]
+    fn a_tail_is_published_on_would_block_eof_and_failure_in_stream_order() {
+        let bytes = "hello\u{4e2d}\x07\x1b[6n".as_bytes();
+        for end in [Ok(None), Ok(Some(0)), Err("test read failed".to_owned())] {
+            let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+            let ring = Ring::new();
+            let (mut pump, _) = pump_for(&session, &ring, -1);
+            let stop = AtomicBool::new(false);
+            let finish = AtomicBool::new(false);
+            let wake = Wake::new().unwrap();
+            let mut offset = 0;
+            // Each read splits UTF-8 and the query, like small PTY reads can. A full ring pauses
+            // the reader exactly as one full of published slots pauses the real one.
+            let result = loop {
+                let result = fill_ring(&ring, || stop.load(Ordering::SeqCst) || finish.load(Ordering::SeqCst), &wake, |buffer| {
+                    if offset == bytes.len() { return end.clone(); }
+                    buffer[0] = bytes[offset];
+                    offset += 1;
+                    Ok(Some(1))
+                });
+                if matches!(result, Ok(Fill::Full)) {
+                    parse_all(&mut pump, &ring);
+                    continue;
+                }
+                break result;
+            };
+            assert_eq!(offset, bytes.len(), "every readable byte is read");
+            match &end {
+                Ok(Some(_)) => assert!(matches!(result, Ok(Fill::Ended))),
+                Ok(None) => assert!(matches!(result, Ok(Fill::Idle))),
+                _ => assert_eq!(result.err().as_deref(), Some("test read failed")),
+            }
+            // The tail is published with the reads that produced it, so the parser applies it
+            // without waiting for the stream to end.
+            assert!(ring.pending(), "a short tail is already published");
+            parse_all(&mut pump, &ring);
+            let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
+            assert!(snapshot["lines"][0].as_str().unwrap().starts_with("hello\u{4e2d}"));
+            assert_eq!(snapshot["bell"], true);
+            let queued: Vec<u8> = pump.output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
+            assert_eq!(queued, b"\x1b[1;8R", "the query is answered in stream order");
+            assert_eq!(pump.response_pending, queued.len());
+        }
+    }
+
+    #[test]
+    fn one_pass_keeps_every_model_lock_inside_one_parse_batch() {
+        let session = Session::new(80, 3, None, None, true, 0, None).unwrap();
+        let ring = Ring::new();
+        let (mut pump, _) = pump_for(&session, &ring, -1);
+        let revision = lock_model(&session.model).revision;
+        let full = vec![b'x'; SLOT_BYTES];
+        for _ in 0..RING_SLOTS {
+            publish(&ring, &full);
+        }
+        assert!(pump.parse_pass());
+        // One revision per bounded parse, so no snapshot or input command waits behind a slot.
+        let feeds = lock_model(&session.model).revision - revision;
+        assert_eq!(feeds, (MAX_PARSE_PER_PASS / PARSE_BATCH) as u64, "each model lock covers one parse batch");
+        // `MAX_PARSE_PER_PASS` is one ring, so a full ring is consumed without splitting a slot.
+        assert!(!ring.pending());
+    }
+
     #[test]
     fn post_exit_drain_queues_the_replies_the_program_asked_for() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
-        let notify = Wake::new().unwrap();
-        let mut output = VecDeque::new();
-        let mut response_pending = 0;
-        // The post-exit drain must share the live feed's reply queueing: answers parsed
-        // after the shell exits used to be dropped on the floor.
-        feed_and_queue(&session.model, &mut output, &mut response_pending, b"\x1b[6n", &notify);
-        let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
+        let ring = Ring::new();
+        let (mut pump, _) = pump_for(&session, &ring, -1);
+        // The post-exit drain publishes into the same ring, so answers parsed after the shell
+        // exits used to be dropped on the floor only because the old drain kept its own buffer.
+        publish(&ring, b"\x1b[6n");
+        parse_all(&mut pump, &ring);
+        let queued: Vec<u8> = pump.output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
         assert!(!queued.is_empty(), "post-exit replies must reach the PTY: {queued:?}");
         assert_eq!(queued, b"\x1b[1;1R");
-        assert_eq!(response_pending, queued.len(), "queued bytes must count against the backlog");
+        assert_eq!(pump.response_pending, queued.len(), "queued bytes must count against the backlog");
     }
 
     /// A connected descriptor pair where `0` is the nonblocking "master" the worker owns and
@@ -2254,58 +2957,6 @@ mod reply_tests {
     }
 
     #[test]
-    fn coalesced_reads_flush_the_tail_and_keep_queries_events_and_utf8_in_order() {
-        for end in [Ok(None), Ok(Some(0)), Err("test read failed".to_owned())] {
-            let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
-            let notify = Wake::new().unwrap();
-            let mut output = VecDeque::new();
-            let mut response_pending = 0;
-            let bytes = "hello中\x07\x1b[6n".as_bytes();
-            let mut offset = 0;
-            let revision = lock_model(&session.model).revision;
-            let result = feed_batch_with(&session.model, &mut output, &mut response_pending, &notify, |buffer| {
-                if offset == bytes.len() { return end.clone(); }
-                // Each read splits UTF-8 and the query, like small PTY reads can.
-                buffer[0] = bytes[offset]; offset += 1;
-                Ok(Some(1))
-            });
-            assert_eq!(result, match &end {
-                Ok(None) => Ok(Some(bytes.len())),
-                Ok(Some(_)) => Ok(None),
-                Err(error) => Err(error.clone()),
-            });
-            assert_eq!(lock_model(&session.model).revision, revision + 1, "one model feed for all the small reads");
-            let snapshot: Value = serde_json::from_str(&session.snapshot(None, true, false).unwrap()).unwrap();
-            assert!(snapshot["lines"][0].as_str().unwrap().starts_with("hello中"));
-            assert_eq!(snapshot["bell"], true);
-            let queued: Vec<u8> = output.iter().flat_map(|(bytes, _, _)| bytes.iter().copied()).collect();
-            assert_eq!(queued, b"\x1b[1;8R");
-            assert_eq!(response_pending, queued.len());
-        }
-    }
-
-    #[test]
-    fn coalesced_reads_bound_model_feeds_and_yield_at_the_pass_budget() {
-        let session = Session::new(80, 3, None, None, true, 0, None).unwrap();
-        let notify = Wake::new().unwrap();
-        let mut output = VecDeque::new();
-        let mut response_pending = 0;
-        let revision = lock_model(&session.model).revision;
-        let mut read_bytes = 0;
-        let result = feed_batch_with(&session.model, &mut output, &mut response_pending, &notify, |buffer| {
-            // Simulate a writer that never stops; no read may exceed the parse budget.
-            assert!(!buffer.is_empty() && buffer.len() <= PARSE_BATCH);
-            let count = buffer.len().min(1024);
-            buffer[..count].fill(b'x');
-            read_bytes += count;
-            Ok(Some(count))
-        }).unwrap();
-        assert_eq!(result, Some(MAX_READ_PER_PASS));
-        assert_eq!(read_bytes, MAX_READ_PER_PASS);
-        assert_eq!(lock_model(&session.model).revision - revision, (MAX_READ_PER_PASS / PARSE_BATCH) as u64);
-    }
-
-    #[test]
     fn post_exit_drain_writes_the_reply_back_to_the_terminal() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let (master, program) = socket_pair();
@@ -2313,21 +2964,22 @@ mod reply_tests {
         let query = b"\x1b[6n";
         // SAFETY: writing a valid slice into a descriptor this test owns.
         assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, 4);
-        let pending = AtomicUsize::new(0);
-        let mut output = VecDeque::new();
-        let mut response_pending = 0;
-        let stop = AtomicBool::new(false);
-        let notify = Wake::new().unwrap();
-        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop, &notify);
-        assert!(failure.is_none(), "{failure:?}");
-        // The answer must be written back, not merely left queued for a reader that never runs.
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let delivered = AtomicBool::new(false);
+        let failure = drain_after_exit(master, &ring, &wake, &delivered);
+        ring.end(failure);
+        let (mut pump, delivered) = pump_for(&session, &ring, master);
+        pump.drain_until_end(true, Instant::now() + Duration::from_millis(200));
+        // The answer must be written back, not merely left queued for a parser that never runs.
         let mut received = [0u8; 16];
         // SAFETY: reading into a valid buffer from a descriptor this test owns.
         let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
         assert!(count > 0, "the drain wrote no reply back to the terminal");
         assert_eq!(&received[..count.max(0) as usize], b"\x1b[1;1R");
-        assert!(output.is_empty(), "the drain must deliver what it queued: {output:?}");
-        assert_eq!(response_pending, 0);
+        assert!(pump.output.is_empty(), "the drain must deliver what it queued: {output:?}", output = pump.output);
+        assert_eq!(pump.response_pending, 0);
+        assert!(delivered.load(Ordering::SeqCst), "a written reply tells the reader to wait for its reader");
         // SAFETY: closing descriptors this test created.
         unsafe { libc::close(master); libc::close(program) };
     }
@@ -2457,15 +3109,126 @@ mod reply_tests {
     }
 
     #[test]
+    fn the_close_drain_continues_across_a_would_block() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        // Scripted evidence, no wall clock: readable -> seven bytes -> would-block, then readable
+        // again -> five bytes -> would-block, then two quiet polls end the bounded drain. The old
+        // drain gave up on the first would-block and dropped the second write.
+        let mut probes = [Some(false), Some(false), None, None].into_iter();
+        let mut reads = [
+            Ok(Some(7usize)),
+            Ok(None),
+            Ok(Some(5usize)),
+            Ok(None),
+        ]
+        .into_iter();
+        drain_to_quiet_with(
+            &ring,
+            &wake,
+            || probes.next().expect("the drain polls at most twice per window"),
+            |buffer, _hung_up| {
+                let step = reads.next().expect("the drain reads only while readable");
+                if let Ok(Some(count)) = step {
+                    buffer[..count].fill(b'p');
+                }
+                step
+            },
+        );
+        let mut seen = 0usize;
+        while let Some((slot, len)) = ring.take_ready_up_to(usize::MAX) {
+            seen += len;
+            ring.recycle(slot);
+        }
+        assert_eq!(seen, 12, "the drain kept reading after a would-block: {seen} of 12 bytes");
+        assert!(!ring.pending());
+        assert_eq!(ring.in_flight(), 0, "an empty read never counts as a parsed slot");
+    }
+
+    #[test]
+    fn a_query_sent_just_before_eof_is_published_and_answered() {
+        let (master, program) = socket_pair();
+        let ring = Ring::new();
+        let control = ReaderControl {
+            stop: Arc::new(AtomicBool::new(false)),
+            finish: Arc::new(AtomicBool::new(false)),
+            abandon: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(Wake::new().unwrap()),
+        };
+        let wake = Wake::new().unwrap();
+        let delivered = AtomicBool::new(false);
+        // The program asks for a cursor position report and then hangs up its write side, so the
+        // reader sees data followed by EOF. EOF must run the bounded post-exit drain and the
+        // answer must still reach the program.
+        // SAFETY: writing into a descriptor this test owns.
+        assert_eq!(unsafe { libc::write(program, b"\x1b[6n".as_ptr().cast(), 4) }, 4);
+        // SAFETY: shutting down the write side of a descriptor this test owns.
+        assert_eq!(unsafe { libc::shutdown(program, libc::SHUT_WR) }, 0);
+        read_loop(master, &ring, &control, &wake, &delivered);
+        assert!(ring.ended(), "EOF ends the reader");
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (mut pump, _) = pump_for(&session, &ring, master);
+        assert!(pump.drain_until_end(true, Instant::now() + Duration::from_millis(500)), "the reader ended");
+        let mut received = [0u8; 16];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(program, received.as_mut_ptr().cast(), received.len()) };
+        assert!(count > 0, "EOF must not swallow the answer to a query sent just before it");
+        assert_eq!(&received[..count as usize], b"\x1b[1;1R");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn a_late_query_from_a_descendant_is_answered_before_the_master_closes() {
+        let (master, program) = socket_pair();
+        // A descendant keeps the slave open after the shell exits, which is why the master never
+        // sees EOF here: only the bounded post-exit drain can catch its late query.
+        // SAFETY: dup of a descriptor this test owns.
+        let descendant = unsafe { libc::dup(program) };
+        assert!(descendant >= 0);
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let delivered = AtomicBool::new(false);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            // SAFETY: writing a valid slice into a descriptor this test owns.
+            assert_eq!(unsafe { libc::write(descendant, b"\x1b[6n".as_ptr().cast(), 4) }, 4);
+        });
+        started_rx.recv().unwrap();
+        let failure = drain_after_exit(master, &ring, &wake, &delivered);
+        writer.join().unwrap();
+        ring.end(failure);
+        // Finalization order: apply every remaining slot, then deliver every reply, while the
+        // master is still open. A flush that ran before the drain finished would drop this answer.
+        let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
+        let (mut pump, pump_delivered) = pump_for(&session, &ring, master);
+        assert!(pump.drain_until_end(true, Instant::now() + Duration::from_millis(500)));
+        pump.flush();
+        assert!(pump_delivered.load(Ordering::SeqCst), "the final flush wrote the answer");
+        let mut received = [0u8; 16];
+        // SAFETY: reading into a valid buffer from a descriptor this test owns.
+        let count = unsafe { libc::read(descendant, received.as_mut_ptr().cast(), received.len()) };
+        assert!(count > 0, "a late descendant query was never answered");
+        assert_eq!(&received[..count as usize], b"\x1b[1;1R");
+        // SAFETY: closing descriptors this test created.
+        unsafe { libc::close(master); libc::close(program); libc::close(descendant) };
+    }
+
+    #[test]
     fn post_exit_drain_answers_every_burst_separated_by_an_idle_window() {
         let session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
         let (master, program) = socket_pair();
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let delivered = AtomicBool::new(false);
         // Three bursts, each written after the drain has already seen an empty read. A shared
         // idle budget spends itself on the earlier gaps and the last burst is never answered.
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
         let writer = std::thread::spawn(move || {
             for (index, query) in [b"\x1b[c".as_slice(), b"\x1b[6n", b"\x1b[c"].into_iter().enumerate() {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(5));
                 // SAFETY: writing a valid slice into a descriptor this test owns.
                 assert_eq!(unsafe { libc::write(program, query.as_ptr().cast(), query.len()) }, query.len() as isize);
                 if index == 0 { started_tx.send(()).unwrap(); }
@@ -2473,13 +3236,15 @@ mod reply_tests {
         });
         // Start the bounded drain only after the writer has actually been scheduled.
         started_rx.recv().unwrap();
-        let pending = AtomicUsize::new(0);
-        let mut output = VecDeque::new();
-        let mut response_pending = 0;
-        let stop = AtomicBool::new(false);
-        let notify = Wake::new().unwrap();
-        let failure = drain_after_exit(master, &session.model, &mut output, &mut response_pending, &pending, &stop, &notify);
-        assert!(failure.is_none(), "{failure:?}");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (mut pump, _) = pump_for(&session, &ring, master);
+                pump.drain_until_end(true, Instant::now() + Duration::from_secs(2));
+            });
+            let failure = drain_after_exit(master, &ring, &wake, &delivered);
+            assert!(failure.is_ok(), "{failure:?}");
+            ring.end(failure);
+        });
         writer.join().unwrap();
         let mut received = [0u8; 64];
         // SAFETY: reading into a valid buffer from a descriptor this test owns.
@@ -2487,8 +3252,6 @@ mod reply_tests {
         let answers = b"\x1b[?62;22c\x1b[1;1R\x1b[?62;22c";
         assert!(count > 0, "the drain wrote no reply back to the terminal");
         assert_eq!(&received[..count as usize], answers, "every separated burst must be answered in order");
-        assert_eq!(response_pending, 0, "every burst must leave the backlog");
-        assert!(output.is_empty(), "the drain must deliver what it queued: {output:?}");
         // SAFETY: closing descriptors this test created.
         unsafe { libc::close(master); libc::close(program) };
     }

@@ -42,16 +42,30 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   keyboard encoder in `akitty-vt`. It has no PTY, filesystem or wall-clock access;
   hosts supply time and enforce clipboard/process policy. Unicode libraries and
   other ordinary dependencies retain their own licenses.
-  The parser lends printable ASCII runs to the terminal, which writes plain width-1
-  spans per row. Insert mode, character-set shifts, hyperlinks, grapheme joins,
-  wrapping and wide-cell repair retain scalar handling. Synchronized output retains
+  The parser lends printable UTF-8 runs to the terminal. Plain ASCII uses packed
+  spans; ordinary narrow/wide Unicode codepoints use batched cells with each grapheme
+  class carried into the next pair decision. Insert mode, character-set shifts,
+  contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
+  A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;
+  it has no unbounded map or per-key heap allocation. Synchronized output retains
   the same bounded action queue and rebuilds ASCII runs when that queue flushes.
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
-  One nonblocking worker owns each PTY. Session state is mutex protected; logical
-  serialization does not assume DispatchQueue calls stay on one OS thread.
-  Available short reads coalesce into at most 8 KiB before parsing, without waiting
-  for another byte. Each model lock covers at most one such parse; a 256 KiB pass
-  budget yields to input and resize commands. EOF and read errors flush any tail.
+  Each PTY is a bounded two-stage pipeline. A reader thread owns every `read(2)`
+  and a worker thread owns the model, replies, writes, resize and child status, so
+  no read runs with the terminal state held and no parse waits on the kernel.
+  Reads move through a fixed ring of four 64 KiB slots whose ownership passes
+  between the stages, so a read is never copied and a parser that falls behind
+  stops the reader instead of growing memory. Every read that is available at once
+  fills one slot up to its full size, which is published when it is full and
+  otherwise on would-block, EOF or a read error; a slot is never held back waiting
+  for more, so a prompt, bell or query still arrives with the reads that produced
+  it, and bytes gathered before a failure are applied before it is reported. The
+  worker applies at most one ring (256 KiB) per pass, with each model lock covering
+  at most 8 KiB, so input and resize keep their turn, and it wakes the host once
+  per applied batch rather than once per parsed chunk.
+  Session state is mutex protected; logical serialization does not assume
+  DispatchQueue calls stay on one OS thread. A close or child exit ends the reader
+  with a bounded drain, and a hangup or read failure still flushes its tail.
   Shutdown sends HUP, then KILL, and polls child status with a bounded deadline;
   it never blocks in `wait()`. If macOS delays reaping, one shared reaper retains
   ownership, with a 64-child limit including pending cleanup. Swift marks a
@@ -83,6 +97,19 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
+  Frames of plain single-scalar ASCII with no images, IME text, decorations or fractional geometry can instead be
+  drawn from a glyph atlas (`MetalText.swift`): each distinct glyph is rasterised once by CoreText into one bounded
+  coverage texture and uploaded only when new, and the GPU composites per-row instance buffers of cell fills,
+  glyph quads and cursor quads. Only the rows the core marked dirty are re-encoded and uploaded; while a frame is
+  still on the GPU the upload publishes a complete replacement buffer from a bounded pool instead of rewriting the
+  one it may read, so a frame never samples a half-updated revision. The atlas texture is tied to the glyph
+  mask cache: frames drawn by other paths leave it alone, and it is released only with that cache. Atlas rebuilds
+  are rationed per font/scale/grid/theme epoch, and a frame needing more masks than the atlas holds is refused,
+  so an adversarial colour workload degrades to the software rasterizer instead of churning masks every frame.
+  Because macOS
+  text smoothing depends on the text colour, masks are keyed by style, text and foreground colour; content the
+  atlas does not reproduce pixel-for-pixel (non-ASCII, wide cells, box drawing, underlines and strike, IME
+  composition, Kitty images, backing scales outside 1x-3x) keeps the software rasterizer unchanged.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status-bar note. Images are

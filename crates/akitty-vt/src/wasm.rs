@@ -405,19 +405,18 @@ fn append_cells(
     reverse: bool,
 ) {
     for cell in cells {
-        let flags = u32::from(cell.style.attrs ^ if reverse { crate::cell::INVERSE } else { 0 })
-            | u32::from(cell.style.underline) << 8;
+        let style = cell.style();
+        let flags = u32::from(style.attrs ^ if reverse { crate::cell::INVERSE } else { 0 })
+            | u32::from(style.underline) << 8;
         for word in [
-            if cell.written { u32::from(cell.ch) } else { 0 },
-            palette.resolve(cell.style.fg),
-            palette.resolve(cell.style.bg),
+            if cell.written() { u32::from(cell.ch) } else { 0 },
+            palette.resolve(style.fg),
+            palette.resolve(style.bg),
             flags,
-            cell.style
-                .underline_color
-                .map_or(u32::MAX, |c| palette.resolve(c)),
-            u32::from(cell.width),
+            style.underline_color.map_or(u32::MAX, |c| palette.resolve(c)),
+            u32::from(cell.width()),
             cell.link_id(),
-            cell.combining.len() as u32,
+            cell.combining_len() as u32,
         ] {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
@@ -448,19 +447,19 @@ fn row_hash(term: &Terminal, row: usize) -> u64 {
     mix(u64::from(term.modes.reverse_video));
     mix(term.screen().rows[row].generation);
     for cell in &term.screen().rows[row].cells {
+        let style = cell.style();
         mix(u64::from(cell.ch));
-        mix(u64::from(cell.width));
-        mix(u64::from(cell.style.attrs));
-        mix(u64::from(cell.style.underline));
-        mix(u64::from(term.palette.resolve(cell.style.fg)));
-        mix(u64::from(term.palette.resolve(cell.style.bg)));
+        mix(u64::from(cell.width()));
+        mix(u64::from(style.attrs));
+        mix(u64::from(style.underline));
+        mix(u64::from(term.palette.resolve(style.fg)));
+        mix(u64::from(term.palette.resolve(style.bg)));
         mix(u64::from(cell.link_id()));
-        mix(cell
-            .style
+        mix(style
             .underline_color
             .map_or(u64::MAX, |c| u64::from(term.palette.resolve(c))));
-        for ch in &cell.combining {
-            mix(u64::from(*ch));
+        for &ch in cell.combining() {
+            mix(u64::from(ch));
         }
     }
     hash

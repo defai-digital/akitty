@@ -3,8 +3,7 @@ use crate::graphics::{self, ApcFilter, Graphics, Segment};
 use crate::placeholder;
 use crate::program_status::{self, ProgramStatuses};
 use akitty_vt::{Event, Terminal};
-use akitty_vt::cell::{self, Cell, Color, Palette};
-#[cfg(test)]
+use akitty_vt::cell::{self, Color, Palette};
 use akitty_vt::screen::Position;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -199,11 +198,28 @@ fn push_binary_cell(block: &mut Vec<u8>, cell: &CellOut) -> bool {
     true
 }
 
+/// The row a viewport position held when its hash was sent: its stable identity and the
+/// generation its cells were last written at. Row identity alone is not enough (a recycled
+/// row can keep an id), and generation alone is not enough (rows move between positions).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct RowStamp {
+    id: u64,
+    generation: u64,
+}
+
 /// What the client holds after the last snapshot sent: lets the next one carry only changed rows.
 struct SentRows {
     revision: u64,
     cols: usize,
     hashes: Vec<u64>,
+    /// Per viewport position, the row identity that produced `hashes`.
+    stamps: Vec<RowStamp>,
+    /// Everything that repaints a row without moving its generation: palette, DECSCNM,
+    /// selection and search marks. Rows are reused only while this is unchanged.
+    appearance: u64,
+    /// Per viewport position, whether the row carried placeholder cells. A row with placeholders
+    /// is always rescanned, because decoding its fragments also reads the graphics state.
+    placeholders: Vec<bool>,
 }
 
 /// The unchanged answer to a `since` poll with nothing new.
@@ -220,6 +236,10 @@ pub(crate) struct SnapshotCommit {
     revision: u64,
     cols: usize,
     hashes: Vec<u64>,
+    /// The certificate that lets the next snapshot reuse these hashes without rescanning cells.
+    stamps: Vec<RowStamp>,
+    appearance: u64,
+    placeholders: Vec<bool>,
     crowded: bool,
 }
 /// Snapshot fields plus the commit that grants them delivery; `None` is the unchanged answer.
@@ -260,6 +280,9 @@ pub struct Model {
     pub requested_size: Size,
     pub revision: u64,
     pub title: String,
+    /// Reused parser event buffer. A feed chunks its input, and a fresh vector per chunk is one
+    /// allocation per kilobyte of output; the buffer keeps its capacity between chunks instead.
+    event_scratch: Vec<Event>,
     pub clipboard: Vec<String>,
     /// BEL count since the model was created; snapshot reports `rung != sent`, so a bell that rings while a
     /// snapshot serializes is delivered by the next poll instead of being cleared by this one.
@@ -271,6 +294,10 @@ pub struct Model {
     pub exit_code: Option<u32>,
     /// Literal find. Visible hits use `query`; `line` and the column span are the current hit.
     pub find: Option<FindMark>,
+    /// Visible cells the last snapshot's hash pass read, so a test can assert that a row certified
+    /// unchanged by its identity and generation was reused instead of rescanned.
+    #[cfg(test)]
+    pub(crate) scanned_cells: usize,
 }
 
 /// One literal hit. `end_col` is exclusive and stays on `line` (a hit does not cross a row).
@@ -309,6 +336,7 @@ impl Model {
             requested_size: size,
             revision: 1,
             title: DEFAULT_TITLE.into(),
+            event_scratch: Vec::new(),
             clipboard: Vec::new(),
             bells_rung: 0,
             bells_sent: 0,
@@ -316,6 +344,8 @@ impl Model {
             exited: false,
             exit_code: None,
             find: None,
+            #[cfg(test)]
+            scanned_cells: 0,
         }
     }
     /// Move to a literal hit and remember it for the next snapshot. `text` is 1..=256 bytes.
@@ -416,33 +446,40 @@ impl Model {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut overflowed = false;
-        for segment in self.chrome_filter.feed(bytes) {
-            match segment {
-                ChromeSegment::Pass(data) => {
-                    self.shell.output(&data);
-                    self.feed_terminal(&data, &mut replies, &mut overflowed);
-                },
-                ChromeSegment::Shell(body) => {
-                    // Only accepted notifications drive control state. An oversized body is
-                    // truncated by the filter and rejected by the shell, yet its prefix can
-                    // still look like a prompt or completion; it must not be attributed.
-                    if self.shell.observe(&body) {
-                        if body == b"133;A" { self.control.dirty = false; self.program_status.finish_work(); }
-                        if body.starts_with(b"133;D") { self.control.observed_completion(); }
+        if self.chrome_filter.passes_through(bytes) {
+            // Nothing in this run can start a chrome sequence, so it reaches the shell and the
+            // parser without being copied into a pass segment first.
+            self.shell.output(bytes);
+            self.feed_terminal(bytes, &mut replies, &mut overflowed);
+        } else {
+            for segment in self.chrome_filter.feed(bytes) {
+                match segment {
+                    ChromeSegment::Pass(data) => {
+                        self.shell.output(&data);
+                        self.feed_terminal(&data, &mut replies, &mut overflowed);
+                    },
+                    ChromeSegment::Shell(body) => {
+                        // Only accepted notifications drive control state. An oversized body is
+                        // truncated by the filter and rejected by the shell, yet its prefix can
+                        // still look like a prompt or completion; it must not be attributed.
+                        if self.shell.observe(&body) {
+                            if body == b"133;A" { self.control.dirty = false; self.program_status.finish_work(); }
+                            if body.starts_with(b"133;D") { self.control.observed_completion(); }
+                        }
+                    },
+                    // A program sequence is consumed either way, so it never lands in the grid.
+                    // With program chrome off it does not replace the document.
+                    ChromeSegment::Document(payload) => {
+                        if self.program_chrome {
+                            let _ = self.chrome.apply_bytes(&payload);
+                        }
                     }
-                },
-                // A program sequence is consumed either way, so it never lands in the grid.
-                // With program chrome off it does not replace the document.
-                ChromeSegment::Document(payload) => {
-                    if self.program_chrome {
-                        let _ = self.chrome.apply_bytes(&payload);
+                    ChromeSegment::ProgramStatus(payload) => {
+                        if payload == b"?" {
+                            if self.program_chrome && !overflowed { replies.extend_from_slice(program_status::REPLY); }
+                        } else if self.program_chrome { self.program_status.apply(&payload); }
+                        if replies.len() > 65536 { replies.clear(); overflowed = true; self.error = Some("terminal reply limit exceeded".into()); }
                     }
-                }
-                ChromeSegment::ProgramStatus(payload) => {
-                    if payload == b"?" {
-                        if self.program_chrome && !overflowed { replies.extend_from_slice(program_status::REPLY); }
-                    } else if self.program_chrome { self.program_status.apply(&payload); }
-                    if replies.len() > 65536 { replies.clear(); overflowed = true; self.error = Some("terminal reply limit exceeded".into()); }
                 }
             }
         }
@@ -455,20 +492,26 @@ impl Model {
     /// The parser records a deadline; the host must expire it even when output stops.
     /// Return replies to the PTY owner rather than discarding buffered queries.
     pub fn expire_sync(&mut self) -> Vec<u8> {
-        let mut events = Vec::new();
-        if !self.term.expire_sync(clock_ms(), |event| events.push(event)) { return Vec::new(); }
+        let mut events = std::mem::take(&mut self.event_scratch);
+        let expired = self.term.expire_sync(clock_ms(), |event| events.push(event));
         let mut replies = Vec::new();
-        self.handle_events(events, &mut replies);
-        self.revision = self.revision.saturating_add(1);
+        if expired {
+            self.handle_events(&mut events, &mut replies);
+            self.revision = self.revision.saturating_add(1);
+        }
+        events.clear();
+        self.event_scratch = events;
         replies
     }
     pub fn sync_deadline(&self) -> Option<Instant> {
         self.term.sync_deadline().map(|ms| clock_origin() + Duration::from_millis(ms))
     }
     pub fn resize_grid(&mut self, size: Size) {
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.event_scratch);
         self.term.resize(size.cols, size.rows, |event| events.push(event)).expect("validated native dimensions");
-        self.handle_events(events, &mut Vec::new());
+        self.handle_events(&mut events, &mut Vec::new());
+        events.clear();
+        self.event_scratch = events;
     }
     pub fn set_chrome(&mut self, input: chrome::ChromeInput) -> Result<(), String> {
         self.chrome.apply(input)?;
@@ -506,6 +549,12 @@ impl Model {
         self.revision = self.revision.saturating_add(1);
     }
     fn feed_terminal(&mut self, bytes: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
+        if self.apc.passes_through(bytes) {
+            // Without an escape neither an APC string nor the cell-size query can start, so the
+            // run goes to the parser as it arrived.
+            self.advance(bytes, replies, overflowed);
+            return;
+        }
         for segment in self.apc.feed(bytes) {
             match segment {
                 Segment::Pass(data) => self.advance(&data, replies, overflowed),
@@ -533,14 +582,20 @@ impl Model {
         // Bound temporary events (at most one per byte) while always applying content
         // movement, even after reply overflow. 1 KiB keeps a full-size PTY read to a
         // handful of feeds instead of one per 64 bytes, with a still-tiny event vector.
-        // The engine has no cross-thread event queue.
+        // The engine has no cross-thread event queue, so the state machine cannot dispatch
+        // while it holds the terminal: events are buffered here and reused across chunks.
+        // Time is read once per feed: the chunks bound the event batch, not the clock.
+        let now = clock_ms();
+        let mut events = std::mem::take(&mut self.event_scratch);
+        let mut discarded = Vec::new();
         for slice in data.chunks(1024) {
-            let mut events = Vec::new();
-            self.term.feed(slice, clock_ms(), |event| events.push(event));
-            let mut discarded = Vec::new();
+            events.clear();
+            self.term.feed(slice, now, |event| events.push(event));
             let destination = if *overflowed { &mut discarded } else { &mut *replies };
-            *overflowed |= self.handle_events(events, destination);
+            *overflowed |= self.handle_events(&mut events, destination);
         }
+        events.clear();
+        self.event_scratch = events;
     }
     fn graphics_command(&mut self, payload: &[u8], replies: &mut Vec<u8>, overflowed: &mut bool) {
         let point = self.term.cursor();
@@ -571,10 +626,11 @@ impl Model {
             self.advance(movement.as_bytes(), replies, overflowed);
         }
     }
-    /// Applies parsed terminal events; returns true when the reply limit was exceeded.
-    fn handle_events(&mut self, events: Vec<Event>, replies: &mut Vec<u8>) -> bool {
+    /// Applies parsed terminal events; returns true when the reply limit was exceeded. The buffer
+    /// is drained in place so its allocation survives for the next parse chunk.
+    fn handle_events(&mut self, events: &mut Vec<Event>, replies: &mut Vec<u8>) -> bool {
         let mut overflowed = false;
-        for event in events {
+        for event in events.drain(..) {
             match event {
                 Event::Title(title) => self.title = if title.trim().is_empty() { DEFAULT_TITLE.into() } else { title },
                 Event::Bell => self.bells_rung = self.bells_rung.saturating_add(1),
@@ -641,6 +697,9 @@ impl Model {
             revision: commit.revision,
             cols: commit.cols,
             hashes: commit.hashes,
+            stamps: commit.stamps,
+            appearance: commit.appearance,
+            placeholders: commit.placeholders,
         });
     }
 
@@ -699,55 +758,83 @@ impl Model {
         let search_ranges = self.visible_search_ranges();
         let active_mark = self.current_mark();
         let rows = self.size.rows;
-        // Pass 1 hashes every row without allocating, to learn which rows differ from the
-        // client's copy (the snapshot it was last sent, identified by `since`).
+        // Resolved once: the per-cell lookup and the appearance stamp must not rescan history per anchor.
+        let selection = self.term.screen().selection_range();
+        // A row can repaint with its cells untouched: a palette change (OSC 4/10/11/12/104/110-112 or a
+        // host theme), DECSCNM, a selection drag or a search mark move no cell generation. Everything
+        // that can do that folds into one stamp, and rows are reused only while it is unchanged.
+        let appearance = self.appearance_stamp(selection, &search_ranges, active_mark);
+        let partial = self.sent.as_ref().is_some_and(|sent| {
+            Some(sent.revision) == since && sent.cols == self.size.cols && sent.hashes.len() == rows
+        });
+        // Pass 1 hashes every row that is not certified unchanged, without allocating, to learn which
+        // rows differ from the client's copy (the snapshot it was last sent, identified by `since`).
         // DECSCNM swaps every cell's colours, so it is part of every row's identity.
         let mut hashes = vec![mix(0xcbf2_9ce4_8422_2325_u64, u64::from(self.term.modes.reverse_video)); rows];
+        // A row whose identity and generation still match the certified build, under the same appearance,
+        // holds the same cells: its hash is reused and its cells are never read. A row that carried a
+        // placeholder is always rescanned, because decoding its fragments also reads the graphics state.
+        let mut rescan = vec![true; rows];
+        if let Some(sent) = self.sent.as_ref().filter(|sent| {
+            partial && sent.appearance == appearance && sent.stamps.len() == rows && sent.placeholders.len() == rows
+        }) {
+            let screen = self.term.screen();
+            for position in 0..rows {
+                let Some(row) = screen.viewport_line(position) else { continue };
+                if sent.placeholders[position] || sent.stamps[position] != (RowStamp { id: row.id, generation: row.generation }) {
+                    continue;
+                }
+                hashes[position] = sent.hashes[position];
+                rescan[position] = false;
+            }
+        }
         // Placeholder cells collected per visible row while hashing, so virtual
         // placements can be decoded into fragments after the pass.
         let mut placeholders: Vec<Vec<placeholder::Cell>> = vec![Vec::new(); rows];
         {
             let content = &self.term;
-            // Resolved once: the per-cell lookup must not rescan history for each anchor.
-            let selection = content.screen().selection_range();
-            for indexed in view_cells(content) {
-                let row = indexed.line + content.screen().offset as i32;
-                if row < 0 || row as usize >= rows {
+            let screen = content.screen();
+            let offset = screen.offset as i32;
+            for position in 0..rows {
+                if !rescan[position] {
                     continue;
                 }
-                let cell = indexed.cell;
-                let selected = content.screen().selected_in(selection, indexed.line, indexed.col);
-                let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.col, indexed.line);
-                let mut hash = mix(hashes[row as usize], u64::from(cell.ch) | (u64::from(cell.style.attrs) | u64::from(cell.style.underline) << 8 | u64::from(cell.width) << 16) << 32);
-                hash = mix(hash, pack(resolve(cell.style.fg, &content.palette)) << 32 | pack(resolve(cell.style.bg, &content.palette)));
-                hash = mix(hash, u64::from(selected) | u64::from(searched) << 1 | u64::from(active) << 2);
-                if !cell.combining.is_empty() { let extra = &cell.combining;
-                    for ch in extra {
-                        hash = mix(hash, u64::from(*ch));
+                let Some(row) = screen.viewport_line(position) else { continue };
+                let line = position as i32 - offset;
+                for (col, cell) in row.cells.iter().enumerate() {
+                    let selected = screen.selected_in(selection, line, col);
+                    let (searched, active) = search_marks(&search_ranges, active_mark, position as i32, col, line);
+                    // One presentation read per cell: the packed form unpacks its colours on
+                    // every call, and the hash, the glyph checks and the row text all need it.
+                    let style = cell.style();
+                    let mut hash = mix(hashes[position], u64::from(cell.ch) | (u64::from(style.attrs) | u64::from(style.underline) << 8 | u64::from(cell.width()) << 16) << 32);
+                    hash = mix(hash, pack(resolve(style.fg, &content.palette)) << 32 | pack(resolve(style.bg, &content.palette)));
+                    hash = mix(hash, u64::from(selected) | u64::from(searched) << 1 | u64::from(active) << 2);
+                    if !cell.combining().is_empty() {
+                        for ch in cell.combining() {
+                            hash = mix(hash, u64::from(*ch));
+                        }
                     }
-                }
-                if let Some(link) = cell.link_uri() {
-                    for byte in link.bytes() {
-                        hash = mix(hash, u64::from(byte));
+                    if let Some(link) = cell.link_uri() {
+                        for byte in link.bytes() {
+                            hash = mix(hash, u64::from(byte));
+                        }
                     }
+                    if let Some(color) = style.underline_color {
+                        hash = mix(hash, pack(resolve(color, &content.palette)) | 1 << 40);
+                    }
+                    if cell.ch == placeholder::PLACEHOLDER && placeholder::color_id(style.fg) != 0 {
+                        placeholders[position].push(placeholder::Cell {
+                            col,
+                            low: placeholder::color_id(style.fg),
+                            placement: style.underline_color.map_or(0, placeholder::color_id),
+                            marks: placeholder::marks(cell.combining()),
+                        });
+                    }
+                    hashes[position] = hash;
                 }
-                if let Some(color) = cell.style.underline_color {
-                    hash = mix(hash, pack(resolve(color, &content.palette)) | 1 << 40);
-                }
-                if cell.ch == placeholder::PLACEHOLDER && placeholder::color_id(cell.style.fg) != 0 {
-                    placeholders[row as usize].push(placeholder::Cell {
-                        col: indexed.col,
-                        low: placeholder::color_id(cell.style.fg),
-                        placement: cell.style.underline_color.map_or(0, placeholder::color_id),
-                        marks: placeholder::marks(&cell.combining),
-                    });
-                }
-                hashes[row as usize] = hash;
             }
         }
-        let partial = self.sent.as_ref().is_some_and(|sent| {
-            Some(sent.revision) == since && sent.cols == self.size.cols && sent.hashes.len() == rows
-        });
         let mut dirty: Vec<bool> = match (&self.sent, partial) {
             (Some(sent), true) => (0..rows).map(|r| sent.hashes[r] != hashes[r]).collect(),
             _ => vec![true; rows],
@@ -780,7 +867,6 @@ impl Model {
         let content = &self.term;
         // Blank cells that match the host's clear colour carry nothing beyond `lines`.
         let base_background = { let rgb = content.palette.base_background(); [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8] };
-        let selection = content.screen().selection_range();
         let mut cells = Vec::new();
         let mut text = vec![String::new(); rows];
         // A partial snapshot extends the retained table so unchanged rows keep valid indices. When the
@@ -790,23 +876,24 @@ impl Model {
             let mut fresh: Vec<&str> = Vec::new();
             let capacity = MAX_LINKS - self.links.len();
             let mut overflow = false;
-            for indexed in view_cells(content) {
-                let row = indexed.line + content.screen().offset as i32;
-                if row < 0 || row as usize >= rows || !dirty[row as usize] {
-                    continue;
+            let screen = content.screen();
+            'rows: for (position, changed) in dirty.iter().enumerate().take(rows) {
+                if !*changed { continue; }
+                let Some(row) = screen.viewport_line(position) else { continue };
+                for cell in &row.cells {
+                    let Some(link) = cell.link_uri() else { continue };
+                    if !link_target_usable(link)
+                        || self.links.iter().any(|known| known.as_str() == link)
+                        || fresh.contains(&link)
+                    {
+                        continue;
+                    }
+                    if fresh.len() >= capacity {
+                        overflow = true;
+                        break 'rows;
+                    }
+                    fresh.push(link);
                 }
-                let Some(link) = indexed.cell.link_uri() else { continue };
-                if !link_target_usable(link)
-                    || self.links.iter().any(|known| known.as_str() == link)
-                    || fresh.contains(&link)
-                {
-                    continue;
-                }
-                if fresh.len() >= capacity {
-                    overflow = true;
-                    break;
-                }
-                fresh.push(link);
             }
             if overflow {
                 dirty.fill(true);
@@ -817,79 +904,86 @@ impl Model {
         // OSC 8 targets are deduplicated into a bounded table; cells reference them by index.
         // A full snapshot rebuilds it; a partial one extends it so unchanged rows stay valid.
         let mut links: Vec<String> = if partial { std::mem::take(&mut self.links) } else { Vec::new() };
-        for indexed in view_cells(content) {
-            let row = indexed.line + content.screen().offset as i32;
-            if row < 0 || row as usize >= self.size.rows || !dirty[row as usize] {
-                continue;
+        // Only dirty rows reach the emitter: a partial snapshot with one changed row reads one row,
+        // not the whole grid. A reused row keeps its glyphs, hyperlinks and line on the client.
+        let screen = content.screen();
+        let offset = screen.offset as i32;
+        for position in 0..rows {
+            if !dirty[position] { continue; }
+            let Some(visible) = screen.viewport_line(position) else { continue };
+            let line = position as i32 - offset;
+            let row = position as i32;
+            for (col, cell) in visible.cells.iter().enumerate() {
+                let style = cell.style();
+                let width = cell.width();
+                let spacer = width == 0;
+                let hidden = style.attrs & cell::INVISIBLE != 0;
+                // A placeholder cell is an image slot; its glyph and marks stay blank
+                // so only the decoded fragment is drawn.
+                let slot = cell.ch == placeholder::PLACEHOLDER
+                    && placeholder::color_id(style.fg) != 0
+                    && placeholders[position]
+                        .binary_search_by_key(&col, |entry| entry.col)
+                        .is_ok();
+                let mut fg = resolve(style.fg, &content.palette);
+                let mut bg = resolve(style.bg, &content.palette);
+                if (style.attrs & cell::INVERSE != 0) != content.modes.reverse_video {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if style.attrs & cell::FAINT != 0 {
+                    fg = fg.map(|v| (v as f32 * 0.65) as u8);
+                }
+                let selected = screen.selected_in(selection, line, col);
+                let (searched, active) = search_marks(&search_ranges, active_mark, row, col, line);
+                // Row text carries every column. Appending the glyph directly avoids allocating a
+                // cell string for the blank cells omitted below; emitted cells copy just their own bytes.
+                let start = text[position].len();
+                if spacer || slot {
+                    // A wide-character spacer and an image slot draw no glyph of their own.
+                } else if hidden {
+                    text[position].push(' ');
+                } else {
+                    let row_text = &mut text[position];
+                    row_text.push(cell.ch);
+                    row_text.extend(cell.combining());
+                }
+                // Blank cells that draw as the clear colour carry no information beyond `lines`;
+                // skipping them shrinks a quiet screen's snapshot by more than 90%.
+                if style.attrs == 0 && style.underline == 0 && width == 1
+                    && cell.ch == ' '
+                    && cell.combining().is_empty()
+                    && !selected
+                    && !searched
+                    && !active
+                    && bg == base_background
+                    && cell.link_uri().is_none()
+                    && style.underline_color.is_none()
+                {
+                    continue;
+                }
+                let ustyle = (style.underline != 0).then_some(style.underline);
+                let flag = |set: bool, bit: u16| if set { bit } else { 0 };
+                let attrs = flag(style.attrs & cell::BOLD != 0, ATTR_BOLD)
+                    | flag(style.attrs & cell::ITALIC != 0, ATTR_ITALIC)
+                    | flag(style.underline != 0, ATTR_UNDERLINE)
+                    | flag(selected, ATTR_SELECTED)
+                    | flag(searched, ATTR_SEARCH)
+                    | flag(active, ATTR_ACTIVE_SEARCH)
+                    | flag(width == 2, ATTR_WIDE)
+                    | flag(style.attrs & cell::STRIKE != 0, ATTR_STRIKE)
+                    | u16::from(ustyle.unwrap_or(0)) << ATTR_USTYLE_SHIFT;
+                cells.push(CellOut {
+                    compact,
+                    row,
+                    col,
+                    text: text[position][start..].to_string(),
+                    fg,
+                    bg,
+                    attrs,
+                    ucolor: ustyle.and(style.underline_color).map(|color| resolve(color, &content.palette)),
+                    link: cell.link_uri().and_then(|link| link_index(&mut links, link)),
+                });
             }
-            let cell = indexed.cell;
-            let spacer = cell.width == 0;
-            let hidden = cell.style.attrs & cell::INVISIBLE != 0;
-            // A placeholder cell is an image slot; its glyph and marks stay blank
-            // so only the decoded fragment is drawn.
-            let slot = cell.ch == placeholder::PLACEHOLDER
-                && placeholder::color_id(cell.style.fg) != 0
-                && placeholders[row as usize]
-                    .binary_search_by_key(&indexed.col, |entry| entry.col)
-                    .is_ok();
-            let mut fg = resolve(cell.style.fg, &content.palette);
-            let mut bg = resolve(cell.style.bg, &content.palette);
-            if (cell.style.attrs & cell::INVERSE != 0) != content.modes.reverse_video {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.style.attrs & cell::FAINT != 0 {
-                fg = fg.map(|v| (v as f32 * 0.65) as u8);
-            }
-            let selected = content.screen().selected_in(selection, indexed.line, indexed.col);
-            let (searched, active) = search_marks(&search_ranges, active_mark, row, indexed.col, indexed.line);
-            // Row text carries every column. Appending the glyph directly avoids allocating a
-            // cell string for the blank cells omitted below; emitted cells copy just their own bytes.
-            let start = text[row as usize].len();
-            if spacer || slot {
-                // A wide-character spacer and an image slot draw no glyph of their own.
-            } else if hidden {
-                text[row as usize].push(' ');
-            } else {
-                let row_text = &mut text[row as usize];
-                row_text.push(cell.ch);
-                if !cell.combining.is_empty() { let extra = &cell.combining; row_text.extend(extra); }
-            }
-            // Blank cells that draw as the clear colour carry no information beyond `lines`;
-            // skipping them shrinks a quiet screen's snapshot by more than 90%.
-            if cell.style.attrs == 0 && cell.style.underline == 0 && cell.width == 1
-                && cell.ch == ' '
-                && cell.combining.is_empty()
-                && !selected
-                && !searched
-                && !active
-                && bg == base_background
-                && cell.link_uri().is_none()
-                && cell.style.underline_color.is_none()
-            {
-                continue;
-            }
-            let ustyle = (cell.style.underline != 0).then_some(cell.style.underline);
-            let flag = |set: bool, bit: u16| if set { bit } else { 0 };
-            let attrs = flag(cell.style.attrs & cell::BOLD != 0, ATTR_BOLD)
-                | flag(cell.style.attrs & cell::ITALIC != 0, ATTR_ITALIC)
-                | flag(cell.style.underline != 0, ATTR_UNDERLINE)
-                | flag(selected, ATTR_SELECTED)
-                | flag(searched, ATTR_SEARCH)
-                | flag(active, ATTR_ACTIVE_SEARCH)
-                | flag(cell.width == 2, ATTR_WIDE)
-                | flag(cell.style.attrs & cell::STRIKE != 0, ATTR_STRIKE)
-                | u16::from(ustyle.unwrap_or(0)) << ATTR_USTYLE_SHIFT;
-            cells.push(CellOut {
-                compact,
-                row,
-                col: indexed.col,
-                text: text[row as usize][start..].to_string(),
-                fg,
-                bg,
-                attrs,
-                ucolor: ustyle.and(cell.style.underline_color).map(|color| resolve(color, &content.palette)),
-                link: cell.link_uri().and_then(|link| link_index(&mut links, link)),
-            });
         }
         let alternate = content.modes.alternate;
         // Drawn placements are bounded by the graphics limits, not cut here.
@@ -1003,6 +1097,29 @@ impl Model {
             shift,
         };
         self.links = links;
+        // The certificate the client's copy now describes: which row sat at each viewport position
+        // and at which generation, the appearance it was painted under, and the rows whose fragments
+        // came from the graphics state rather than their own cells.
+        let stamps: Vec<RowStamp> = (0..rows)
+            .map(|position| {
+                content
+                    .screen()
+                    .viewport_line(position)
+                    .map_or(RowStamp { id: 0, generation: 0 }, |row| RowStamp { id: row.id, generation: row.generation })
+            })
+            .collect();
+        let placeholder_rows: Vec<bool> = placeholders.iter().map(|cells| !cells.is_empty()).collect();
+        // Test-only: visible cells this snapshot's hash pass actually read. A row certified unchanged
+        // contributes none, which is what makes the fast path observable instead of assumed.
+        #[cfg(test)]
+        let scanned = (0..rows)
+            .filter(|position| rescan[*position])
+            .filter_map(|position| content.screen().viewport_line(position).map(|row| row.cells.len()))
+            .sum::<usize>();
+        // Test-only: no production build pays for the tally, and the placeholder binding keeps
+        // clippy's `let_unit_value` quiet on the assignment it replaces.
+        #[cfg(test)]
+        let _previous_tally = std::mem::replace(&mut self.scanned_cells, scanned);
         Ok(Some((
             value,
             SnapshotCommit {
@@ -1013,10 +1130,66 @@ impl Model {
                 revision: self.revision,
                 cols: self.size.cols,
                 hashes,
+                stamps,
+                appearance,
+                placeholders: placeholder_rows,
                 crowded,
             },
         )))
     }
+    /// The state that repaints a row without moving its content generation. Rows are reused only
+    /// while this is unchanged, so anything uncertain here costs a rescan, never a stale frame.
+    fn appearance_stamp(&self, selection: Option<(Position, Position)>, search_ranges: &[Vec<(usize, usize)>], active: Option<(i32, usize, usize)>) -> u64 {
+        // DECSCNM swaps every cell's colours and the geometry decides which row a position holds.
+        let mut stamp = mix(0x9e37_79b9_7f4a_7c15, u64::from(self.term.modes.reverse_video));
+        stamp = mix(stamp, (self.term.cols() as u64) << 32 | self.term.rows() as u64);
+        stamp = mix(stamp, palette_stamp(&self.term.palette));
+        // A selection drag or a search step repaints rows whose generation never moves.
+        match selection {
+            Some((start, end)) => {
+                stamp = mix(stamp, 1);
+                stamp = mix(stamp, start.row as u64);
+                stamp = mix(stamp, start.col as u64);
+                stamp = mix(stamp, end.row as u64);
+                stamp = mix(stamp, end.col as u64);
+            }
+            None => stamp = mix(stamp, 0),
+        }
+        match active {
+            Some((line, start, end)) => {
+                stamp = mix(stamp, 1);
+                stamp = mix(stamp, line as u64);
+                stamp = mix(stamp, start as u64);
+                stamp = mix(stamp, end as u64);
+            }
+            None => stamp = mix(stamp, 0),
+        }
+        stamp = mix(stamp, search_ranges.len() as u64);
+        for spans in search_ranges {
+            stamp = mix(stamp, spans.len() as u64);
+            for (start, end) in spans {
+                stamp = mix(stamp, *start as u64);
+                stamp = mix(stamp, *end as u64);
+            }
+        }
+        // Placeholder fragments are decoded per cell pixel.
+        stamp = mix(stamp, u64::from(self.cell_px.0) << 32 | u64::from(self.cell_px.1));
+        stamp
+    }
+}
+
+/// Every colour a cell can resolve through, so an OSC 4/10/11/12/104/110-112 or host theme change
+/// invalidates the row certificate even though no row generation moved. The palette is small
+/// (259 slots), and this runs once per snapshot rather than once per cell.
+fn palette_stamp(palette: &Palette) -> u64 {
+    let mut stamp = mix(0xcbf2_9ce4_8422_2325, u64::from(palette.resolve(Color::Foreground)));
+    stamp = mix(stamp, u64::from(palette.resolve(Color::Background)));
+    stamp = mix(stamp, u64::from(palette.base_background()));
+    stamp = mix(stamp, palette.cursor().map_or(u64::MAX, u64::from));
+    for index in 0..=u8::MAX {
+        stamp = mix(stamp, u64::from(palette.resolve(Color::Indexed(index))));
+    }
+    stamp
 }
 
 fn search_marks(ranges: &[Vec<(usize, usize)>], active: Option<(i32, usize, usize)>, row: i32, col: usize, line: i32) -> (bool, bool) {
@@ -1037,16 +1210,15 @@ fn line_matches(term: &Terminal, line: i32, query: &str) -> Vec<(usize, usize)> 
     let mut col = 0usize;
     while col < limit {
         let cell = &row.cells[col];
-        if cell.width == 0 {
+        let cell_width = cell.width();
+        if cell_width == 0 {
             col += 1;
             continue;
         }
-        let width = if cell.width == 2 { 2 } else { 1 };
+        let width = if cell_width == 2 { 2 } else { 1 };
         glyphs.push((text.len(), col, width));
         text.push(cell.ch);
-        if !cell.combining.is_empty() { let extra = &cell.combining;
-            for ch in extra { text.push(*ch); }
-        }
+        text.extend(cell.combining());
         col += 1;
     }
     let mut found = Vec::new();
@@ -1200,12 +1372,6 @@ fn resolve(color: Color, colors: &Palette) -> [u8; 3] {
 fn clock_origin() -> Instant { *CLOCK.get_or_init(Instant::now) }
 static CLOCK: OnceLock<Instant> = OnceLock::new();
 fn clock_ms() -> u64 { clock_origin().elapsed().as_millis().min(u128::from(u64::MAX)) as u64 }
-struct VisibleCell<'a> { line: i32, col: usize, cell: &'a Cell }
-fn view_cells(term: &Terminal) -> impl Iterator<Item = VisibleCell<'_>> {
-    let screen = term.screen();
-    (0..term.rows()).filter_map(move |row| screen.viewport_line(row).map(|line| (row as i32 - screen.offset as i32, line)))
-        .flat_map(|(line, data)| data.cells.iter().enumerate().map(move |(col, cell)| VisibleCell { line, col, cell }))
-}
 
 #[cfg(test)]
 mod tests {
@@ -1219,6 +1385,46 @@ mod tests {
         assert!(model.expire_sync().is_empty());
     }
     use super::*;
+    #[test]
+    fn a_plain_run_passes_through_without_disturbing_a_split_osc() {
+        let stream: &[u8] = b"pre\x1b]771;{\"v\":1}\x1b\\post";
+        let mut whole = Model::new(Size::validate(24, 4).unwrap(), 100);
+        whole.feed(stream);
+        let expected = whole.snapshot(None);
+        // The middle run has no escape, so it takes the pass-through path even though an OSC is
+        // still open: it must extend the document body instead of printing to the grid.
+        let mut split = Model::new(Size::validate(24, 4).unwrap(), 100);
+        split.feed(b"pre\x1b]771;");
+        split.feed(b"{\"v\":1}");
+        split.feed(b"\x1b\\post");
+        let split = split.snapshot(None);
+        // Three feeds advance the revision three times, so compare the screen, not the counter.
+        assert_eq!(split["lines"], expected["lines"]);
+        assert_eq!(split["cells"], expected["cells"]);
+        assert_eq!(split["cursor"], expected["cursor"]);
+        assert_eq!(split["lines"][0], "prepost                 ", "the body must not reach the grid");
+        // And a plain run between two complete sequences leaves no escape in the grid.
+        let mut model = Model::new(Size::validate(24, 4).unwrap(), 100);
+        model.feed(b"a\x1b[31m");
+        model.feed(b"red");
+        model.feed(b"\x1b[0mz");
+        assert_eq!(model.snapshot(None)["lines"][0].as_str().unwrap().trim_end(), "aredz");
+    }
+
+    #[test]
+    fn the_parser_event_buffer_is_reused_between_feeds() {
+        let mut model = Model::new(Size::validate(20, 3).unwrap(), 100);
+        assert_eq!(model.event_scratch.capacity(), 0, "the buffer starts empty");
+        model.feed(b"ding\x07");
+        let capacity = model.event_scratch.capacity();
+        assert!(capacity > 0, "a bell is buffered through the reusable event vector");
+        for _ in 0..8 {
+            model.feed(b"ding\x07");
+        }
+        assert_eq!(model.event_scratch.capacity(), capacity, "later feeds reuse the buffer");
+        assert_eq!(model.bell_counts(), (9, 0));
+    }
+
     #[test]
     fn split_every_byte_boundary_matches_whole_stream() {
         let stream = "abc\x1b[2;4H中e\u{301}😀\x1b[31mRED\x1b[0m".as_bytes();
@@ -1766,13 +1972,13 @@ mod tests {
         let mut model = Model::new(Size::validate(20, 4).unwrap(), 100);
         let flood = format!("a{}b", "\u{301}".repeat(10_000));
         model.feed(flood.as_bytes());
-        let first = model.term.screen().rows[0].cells[0].combining.len();
+        let first = model.term.screen().rows[0].cells[0].combining().len();
         assert_eq!(first, cell::MAX_COMBINING);
         // Output after the flood still lands normally in the next cell.
         assert_eq!(model.term.screen().rows[0].cells[1].ch, 'b');
         // A wide character takes its marks on the leading cell, under the same cap.
         model.feed(format!("\r\n\u{4e2d}{}", "\u{301}".repeat(100)).as_bytes());
-        let wide = model.term.screen().rows[1].cells[0].combining.len();
+        let wide = model.term.screen().rows[1].cells[0].combining().len();
         assert_eq!(wide, cell::MAX_COMBINING);
     }
 
@@ -2132,5 +2338,383 @@ mod tests {
         let mut block = Vec::new();
         assert!(!push_binary_cell(&mut block, &long));
         assert!(block.is_empty(), "a rejected cell must not leave a partial block");
+    }
+    /// Feeds `steps` the way a polling client does, merging each snapshot into a client copy and checking it
+    /// against a second model that saw the same bytes and answers with a full snapshot. Returns each snapshot
+    /// with the number of visible cells its hash pass actually read.
+    fn certified_steps(steps: &[&[u8]], cols: usize, rows: usize) -> Vec<(Value, usize)> {
+        let size = Size::validate(cols, rows).unwrap();
+        let mut model = Model::new(size, 100);
+        let mut client: (Vec<Value>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut since = None;
+        let mut sent = Vec::new();
+        for (index, step) in steps.iter().enumerate() {
+            model.feed(step);
+            let snapshot = model.snapshot(since);
+            apply(&mut client, &snapshot, cols);
+            since = snapshot["revision"].as_u64();
+            let mut fresh = Model::new(size, 100);
+            for earlier in &steps[..=index] {
+                fresh.feed(earlier);
+            }
+            let full = fresh.snapshot(None);
+            let mut expected: Vec<Value> = full["cells"].as_array().unwrap().clone();
+            expected.sort_by_key(|c| (c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap()));
+            assert_eq!(client.0, expected, "cells diverged after step {index}");
+            let lines: Vec<String> = full["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(client.1, lines, "lines diverged after step {index}");
+            sent.push((snapshot, model.scanned_cells));
+        }
+        sent
+    }
+    #[test]
+    fn an_unchanged_screen_reuses_its_row_hashes_without_reading_cells() {
+        let mut model = Model::new(Size::validate(12, 3).unwrap(), 100);
+        model.feed(b"one\r\ntwo\r\nthree");
+        let first = model.snapshot(None);
+        assert_eq!(
+            model.scanned_cells, 36,
+            "a full snapshot reads every visible cell"
+        );
+        // A pen reset writes no cell, so every row keeps its identity and generation.
+        model.feed(b"\x1b[0m");
+        let snapshot = model.snapshot(first["revision"].as_u64());
+        assert_eq!(snapshot["partial"], true);
+        assert_eq!(snapshot["dirty"], json!([]));
+        assert_eq!(
+            snapshot["lines"],
+            json!([]),
+            "an unchanged partial carries no row text"
+        );
+        assert!(snapshot.get("shift").is_none());
+        assert_eq!(model.scanned_cells, 0, "certified rows are never rescanned");
+    }
+    #[test]
+    fn a_styled_row_survives_while_another_row_changes() {
+        let steps: [&[u8]; 2] = [
+                b"\x1b[1;4:3;58;5;9mA\x1b]8;;https://a.test/x\x07L\x1b]8;;\x07\x1b[0m\x1b[38;2;10;20;30mT\r\nplain",
+                b"\x1b[3;1Hdirty",
+            ];
+        let sent = certified_steps(&steps, 20, 3);
+        assert_eq!(sent[1].0["partial"], true);
+        assert_eq!(
+            sent[1].0["dirty"],
+            json!([2]),
+            "only the changed row is sent"
+        );
+        assert_eq!(sent[1].1, 20, "one rescanned row, not the grid");
+        // The reused rows keep valid hyperlink indices into the retained table.
+        assert_eq!(sent[1].0["links"], sent[0].0["links"]);
+    }
+    #[test]
+    fn an_osc4_palette_change_repaints_certified_rows() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed(b"\x1b[31mred");
+        let first = model.snapshot(None);
+        let before = first["cells"][0]["fg"].clone();
+        assert_ne!(before, json!([255, 0, 0]));
+        // OSC 4 rewrites palette slot 1 without writing a single cell, so no generation moves.
+        model.feed(b"\x1b]4;1;rgb:ff/00/00\x07");
+        let snapshot = model.snapshot(first["revision"].as_u64());
+        assert_eq!(
+            snapshot["cells"][0]["fg"],
+            json!([255, 0, 0]),
+            "a reused hash would have kept the old red"
+        );
+        assert_eq!(model.scanned_cells, 20, "a palette change rescans the grid");
+    }
+    #[test]
+    fn an_osc11_override_and_its_reset_repaint_certified_rows() {
+        let mut model = Model::new(Size::validate(10, 2).unwrap(), 100);
+        model.feed(b"text");
+        let first = model.snapshot(None);
+        let plain_cells = first["cells"].as_array().unwrap().len();
+        let mut since = first["revision"].as_u64();
+        // The program's default background stops matching the host's clear colour, so blank cells are
+        // sent explicitly instead of being omitted behind `lines`.
+        model.feed(b"\x1b]11;rgb:00/00/ff\x07");
+        let overridden = model.snapshot(since);
+        assert!(
+            overridden["cells"].as_array().unwrap().len() > plain_cells,
+            "blank cells now carry a colour"
+        );
+        assert_eq!(overridden["cells"][0]["bg"], json!([0, 0, 255]));
+        since = overridden["revision"].as_u64();
+        // OSC 111 restores the host background, so the blank cells are omitted again.
+        model.feed(b"\x1b]111\x07");
+        let restored = model.snapshot(since);
+        assert_eq!(restored["cells"].as_array().unwrap().len(), plain_cells);
+    }
+    #[test]
+    fn reverse_video_repaints_certified_rows_and_matches_a_fresh_snapshot() {
+        let steps: [&[u8]; 4] = [b"\x1b[31;44mhello", b"\x1b[?5h", b"\x1b[?5l", b"\x1b[?5h"];
+        let sent = certified_steps(&steps, 12, 3);
+        // Every row repaints, so the partial buys nothing and the answer is a full snapshot.
+        assert!(sent[1].0.get("partial").is_none());
+        assert_eq!(
+            sent[1].0["cells"].as_array().unwrap().len(),
+            36,
+            "DECSCNM repaints every row"
+        );
+        assert_eq!(
+            sent[1].1, 36,
+            "DECSCNM rescans rather than reusing the swapped-off hashes"
+        );
+        assert_eq!(
+            sent[2].0["cells"][0]["fg"], sent[0].0["cells"][0]["fg"],
+            "switching back restores the foreground"
+        );
+        assert_eq!(
+            sent[2].0["cells"][0]["bg"], sent[0].0["cells"][0]["bg"],
+            "switching back restores the background"
+        );
+    }
+    #[test]
+    fn adding_and_removing_a_selection_repaints_certified_rows() {
+        let mut model = Model::new(Size::validate(12, 3).unwrap(), 100);
+        model.feed(b"alpha\r\nbeta\r\ngamma");
+        let first = model.snapshot(None);
+        let mut since = first["revision"].as_u64();
+        // A drag selects row 1 without touching a cell.
+        model
+            .term
+            .screen_mut()
+            .select(Position { row: 1, col: 0 }, Position { row: 1, col: 3 });
+        model.revision += 1;
+        let selected = model.snapshot(since);
+        assert_eq!(selected["partial"], true);
+        assert_eq!(
+            selected["dirty"],
+            json!([1]),
+            "only the selected row is sent"
+        );
+        assert!(selected["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["row"] == 1 && c["selected"] == true));
+        // The appearance stamp is global: the change costs a full rescan, but only the row that
+        // actually repaints goes on the wire.
+        assert_eq!(model.scanned_cells, 36);
+        since = selected["revision"].as_u64();
+        model.term.screen_mut().selection = None;
+        model.revision += 1;
+        let cleared = model.snapshot(since);
+        assert_eq!(cleared["dirty"], json!([1]));
+        assert!(
+            !cleared["cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["selected"] == true),
+            "the highlight is gone"
+        );
+    }
+    #[test]
+    fn adding_and_removing_a_search_mark_repaints_certified_rows() {
+        let mut model = Model::new(Size::validate(12, 3).unwrap(), 100);
+        model.feed(b"alpha\r\nbeta\r\nalpha again");
+        let first = model.snapshot(None);
+        let mut since = first["revision"].as_u64();
+        model.find = Some(FindMark {
+            query: "alpha".into(),
+            line: 2,
+            start_col: 0,
+            end_col: 5,
+        });
+        model.revision += 1;
+        let marked = model.snapshot(since);
+        assert_eq!(marked["partial"], true);
+        assert_eq!(marked["dirty"], json!([0, 2]), "both hits repaint");
+        assert!(marked["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["search"] == true));
+        assert!(marked["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["active_search"] == true));
+        since = marked["revision"].as_u64();
+        model.find = None;
+        model.revision += 1;
+        let cleared = model.snapshot(since);
+        assert_eq!(cleared["dirty"], json!([0, 2]));
+        assert!(!cleared["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["search"] == true || c["active_search"] == true));
+    }
+    #[test]
+    fn ed2_ed3_and_ris_never_reuse_a_forgotten_row() {
+        let steps: [&[u8]; 6] = [
+            b"keep\r\nthis",
+            b"\x1b[2J",
+            b"\x1b[Hafter",
+            b"\x1b[3J",
+            b"\x1bctop",
+            b"\x1bc",
+        ];
+        let sent = certified_steps(&steps, 12, 3);
+        assert_eq!(
+            sent[1].0["cells"].as_array().unwrap().len(),
+            0,
+            "ED2 leaves a blank screen"
+        );
+        assert_eq!(
+            sent[2].0["cells"].as_array().unwrap().len(),
+            5,
+            "the next glyphs land on the cleared grid"
+        );
+        assert_eq!(
+            sent[3].0["dirty"],
+            json!([]),
+            "ED3 clears scrollback, so no row repaints"
+        );
+        assert_eq!(
+            sent[5].0["cells"].as_array().unwrap().len(),
+            0,
+            "RIS leaves a blank screen"
+        );
+    }
+    #[test]
+    fn a_scroll_keeps_the_shift_shape_and_rescans_the_moved_rows() {
+        let steps: [&[u8]; 3] = [b"one\r\ntwo\r\nthree", b"\r\nfour", b"\r\nfive\r\nsix"];
+        let sent = certified_steps(&steps, 12, 3);
+        assert_eq!(sent[1].0["partial"], true);
+        assert_eq!(sent[1].0["shift"], 1);
+        assert_eq!(
+            sent[1].0["dirty"],
+            json!([2]),
+            "the rows Swift shifts up stay out of the wire"
+        );
+        assert_eq!(
+            sent[1].1, 36,
+            "moved rows sit at new positions, so the grid is rescanned"
+        );
+    }
+    #[test]
+    fn a_resize_reflow_drops_the_certificate_and_matches_a_fresh_snapshot() {
+        let mut model = Model::new(Size::validate(20, 3).unwrap(), 100);
+        model.feed(b"abcdefghijklmnop");
+        let first = model.snapshot(None);
+        // Reflow moves cells between rows without moving their generation and keeps their ids.
+        model.resize_grid(Size::validate(10, 4).unwrap());
+        model.size = Size::validate(10, 4).unwrap();
+        model.revision += 1;
+        let resized = model.snapshot(first["revision"].as_u64());
+        assert!(
+            resized.get("partial").is_none(),
+            "a new grid is always a full snapshot"
+        );
+        assert_eq!(model.scanned_cells, 40);
+        let mut client = (Vec::new(), Vec::new());
+        apply(&mut client, &resized, 10);
+        let mut fresh = Model::new(Size::validate(20, 3).unwrap(), 100);
+        fresh.feed(b"abcdefghijklmnop");
+        fresh.resize_grid(Size::validate(10, 4).unwrap());
+        fresh.size = Size::validate(10, 4).unwrap();
+        let full = fresh.snapshot(None);
+        let mut expected: Vec<Value> = full["cells"].as_array().unwrap().clone();
+        expected.sort_by_key(|c| (c["row"].as_u64().unwrap(), c["col"].as_u64().unwrap()));
+        assert_eq!(client.0, expected);
+    }
+    #[test]
+    fn a_crowded_link_table_drops_the_certificate_for_the_next_poll() {
+        let size = Size::validate(24, 24).unwrap();
+        let mut model = Model::new(size, 200);
+        // Five distinct targets on every row: the retained table starts below the crowded threshold.
+        let mut burst = String::new();
+        for row in 1..=24 {
+            for col in 1..=5 {
+                burst.push_str(&format!(
+                    "\x1b[{};{}H\x1b]8;;https://h/{row}/{col}\x07x\x1b]8;;\x07",
+                    row, col
+                ));
+            }
+        }
+        model.feed(burst.as_bytes());
+        let first = model.snapshot(None);
+        assert_eq!(model.links.len(), 120);
+        // One more target on twenty of the rows pushes the table past MAX_LINKS / 2 on a partial build;
+        // the four untouched rows keep the answer partial instead of a full snapshot.
+        let mut more = String::new();
+        for row in 1..=20 {
+            more.push_str(&format!(
+                "\x1b[{};6H\x1b]8;;https://h/{row}/6\x07x\x1b]8;;\x07",
+                row
+            ));
+        }
+        model.feed(more.as_bytes());
+        let snapshot = model.snapshot(first["revision"].as_u64());
+        assert_eq!(snapshot["partial"], true);
+        assert!(model.links.len() > MAX_LINKS / 2);
+        assert!(
+            model.sent.is_none(),
+            "a crowded table drops the baseline and its certificate"
+        );
+        model.feed(b"\x1b[1;1HZ");
+        let retry = model.snapshot(snapshot["revision"].as_u64());
+        assert!(
+            retry.get("partial").is_none(),
+            "no diff against a dropped baseline"
+        );
+    }
+    #[test]
+    fn an_oversized_snapshot_drops_the_certificate_before_the_retry() {
+        let mut model = Model::new(Size::validate(30, 4).unwrap(), 100);
+        model.feed(b"alpha\r\nbeta");
+        let first = model.snapshot(None);
+        let since = first["revision"].as_u64().unwrap();
+        model.feed(b"\r\ngamma");
+        assert!(model.snapshot_json_within(Some(since), true, 16).is_err());
+        assert!(
+            model.sent.is_none(),
+            "a snapshot the client never received leaves no baseline"
+        );
+        let retry = model.snapshot(Some(since));
+        assert!(
+            retry.get("partial").is_none(),
+            "the retry is a full snapshot"
+        );
+        assert_eq!(
+            retry["cells"].as_array().unwrap().len(),
+            14,
+            "5 + 4 + 5 glyphs"
+        );
+    }
+    #[test]
+    fn a_placeholder_row_is_always_rescanned_so_its_fragments_survive() {
+        let mut model = Model::new(Size::validate(30, 3).unwrap(), 100);
+        model.cell_px = (8, 16);
+        model.feed(
+            format!("\x1b_Ga=t,f=24,s=2,v=2,i=5,q=2;{PIXEL}\x1b\\\x1b_Ga=p,U=1,i=5,c=2,r=1,q=2\x1b\\")
+                .as_bytes(),
+        );
+        model.feed("\x1b[38;2;0;0;5m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\x1b[0m!".as_bytes());
+        let first = model.snapshot(None);
+        let images = first["images"].as_array().unwrap().len();
+        assert!(images > 0, "{first}");
+        model.feed(b"\x1b[0m");
+        let snapshot = model.snapshot(first["revision"].as_u64());
+        assert_eq!(snapshot["dirty"], json!([]));
+        // Fragment decoding reads the graphics state, which no cell generation covers, so the row that
+        // holds the placeholders is rescanned even though its cells are unchanged.
+        assert_eq!(
+            model.scanned_cells, 30,
+            "only the placeholder row is rescanned"
+        );
+        assert_eq!(
+            snapshot["images"].as_array().unwrap().len(),
+            images,
+            "the fragments still reach the client"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! Screen storage with bounded history and stable row identities.
 
-use crate::cell::{Cell, Color, Link};
+use crate::cell::{Cell, Color};
 use std::collections::VecDeque;
 
 pub const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
@@ -15,6 +15,34 @@ pub struct Position {
 pub struct Cursor {
     pub position: Position,
     pub pending_wrap: bool,
+}
+
+/// Distinct side records a row is charged for, maintained as cells are written.
+///
+/// A row is blanked to a heap-free background, and writes then advance left to right
+/// (`prefix`). Everything at or beyond `prefix` is still such a blank, so a run of
+/// writes only ever adds identities and tracking stays O(1) per run. Any write that
+/// rewrites accounted cells, or a bulk edit, drops the cache and the next `bytes()`
+/// recounts exactly.
+#[derive(Clone, Copy, Debug)]
+struct Charge {
+    /// Columns whose cells are reflected in `total`.
+    prefix: usize,
+    /// Heap bytes of the distinct records inside the prefix.
+    total: usize,
+    /// Record identities counted so far (compared only, never dereferenced).
+    keys: [usize; CHARGE_KEYS],
+    used: usize,
+}
+
+/// Distinct records tracked per row without allocating. A row normally holds one or
+/// two; a row that needs more falls back to an exact recount instead of growing.
+const CHARGE_KEYS: usize = 4;
+
+impl Charge {
+    const fn fresh() -> Self {
+        Self { prefix: 0, total: 0, keys: [0; CHARGE_KEYS], used: 0 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -37,12 +65,15 @@ pub struct Row {
     /// written-space state. Every cell mutation extends it; resize invalidates it.
     modified_end: usize,
     modified_gen: u64,
-    /// Whether any cell in this row may own heap (combining marks or a hyperlink).
+    /// Whether any cell in this row may own heap (combining marks, a hyperlink, or
+    /// presentation kept in a cell's side record).
     /// `false` certifies every cell is heap-free, letting `bytes()` skip the per-cell
-    /// scan. It is set when combining/link is attached and cleared only by a full
-    /// blank; a stale `true` merely over-counts (safe), while a stale `false` would
+    /// scan. It is set when side data is attached and cleared only by a full blank;
+    /// a stale `true` merely over-counts (safe), while a stale `false` would
     /// under-count the history budget, so resize conservatively re-sets it.
     has_heap: bool,
+    /// Incremental history charge, or `None` when an edit needs an exact recount.
+    charge: Option<Charge>,
 }
 
 impl Row {
@@ -55,36 +86,125 @@ impl Row {
     pub fn text(&self) -> String {
         self.cells
             .iter()
-            .filter(|c| c.width != 0)
+            .filter(|c| c.width() != 0)
             .map(Cell::text)
             .collect()
     }
+    /// Bytes this row is charged in the history budget: its cell storage plus the side
+    /// records it owns. Records shared by a whole run are counted once; a record shared
+    /// with another row is charged in each of them (never an under-count).
     fn bytes(&self) -> usize {
         let base = self.cells.capacity() * std::mem::size_of::<Cell>();
         if !self.has_heap {
             return base;
         }
-        base + self
-            .cells
-            .iter()
-            .map(|c| {
-                c.combining.heap_bytes()
-                    + c.link
-                        .as_ref()
-                        .map_or(0, |l| std::mem::size_of::<Link>() + l.uri.len())
-            })
-            .sum::<usize>()
+        match &self.charge {
+            Some(charge) => {
+                // The incremental charge must equal an independent recount; tests run
+                // this check so any missed accounting hook fails loudly.
+                #[cfg(test)]
+                assert_eq!(
+                    charge.total,
+                    crate::cell::side_bytes(&self.cells),
+                    "row {} incremental charge drifted (prefix {} of {}, heap cells {}, used {})",
+                    self.id,
+                    charge.prefix,
+                    self.cells.len(),
+                    self.cells.iter().filter(|c| c.side_bytes() > 0).count(),
+                    charge.used
+                );
+                base + charge.total
+            }
+            None => base + crate::cell::side_bytes(&self.cells),
+        }
+    }
+    /// Account for `count` cells written at `col` with the side record `side`.
+    pub(crate) fn charge_write(&mut self, col: usize, count: usize, side: Option<(usize, usize)>) {
+        let Some(charge) = &mut self.charge else { return };
+        if count == 0 || col < charge.prefix || col + count > self.cells.len() {
+            self.charge = None;
+            return;
+        }
+        if let Some((key, bytes)) = side
+            && !charge.keys[..charge.used].contains(&key)
+        {
+            if charge.used == CHARGE_KEYS {
+                self.charge = None;
+                return;
+            }
+            charge.keys[charge.used] = key;
+            charge.used += 1;
+            charge.total += bytes;
+        }
+        charge.prefix = charge.prefix.max(col + count);
+        #[cfg(test)]
+        {
+            let actual = crate::cell::side_bytes(&self.cells);
+            let cached = self.charge.map_or(actual, |charge| charge.total);
+            assert_eq!(
+                cached,
+                actual,
+                "charge_write({col}, {count}) left row {} inconsistent: charge {:?} cells {:?}",
+                self.id,
+                self.charge.map(|charge| (charge.prefix, charge.total, charge.used)),
+                self.cells.iter().map(|cell| (cell.ch, cell.side_bytes())).collect::<Vec<_>>()
+            );
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn assert_charge_matches_recount(&self, context: &str) {
+        let actual = crate::cell::side_bytes(&self.cells);
+        if let Some(charge) = self.charge {
+            assert_eq!(
+                charge.total, actual,
+                "row {} drifted after {context:?} (prefix {} of {}, cells {:?})",
+                self.id,
+                charge.prefix,
+                self.cells.len(),
+                self.cells.iter().map(|cell| (cell.ch, cell.side_bytes())).collect::<Vec<_>>()
+            );
+        }
+    }
+    /// Drop the cache: the cells changed in a way only a recount can price.
+    pub(crate) fn charge_unknown(&mut self) {
+        self.charge = None;
+    }
+    /// The row was rewritten with cells that own no side record (a uniform fill of
+    /// plain cells), so nothing is charged while all cells stay above the prefix.
+    pub(crate) fn charge_plain(&mut self) {
+        self.charge = Some(Charge::fresh());
+    }
+    /// The row is exactly `bg` blanks again.
+    fn charge_blank(&mut self, bg: Color) {
+        self.charge = if Cell::blank_owns_heap(bg) { None } else { Some(Charge::fresh()) };
+    }
+    /// The row's history charge, for accounting tests.
+    #[cfg(test)]
+    pub(crate) fn bytes_for_test(&self) -> usize {
+        self.bytes()
+    }
+    /// An independent full recount of the same charge, for accounting tests.
+    #[cfg(test)]
+    pub(crate) fn recount_for_test(&self) -> usize {
+        let base = self.cells.capacity() * std::mem::size_of::<Cell>();
+        if !self.has_heap {
+            return base;
+        }
+        base + crate::cell::side_bytes(&self.cells)
     }
     /// True when the cells are known to be exactly `cols` blanks of `bg`.
     pub(crate) fn is_blank(&self, bg: Color) -> bool {
         self.blank_gen == self.generation && self.blank_bg == bg
     }
     /// Record that the cells were just fully blanked with `bg` at the current generation.
-    /// A fully blanked row owns no combining marks or links, so the heap flag clears too.
+    ///
+    /// A blank cell of an RGB background cannot be packed, so it owns a side record: the
+    /// row still owns heap and the flag must stay set. Clearing it unconditionally would
+    /// make `bytes()` report base-only and let the history budget be bypassed.
     pub(crate) fn mark_blank(&mut self, bg: Color) {
         self.blank_gen = self.generation;
         self.blank_bg = bg;
-        self.has_heap = false;
+        self.has_heap = Cell::blank_owns_heap(bg);
         self.modified_end = 0;
         self.modified_gen = self.generation;
     }
@@ -110,12 +230,31 @@ impl Row {
         let end = if self.is_blank(bg) { 0 }
             else if self.blank_bg == bg && self.modified_gen == self.generation { self.modified_end }
             else { self.cells.len() };
-        self.cells[..end].fill(Cell::blank(bg));
+        self.fill_blank_to(end, bg);
+        self.charge_blank(bg);
         self.mark_blank(bg);
     }
-    /// Record that a cell in this row now owns heap (combining marks or a hyperlink).
+    /// Record that a cell in this row now owns heap (a side record with combining
+    /// marks, a hyperlink, or presentation the packed word cannot hold).
     pub(crate) fn mark_heap(&mut self) {
         self.has_heap = true;
+    }
+    /// Install a blank cell, keeping the heap flag honest: an RGB background cannot be
+    /// packed, so the blank owns a side record and the row must keep counting it.
+    pub(crate) fn put_blank(&mut self, col: usize, bg: Color) {
+        self.cells[col] = Cell::blank(bg);
+        self.has_heap |= Cell::blank_owns_heap(bg);
+        self.charge = None;
+    }
+    /// Fill a column range with blanks, allocating one shared record for the range.
+    pub(crate) fn fill_blank(&mut self, range: std::ops::Range<usize>, bg: Color) {
+        self.cells[range.clone()].fill(Cell::blank(bg));
+        self.has_heap |= Cell::blank_owns_heap(bg);
+        self.charge = None;
+    }
+    /// Fill the first `end` columns with blanks.
+    pub(crate) fn fill_blank_to(&mut self, end: usize, bg: Color) {
+        self.fill_blank(0..end, bg);
     }
     /// Invalidate the blank marker: cells changed without a generation bump (resize).
     /// Use `generation - 1`, not `+ 1`: generation only ever advances by one per write,
@@ -201,7 +340,8 @@ impl Screen {
             blank_bg: background,
             modified_end: 0,
             modified_gen: 0,
-            has_heap: false,
+            has_heap: Cell::blank_owns_heap(background),
+            charge: if Cell::blank_owns_heap(background) { None } else { Some(Charge::fresh()) },
         }
     }
 
@@ -223,6 +363,7 @@ impl Screen {
             row.wrapped = false;
             row.wrap_padding = false;
             row.generation = row.generation.wrapping_add(1);
+            row.charge_blank(Color::Background);
             row.mark_blank(Color::Background);
             row.history_cost = 0;
         }
@@ -415,10 +556,10 @@ impl Screen {
         self.line(line)
             .and_then(|r| r.cells.get(col))
             .is_some_and(|cell| {
-                if cell.width == 0 && col > 0 {
+                if cell.width() == 0 && col > 0 {
                     let prev = Position { row, col: col - 1 };
                     prev >= a && prev <= b
-                } else if cell.width == 2 {
+                } else if cell.width() == 2 {
                     let next = Position { row, col: col + 1 };
                     next >= a && next <= b
                 } else {
@@ -444,8 +585,8 @@ impl Screen {
             let content_end = end.min(self.cols - usize::from(row.wrapped && row.wrap_padding));
             let mut text = String::new();
             for (col, cell) in row.cells.iter().enumerate() {
-                let overlap = col < content_end && col + usize::from(cell.width) > start;
-                if overlap && cell.width != 0 {
+                let overlap = col < content_end && col + usize::from(cell.width()) > start;
+                if overlap && cell.width() != 0 {
                     text.push_str(&cell.text());
                 }
             }
@@ -523,10 +664,10 @@ impl Screen {
                 let mut saved_found = false;
                 let mut viewport_found = false;
                 for (position, mut cell) in logical.drain(..).enumerate() {
-                    if cell.width == 0 {
+                    if cell.width() == 0 {
                         continue;
                     }
-                    let width = usize::from(cell.width).min(cols);
+                    let width = usize::from(cell.width()).min(cols);
                     if col + width > cols || col == cols {
                         output.wrap_padding = col != cols;
                         output.wrapped = true;
@@ -536,7 +677,7 @@ impl Screen {
                     }
                     if let Some(target) = cursor_logical
                         && target >= position
-                        && target < position + usize::from(cell.width)
+                        && target < position + usize::from(cell.width())
                     {
                         cursor_global = rebuilt.len();
                         cursor_col = col + (target - position).min(width - 1);
@@ -545,29 +686,24 @@ impl Screen {
                     }
                     if let Some(target) = viewport_logical
                         && target >= position
-                        && target < position + usize::from(cell.width)
+                        && target < position + usize::from(cell.width())
                     {
                         viewport_global = rebuilt.len();
                         viewport_found = true;
                     }
                     if let Some(target) = saved_logical
                         && target >= position
-                        && target < position + usize::from(cell.width)
+                        && target < position + usize::from(cell.width())
                     {
                         saved_global = rebuilt.len();
                         saved_col = col + (target - position).min(width - 1);
                         saved_found = true;
                         saved_wrap = false;
                     }
-                    cell.width = width as u8;
+                    cell.set_width(width as u8);
                     output.cells[col] = cell;
                     if width == 2 {
-                        output.cells[col + 1] = Cell {
-                            width: 0,
-                            style: output.cells[col].style,
-                            link: output.cells[col].link.clone(),
-                            ..Cell::default()
-                        };
+                        output.cells[col + 1] = output.cells[col].spacer();
                     }
                     col += width;
                 }
@@ -594,10 +730,15 @@ impl Screen {
             for row in &mut all {
                 row.cells.resize(cols, Cell::default());
                 row.cells.truncate(cols);
-                if row.cells[cols - 1].width == 2 {
+                if row.cells[cols - 1].width() == 2 {
                     row.cells[cols - 1] = Cell::default();
                 }
             }
+        }
+        // Resize rebuilds, truncates and reflows cells directly, outside the write hooks,
+        // and `remember` below prices them. Charge them by recount.
+        for row in &mut all {
+            row.charge = None;
         }
         // Trailing unused screen rows do not force the cursor into history when shrinking.
         while all.len() > rows
@@ -671,21 +812,21 @@ mod tests {
         for tracked_write_after in [false, true] {
             let row = &mut screen.rows[0];
             row.cells[10].ch = 'X';
-            row.cells[10].written = true;
+            row.cells[10].set_written(true);
             row.generation = row.generation.wrapping_add(1);
             if tracked_write_after {
                 row.record_write(1, 1);
                 row.cells[0].ch = 'Y';
             }
             row.reset_cells(Color::Background);
-            assert!(row.cells.iter().all(|c| *c == Cell::default()));
+            assert!(row.cells.iter().all(|c| c == &Cell::default()));
         }
         let mut row = screen.rows.pop_front().unwrap();
-        row.cells[11].written = true;
+        row.cells[11].set_written(true);
         row.cells[11].ch = 'Z';
         row.generation = row.generation.wrapping_add(1);
         screen.recycle(row);
         let row = screen.blank(Color::Background);
-        assert!(row.cells.iter().all(|c| *c == Cell::default()));
+        assert!(row.cells.iter().all(|c| c == &Cell::default()));
     }
 }

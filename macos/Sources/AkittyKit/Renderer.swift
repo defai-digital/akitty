@@ -54,11 +54,38 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private let imagePipeline: MTLRenderPipelineState
+    /// Instanced fill/glyph/cursor pipeline for frames the glyph atlas covers.
+    private let textPipeline: MTLRenderPipelineState
     private let nearest: MTLSamplerState?
     private let linear: MTLSamplerState?
     private(set) var texture: MTLTexture?
     private(set) var backgroundLayer: MTLTexture?
     private(set) var foregroundLayer: MTLTexture?
+    /// What the next draw presents. Exactly one of the three paths owns the frame.
+    private enum FrameMode { case none, single, layered, text }
+    private var mode: FrameMode = .none
+    /// Coverage atlas and the row-sliced instance buffer of the GPU text path.
+    private var textAtlas: MTLTexture?
+    /// The instance buffer the next draw reads. Replaced, never rewritten, while a frame may still read it.
+    private var textInstances: MTLBuffer?
+    /// CPU mirror of `textInstances`, so a busy frame can publish a complete replacement buffer.
+    private var textShadow: [TextInstance] = []
+    /// Instance buffers a frame may still be reading, tagged with the last frame that might; reused in order.
+    private var retiredTextBuffers: [(buffer: MTLBuffer, frame: UInt64)] = []
+    private static let maxRetiredTextBuffers = 2
+    private var textRows = 0, textRowCapacity = 0, textInstanceCount = 0
+    /// Bounded observations for tests and probes: atlas generations, upload paths and uploaded instance rows.
+    private(set) var textAtlasGenerations = 0
+    private(set) var textAtlasUploads = 0
+    private(set) var textRowUploads = 0
+    /// Frames whose rows could not be written in place because the GPU was busy, so a whole buffer was published.
+    private(set) var textFullUploads = 0
+    /// Identity of the draw buffer; a busy upload must change it rather than edit the one in flight.
+    var textBufferIdentity: ObjectIdentifier? { textInstances.map(ObjectIdentifier.init) }
+    /// Live instance buffers: the draw buffer plus the bounded retired pool.
+    var textBufferCount: Int { (textInstances == nil ? 0 : 1) + retiredTextBuffers.count }
+    /// Frames submitted and not yet completed; a test waits for this to reach zero before expecting in-place writes.
+    var pendingFrameCount: Int { pending.count }
     /// One texture per placed image, re-uploaded only when the core reports a new generation.
     struct ImageBinding { let generation: UInt64; let texture: MTLTexture }
     private(set) var imageTextures: [UInt32: ImageBinding] = [:]
@@ -66,7 +93,11 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     private(set) var placements: [ImagePlacement] = []
     private(set) var grid: GridGeometry?
     /// Whether frames composite the two text layers and the image textures, rather than the single bitmap.
-    private(set) var layered = false
+    var layered: Bool { mode == .layered }
+    /// Whether frames draw from the glyph atlas instead of a CPU bitmap.
+    var textMode: Bool { mode == .text }
+    /// Whether any GPU text resource (atlas texture or instance buffer) is currently retained.
+    var hasTextResources: Bool { textAtlas != nil || textInstances != nil }
     var onFailure: ((String) -> Void)?
     var frameRevision: UInt64 = 0
     var onCompleted: (@MainActor @Sendable (UInt64, Double) -> Void)?
@@ -103,6 +134,26 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         fragment float4 image_fragment(ImageOut in [[stage_in]], texture2d<float> image [[texture(0)]], sampler s [[sampler(0)]]) {
             return image.sample(s,in.uv);
         }
+        struct TextInstance { float4 dest; float4 uv; float4 color; };
+        struct TextOut { float4 position [[position]]; float2 uv; float4 color; float solid; };
+        vertex TextOut text_vertex(uint id [[vertex_id]], uint iid [[instance_id]],
+                                   constant TextInstance *items [[buffer(0)]], constant float2 &size [[buffer(1)]]) {
+            TextInstance item = items[iid];
+            float2 corner = float2(float(id & 1u), float(id >> 1u));
+            float2 px = item.dest.xy + corner * item.dest.zw;
+            TextOut o;
+            o.position = float4(px.x / size.x * 2.0 - 1.0, 1.0 - px.y / size.y * 2.0, 0.0, 1.0);
+            o.uv = item.uv.xy + corner * item.uv.zw;
+            o.color = item.color;
+            o.solid = (item.uv.z > 0.0 && item.uv.w > 0.0) ? 0.0 : 1.0;
+            if (item.dest.z <= 0.0 || item.dest.w <= 0.0) { o.position = float4(2.0, 2.0, 2.0, 1.0); }
+            return o;
+        }
+        fragment float4 text_fragment(TextOut in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]]) {
+            float mask = in.solid > 0.5 ? 1.0 : atlas.sample(s, in.uv).r;
+            float alpha = in.color.a * mask;
+            return float4(in.color.rgb * alpha, alpha);
+        }
         """
         let shader = forceShaderFailure || ProcessInfo.processInfo.environment["AKITTY_FORCE_SHADER_ERROR"] == "1" ? "invalid shader" : source
         let library = try device.makeLibrary(source: shader, options: nil)
@@ -120,6 +171,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             return try device.makeRenderPipelineState(descriptor: descriptor)
         }
         pipeline = try state("vertex_main", "fragment_main", sourceFactor: .one)
+        textPipeline = try state("text_vertex", "text_fragment", sourceFactor: .one)
         // Image textures hold the device-RGB premultiplied pixels the CPU path would draw, so both pipelines blend alike.
         imagePipeline = try state("image_vertex", "image_fragment", sourceFactor: .one)
         func sampler(_ filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
@@ -186,7 +238,9 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     /// `damage` is the range of bitmap pixel rows that changed since the last call (nil: all of them).
     func update(bitmap: CGContext, damage: Range<Int>? = nil) throws {
         // Leaving the layered path frees its layer and image textures.
-        if layered { layered = false; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = [] }
+        if mode == .layered { backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = [] }
+        if mode == .text { discardInstanceBuffers() }
+        mode = .single
         noteLayerSize(bitmap)
         texture = try upload(into: texture, bitmap: bitmap, damage: damage)
         view.needsDisplay = true
@@ -198,7 +252,8 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         self.grid = grid; self.placements = Self.ordered(placements)
         backgroundLayer = try upload(into: backgroundLayer, bitmap: background, damage: damage)
         foregroundLayer = try upload(into: foregroundLayer, bitmap: foreground, damage: damage)
-        layered = true; texture = nil
+        if mode == .text { discardInstanceBuffers() }
+        mode = .layered; texture = nil
         view.needsDisplay = true
     }
     /// An image-only frame: the text layers are still valid, so only image textures and geometry move.
@@ -207,11 +262,146 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         self.grid = grid; self.placements = Self.ordered(placements)
         view.needsDisplay = true
     }
+    /// The GPU text frame: only the rows the composer rebuilt are uploaded, and only masks new to the atlas
+    /// are written into it. Rows are packed at a fixed stride so a row's instances stay at a stable offset.
+    func updateText(_ frame: TextFrame, grid: GridGeometry) throws {
+        if mode != .text {
+            texture = nil; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []
+            // Window-sized textures retired by the image path have no use here and would otherwise linger.
+            retired = []
+        }
+        self.grid = grid; self.placements = []
+        try syncText(frame, grid: grid)
+        mode = .text
+        view.needsDisplay = true
+    }
+    /// Instances a row may hold: one fill per column, one glyph per column and the four cursor bands. One
+    /// definition, so the composer's worst case and the presenter's buffer size cannot drift apart.
+    static func textRowCapacity(cols: Int) -> Int { max(8, cols * 2 + 4) }
+
+    /// A buffer no frame can read yet: the CPU mirror is copied into it whole, so a busy GPU never sees a
+    /// half-updated revision. Retired buffers are reused only after the frame that owned them completed.
+    private func makeTextBuffer(length: Int) throws -> MTLBuffer {
+        let completed = pending.completed
+        if let index = retiredTextBuffers.firstIndex(where: { $0.frame <= completed && $0.buffer.length == length }) {
+            let buffer = retiredTextBuffers.remove(at: index).buffer
+            memset(buffer.contents(), 0, length)
+            return buffer
+        }
+        guard let buffer = device.makeBuffer(length: length, options: .storageModeShared) else {
+            throw AkittyError.core("Metal text buffer allocation failed")
+        }
+        memset(buffer.contents(), 0, length)
+        return buffer
+    }
+    private func retireText(_ buffer: MTLBuffer) {
+        retiredTextBuffers.append((buffer, pending.submitted))
+        if retiredTextBuffers.count > Self.maxRetiredTextBuffers {
+            retiredTextBuffers.removeFirst(retiredTextBuffers.count - Self.maxRetiredTextBuffers)
+        }
+    }
+    private func syncText(_ frame: TextFrame, grid: GridGeometry) throws {
+        let capacity = Self.textRowCapacity(cols: grid.cols)
+        let stride = MemoryLayout<TextInstance>.stride
+        let length = max(1, frame.rows * capacity) * stride
+        let needsBuffer = textInstances == nil || textRows != frame.rows || textRowCapacity != capacity
+            || textInstances?.length != length
+        if needsBuffer {
+            // A fresh buffer starts blank, so only a full frame can fill it. The composer re-encodes every row
+            // whenever the grid or layout changes, which is the only time this can happen.
+            guard frame.dirtyRows.count == frame.rows else { throw AkittyError.core("Metal text frame is not a full repaint") }
+            textRows = frame.rows; textRowCapacity = capacity; textInstanceCount = frame.rows * capacity
+            textShadow = Array(repeating: .zero, count: max(1, frame.rows * capacity))
+        }
+        if frame.resetAtlas || textAtlas == nil {
+            guard let atlas = Self.makeAtlasTexture(device: device) else { throw AkittyError.core("Metal text atlas allocation failed") }
+            textAtlas = atlas; textAtlasGenerations += 1
+        }
+        // New masks only ever take atlas coordinates that were never written before, so appending cannot
+        // disturb a texture a frame in flight is sampling.
+        for upload in frame.uploads {
+            textAtlas?.replace(region: MTLRegionMake2D(upload.x, upload.y, upload.width, upload.height), mipmapLevel: 0,
+                               withBytes: upload.coverage, bytesPerRow: upload.width)
+            textAtlasUploads += 1
+        }
+        guard textShadow.count * stride >= length else { return }
+        // Stage into the CPU mirror first. Every row bound is an invariant, not a truncation: silently dropping
+        // instances would show a partially drawn row instead of failing over to the rasterizer.
+        for (index, row) in frame.dirtyRows.enumerated() where row >= 0 && row < textRows {
+            let items = frame.content[index]
+            guard items.count <= textRowCapacity else { throw AkittyError.core("Metal text row exceeds its instance capacity") }
+            let offset = row * textRowCapacity
+            for slot in 0..<items.count { textShadow[offset + slot] = items[slot] }
+            for slot in items.count..<textRowCapacity { textShadow[offset + slot] = .zero }
+        }
+        if pending.count == 0 {
+            // Nothing is sampling the buffer, so only the rows this frame changed are written.
+            let buffer: MTLBuffer
+            if needsBuffer {
+                buffer = try makeTextBuffer(length: length)
+                textInstances = buffer
+            } else if let current = textInstances {
+                buffer = current
+            } else {
+                return
+            }
+            let base = buffer.contents()
+            for (index, row) in frame.dirtyRows.enumerated() where row >= 0 && row < textRows {
+                let offset = row * textRowCapacity * stride
+                let items = frame.content[index]
+                if !items.isEmpty {
+                    _ = items.withUnsafeBytes { memcpy(base + offset, $0.baseAddress!, items.count * stride) }
+                }
+                if items.count < textRowCapacity {
+                    memset(base + offset + items.count * stride, 0, (textRowCapacity - items.count) * stride)
+                }
+                textRowUploads += 1
+            }
+            return
+        }
+        // A frame still reads the current buffer: publish a complete replacement instead of editing it.
+        let next = try makeTextBuffer(length: length)
+        _ = textShadow.withUnsafeBytes { memcpy(next.contents(), $0.baseAddress!, length) }
+        if !needsBuffer, let current = textInstances { retireText(current) }
+        textInstances = next
+        textFullUploads += 1
+    }
+    /// A single R8 texture holds every mask, so the GPU never allocates a texture per glyph or per cell.
+    static func makeAtlasTexture(device: MTLDevice) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: GlyphAtlas.textureSize,
+                                                                  height: GlyphAtlas.textureSize, mipmapped: false)
+        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
+        return device.makeTexture(descriptor: descriptor)
+    }
+    /// Test hook: commits a frame that blocks on a shared event and registers it exactly as `draw(in:)` does, so a
+    /// test can hold a real frame in flight until `release` and prove the next upload never rewrites the instance
+    /// buffer it may still read.
+    func holdFrameInFlight() throws -> (command: MTLCommandBuffer, release: () -> Void) {
+        guard let event = device.makeSharedEvent(), let command = queue.makeCommandBuffer() else {
+            throw AkittyError.core("Metal command allocation failed")
+        }
+        command.encodeWaitForEvent(event, value: 1)
+        pending.add(1)
+        let pending = self.pending
+        command.addCompletedHandler { _ in pending.add(-1) }
+        command.commit()
+        return (command, { event.signaledValue = 1 })
+    }
+    /// Drops the instance buffers when another path takes over. The atlas deliberately survives: the composer
+    /// keeps its mask cache across such frames, so discarding the texture would leave later frames sampling empty
+    /// texels. It lives and dies with that cache — only `releaseTextures`, paired with `TextComposer.releaseFrames`,
+    /// drops it. In-flight command buffers retain whatever they still read, so dropping our references is safe.
+    private func discardInstanceBuffers() {
+        textInstances = nil; textShadow = []; retiredTextBuffers = []
+        textInstanceCount = 0; textRows = 0; textRowCapacity = 0
+    }
     /// Frees every texture while the pane is out of the window. A command buffer still in flight retains the textures it
     /// samples, so dropping our references is safe; the next `update`/`updateLayers` uploads a fresh full frame.
     func releaseTextures() {
         texture = nil; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = []
-        layerSize = nil; layered = false; view.needsDisplay = true
+        textAtlas = nil; textInstances = nil; textShadow = []; retiredTextBuffers = []
+        textInstanceCount = 0; textRows = 0; textRowCapacity = 0
+        layerSize = nil; mode = .none; view.needsDisplay = true
     }
     /// Kitty z-index ties keep snapshot order, so sort with the original offset as the tie-break.
     nonisolated static func ordered(_ placements: [ImagePlacement]) -> [ImagePlacement] {
@@ -284,19 +474,13 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
-        guard layered || texture != nil else { return }
+        guard mode != .none else { return }
         // Occluded windows legitimately have no drawable; no frame was submitted.
         guard let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor else { return }
         guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { onFailure?("Metal command allocation failed"); return }
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = clearColor
-        if layered {
-            encode(encoder, width: drawable.texture.width, height: drawable.texture.height)
-        } else if let texture {
-            // Single-texture frames: the pre-layer composite path (also used by tests).
-            encoder.setRenderPipelineState(pipeline); encoder.setFragmentTexture(texture, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        }
+        encode(encoder, width: drawable.texture.width, height: drawable.texture.height)
         encoder.endEncoding()
         pending.add(1)
         let pending = self.pending, onCompleted = self.onCompleted, revision = frameRevision
@@ -320,9 +504,35 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         }
         command.present(drawable); command.commit()
     }
+    private func encode(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+        switch mode {
+        case .text: encodeText(encoder, width: width, height: height)
+        case .layered: encodeLayers(encoder, width: width, height: height)
+        case .single:
+            // Pre-layer composite frames (also used by tests).
+            if let texture {
+                encoder.setRenderPipelineState(pipeline); encoder.setFragmentTexture(texture, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+        case .none: break
+        }
+    }
+    /// The GPU text frame: one instanced draw over every row's fixed slot range. Unused slots are degenerate
+    /// and cover no pixels, so a row that shrank needs no second draw call.
+    private func encodeText(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+        guard let textAtlas, let textInstances, textInstanceCount > 0 else { return }
+        scissor(to: grid?.rect, width: width, height: height, encoder: encoder)
+        encoder.setRenderPipelineState(textPipeline)
+        encoder.setVertexBuffer(textInstances, offset: 0, index: 0)
+        var size = SIMD2<Float>(Float(width), Float(height))
+        encoder.setVertexBytes(&size, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        encoder.setFragmentTexture(textAtlas, index: 0)
+        encoder.setFragmentSamplerState(nearest, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: textInstanceCount)
+    }
     /// The layered frame: clear to the default background, then z bands around the two text layers,
     /// everything after the first band clipped to the grid area in drawable pixels.
-    private func encode(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
+    private func encodeLayers(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
         scissor(to: grid?.rect, width: width, height: height, encoder: encoder)
         drawImages(where: { $0.z < GridRasterizer.underlayZ }, encoder: encoder, width: width, height: height)
         drawLayer(backgroundLayer, encoder: encoder)

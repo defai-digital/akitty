@@ -14,6 +14,31 @@ enum NativeFrameEvent {
     case uploaded(bytes: Int, full: Bool), handedOff(UInt64), gpuCompleted(UInt64, Double), presented(UInt64, Double)
 }
 
+/// Which retained renderer state a frame may trust. The CPU bitmap is only current while the CPU path drew the
+/// previous frame, and the atlas composer only while the atlas did; anything else repaints in full. A frame that
+/// falls through from the atlas to the CPU must therefore demand a full repaint even when the core reported
+/// partial damage, or it would leave rows the atlas drew on screen.
+struct RenderReuse: Equatable {
+    /// Damage the CPU bitmap path may apply; nil repaints every row.
+    let cpuDamage: Set<Int>?
+    /// Damage the atlas composer may apply; nil re-encodes every row.
+    let textDamage: Set<Int>?
+    /// Rows the CPU bitmap path may move, or zero when it has to repaint.
+    let cpuScroll: Int
+
+    static func plan(damage: Set<Int>?, scroll: Int, layered: Bool, textEligible: Bool,
+                     previousLayered: Bool, previousText: Bool) -> RenderReuse {
+        // The other path's retained bitmap went stale while this one drew.
+        let cpuCurrent = !previousText && layered == previousLayered
+        // Image layers retain the full repaint fallback until their scrolls are qualified.
+        let cpuDamage = cpuCurrent ? (layered && scroll > 0 ? nil : damage) : nil
+        let cpuScroll = cpuCurrent && !layered ? scroll : 0
+        // The composer keeps whole rows rather than a scrolled bitmap, so a scroll re-encodes every row.
+        let textDamage = textEligible && previousText && scroll == 0 ? damage : nil
+        return RenderReuse(cpuDamage: cpuDamage, textDamage: textDamage, cpuScroll: cpuScroll)
+    }
+}
+
 @MainActor public final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     private var sessionStorage: TerminalSession?
     public var session: TerminalSession { sessionStorage! }
@@ -45,8 +70,12 @@ enum NativeFrameEvent {
     private let inputQueue = DispatchQueue(label: "com.defai.akitty.input", qos: .userInteractive)
     /// Keeps the bitmap between frames; only touched on `rasterQueue`.
     private let rasterizer = GridRasterizer()
+    /// The GPU text path's atlas and retained instance rows; also only touched on `rasterQueue`.
+    private let textComposer = TextComposer()
     /// Whether the last frame went through the layered Metal path.
     private var lastLayered = false
+    /// Whether the last frame presented from the glyph atlas, which leaves the CPU bitmap stale.
+    private var lastTextFramed = false
     /// Grid rows changed since the last raster started; nil means unknown (repaint everything).
     private var gridDamage = GridDamage()
     private var pendingDamage: Set<Int>? {
@@ -243,8 +272,9 @@ enum NativeFrameEvent {
             stopRefreshLink()
             // A background tab's pane keeps no window-sized pixels; it repaints in full when it is shown again.
             pendingDamage = nil; bitmap = nil; presenter?.releaseTextures()
-            let rasterizer = self.rasterizer
-            rasterQueue.async { rasterizer.releaseFrames() }
+            let rasterizer = self.rasterizer, composer = textComposer
+            lastTextFramed = false
+            rasterQueue.async { rasterizer.releaseFrames(); composer.releaseFrames() }
         } else { updatePolling() }
         resizeTerminal(); poll(); showClipboardRequest()
         // A pane whose snapshot did not change (the poll answers "unchanged") still gets its bitmap back here.
@@ -514,18 +544,44 @@ enum NativeFrameEvent {
         // its own texture, so an animation frame re-uploads one texture instead of repainting the window. Frames without
         // images (and the software fallback) keep the single bitmap.
         let layered = presenter != nil && !(snapshot.images ?? []).isEmpty
-        var damage = pendingDamage
-        let scroll = layered ? 0 : gridDamage.scroll
-        // Image layers retain the full repaint fallback until their scrolls are qualified.
-        if layered && gridDamage.scroll > 0 { damage = nil }
-        // The other path's retained bitmaps went stale while it was idle.
-        if layered != lastLayered { damage = nil; lastLayered = layered }
-        let rasterizer = self.rasterizer, images = layered ? [:] : imageStore.images, appearance = renderAppearance
+        // The atlas path covers what the CPU rasterizer would otherwise repaint wholesale: no images, no IME,
+        // plain single-scalar ASCII, integral geometry. Everything else keeps the software reference path.
+        let textEligible = presenter != nil && !layered
+            && TextEligibility.fallback(snapshot: snapshot, composition: marked, size: size, scale: scale, cell: cells,
+                                        fontName: fontName, fontSize: fontSize) == nil
+        let plan = RenderReuse.plan(damage: pendingDamage, scroll: gridDamage.scroll, layered: layered,
+                                    textEligible: textEligible, previousLayered: lastLayered,
+                                    previousText: lastTextFramed)
+        lastLayered = layered
+        let damage = plan.cpuDamage, textDamage = plan.textDamage, scroll = plan.cpuScroll
+        let rasterizer = self.rasterizer, composer = textComposer, images = layered ? [:] : imageStore.images, appearance = renderAppearance
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
         let reuse = presenter != nil
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
         rasterQueue.async { [weak self] in
+            if textEligible, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
+                                                          fontName: fontName, fontSize: fontSize, cell: cells,
+                                                          cjkFontName: cjkFontName, appearance: appearance) {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.rasterInFlight = false
+                    self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
+                    guard !self.stopped else { return }
+                    guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
+                    if size == self.bounds.size, self.window != nil, let presenter = self.presenter {
+                        do {
+                            presenter.frameRevision = snapshot.revision
+                            try presenter.updateText(frame, grid: grid)
+                            self.lastTextFramed = true
+                            self.onNativeFrameEvent?(.handedOff(snapshot.revision))
+                        } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
+                    } else { self.pendingDamage = nil }
+                    if self.rasterPending { self.redraw() }
+                    self.flushDeferredPoll()
+                }
+                return
+            }
             if layered {
                 let result = Result { try rasterizer.renderLayers(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, appearance: appearance) }
                 DispatchQueue.main.async {
@@ -543,6 +599,7 @@ enum NativeFrameEvent {
                             presenter.frameRevision = snapshot.revision
                             try presenter.updateLayers(background: frame.background, foreground: frame.foreground, damage: frame.damage, grid: grid,
                                                        placements: self.snapshot?.images ?? snapshot.images ?? [], pixels: self.imageStore.entries)
+                            self.lastTextFramed = false
                             self.onNativeFrameEvent?(.handedOff(snapshot.revision))
                         } else { self.pendingDamage = nil }
                     } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
@@ -562,6 +619,7 @@ enum NativeFrameEvent {
                     let frame = try result.get()
                     if size == self.bounds.size, self.window != nil {
                         self.bitmap = frame.context
+                        self.lastTextFramed = false
                         if let presenter = self.presenter {
                             do {
                                 presenter.frameRevision = snapshot.revision

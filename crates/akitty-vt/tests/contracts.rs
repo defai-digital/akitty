@@ -155,19 +155,19 @@ fn random_edits_resizes_and_screen_switches_preserve_grid_invariants() {
                     assert!(identities.insert(row.id));
                     assert_eq!(row.cells.len(), term.cols(), "step {index}");
                     for (col, cell) in row.cells.iter().enumerate() {
-                        if cell.width == 0 {
+                        if cell.width() == 0 {
                             assert!(
-                                col > 0 && row.cells[col - 1].width == 2,
+                                col > 0 && row.cells[col - 1].width() == 2,
                                 "orphan trail step {index} col {col}"
                             );
                         }
-                        if cell.width == 2 {
+                        if cell.width() == 2 {
                             assert!(
-                                col + 1 < term.cols() && row.cells[col + 1].width == 0,
+                                col + 1 < term.cols() && row.cells[col + 1].width() == 0,
                                 "orphan lead step {index} col {col}"
                             );
                         }
-                        assert!(cell.combining.len() <= akitty_vt::cell::MAX_COMBINING);
+                        assert!(cell.combining_len() <= akitty_vt::cell::MAX_COMBINING);
                     }
                 }
             }

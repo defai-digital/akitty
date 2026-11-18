@@ -34,7 +34,9 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   composition, cropped grids and fractional geometry retain the full repaint fallback. Moved pixel rows
   still upload to Metal; this optimizes CPU raster work rather than eliminating the GPU upload.
 - The PTY worker now wakes through a self-pipe for input, resize and close, sleeps
-  up to 250 ms when idle, coalesces queued resizes and reads up to 256 KiB per pass.
+  up to 250 ms when idle, coalesces queued resizes and applies up to 256 KiB per pass.
+  A separate reader thread owns every read through a fixed ring of four 64 KiB slots,
+  so parsing overlaps reading and the host is woken once per applied batch.
 - The PTY worker signals a host-notification pipe whenever it advances the model, so an
   idle pane no longer polls on a 30 Hz timer; a 1 Hz safety tick backstops a missed wake.
   A timed chrome status or progress also wakes the host when it expires, so it clears on time.

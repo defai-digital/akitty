@@ -2,6 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod cell;
+mod grapheme;
 pub mod key;
 pub mod parser;
 pub mod screen;
