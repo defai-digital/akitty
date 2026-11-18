@@ -1019,12 +1019,16 @@ impl Terminal {
         let heap_free = row.heap_free();
         let stretches = plain.filter(|_| heap_free);
         while let Some(ch) = text[bytes..].chars().next() {
+            // A simple character never joins the simple character written before it
+            // (ordinary ASCII, Latin text, CJK, kana and Hangul syllables), so such text
+            // does no grapheme work at all.
+            let simple = grapheme::simple_width(ch);
             // After a simple character, a stretch of simple characters cannot join
             // anything, so with plain words over cells without records a smaller loop
             // that keeps its state in registers writes it. It stops exactly where this
             // loop would: before any other character, a column that does not fit, an
             // uncontained cell, or after a hand-off.
-            if previous_simple && let Some(words) = stretches {
+            if previous_simple && simple.is_some() && let Some(words) = stretches {
                 let stretch = simple_stretch::<PENDING>(&mut row.cells, &text.as_bytes()[bytes..], col, cols, words);
                 if stretch.bytes != 0 {
                     bytes += stretch.bytes;
@@ -1039,10 +1043,6 @@ impl Terminal {
                     continue;
                 }
             }
-            // A simple character never joins the simple character written before it
-            // (ordinary ASCII, Latin text, CJK, kana and Hangul syllables), so such text
-            // does no grapheme work at all.
-            let simple = grapheme::simple_width(ch);
             let mut carried = None;
             if graphemes && !(previous_simple && simple.is_some()) {
                 let verdict = match previous {
@@ -2652,7 +2652,11 @@ fn simple_stretch<const PENDING: bool>(
     // SAFETY: the caller passes a suffix of a `&str` that starts at a character
     // boundary.
     let text = unsafe { std::str::from_utf8_unchecked(text) };
-    let mut stretch = Stretch { bytes: 0, col, last_col: col, last_char: ' ', handoff: false };
+    // The state lives in locals so it stays in registers; the result is built once.
+    let mut bytes = 0;
+    let mut last_col = col;
+    let mut last_char = ' ';
+    let mut handoff = false;
     for ch in text.chars() {
         let Some(width) = grapheme::simple_width(ch) else { break };
         let width = usize::from(width).min(cols);
@@ -2673,21 +2677,20 @@ fn simple_stretch<const PENDING: bool>(
         if width == 2 {
             cells[col + 1].store_heap_free(Cell::from_packed(' ', words[2]));
         }
-        stretch.last_col = col;
-        stretch.last_char = ch;
+        last_col = col;
+        last_char = ch;
         col += width;
-        stretch.bytes += ch.len_utf8();
+        bytes += ch.len_utf8();
         if !ch.is_ascii()
-            && text.as_bytes().get(stretch.bytes).is_some_and(u8::is_ascii)
-            && let Some(&next) = text.as_bytes()[stretch.bytes..].first_chunk::<ASCII_HANDOFF>()
+            && text.as_bytes().get(bytes).is_some_and(u8::is_ascii)
+            && let Some(&next) = text.as_bytes()[bytes..].first_chunk::<ASCII_HANDOFF>()
             && u128::from_ne_bytes(next) & u128::from_ne_bytes([0x80; ASCII_HANDOFF]) == 0
         {
-            stretch.handoff = true;
+            handoff = true;
             break;
         }
     }
-    stretch.col = col;
-    stretch
+    Stretch { bytes, col, last_col, last_char, handoff }
 }
 
 /// The byte length of `text`'s first character and the characters after it that are

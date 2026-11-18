@@ -245,6 +245,13 @@ impl Classes {
         let width = width.map_or(Self::UNKNOWN_WIDTH, |width| width.min(2) as u8);
         Self(class | width << 4)
     }
+    const fn new_const(class: Class, width: Option<u8>) -> Self {
+        let width = match width {
+            Some(width) => width,
+            None => Self::UNKNOWN_WIDTH,
+        };
+        Self(class as u8 | width << 4)
+    }
     const fn unknown() -> Self {
         Self(Self::UNKNOWN_CLASS | Self::UNKNOWN_WIDTH << 4)
     }
@@ -302,6 +309,24 @@ pub(crate) fn simple_width(ch: char) -> Option<u8> {
     }
 }
 
+/// The classes of the ASCII characters, as `class_direct` and the control test give
+/// them.
+const ASCII_CLASSES: [Classes; 0x80] = {
+    let mut table = [Classes::unknown(); 0x80];
+    let mut code = 0;
+    while code < 0x80 {
+        let (class, width) = match code {
+            0x0d => (Class::Cr, None),
+            0x0a => (Class::Lf, None),
+            0x00..=0x1f | 0x7f => (Class::Control, None),
+            _ => (Class::Plain, Some(1)),
+        };
+        table[code] = Classes::new_const(class, width);
+        code += 1;
+    }
+    table
+};
+
 /// Look up both properties once. A page is built only from the existing class function
 /// and `UnicodeWidthChar`; `OnceLock` also makes concurrent first use deterministic.
 #[inline]
@@ -310,7 +335,7 @@ pub(crate) fn classes(ch: char) -> Classes {
     CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
     let code = ch as u32;
     if code < 0x80 {
-        return Classes::new(class_direct(ch), (!ch.is_ascii_control()).then_some(1));
+        return ASCII_CLASSES[code as usize];
     }
     let page = (code >> 8) as usize;
     let entries = PROPERTY_PAGES[page].get_or_init(|| {
@@ -342,6 +367,7 @@ pub(crate) fn join(lead: char, combining: &[char], next: char) -> Join {
 /// `tail` is the class of the last character in the cluster: `combining.last()`, or
 /// `lead` when there is none. `lead` and `combining` are still passed because the
 /// regional-indicator look-behind has to count the run that ends at the tail.
+#[inline]
 pub(crate) fn join_classes(tail: Classes, next: Classes, lead: char, combining: &[char]) -> Join {
     match PAIRS[usize::from(tail.0 & 0x0f)][usize::from(next.0 & 0x0f)] {
         Pair::No => Join::No,
@@ -422,6 +448,7 @@ const fn pair_rule(tail: Option<Class>, next: Option<Class>) -> Pair {
 }
 
 /// Whether an odd number of regional indicators immediately precede `next`.
+#[inline(never)]
 fn regional_run_is_odd(lead: char, combining: &[char]) -> bool {
     let mut count = 0usize;
     for &ch in combining.iter().rev().chain(std::iter::once(&lead)) {
@@ -436,6 +463,17 @@ fn regional_run_is_odd(lead: char, combining: &[char]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ascii_classes_match_the_classifier() {
+        for code in 0u8..0x80 {
+            let ch = char::from(code);
+            assert!(
+                super::classes(ch) == Classes::new(class_direct(ch), (!ch.is_ascii_control()).then_some(1)),
+                "{code:#x}"
+            );
+        }
+    }
+
     #[test]
     fn simple_characters_match_the_tables_and_never_join_each_other() {
         // Every simple character has the table's class and width, its class is plain or

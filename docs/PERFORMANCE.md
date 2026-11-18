@@ -1861,3 +1861,40 @@ pictographs 3.84 (ours 9.98), flags 15.58 (ours 24.53), and the family sequence
 | Alternate screen | 173.6 | 175.9 | 0.99x |
 
 Raw record: [simple-stretches](../benchmarks/results/simple-stretches-2026-11-18.json).
+
+## Stretch entry and ASCII classes
+
+A profile of lines of lone pictographs with spaces showed three avoidable costs.
+The writer called `simple_stretch` for every pictograph that followed a space, and
+the stretch returned at once without writing (11%); it now runs only once the
+current character is known to be simple. The space after each pictograph called
+`class_direct` out of line (3%); ASCII classes now come from a 128-entry constant
+table that a test checks against the classifier for every ASCII character. And
+`join_classes`, a single table lookup, was a call (7%); it is inlined, with the
+regional-indicator count kept out of line. The stretch also keeps its result in
+locals instead of writing the returned struct on every character.
+
+Mutation checks catch each wrong ASCII table entry (CR, LF, DEL, the printable
+width) and a table that is not used. Dropping the new simple check before the
+stretch is equivalent, since the stretch writes nothing for a character that is not
+simple; it is there for speed only.
+
+Rejected: a parser scan with direct paths for two-byte leads and for three-byte
+leads other than E0 and ED, moved out of line. CJK lines fell from 5.38 to 4.57 ns
+per character, but the ASCII workload measured 0.93x.
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 170.5 | 176.4 | 1.03x | 194.4 | 1.15x |
+| ASCII | 1275.8 | 1293.0 | 1.01x | 1306.1 | 1.01x |
+| Synchronized screen | 928.7 | 921.1 | 0.99x | 895.1 | 0.96x |
+| Long lines | 894.3 | 914.0 | 1.02x | 493.8 | 0.55x |
+| ANSI | 336.5 | 340.1 | 1.01x | 272.6 | 0.80x |
+| Alternate screen | 176.0 | 177.5 | 1.01x | 175.7 | 0.99x |
+
+The Ghostty columns come from a separate run on the same build, in which
+libghostty-vt's Unicode figure also rose (194.4 against 189.4 before); host noise
+is about 3%. Per character against libghostty-vt: lone pictographs 8.16 against
+3.87 (9.98 before), CJK 5.29 against 2.82, and flags 23.74 against 15.65.
+
+Raw record: [stretch-entry-and-ascii-classes](../benchmarks/results/stretch-entry-and-ascii-classes-2026-11-18.json).

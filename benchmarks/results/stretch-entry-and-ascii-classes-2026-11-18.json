@@ -1,0 +1,158 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "0bd7c5d",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "profile_lone_pictograph_lines": {
+  "write_run_cells": 0.584,
+  "simple_stretch_called_for_non_simple": 0.109,
+  "join_classes_call": 0.072,
+  "class_direct_call": 0.032
+ },
+ "rotated_ab_5_passes_text": [
+  "unicode 170.5 -> 176.4 (1.03x)",
+  "ascii 1275.8 -> 1293.0 (1.01x)",
+  "synchronized-screen 928.7 -> 921.1 (0.99x)",
+  "long-lines 894.3 -> 914.0 (1.02x)",
+  "ansi 336.5 -> 340.1 (1.01x)",
+  "alternate-screen 176.0 -> 177.5 (1.01x)"
+ ],
+ "per_shape_vs_libghostty_ns_per_char": {
+  "cjk": [
+   5.29,
+   2.82
+  ],
+  "cjk_space": [
+   5.25,
+   3.86
+  ],
+  "e_acute": [
+   3.97,
+   1.15
+  ],
+  "emoji": [
+   8.16,
+   3.87
+  ],
+  "flag": [
+   23.74,
+   15.65
+  ],
+  "family": [
+   19.34,
+   24.15
+  ]
+ },
+ "rejected": {
+  "parser_direct_two_and_three_byte_scan_out_of_line": "CJK lines 5.38 -> 4.57 ns/char, but ascii 0.93x in the workload A/B"
+ },
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 1298.1,
+   "ghostty_mib_s": 1306.1,
+   "ghostty_over_akitty": 1.01,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    1295.9,
+    1298.1,
+    1303.1
+   ],
+   "ghostty_passes": [
+    1334.1,
+    1301.5,
+    1306.1
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 340.5,
+   "ghostty_mib_s": 272.6,
+   "ghostty_over_akitty": 0.8,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    342.1,
+    339.7,
+    340.5
+   ],
+   "ghostty_passes": [
+    270.1,
+    272.6,
+    272.7
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 169.4,
+   "ghostty_mib_s": 194.4,
+   "ghostty_over_akitty": 1.15,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    174.2,
+    169.4,
+    169.2
+   ],
+   "ghostty_passes": [
+    194.4,
+    196.9,
+    191.6
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 892.7,
+   "ghostty_mib_s": 493.8,
+   "ghostty_over_akitty": 0.55,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    890.6,
+    892.7,
+    907.9
+   ],
+   "ghostty_passes": [
+    460.7,
+    493.8,
+    495.2
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 177.9,
+   "ghostty_mib_s": 175.7,
+   "ghostty_over_akitty": 0.99,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    176.4,
+    177.9,
+    178.8
+   ],
+   "ghostty_passes": [
+    176.5,
+    175.7,
+    172.7
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 931.4,
+   "ghostty_mib_s": 895.1,
+   "ghostty_over_akitty": 0.96,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    933.9,
+    931.4,
+    930.9
+   ],
+   "ghostty_passes": [
+    895.1,
+    886.6,
+    904.4
+   ]
+  }
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. The Ghostty run on this build measured libghostty-vt Unicode at 194.4 against 189.4 in the previous record."
+}
