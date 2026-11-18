@@ -226,7 +226,8 @@ pub struct Terminal {
     alternate: Screen,
     pub modes: Modes,
     pub palette: Palette,
-    pub style: Style,
+    /// Private so every change passes a site that clears `current_template`.
+    style: Style,
     pub cell_pixels: (u32, u32),
     pub revision: u64,
     pub title: String,
@@ -251,6 +252,10 @@ pub struct Terminal {
     /// `StyleCache`), with the next slot to overwrite.
     style_cache: [Option<StyleCache>; STYLE_SLOTS],
     style_slot: usize,
+    /// The `style_cache` slot holding the template for the current style and
+    /// hyperlink, cleared by every site that changes either (`style_changed`). Only
+    /// `slot_template` replaces a slot, and it sets this to the slot it fills.
+    current_slot: Option<usize>,
     /// Number of templates built, for tests that prove reuse.
     #[cfg(test)]
     template_builds: usize,
@@ -328,6 +333,7 @@ impl Terminal {
             cluster_slot: 0,
             style_cache: [None, None, None, None],
             style_slot: 0,
+            current_slot: None,
             #[cfg(test)]
             template_builds: 0,
             preserve_erased_screen: true,
@@ -738,9 +744,26 @@ impl Terminal {
     /// both are absent from the bounded slot set. At most `STYLE_SLOTS` templates are
     /// retained per terminal.
     fn style_template(&mut self) -> CellStyle {
+        if let Some(slot) = self.current_slot
+            && let Some(cache) = &self.style_cache[slot]
+        {
+            let template = &cache.template;
+            debug_assert!(
+                template.same_presentation(&CellStyle::new(&self.style, self.link.as_ref())),
+                "a style or hyperlink change missed style_changed"
+            );
+            return template.clone();
+        }
+        self.slot_template()
+    }
+    /// The current style or hyperlink may have changed.
+    fn style_changed(&mut self) {
+        self.current_slot = None;
+    }
+    fn slot_template(&mut self) -> CellStyle {
         let style = self.style;
         let link = self.link.as_ref();
-        for slot in &self.style_cache {
+        for (index, slot) in self.style_cache.iter().enumerate() {
             let Some(cache) = slot else { continue };
             if cache.style == style
                 && match (&cache.link, link) {
@@ -749,10 +772,12 @@ impl Terminal {
                     _ => false,
                 }
             {
+                self.current_slot = Some(index);
                 return cache.template.clone();
             }
         }
         let template = CellStyle::new(&style, link);
+        self.current_slot = Some(self.style_slot % STYLE_SLOTS);
         self.style_cache[self.style_slot % STYLE_SLOTS] = Some(StyleCache {
             style,
             link: link.cloned(),
@@ -1330,6 +1355,7 @@ impl Terminal {
         self.screen_mut().cursor = self.screen().saved_cursor;
         let saved = self.saved_state[usize::from(self.modes.alternate)];
         self.style = saved.style;
+        self.style_changed();
         self.modes.origin = saved.origin;
         self.modes.wrap = saved.wrap;
         self.charsets = saved.charsets;
@@ -1544,6 +1570,7 @@ impl Terminal {
         }
         if c.intermediates == b"!" && c.final_byte == b'p' {
             self.style = Style::default();
+            self.style_changed();
             self.modes.cursor_visible = true;
             self.charsets = [false; 4];
             self.charset = 0;
@@ -1827,6 +1854,7 @@ impl Terminal {
         }
     }
     fn sgr(&mut self, params: &[Vec<Option<u16>>]) {
+        self.style_changed();
         if params.is_empty() {
             self.style = Style::default();
             return;
@@ -1944,6 +1972,7 @@ impl Terminal {
                     let uri = std::str::from_utf8(uri).ok().filter(|s| {
                         !s.is_empty() && s.len() <= 2048 && !s.chars().any(char::is_control)
                     });
+                    self.style_changed();
                     if let Some(uri) = uri {
                         self.link_id = self.link_id.wrapping_add(1).max(1);
                         self.link = Some(Arc::new(Link { id: self.link_id, uri: uri.into() }));
@@ -2156,6 +2185,7 @@ impl Terminal {
         self.style = Style::default();
         self.palette.reset();
         self.link = None;
+        self.style_changed();
         self.modes.grapheme_clusters = self.grapheme_supported;
         self.grapheme_target = None;
         self.charsets = [false; 4];
@@ -3552,6 +3582,25 @@ mod tests {
         feed(&mut term, b"\x1b]8;;https://b.test\x1b\\");
         feed(&mut term, b"E");
         assert_eq!(term.screen().rows[0].cells[4].link_uri(), Some("https://b.test"));
+    }
+
+    #[test]
+    fn soft_reset_and_cursor_restore_reach_the_next_run() {
+        // Styled text, then a style change that is not an SGR, then more text: the
+        // second run must take the new presentation, not the cached template.
+        let plain = {
+            let mut term = Terminal::new(10, 2, 0).unwrap();
+            feed(&mut term, b"ab");
+            term.screen().rows[0].cells[1].clone()
+        };
+        for change in [&b"\x1b[!p"[..], b"\x1b8", b"\x1bc"] {
+            let mut term = Terminal::new(10, 2, 0).unwrap();
+            feed(&mut term, b"\x1b7\x1b[31;1mxa");
+            feed(&mut term, change);
+            feed(&mut term, b"\rab");
+            let cell = &term.screen().rows[0].cells[1];
+            assert_eq!(format!("{cell:?}"), format!("{plain:?}"), "{change:?}");
+        }
     }
 
     #[test]

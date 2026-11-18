@@ -1405,3 +1405,30 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/exa
 | Long lines | 749.8 | 782.4 | 1.04x | 501.2 | 0.64x |
 | Synchronized screen | 743.9 | 754.3 | 1.01x | 878.0 | 1.19x |
 | Alternate screen | 173.1 | 178.4 | 1.03x | 173.8 | 0.98x |
+
+## The current presentation without a lookup
+
+Every text run asked the style cache for its presentation, comparing the current
+style and hyperlink with each retained slot. Short runs paid that in full: on
+two-character lines it was about 18% of the samples. The terminal now remembers which
+slot holds the current presentation and forgets it at each site that changes the
+style or the hyperlink: SGR, cursor restore, the OSC 8 handler, soft reset and full
+reset. The style field became crate-private so no other code can change it without
+passing one of them. Remembering the slot, not a copy of the template, keeps a style
+change from costing an extra reference count on a side record.
+
+In debug builds every remembered answer is compared with a freshly built template.
+Mutation checks remove each of the five forgetting sites in turn and point at the
+wrong slot; all are caught, the soft-reset site by a new test that prints, changes
+the style without an SGR, and prints again.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/current-template-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 1069.2 | 1094.1 | 1.02x | 1282.8 | 1.17x |
+| ANSI | 330.0 | 328.0 | 0.99x | 266.5 | 0.82x |
+| Unicode | 145.9 | 149.1 | 1.02x | 192.6 | 1.31x |
+| Long lines | 775.5 | 781.9 | 1.01x | 490.2 | 0.63x |
+| Synchronized screen | 742.2 | 735.1 | 0.99x | 898.7 | 1.22x |
+| Alternate screen | 175.5 | 172.9 | 0.98x | 170.0 | 0.99x |

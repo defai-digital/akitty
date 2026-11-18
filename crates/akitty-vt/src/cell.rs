@@ -530,6 +530,17 @@ pub(crate) struct CellStyle {
 }
 
 impl CellStyle {
+    /// Whether both give cells the same presentation, comparing side records by value.
+    /// Only debug assertions call it.
+    #[allow(dead_code)]
+    pub(crate) fn same_presentation(&self, other: &Self) -> bool {
+        self.packed == other.packed
+            && match (&self.extras, &other.extras) {
+                (None, None) => true,
+                (Some(a), Some(b)) => format!("{a:?}") == format!("{b:?}"),
+                _ => false,
+            }
+    }
     pub(crate) fn new(style: &Style, link: Option<&Arc<Link>>) -> Self {
         let fg = pack_color(style.fg);
         let bg = pack_color(style.bg);
