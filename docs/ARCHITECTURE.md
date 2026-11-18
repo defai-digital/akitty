@@ -49,7 +49,9 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   class carried into the next pair decision. Insert mode, character-set shifts,
   contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
   A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;
-  it has no unbounded map or per-key heap allocation. Synchronized output retains
+  it has no unbounded map or per-key heap allocation. A synchronized frame whose
+  exact `?2026l` arrives in the same chunk as its `?2026h` is applied as it arrives,
+  which a host cannot tell from a replayed queue. Otherwise synchronized output retains
   the same bounded action queue, holding printable text as runs in one shared buffer
   that replay through the row writer when the queue flushes, and copying deferred
   CSIs into recycled records; each item keeps its scalar-action charge against the

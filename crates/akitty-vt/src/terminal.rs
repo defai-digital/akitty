@@ -377,6 +377,10 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8], now_ms: u64, mut emit: impl FnMut(Event)) {
         self.expire_sync(now_ms, &mut emit);
         let mut parser = std::mem::take(&mut self.parser);
+        // Exact synchronized-output ends (`ESC [ ? 2026 l`) in this chunk, counted when
+        // first needed, and how many of them have been dispatched so far.
+        let mut sync_ends: Option<usize> = None;
+        let mut sync_ends_seen = 0usize;
         parser.feed_runs(bytes, |input| match input {
             Input::Text(text) => self.print_run(text, &mut emit),
             Input::Csi(csi) => {
@@ -387,8 +391,25 @@ impl Terminal {
                     // Start (or re-arm) or end synchronized output, as `dispatch` does,
                     // without taking the parser's parameter storage.
                     if csi.final_byte == b'h' {
-                        self.sync_deadline = Some(now_ms.saturating_add(SYNC_TIMEOUT_MS));
+                        // A frame that also ends in this chunk is applied as it arrives.
+                        // The host cannot look at the terminal inside one `feed`, and
+                        // queued actions replay with synchronized output already off, in
+                        // order, so the result and every event are the same. Every
+                        // literal end parses as one (ESC always starts a new sequence),
+                        // so ends ahead are the chunk's ends less those dispatched; an
+                        // end the count misses (eight-bit, or begun in an earlier chunk)
+                        // only makes the frame queue. With a frame already queued from an
+                        // earlier chunk, skipping the re-arm is equally unobservable: that
+                        // end flushes the queue before anything reads the deadline.
+                        let frame_closes =
+                            *sync_ends.get_or_insert_with(|| count_sync_ends(bytes)) > sync_ends_seen;
+                        if !frame_closes {
+                            self.sync_deadline = Some(now_ms.saturating_add(SYNC_TIMEOUT_MS));
+                        }
                     } else {
+                        if csi.params[0].len() == 1 {
+                            sync_ends_seen += 1;
+                        }
                         self.flush_sync(&mut emit);
                     }
                 } else if sync_control {
@@ -433,6 +454,9 @@ impl Terminal {
     fn flush_sync(&mut self, emit: &mut impl FnMut(Event)) {
         self.sync_deadline = None;
         self.sync.bytes = 0;
+        if self.sync.entries.is_empty() {
+            return;
+        }
         // Deferred text replays as whole runs, so a synchronized frame takes the same
         // row writes as unsynchronized output instead of one dispatch per character.
         let mut entries = std::mem::take(&mut self.sync.entries);
@@ -2146,6 +2170,38 @@ impl Terminal {
 
 /// Width of one printed character, matching the scalar path's clamp exactly.
 #[inline]
+/// The number of exact synchronized-output ends, `ESC [ ? 2026 l`, in `bytes`. The
+/// search stops at each `?`, which is rarer than ESC in escape-dense output.
+fn count_sync_ends(bytes: &[u8]) -> usize {
+    let mut count = 0;
+    let mut index = 2;
+    while index < bytes.len() {
+        let Some(offset) = find_byte(&bytes[index..], b'?') else { break };
+        let at = index + offset;
+        if bytes[at - 2..at] == *b"\x1b[" && bytes[at..].starts_with(b"?2026l") {
+            count += 1;
+        }
+        index = at + 1;
+    }
+    count
+}
+
+/// The offset of the first `needle` in `bytes`, eight bytes at a time.
+fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (index, word) in words.iter().enumerate() {
+        let diff = u64::from_le_bytes(*word) ^ (ONES * u64::from(needle));
+        // The lowest flagged byte is exact: a borrow only reaches bytes above a zero.
+        let zero = diff.wrapping_sub(ONES) & !diff & HIGH;
+        if zero != 0 {
+            return Some(index * 8 + (zero.trailing_zeros() / 8) as usize);
+        }
+    }
+    tail.iter().position(|&byte| byte == needle).map(|offset| words.len() * 8 + offset)
+}
+
 fn char_width(ch: char, cols: usize) -> usize {
     if ch.is_ascii() {
         1
@@ -2781,6 +2837,68 @@ mod tests {
         for chunk in [1usize, 5, 64] {
             assert_corpus_matches_scalar(9, 3, 0, false, &corpus, chunk);
             assert_corpus_matches_scalar(9, 3, 4, true, &corpus, chunk);
+        }
+    }
+    #[test]
+    fn frames_closed_within_a_chunk_match_queued_frames() {
+        // Whole chunks apply a closed frame directly; one byte at a time every frame is
+        // queued and replayed. Events and the whole state must agree after each chunk.
+        let big = "x".repeat(MAX_SYNC_MEMORY / std::mem::size_of::<Action>() + 3);
+        let cases = [
+            "a\x1b[?2026hb\x1b[6nc\x1b[?2026$pd\x1b[?2026le\x1b[?2026$p".to_string(),
+            "\x1b[?2026h\x1b]0;t\x1b[?2026lafter\x1b[?2026l".to_string(),
+            "\x1b[?2026h\x1bP1$r\x1b[?2026lafter".to_string(),
+            "\x1b[?2026hx\u{9b}?2026ly\x1b[6n".to_string(),
+            "\x1b[?2026hx\x1b[?2026:1ly\x1b[?2026lz".to_string(),
+            "\x1b[?2026hx\x1b[?2026;25ly\x1b[6n\x1b[?2026lz".to_string(),
+            "\x1b[?2026hx\x1b[?2026hy\x1b[?2026l\x1b[?2026hz\x1b[6n".to_string(),
+            "e\x1b[?2026h\u{301}\x1b[?2026l\u{301}\x1b[?2026;25hq\x1b[?2026l".to_string(),
+            format!("\x1b[?2026h\x1b[31m{big}\x1b[6n\x1b[?2026h{big}\x1b[?2026lend"),
+            "\x1b[?2026hopen frame \x1b[6n".to_string(),
+        ];
+        for case in &cases {
+            for split in [None, Some(case.len() / 2)] {
+                let mut whole = Terminal::new(9, 3, 4).unwrap();
+                let mut bytes = Terminal::new(9, 3, 4).unwrap();
+                for term in [&mut whole, &mut bytes] { term.enable_grapheme_support(true); }
+                let parts: Vec<&[u8]> = match split {
+                    Some(at) => vec![&case.as_bytes()[..at], &case.as_bytes()[at..]],
+                    None => vec![case.as_bytes()],
+                };
+                for part in parts {
+                    let expected: Vec<Event> = part.chunks(1).flat_map(|byte| feed_at(&mut bytes, byte, 0)).collect();
+                    assert_eq!(feed_at(&mut whole, part, 0), expected, "{case:?}");
+                    // Only the live parser state matters; its UTF-8 scratch bytes
+                    // depend on how the input was chunked.
+                    whole.parser.clear_scratch_for_test();
+                    bytes.parser.clear_scratch_for_test();
+                    // The revision counts `feed` calls, not content.
+                    whole.revision = bytes.revision;
+                    assert_eq!(state(&whole), state(&bytes), "{case:?} split {split:?}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn sync_end_counts_match_a_byte_search() {
+        // Ends among near misses: other finals, introducers, a cut-off end, `?` at the
+        // very start, repeated `?`, with every split of a pseudo-random concatenation.
+        let end = b"\x1b[?2026l";
+        let fragments: [&[u8]; 9] = [end, b"?", b"\x1b[?2026h", b"x[?2026l", b"\x1b]?2026l",
+                                     b"\x1b[??2026l", b"plain text ", b"\x1b[?2026", b"\x1b"];
+        let mut seed = 0x9e37_79b9u32;
+        for _ in 0..2000 {
+            let mut bytes = Vec::new();
+            for _ in 0..(seed % 9) {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                bytes.extend_from_slice(fragments[(seed >> 24) as usize % fragments.len()]);
+            }
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let naive = bytes.windows(end.len()).filter(|window| window == end).count();
+            assert_eq!(count_sync_ends(&bytes), naive, "{bytes:?}");
+            for start in 0..bytes.len() {
+                assert_eq!(find_byte(&bytes[start..], b'?'), bytes[start..].iter().position(|&b| b == b'?'));
+            }
         }
     }
     #[test]

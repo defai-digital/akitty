@@ -287,6 +287,15 @@ impl Parser {
         index
     }
 
+    /// Clear the UTF-8 scratch bytes, which outlive the sequence that used them.
+    #[cfg(test)]
+    pub(crate) fn clear_scratch_for_test(&mut self) {
+        let pending = self.utf8_len;
+        self.utf8[pending..].fill(0);
+        if pending == 0 {
+            self.utf8_expected = 0;
+        }
+    }
     fn begin(&mut self, state: State) {
         self.state = state;
         self.intermediates.clear();

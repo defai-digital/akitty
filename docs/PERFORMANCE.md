@@ -1301,3 +1301,52 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/pai
 | Long lines | 736.5 | 784.3 | 1.06x |
 | Alternate screen | 172.5 | 173.6 | 1.01x |
 | Synchronized screen | 610.6 | 599.4 | 0.98x |
+
+## Synchronized frames that close within one chunk
+
+A host reads the terminal only between `feed` calls, and a queued frame replays with
+synchronized output already off, in order, emitting every held event in that order.
+A frame whose `?2026h` and exact `?2026l` both arrive in one chunk therefore gives
+the same state and the same events when its actions are applied as they arrive, so
+such a `?2026h` no longer starts a queue. Frames that span chunks, eight-bit or
+parameter-list ends, and timeouts keep the queue exactly as before.
+
+Whether an end lies ahead is decided without parser positions: every literal
+`ESC [ ? 2026 l` in a chunk is dispatched as an exact end, because ESC begins a new
+sequence from every parser state (strings included), so the ends ahead are the
+chunk's literal ends less the exact ends dispatched so far. An end the count cannot
+see (eight-bit, or begun in the previous chunk) only lowers the estimate and makes
+the frame queue. The chunk is counted once, on its first `?2026h`, by a word-at-a-time
+search for `?`, which is rarer than ESC in escape-dense output; a queue with nothing
+in it now returns from its flush at once.
+
+A differential test feeds frames whole and one byte at a time (which always queues)
+and compares events and the whole state after every part: replies and mode reports
+inside frames, ends inside OSC and DCS strings, eight-bit and subparameter ends,
+parameter lists, re-arming, combining marks across the frame edges, frames past the
+memory bound, unclosed frames and splits inside a UTF-8 sequence. The end count is
+compared with a window search over pseudo-random fragment mixes. Mutation checks
+confirm the count, its start, both checked neighbours, the byte search and the
+dispatched-end test are caught; dropping the "nothing queued" check, counting
+subparameter ends as dispatched, and resuming the search inside a match are
+equivalent and were left out or noted.
+
+| Frame (ns) | Before | After | libghostty-vt |
+| --- | ---: | ---: | ---: |
+| Benchmark frame, synchronized | 275.9 | 220.6 | 186.0 |
+| Same frame without mode 2026 | 174.7 | 178.5 | 124.5 |
+| Sixteen empty mode pairs | 450.1 | 509.8 | 423.5 |
+
+The empty-pair line is a worst case for the `?` search (a chunk of nothing but mode
+pairs) and is about 12% slower; ordinary frames gain.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/closed-frames-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Synchronized screen | 603.6 | 744.9 | 1.23x | 906.7 | 1.21x |
+| ASCII | 972.2 | 966.5 | 0.99x | 1335.2 | 1.38x |
+| ANSI | 322.1 | 329.2 | 1.02x | 277.5 | 0.84x |
+| Unicode | 153.9 | 148.7 | 0.97x | 196.2 | 1.3x |
+| Long lines | 781.4 | 772.8 | 0.99x | 500.4 | 0.64x |
+| Alternate screen | 172.3 | 173.3 | 1.01x | 176.0 | 1.0x |

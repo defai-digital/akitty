@@ -1,0 +1,132 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "af1219114d58e382045870786e02386b48f332b7",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "frame_ns_text": [
+  "sync         275.9 ns/frame |  220.6 ns/frame | ghostty  186.0",
+  "nosync       174.7 ns/frame |  178.5 ns/frame | ghostty  124.5",
+  "sync-empty   450.1 ns/frame |  509.8 ns/frame | ghostty  423.5"
+ ],
+ "rejected": {
+  "ESC-driven end search": "empty-pair chunks 26% slower; replaced by the ? search",
+  "pictograph blocks as simple characters": "emoji line 1.25x but ZWJ 0.97x, long lines 0.95x, Unicode workload flat"
+ },
+ "rotated_ab_5_passes_text": [
+  "synchronized-screen  base   603.6  new   744.9   1.23x  base=[604, 614, 602, 622, 595] new=[753, 741, 745, 753, 732]",
+  "ascii                base   972.2  new   966.5   0.99x  base=[950, 985, 963, 972, 988] new=[966, 964, 970, 979, 943]",
+  "ansi                 base   322.1  new   329.2   1.02x  base=[321, 331, 322, 327, 317] new=[327, 329, 328, 338, 334]",
+  "unicode              base   153.9  new   148.7   0.97x  base=[154, 154, 153, 155, 154] new=[152, 149, 142, 153, 147]",
+  "long-lines           base   781.4  new   772.8   0.99x  base=[790, 749, 777, 801, 781] new=[748, 745, 773, 796, 785]",
+  "alternate-screen     base   172.3  new   173.3   1.01x  base=[169, 173, 172, 172, 176] new=[171, 172, 174, 177, 173]"
+ ],
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 969.3,
+   "ghostty_mib_s": 1335.2,
+   "ghostty_over_akitty": 1.38,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    958.0,
+    969.3,
+    991.3
+   ],
+   "ghostty_passes": [
+    1308.1,
+    1346.8,
+    1335.2
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 330.3,
+   "ghostty_mib_s": 277.5,
+   "ghostty_over_akitty": 0.84,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    326.5,
+    334.5,
+    330.3
+   ],
+   "ghostty_passes": [
+    276.8,
+    280.3,
+    277.5
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 150.6,
+   "ghostty_mib_s": 196.2,
+   "ghostty_over_akitty": 1.3,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    150.4,
+    150.6,
+    151.7
+   ],
+   "ghostty_passes": [
+    200.5,
+    196.2,
+    186.0
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 787.0,
+   "ghostty_mib_s": 500.4,
+   "ghostty_over_akitty": 0.64,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    787.0,
+    795.6,
+    776.7
+   ],
+   "ghostty_passes": [
+    500.4,
+    482.0,
+    504.7
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 175.4,
+   "ghostty_mib_s": 176.0,
+   "ghostty_over_akitty": 1.0,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    175.4,
+    175.1,
+    175.4
+   ],
+   "ghostty_passes": [
+    170.0,
+    177.1,
+    176.0
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 748.1,
+   "ghostty_mib_s": 906.7,
+   "ghostty_over_akitty": 1.21,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    748.1,
+    750.0,
+    744.4
+   ],
+   "ghostty_passes": [
+    895.0,
+    929.9,
+    906.7
+   ]
+  }
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}
