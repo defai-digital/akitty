@@ -1,0 +1,123 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "3ee81d1",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "rotated_ab_7_passes_text": [
+  "unicode              base   165.3  new   168.3   1.02x  base=[166, 166, 166, 164, 164, 165, 165] new=[168, 168, 170, 168, 169, 168, 169]",
+  "ascii                base  1298.6  new  1281.0   0.99x  base=[1301, 1309, 1307, 1293, 1299, 1279, 1292] new=[1277, 1283, 1302, 1281, 1272, 1273, 1304]",
+  "synchronized-screen  base   907.0  new   917.6   1.01x  base=[892, 904, 913, 907, 911, 900, 914] new=[923, 922, 907, 916, 918, 907, 928]",
+  "long-lines           base   893.9  new   896.9   1.00x  base=[902, 912, 890, 900, 891, 606, 894] new=[891, 887, 908, 893, 900, 897, 901]",
+  "ansi                 base   327.4  new   324.7   0.99x  base=[327, 319, 324, 329, 329, 327, 330] new=[326, 328, 324, 325, 325, 325, 322]",
+  "alternate-screen     base   173.7  new   174.0   1.00x  base=[171, 174, 174, 173, 174, 175, 174] new=[174, 172, 174, 174, 173, 173, 177]"
+ ],
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 1301.7,
+   "ghostty_mib_s": 1206.0,
+   "ghostty_over_akitty": 0.93,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    1310.5,
+    1301.7,
+    1278.6
+   ],
+   "ghostty_passes": [
+    1206.0,
+    789.9,
+    1272.3
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 325.2,
+   "ghostty_mib_s": 265.3,
+   "ghostty_over_akitty": 0.82,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    325.2,
+    325.0,
+    326.0
+   ],
+   "ghostty_passes": [
+    263.8,
+    265.3,
+    269.8
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 163.4,
+   "ghostty_mib_s": 185.5,
+   "ghostty_over_akitty": 1.14,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    163.3,
+    163.4,
+    172.9
+   ],
+   "ghostty_passes": [
+    186.0,
+    162.8,
+    185.5
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 890.4,
+   "ghostty_mib_s": 488.1,
+   "ghostty_over_akitty": 0.55,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    890.4,
+    892.6,
+    859.4
+   ],
+   "ghostty_passes": [
+    488.5,
+    483.8,
+    488.1
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 173.3,
+   "ghostty_mib_s": 165.3,
+   "ghostty_over_akitty": 0.95,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    173.3,
+    175.4,
+    159.3
+   ],
+   "ghostty_passes": [
+    163.9,
+    165.3,
+    170.2
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 915.8,
+   "ghostty_mib_s": 881.0,
+   "ghostty_over_akitty": 0.96,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    915.8,
+    902.6,
+    919.9
+   ],
+   "ghostty_passes": [
+    888.7,
+    876.2,
+    881.0
+   ]
+  }
+ ],
+ "qualification": "Shared host, noisy during this run (libghostty-vt's Unicode line rose from 325 to 362 ns between runs). Ratios and sample overlap are the evidence."
+}

@@ -288,6 +288,10 @@ pub struct Terminal {
     /// Line feeds blank their new row at once, for tests that use it as a reference.
     #[cfg(test)]
     blank_at_once: bool,
+    /// Every width change of a joined cluster takes the general repair, for tests that
+    /// use it as a reference.
+    #[cfg(test)]
+    general_repair: bool,
     pub preserve_erased_screen: bool,
     pub title_max_bytes: usize,
     pub title_max_chars: usize,
@@ -384,6 +388,8 @@ impl Terminal {
             template_builds: 0,
             #[cfg(test)]
             blank_at_once: false,
+            #[cfg(test)]
+            general_repair: false,
             preserve_erased_screen: true,
             title_max_bytes: crate::parser::MAX_STRING_BYTES,
             title_max_chars: 128,
@@ -1351,6 +1357,45 @@ impl Terminal {
             row.mark_heap();
             row.charge_unknown();
             self.cluster_scratch_at = Some((position, row.id, row.generation));
+            self.grapheme_target = Some(position);
+            self.last_printed = Some(ch);
+            return true;
+        }
+        // A cluster growing from one column to two over an ordinary narrow cell (a flag's
+        // second indicator, an emoji presentation selector) inside the row: the repair
+        // below would blank both cells, record three one-step writes ending at most two
+        // columns on, and then store the cell and its spacer. Their net effect is
+        // stored directly; one write of three steps records the same generation and
+        // certificates.
+        #[cfg(test)]
+        let direct = !self.general_repair;
+        #[cfg(not(test))]
+        let direct = true;
+        if direct
+            && old_width == 1
+            && width == 2
+            && position.col + 2 <= self.cols()
+            && self.screen().rows[position.row].cells[position.col + 1].width() == 1
+        {
+            self.cluster_scratch = cluster;
+            let cols = self.cols();
+            let screen = self.screen_mut();
+            let row = &mut screen.rows[position.row];
+            let cell = &mut row.cells[position.col];
+            let appended = cell.push_combining_from(ch, &mut screen.pool);
+            debug_assert!(appended, "the combining bound was checked above");
+            cell.set_width(2);
+            let trail = cell.spacer();
+            row.cells[position.col + 1] = trail;
+            row.record_write(position.col + 2, 3);
+            row.mark_heap();
+            row.charge_unknown();
+            let at = (position, row.id, row.generation);
+            screen.cursor = Cursor {
+                position: Position { row: position.row, col: (position.col + 2).min(cols - 1) },
+                pending_wrap: position.col + 2 >= cols,
+            };
+            self.cluster_scratch_at = Some(at);
             self.grapheme_target = Some(position);
             self.last_printed = Some(ch);
             return true;
@@ -2652,6 +2697,43 @@ mod tests {
         term.materialize();
         if !bytes.is_empty() { term.revision = term.revision.wrapping_add(1); }
         events
+    }
+
+    #[test]
+    fn clusters_growing_in_place_match_the_general_repair() {
+        // Flags and presentation selectors grow a cell from one column to two, over
+        // blanks, text, wide glyphs, spacers and styled cells, at and near the edge,
+        // with and without autowrap, one character per feed and in whole runs.
+        let corpus = [
+            "🇯🇵 🇺🇸🇬🇧 ☺\u{fe0f} ❤\u{fe0f}x",
+            "\x1b[1;1Habcdefgh\x1b[1;1H🇯🇵\x1b[1;4H☺\u{fe0f}",
+            "\x1b[2;1H中中中中\x1b[2;1H🇯🇵\x1b[2;4H🇺🇸",
+            "\x1b[3;7H🇯🇵\x1b[3;8H☺\u{fe0f}\x1b[3;6H❤\u{fe0f}",
+            "\x1b[?7l\x1b[1;8H🇯🇵\x1b[?7h",
+            "\x1b[48;2;1;2;3m\x1b[1;1H\x1b]8;;https://example.test\x1b\\🇯🇵\x1b]8;;\x1b\\\x1b[0m",
+            "\x1b[1;1Hx\u{301}\x1b[1;1H🇯🇵 ok",
+        ];
+        for cols in [2, 3, 8] {
+            for whole in [true, false] {
+                let mut direct = Terminal::new(cols, 3, 0).unwrap();
+                let mut general = Terminal::new(cols, 3, 0).unwrap();
+                general.general_repair = true;
+                direct.enable_grapheme_support(true);
+                general.enable_grapheme_support(true);
+                for text in corpus {
+                    let pieces: Vec<String> =
+                        if whole { vec![text.to_string()] } else { text.chars().map(String::from).collect() };
+                    for piece in pieces {
+                        let mut events = Vec::new();
+                        direct.feed(piece.as_bytes(), 0, |event| events.push(event));
+                        let mut expected = Vec::new();
+                        general.feed(piece.as_bytes(), 0, |event| expected.push(event));
+                        assert_eq!(events, expected, "cols={cols} whole={whole} text={text:?}");
+                        assert_eq!(state(&direct), state(&general), "cols={cols} whole={whole} text={text:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

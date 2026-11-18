@@ -1755,3 +1755,35 @@ Engine results, rotated order, seven passes, history 0
 Per line of the Unicode workload, the family sequence now costs 87 ns against
 libghostty-vt's 80 ns; CJK (67 against 34 ns), the flag (70 against 45 ns), the
 lone pictograph and `é` hold the rest of the gap.
+
+## Clusters growing in place
+
+A flag's second regional indicator, or an emoji presentation selector, grows its
+cell from one column to two. `join_grapheme` sent every such change through the
+general wide-cell repair: take the cell out, blank it and its neighbour, record
+three one-step writes, then store the cell and its spacer. When the neighbour is an
+ordinary narrow cell inside the row, the net effect is now stored directly: the
+mark, the width, the spacer, and one write of three steps, which records the same
+generation and certificates. Wrapping, wide neighbours, spacers and shrinking
+widths still take the general repair.
+
+Both the run path and the scalar reference reach this code, so the run-versus-
+scalar tests cannot see it; a test-only switch forces the general repair, and a new
+test compares the two over flags and selectors on blanks, text, wide glyphs,
+spacers, styled and linked cells, at and near the edge, with and without autowrap,
+whole and one character per feed. Mutation checks catch a missing neighbour or edge
+condition, a wrong generation count or certificate end, a missing spacer, a wrong
+pending wrap and a missing charge reset.
+
+Engine results, rotated order, seven passes, history 0
+([raw record](../benchmarks/results/clusters-growing-in-place-2026-11-18.json));
+the host was noisy during the libghostty-vt run:
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 165.3 | 168.3 | 1.02x | 185.5 | 1.14x |
+| ASCII | 1298.6 | 1281.0 | 0.99x | 1206.0 | 0.93x |
+| Synchronized screen | 907.0 | 917.6 | 1.01x | 881.0 | 0.96x |
+| Long lines | 893.9 | 896.9 | 1.00x | 488.1 | 0.55x |
+| ANSI | 327.4 | 324.7 | 0.99x | 265.3 | 0.82x |
+| Alternate screen | 173.7 | 174.0 | 1.00x | 165.3 | 0.95x |
