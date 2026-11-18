@@ -1,0 +1,32 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "ae5783f1f33667e62aee7516ff34786aad577cd1",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "synthetic_ns_per_line_text": [
+  "cjk        292.7 MiB/s  130.3 ns/line |   287.9 MiB/s  132.5 ns/line",
+  "hangul     282.9 MiB/s  121.4 ns/line |   274.5 MiB/s  125.1 ns/line",
+  "e-acute    216.8 MiB/s  105.6 ns/line |   215.2 MiB/s  106.4 ns/line",
+  "emoji      198.3 MiB/s  125.0 ns/line |   218.8 MiB/s  113.3 ns/line",
+  "zwj        116.0 MiB/s  312.3 ns/line |   121.7 MiB/s  297.8 ns/line",
+  "flag       106.0 MiB/s  297.0 ns/line |   112.0 MiB/s  281.0 ns/line",
+  "full       141.5 MiB/s  451.6 ns/line |   150.4 MiB/s  424.8 ns/line"
+ ],
+ "rejected": {
+  "short ASCII stretch stays in the cell writer": "ASCII 0.97x, long lines 0.99x, alternate screen 0.96x, Unicode 0.99x",
+  "#[inline] on the table lookup": "ASCII 0.96x, alternate screen 0.96x"
+ },
+ "rotated_ab_5_passes_text": [
+  "unicode              base   145.4  new   151.2   1.04x  base=[145, 145, 145, 143, 146] new=[151, 152, 153, 151, 148]",
+  "ascii                base   978.8  new   961.6   0.98x  base=[958, 980, 973, 984, 979] new=[959, 970, 965, 962, 960]",
+  "ansi                 base   329.3  new   321.4   0.98x  base=[333, 332, 315, 329, 326] new=[329, 320, 315, 321, 326]",
+  "long-lines           base   736.5  new   784.3   1.06x  base=[715, 739, 736, 750, 737] new=[779, 799, 786, 778, 784]",
+  "alternate-screen     base   172.5  new   173.6   1.01x  base=[171, 173, 173, 173, 171] new=[173, 174, 174, 166, 174]",
+  "synchronized-screen  base   610.6  new   599.4   0.98x  base=[617, 605, 605, 612, 611] new=[616, 599, 595, 608, 599]"
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}

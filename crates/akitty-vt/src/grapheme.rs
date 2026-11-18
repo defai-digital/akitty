@@ -248,7 +248,7 @@ impl Classes {
     const fn unknown() -> Self {
         Self(Self::UNKNOWN_CLASS | Self::UNKNOWN_WIDTH << 4)
     }
-    fn class(self) -> Option<Class> {
+    const fn class(self) -> Option<Class> {
         match self.0 & 0x0f {
             0 => Some(Class::Control),
             1 => Some(Class::Cr),
@@ -343,48 +343,82 @@ pub(crate) fn join(lead: char, combining: &[char], next: char) -> Join {
 /// `lead` when there is none. `lead` and `combining` are still passed because the
 /// regional-indicator look-behind has to count the run that ends at the tail.
 pub(crate) fn join_classes(tail: Classes, next: Classes, lead: char, combining: &[char]) -> Join {
-    let (Some(tail_class), Some(next_class)) = (tail.class(), next.class()) else {
-        return Join::Unknown;
+    match PAIRS[usize::from(tail.0 & 0x0f)][usize::from(next.0 & 0x0f)] {
+        Pair::No => Join::No,
+        Pair::Yes => Join::Yes,
+        Pair::Unknown => Join::Unknown,
+        Pair::RegionalRun => {
+            if regional_run_is_odd(lead, combining) { Join::Yes } else { Join::No }
+        }
+    }
+}
+
+/// The pair decision for two class nibbles, with the regional-indicator look-behind
+/// left to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pair {
+    No,
+    Yes,
+    Unknown,
+    /// Join exactly when an odd run of regional indicators ends at the tail.
+    RegionalRun,
+}
+
+/// Every pair of class nibbles (including the unknown class) decided once, at compile
+/// time, by [`pair_rule`], so a run decides a pair with one lookup.
+const PAIRS: [[Pair; 16]; 16] = {
+    let mut table = [[Pair::No; 16]; 16];
+    let mut tail = 0;
+    while tail < 16 {
+        let mut next = 0;
+        while next < 16 {
+            table[tail][next] = pair_rule(Classes(tail as u8).class(), Classes(next as u8).class());
+            next += 1;
+        }
+        tail += 1;
+    }
+    table
+};
+
+/// The grapheme pair rules over two classes.
+const fn pair_rule(tail: Option<Class>, next: Option<Class>) -> Pair {
+    let (Some(tail), Some(next)) = (tail, next) else {
+        return Pair::Unknown;
     };
     // GB3/GB4/GB5: CR LF stays together; other controls break on both sides.
-    if tail_class == Class::Cr && next_class == Class::Lf {
-        return Join::Yes;
+    if matches!((tail, next), (Class::Cr, Class::Lf)) {
+        return Pair::Yes;
     }
-    if matches!(tail_class, Class::Control | Class::Cr | Class::Lf)
-        || matches!(next_class, Class::Control | Class::Cr | Class::Lf)
+    if matches!(tail, Class::Control | Class::Cr | Class::Lf)
+        || matches!(next, Class::Control | Class::Cr | Class::Lf)
     {
-        return Join::No;
+        return Pair::No;
     }
     // GB9: no break before an extending character or a zero width joiner.
-    if matches!(next_class, Class::Extend | Class::Zwj) {
-        return Join::Yes;
+    if matches!(next, Class::Extend | Class::Zwj) {
+        return Pair::Yes;
     }
     // GB6/GB7/GB8: Hangul syllable composition.
-    match (tail_class, next_class) {
+    if matches!(
+        (tail, next),
         (Class::HangulL, Class::HangulL | Class::HangulV | Class::HangulLv | Class::HangulLvt)
-        | (Class::HangulLv | Class::HangulV, Class::HangulV | Class::HangulT)
-        | (Class::HangulLvt | Class::HangulT, Class::HangulT) => return Join::Yes,
-        _ => {}
+            | (Class::HangulLv | Class::HangulV, Class::HangulV | Class::HangulT)
+            | (Class::HangulLvt | Class::HangulT, Class::HangulT)
+    ) {
+        return Pair::Yes;
     }
     // GB11 joins a pictograph only after `pictograph Extend* ZWJ`. Whether the
     // character before the ZWJ is a pictograph is exactly the look-behind this table
     // cannot answer without the full Extended_Pictographic property, so the pair
     // defers to exact segmentation. Every other pictograph neighbour is a break.
-    if next_class == Class::Emoji {
-        return match tail_class {
-            Class::Zwj => Join::Unknown,
-            _ => Join::No,
-        };
+    if matches!(next, Class::Emoji) {
+        return if matches!(tail, Class::Zwj) { Pair::Unknown } else { Pair::No };
     }
     // GB12/GB13: regional indicators pair up two at a time.
-    if next_class == Class::Regional {
-        return if tail_class == Class::Regional && regional_run_is_odd(lead, combining) {
-            Join::Yes
-        } else {
-            Join::No
-        };
+    if matches!((tail, next), (Class::Regional, Class::Regional)) {
+        return Pair::RegionalRun;
     }
-    Join::No
+    Pair::No
 }
 
 /// Whether an odd number of regional indicators immediately precede `next`.

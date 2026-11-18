@@ -1262,3 +1262,42 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/own
 | ASCII | 934.8 | 962.6 | 1.03x |
 | Unicode | 146.2 | 146.1 | 1.00x |
 | Synchronized screen | 603.9 | 604.4 | 1.00x |
+
+## Grapheme pair decisions from a table
+
+Every non-simple pair in a run went through an out-of-line chain of rule checks. The
+rules depend only on the two class nibbles, apart from the regional-indicator
+look-behind, so they are now a `const fn` evaluated once at compile time into a
+16-by-16 table (unknown classes included). A pair is decided with one lookup;
+only a regional indicator after a regional indicator still counts the run before it.
+The rules keep a single source, and the existing segmentation tests, which compare
+against exact segmentation, cover them. Mutation checks confirm the table index
+order, the regional look-behind, the unknown verdict and the rule results are caught.
+Marking the lookup `#[inline]` copied it into the ASCII run writer and cost 4% on
+ASCII and the alternate screen, so it is left to the compiler; ASCII, ANSI and the
+synchronized screen remain within 2% of their earlier rates.
+
+One other experiment was dropped: letting a short ASCII stretch before non-ASCII
+text stay in the cell writer cost 1-4% on ASCII, long lines and the alternate screen
+without a Unicode gain.
+
+| Synthetic line | Before ns | After ns |
+| --- | ---: | ---: |
+| CJK and ASCII | 130.3 | 132.5 |
+| Hangul and ASCII | 121.4 | 125.1 |
+| é and ASCII | 105.6 | 106.4 |
+| Emoji and ASCII | 125.0 | 113.3 |
+| ZWJ sequences | 312.3 | 297.8 |
+| Flags | 297.0 | 281.0 |
+| Mixed Unicode workload line | 451.6 | 424.8 |
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/pair-table-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Unicode | 145.4 | 151.2 | 1.04x |
+| ASCII | 978.8 | 961.6 | 0.98x |
+| ANSI | 329.3 | 321.4 | 0.98x |
+| Long lines | 736.5 | 784.3 | 1.06x |
+| Alternate screen | 172.5 | 173.6 | 1.01x |
+| Synchronized screen | 610.6 | 599.4 | 0.98x |
