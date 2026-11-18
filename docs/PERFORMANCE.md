@@ -2000,3 +2000,29 @@ Rejected in this round, all measured against the build before:
 | Alternate screen | 176.7 | 177.6 | 1.00x | 173.0 | 0.94x |
 
 Raw record: [stretch-decoding](../benchmarks/results/stretch-decoding-2026-11-18.json).
+
+### Further rejected attempts after lead-byte decoding
+
+Measured per line against the build with lead-byte decoding, and, where noted,
+against libghostty-vt 1.0.1 on the same host:
+- `join_tail`'s cell work as a free function over the borrowed row and pool: the
+  family line 1.09x, but the Unicode line 0.97x and combining accents 0.94x;
+- after a multi-byte scalar, finding the run end with an eight-byte control scan and
+  the standard UTF-8 validator: French 0.88x, emoji 0.94x (the standard validator
+  costs more per byte than the per-scalar check);
+- checking pairs of three-byte scalars with one eight-byte load in the parser: pure
+  CJK 1.12x, but the Unicode line 0.99x and emoji 0.95x, since its CJK runs are two
+  or three characters long;
+- simple stretches also taking E2 and four-byte characters whose property page is
+  built (box drawing, arrows, pictographs): the Unicode line 1.03x, but German 0.95x
+  and French 0.97x;
+- an inline hit path for the style template: within noise.
+
+Where the Unicode workload's gap sits, by adding one segment at a time to its line:
+the CJK segment costs about 15 to 20 ns more than in libghostty-vt, `😀 ` about
+14 ns more and the flag up to 30 ns more, while the family is about 54 ns cheaper. A
+line holding only `x` costs about 4 ns more. A pure CJK line spends about 2.6 ns per
+character in the stretch and 2.1 ns in the parser, against libghostty-vt's 2.9 ns for
+both; the stretch stores 32 bytes per wide character, well under one cycle of store
+bandwidth, so it is bound by instructions, and halving the cell size alone would not
+close this.
