@@ -158,12 +158,12 @@ above. Grapheme support is enabled on both builds. Rates are MiB/s at p50:
 
 | Workload | Native before | Native after | Ratio | WASM before | WASM after |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| ascii | 219.5 | 319.9 | 1.46x | 130.2 | 183.0 |
+| ASCII | 219.5 | 319.9 | 1.46x | 130.2 | 183.0 |
 | ansi | 123.7 | 218.5 | 1.77x | 92.2 | 149.9 |
-| unicode | 31.7 | 31.7 | 1.00x | 24.6 | 25.1 |
+| Unicode | 31.7 | 31.7 | 1.00x | 24.6 | 25.1 |
 | long-lines | 226.5 | 230.5 | 1.02x | 139.9 | 144.4 |
 | alternate-screen | 62.2 | 67.7 | 1.09x | 44.0 | 44.7 |
-| synchronized-screen | 93.4 | 91.6 | 0.98x | 76.7 | 76.3 |
+| Synchronized screen | 93.4 | 91.6 | 0.98x | 76.7 | 76.3 |
 
 Unicode throughput is effectively unchanged. Long-line and small WASM differences
 should not be read as broad gains. Native synchronized-screen throughput is
@@ -180,9 +180,9 @@ It repeats the same 8 MiB transport probe with three warmups and 11 samples:
 
 | PTY workload | Before MiB/s | After MiB/s | Ratio |
 | --- | ---: | ---: | ---: |
-| ascii | 96.74 | 111.36 | 1.15x |
+| ASCII | 96.74 | 111.36 | 1.15x |
 | ansi | 63.32 | 84.80 | 1.34x |
-| unicode | 58.55 | 61.27 | 1.05x |
+| Unicode | 58.55 | 61.27 | 1.05x |
 
 These are worker/model throughput improvements, excluding snapshots and rendering.
 The Unicode mode and fixture differ from the canonical engine measurement; their
@@ -199,9 +199,9 @@ excluded because their cell-width policies differ.
 
 | Workload | Ghostty/native engine ratio before | After | Ghostty/common PTY host ratio before | After |
 | --- | ---: | ---: | ---: | ---: |
-| ascii | 5.60x | 3.66x | 1.19x | 1.11x |
+| ASCII | 5.60x | 3.66x | 1.19x | 1.11x |
 | ansi | 2.57x | 1.44x | 1.57x | 1.04x |
-| unicode | 5.97x | 5.98x | 4.97x | 4.91x |
+| Unicode | 5.97x | 5.98x | 4.97x | 4.91x |
 
 The common PTY host is not AkiTTY's actual worker or Ghostty's app. It isolates a
 shared transport path, excluding both applications' rendering. The Unicode
@@ -1239,3 +1239,26 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/asc
 | Alternate screen | 174.0 | 173.0 | 0.99x | 174.6 | 1.01x |
 | Synchronized screen | 593.0 | 607.3 | 1.02x | 906.2 | 1.49x |
 
+## Controls that own nothing
+
+A C0 control from the parser's text fast path reached the terminal as
+`Input::Action(Action::Control(_))`. `Action` has variants that own vectors, so
+every line feed and carriage return ran `Action`'s drop glue, an out-of-line call
+that was 6% of an ASCII profile. The fast path now emits `Input::Control(u8)`, which
+owns nothing; the byte machine's controls are unchanged and both reach the same
+handler. The control fast-path equivalence test maps the new input to the action it
+stands for and still compares every C0 byte with the byte machine.
+
+Two experiments in the same pass were measured and dropped: four-lane NEON stores of
+sixteen ASCII cells (taken, but no gain, so stores are not the bound) and releasing
+side records before a pattern refill of heap rows (no Unicode gain, 12% ASCII loss
+from the refill no longer inlining). A probe timed the parser alone at 0.17 ns per
+ASCII byte.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/owned-controls-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| ASCII | 934.8 | 962.6 | 1.03x |
+| Unicode | 146.2 | 146.1 | 1.00x |
+| Synchronized screen | 603.9 | 604.4 | 1.00x |

@@ -402,7 +402,7 @@ impl Terminal {
             }
             // Outside synchronized output a control is applied at once, as `dispatch`
             // would, without the general action path.
-            Input::Action(Action::Control(byte)) => {
+            Input::Control(byte) | Input::Action(Action::Control(byte)) => {
                 if self.sync_deadline.is_some() {
                     self.defer_control(byte, &mut emit);
                 } else {

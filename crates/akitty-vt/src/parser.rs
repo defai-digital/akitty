@@ -69,6 +69,9 @@ pub(crate) enum Input<'a> {
     /// receives it as `&str` and never revalidates it.
     Text(&'a str),
     Csi(&'a mut Csi),
+    /// A C0 control from the text fast path, the same as `Action(Action::Control(_))`
+    /// but owning nothing, so dispatching it needs no drop check.
+    Control(u8),
     Action(Action),
 }
 
@@ -164,6 +167,7 @@ impl Parser {
                 for ch in text.chars() { emit(Action::Print(ch)); }
             }
             Input::Csi(csi) => emit(Action::Csi(std::mem::take(csi))),
+            Input::Control(byte) => emit(Action::Control(byte)),
             Input::Action(action) => emit(action),
         });
     }
@@ -208,7 +212,7 @@ impl Parser {
                 // A C0 control other than the cancels and ESC is the byte machine's
                 // Text-state control action; skip its general dispatch.
                 if input[index] < 0x20 && !matches!(input[index], 0x18 | 0x1a | 0x1b) {
-                    emit(Input::Action(Action::Control(input[index])));
+                    emit(Input::Control(input[index]));
                     index += 1;
                     continue;
                 }
@@ -549,6 +553,7 @@ mod tests {
                     move |input| match input {
                         Input::Text(text) => actions.extend(text.chars().map(Action::Print)),
                         Input::Csi(csi) => actions.push(Action::Csi(csi.clone())),
+                        Input::Control(byte) => actions.push(Action::Control(byte)),
                         Input::Action(action) => actions.push(action),
                     }
                 }
@@ -784,6 +789,7 @@ mod tests {
                     parser.feed_runs(chunk, |input| match input {
                         Input::Text(text) => actual.extend(text.chars().map(Action::Print)),
                         Input::Csi(csi) => actual.push(Action::Csi(csi.clone())),
+                        Input::Control(byte) => actual.push(Action::Control(byte)),
                         Input::Action(action) => actual.push(action),
                     });
                 }

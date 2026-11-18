@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "4dd23c5828cfe248ff1d340ae8b97231ade4a9f2",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "parser_only_ns_per_byte_ascii_lines": 0.171,
+ "rejected": {
+  "NEON vst4q four-cell ASCII stores": "path taken, no gain",
+  "release records then pattern refill on heap rows": "no Unicode gain, ASCII 0.88x"
+ },
+ "rotated_ab_5_passes_text": [
+  "ascii                base   934.8  new   962.6   1.03x  base=[935, 945, 952, 935, 911] new=[963, 955, 985, 982, 931]",
+  "unicode              base   146.2  new   146.1   1.00x  base=[143, 146, 146, 146, 147] new=[145, 146, 147, 147, 145]",
+  "synchronized-screen  base   603.9  new   604.4   1.00x  base=[594, 607, 613, 585, 604] new=[593, 618, 608, 597, 604]"
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}
