@@ -1322,10 +1322,28 @@ const CLOSE_SLOT_MS: u64 = 50;
 /// never make this run past its bounds, and every published batch is applied before the next
 /// idle window starts, so an answer still reaches the program while the master is open.
 fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool) -> Result<(), String> {
+    drain_after_exit_with(ring, wake, delivered, |slot| read_pty(fd, slot, true), |wait| {
+        let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll references one valid pollfd for this owned master.
+        let ready = unsafe { libc::poll(&mut poll, 1, wait) };
+        if ready >= 0 { return Ok(()); }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted { return Ok(()); }
+        Err(format!("PTY drain poll failed: {error}"))
+    })
+}
+
+/// Keep the idle-window policy independent of scheduling so a quiet or interrupted first poll can be
+/// tested without racing a writer thread against a short wall-clock delay.
+fn drain_after_exit_with<R, P>(ring: &Ring, wake: &Wake, delivered: &AtomicBool, mut read: R, mut probe: P) -> Result<(), String>
+where
+    R: FnMut(&mut [u8]) -> Result<Option<usize>, String>,
+    P: FnMut(libc::c_int) -> Result<(), String>,
+{
     let mut idle_waits = 0;
     for _ in 0..32 {
         let Some(mut slot) = ring.checkout_within(Duration::from_millis(DRAIN_SLOT_MS)) else { return Ok(()) };
-        match read_pty(fd, &mut slot[..], true) {
+        match read(&mut slot[..]) {
             Ok(Some(0)) => {
                 ring.release(slot);
                 return Ok(());
@@ -1342,9 +1360,9 @@ fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool) -
                 // Let the parser apply and answer what was published first: its reply is written
                 // in the same pass, so `delivered` reflects this drain rather than a previous one.
                 ring.wait_parsed(Duration::from_millis(wait as u64));
-                let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                // SAFETY: poll references one valid pollfd for this owned master.
-                if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 { return Ok(()); }
+                // A quiet poll spends one window, rather than bypassing the remaining idle budget.
+                // Re-read after either result: readiness can race and a late writer may now have data.
+                probe(wait)?;
             }
             Ok(Some(count)) => {
                 idle_waits = 0;
@@ -3176,6 +3194,42 @@ mod reply_tests {
         assert_eq!(&received[..count as usize], b"\x1b[1;1R");
         // SAFETY: closing descriptors this test created.
         unsafe { libc::close(master); libc::close(program) };
+    }
+
+    #[test]
+    fn post_exit_drain_keeps_the_second_window_after_a_quiet_poll() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let delivered = AtomicBool::new(false);
+        let mut reads = 0;
+        let mut polls = 0;
+        drain_after_exit_with(&ring, &wake, &delivered, |buffer| {
+            reads += 1;
+            if reads == 2 {
+                buffer[..4].copy_from_slice(b"\x1b[6n");
+                Ok(Some(4))
+            } else {
+                Ok(None)
+            }
+        }, |_| {
+            polls += 1;
+            Ok(())
+        }).unwrap();
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("the late query was published");
+        assert_eq!(&slot[..len], b"\x1b[6n");
+        ring.recycle(slot);
+        assert_eq!(polls, 3, "the published burst resets the two-window idle budget");
+        assert_eq!(reads, 5, "the drain still ends when its idle budget is spent");
+    }
+
+    #[test]
+    fn post_exit_drain_reports_poll_failure_without_leaking_a_slot() {
+        let ring = Ring::new();
+        let wake = Wake::new().unwrap();
+        let failure = drain_after_exit_with(&ring, &wake, &AtomicBool::new(false), |_| Ok(None),
+            |_| Err("PTY drain poll failed: test failure".into()));
+        assert_eq!(failure.unwrap_err(), "PTY drain poll failed: test failure");
+        assert_eq!(ring.lock().free.len(), RING_SLOTS);
     }
 
     #[test]
