@@ -2725,9 +2725,39 @@ fn simple_stretch<const PENDING: bool>(
     let mut last_col = col;
     let mut last_char = ' ';
     let mut handoff = false;
-    for ch in text.chars() {
-        let Some(width) = grapheme::simple_width(ch) else { break };
-        let width = usize::from(width).min(cols);
+    let input = text.as_bytes();
+    while let Some(&lead) = input.get(bytes) {
+        // Decode by lead byte and decide `simple_width` from the ranges each length can
+        // reach: printable ASCII (a run holds no other ASCII), two-byte scalars below
+        // U+0300, and the three-byte kana, CJK and Hangul blocks. Four-byte scalars are
+        // never simple.
+        let (ch, len, width) = match lead {
+            0x00..=0x7f => (u32::from(lead), 1, 1),
+            0xc2..=0xcb => {
+                let code = (u32::from(lead & 0x1f) << 6) | u32::from(input[bytes + 1] & 0x3f);
+                if code < 0xa0 || matches!(code, 0xa9 | 0xad | 0xae) {
+                    break;
+                }
+                (code, 2, 1)
+            }
+            0xe3..=0xed => {
+                let code = (u32::from(lead & 0x0f) << 12)
+                    | (u32::from(input[bytes + 1] & 0x3f) << 6)
+                    | u32::from(input[bytes + 2] & 0x3f);
+                if !matches!(code, 0x3041..=0x3096 | 0x30a1..=0x30fa | 0x4e00..=0x9fff | 0xac00..=0xd7a3) {
+                    break;
+                }
+                (code, 3, 2)
+            }
+            _ => break,
+        };
+        debug_assert!(ch >= 0x80 || (0x20..=0x7e).contains(&ch), "a run holds printable ASCII only");
+        // SAFETY: `text` is valid UTF-8 and `ch` is the scalar its sequence at `bytes`
+        // encodes.
+        let ch = unsafe { char::from_u32_unchecked(ch) };
+        debug_assert_eq!(grapheme::simple_width(ch), Some(width as u8));
+        debug_assert_eq!(ch.len_utf8(), len);
+        let width = width.min(cols);
         if col + width > cols {
             break;
         }
@@ -2748,8 +2778,8 @@ fn simple_stretch<const PENDING: bool>(
         last_col = col;
         last_char = ch;
         col += width;
-        bytes += ch.len_utf8();
-        if !ch.is_ascii()
+        bytes += len;
+        if len != 1
             && text.as_bytes().get(bytes).is_some_and(u8::is_ascii)
             && let Some(&next) = text.as_bytes()[bytes..].first_chunk::<ASCII_HANDOFF>()
             && u128::from_ne_bytes(next) & u128::from_ne_bytes([0x80; ASCII_HANDOFF]) == 0
@@ -2867,6 +2897,32 @@ mod tests {
             }
         }
         assert!(!regional_indicator('\u{1f1e5}') && !regional_indicator('\u{1f200}'));
+    }
+
+    #[test]
+    fn simple_stretches_take_exactly_the_simple_characters() {
+        // The stretch decodes by lead byte; every scalar a run can hold is taken exactly
+        // when `simple_width` says so, at its width and length, and nothing is written
+        // otherwise.
+        let template = CellStyle::new(&Style::default(), None);
+        let words = template.plain_words().expect("the default style packs");
+        for code in 0x20..=0x2ffffu32 {
+            let Some(ch) = char::from_u32(code) else { continue };
+            if code == 0x7f {
+                continue;
+            }
+            let text = format!("{ch}x");
+            let mut cells = vec![Cell::blank(Color::Background); 8];
+            let stretch = simple_stretch::<true>(&mut cells, text.as_bytes(), 0, 8, words);
+            match grapheme::simple_width(ch) {
+                Some(width) => {
+                    assert_eq!(stretch.bytes, ch.len_utf8() + 1, "{code:#x}");
+                    assert_eq!(stretch.col, usize::from(width) + 1, "{code:#x}");
+                    assert_eq!((cells[0].ch, cells[0].width()), (ch, width), "{code:#x}");
+                }
+                None => assert_eq!(stretch.bytes, 0, "{code:#x}"),
+            }
+        }
     }
 
     #[test]

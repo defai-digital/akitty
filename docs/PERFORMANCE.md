@@ -1951,3 +1951,52 @@ word).
 | Alternate screen | 177.6 | 175.1 | 0.99x | 162.3 | 0.93x |
 
 Raw record: [flags-in-runs](../benchmarks/results/flags-in-runs-2026-11-18.json).
+
+## Decoding simple stretches by lead byte
+
+`simple_stretch` decoded with the generic `chars()` iterator, asked `simple_width`
+about each scalar and then recomputed its length. It now decodes by lead byte and
+decides simplicity from the ranges each length can reach: printable ASCII (a run
+holds no other ASCII), two-byte scalars below U+0300 other than the C1 controls, the
+two pictographs and the soft hyphen, and the three-byte kana, CJK and Hangul blocks.
+Four-byte scalars are never simple. Debug assertions compare each decision with
+`simple_width` and each length with the scalar's.
+
+A new test runs the stretch over every scalar up to U+2FFFF and checks that it takes
+exactly the simple ones, at their width and length. Mutation checks catch a wider
+two-byte lead range, a missing C1, pictograph or soft-hyphen exclusion, each block
+edge, the three-byte width and the length. Handing off after an ASCII character too
+is equivalent: it only changes which writer stores the following ASCII.
+
+Accented Latin text gains (a French sentence 164.6 to 138.0 ns per line, `é` lines
+110.2 to 102.8 ns). CJK lines (110.2 to 112.9 ns) and the Unicode workload's line
+(289.0 to 292.3 ns) are flat within noise, so the CJK cost is not in decoding. All
+six workloads are flat.
+
+Rejected in this round, all measured against the build before:
+- the stretch also taking plain and pictograph characters, with their classes passed
+  back to the run writer: emoji lines 1.12x and box drawing 1.17x, but `é` 0.92x,
+  flags 0.88x and Unicode 0.99x; as a const-generic variant only for stretches that
+  start at such a character, flags 0.94x and the Unicode line 0.98x;
+- the stretch reading such characters only from property pages already built, so it
+  makes no call: the Unicode line 1.04x and Vietnamese 1.43x, but French 0.95x,
+  German 0.93x and the Unicode workload 1.00x;
+- a per-row lower bound on the columns that own records, so a refill releases
+  records only from there: Unicode 1.00x;
+- the parser trying an ASCII word after a scalar only when an ASCII byte follows:
+  the Unicode line 1.00x;
+- sending ASCII prefixes shorter than four bytes before other text straight to the
+  cell writer: the Unicode line 0.99x, and 0.95x for a family-and-flag line;
+- counting plain and pictograph characters as simple predecessors: the Unicode line
+  1.00x, emoji 0.96x.
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 180.0 | 180.3 | 1.00x | 196.0 | 1.06x |
+| ASCII | 1298.7 | 1299.1 | 1.00x | 1307.3 | 1.00x |
+| Synchronized screen | 916.5 | 925.9 | 1.01x | 899.8 | 0.94x |
+| Long lines | 912.9 | 916.8 | 1.00x | 497.8 | 0.53x |
+| ANSI | 341.8 | 338.5 | 0.99x | 281.4 | 0.81x |
+| Alternate screen | 176.7 | 177.6 | 1.00x | 173.0 | 0.94x |
+
+Raw record: [stretch-decoding](../benchmarks/results/stretch-decoding-2026-11-18.json).
