@@ -779,16 +779,19 @@ impl Terminal {
         // of the following pair. `None` means the pair was an ordinary ASCII pair that
         // needed no decision, and the class is filled in when one is needed.
         let mut previous_class: Option<grapheme::Classes> = None;
-        let mut previous_is_ascii = false;
+        // Whether the character written before this one is a `simple_width` character.
+        let mut previous_simple = false;
         let mut last_col = pos.col;
         let mut last_char = ' ';
         let screen = self.screen_mut();
         let row = &mut screen.rows[pos.row];
         for ch in text.chars() {
-            // An ordinary ASCII character can never join the ASCII character written
-            // before it, so plain text does no grapheme work at all.
+            // A simple character never joins the simple character written before it
+            // (ordinary ASCII, Latin text, CJK, kana and Hangul syllables), so such text
+            // does no grapheme work at all.
+            let simple = grapheme::simple_width(ch);
             let mut carried = None;
-            if graphemes && !(previous_is_ascii && ch.is_ascii()) {
+            if graphemes && !(previous_simple && simple.is_some()) {
                 let verdict = match previous {
                     Some(lead) => {
                         let tail = previous_class.unwrap_or_else(|| grapheme::classes(lead));
@@ -827,8 +830,8 @@ impl Terminal {
                     break;
                 }
             }
-            let width = if ch.is_ascii() {
-                1
+            let width = if let Some(width) = simple {
+                usize::from(width).min(cols)
             } else {
                 carried
                     .and_then(grapheme::Classes::width)
@@ -856,7 +859,7 @@ impl Terminal {
             bytes += ch.len_utf8();
             previous = Some(ch);
             previous_class = carried;
-            previous_is_ascii = ch.is_ascii();
+            previous_simple = simple.is_some();
         }
         if bytes != 0 {
             let advance = col - pos.col;
@@ -3541,9 +3544,13 @@ mod tests {
             let written = term.write_run(text, &template);
             (written.bytes, grapheme::classifications_for_test())
         }
-        assert_eq!(run("中文字"), (9, 3), "one class per CJK character written");
-        assert_eq!(run("한국어"), (9, 3));
-        assert_eq!(run("中a中"), (7, 3), "an ASCII member of the run is classified once too");
+        // Simple characters (CJK, kana, Hangul syllables, Latin) need no lookup at all.
+        assert_eq!(run("中文字"), (9, 0));
+        assert_eq!(run("한국어"), (9, 0));
+        assert_eq!(run("中a中é"), (9, 0));
+        // Any other character is classified once, as `next` and then as the tail.
+        assert_eq!(run("😀😀😀"), (12, 3), "one class per pictograph written");
+        assert_eq!(run("中😀中"), (10, 3), "a simple neighbour is classified once when needed");
         // The packed ASCII prefix is batched before any pair decision is taken.
         assert_eq!(run("e\u{301}"), (1, 0));
         // Pure ASCII pairs are decided by the character test alone.

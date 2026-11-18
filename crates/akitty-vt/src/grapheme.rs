@@ -277,6 +277,31 @@ impl Classes {
     }
 }
 
+/// The width of a character that never joins a cluster with a neighbour that is also
+/// such a character: printable ASCII, U+00A0..U+02FF without the two pictographs and
+/// the soft hyphen, and the kana, CJK ideograph and Hangul syllable blocks. Their
+/// classes are plain or a Hangul syllable, and no pair of those joins, so a run of them
+/// needs no property lookup or pair decision. Tests check this against the tables.
+#[inline]
+pub(crate) fn simple_width(ch: char) -> Option<u8> {
+    let code = ch as u32;
+    // One comparison settles pictographs, flags and everything else above the blocks.
+    if code > 0xd7a3 {
+        return None;
+    }
+    if code < 0x300 {
+        return match code {
+            0x20..=0x7e => Some(1),
+            0xa0..=0x2ff if !matches!(code, 0xa9 | 0xad | 0xae) => Some(1),
+            _ => None,
+        };
+    }
+    match code {
+        0x3041..=0x3096 | 0x30a1..=0x30fa | 0x4e00..=0x9fff | 0xac00..=0xd7a3 => Some(2),
+        _ => None,
+    }
+}
+
 /// Look up both properties once. A page is built only from the existing class function
 /// and `UnicodeWidthChar`; `OnceLock` also makes concurrent first use deterministic.
 #[inline]
@@ -377,6 +402,31 @@ fn regional_run_is_odd(lead: char, combining: &[char]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn simple_characters_match_the_tables_and_never_join_each_other() {
+        // Every simple character has the table's class and width, its class is plain or
+        // a Hangul syllable, and every pair of those classes is a break.
+        let mut seen = Vec::new();
+        for code in 0..=0x10ffffu32 {
+            let Some(ch) = char::from_u32(code) else { continue };
+            let Some(width) = super::simple_width(ch) else { continue };
+            let classes = super::classes(ch);
+            assert_eq!(classes.width(), Some(usize::from(width)), "{code:#x}");
+            assert_eq!(ch.width(), Some(usize::from(width)), "{code:#x}");
+            let class = classes.class();
+            assert!(matches!(class, Some(Class::Plain | Class::HangulLv | Class::HangulLvt)), "{code:#x} {class:?}");
+            if !seen.iter().any(|(seen, _)| *seen == class) {
+                seen.push((class, ch));
+            }
+        }
+        assert_eq!(seen.len(), 3, "plain and both Hangul syllable classes are covered");
+        for &(_, tail) in &seen {
+            for &(_, next) in &seen {
+                let verdict = super::join_classes(super::classes(tail), super::classes(next), tail, &[]);
+                assert_eq!(verdict, Join::No, "{tail:?} then {next:?}");
+            }
+        }
+    }
     use super::*;
     use unicode_segmentation::UnicodeSegmentation;
 

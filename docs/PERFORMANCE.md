@@ -1064,3 +1064,42 @@ also measured. It showed no gain and was not adopted, since it needed `unsafe`.
 Final viewport, cursor and screen state agree with libghostty-vt. These rates
 exclude snapshots and rendering and make no Ghostty parity claim.
 
+## Runs of characters that never join each other
+
+Only printable ASCII skipped the grapheme pair decision in a text run; CJK, kana,
+Hangul syllables and accented Latin each paid a property lookup and a pair decision.
+Per-class synthetic lines put the remaining Unicode gap in those ordinary scripts
+rather than in emoji sequences: a CJK line cost 190 ns against libghostty-vt's 98,
+while a ZWJ sequence line cost 337 ns against 283.
+
+A character is now simple when it is printable ASCII, in U+00A0..U+02FF other than
+the two pictographs and the soft hyphen, or in the kana, CJK unified ideograph or
+Hangul syllable blocks. Their classes are plain or a Hangul syllable, and no pair of
+those classes joins, so a simple character after a simple character needs neither a
+lookup nor a decision and takes its width from the range. Any other character, or
+a simple character next to one, takes the existing path. A test walks every scalar
+value and checks each simple character's width and class against the tables and
+every class pair against the pair rules. Mutation checks confirm each range and the
+run condition are caught, except edits that the range ordering makes unreachable.
+
+| Synthetic line | Before ns | After ns | libghostty-vt ns |
+| --- | ---: | ---: | ---: |
+| CJK and ASCII | 189.6 | 150.3 | 98.4 |
+| Hangul and ASCII | 173.5 | 137.5 | 87.8 |
+| é and ASCII | 148.3 | 102.3 | 50.5 |
+| Mixed Unicode workload line | 491.9 | 478.5 | 331.1 |
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/simple-runs-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| ASCII | 733.2 | 747.7 | 1.02x |
+| ANSI | 329.6 | 326.7 | 0.99x |
+| Unicode | 131.8 | 136.8 | 1.04x |
+| Long lines | 375.0 | 380.9 | 1.02x |
+| Alternate screen | 166.9 | 166.1 | 1.00x |
+| Synchronized screen | 564.3 | 563.7 | 1.00x |
+
+The mixed Unicode workload is dominated by emoji, ZWJ and flag sequences, which
+still take the pair path, so its gain is smaller than the per-script lines.
+

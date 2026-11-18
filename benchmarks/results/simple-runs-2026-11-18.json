@@ -1,0 +1,48 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "47e60e2d66275e14a53eaf687569abd12136a11e",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "synthetic_ns_per_line": {
+  "before": {
+   "cjk": 189.6,
+   "hangul": 173.5,
+   "e-acute": 148.3,
+   "emoji": 128.1,
+   "zwj": 336.9,
+   "flag": 293.3,
+   "full": 491.9
+  },
+  "after": {
+   "cjk": 150.3,
+   "hangul": 137.5,
+   "e-acute": 102.3,
+   "emoji": 134.1,
+   "zwj": 346.1,
+   "flag": 294.7,
+   "full": 478.5
+  },
+  "libghostty_vt_1_0_1": {
+   "cjk": 98.4,
+   "hangul": 87.8,
+   "e-acute": 50.5,
+   "emoji": 75.3,
+   "zwj": 282.7,
+   "flag": 249.1,
+   "full": 331.1
+  }
+ },
+ "rotated_ab_5_passes_text": [
+  "ascii                base   733.2  new   747.7   1.02x  base=[733, 739, 731, 758, 726] new=[739, 752, 744, 748, 756]",
+  "ansi                 base   329.6  new   326.7   0.99x  base=[327, 331, 330, 330, 323] new=[324, 327, 331, 326, 331]",
+  "unicode              base   131.8  new   136.8   1.04x  base=[132, 133, 132, 129, 132] new=[138, 133, 140, 137, 134]",
+  "long-lines           base   375.0  new   380.9   1.02x  base=[375, 375, 382, 380, 373] new=[367, 381, 378, 381, 382]",
+  "alternate-screen     base   166.9  new   166.1   1.00x  base=[166, 172, 167, 172, 164] new=[168, 165, 170, 166, 164]",
+  "synchronized-screen  base   564.3  new   563.7   1.00x  base=[564, 563, 585, 560, 567] new=[565, 553, 564, 558, 567]"
+ ],
+ "qualification": "Shared host; ratios and sample overlap are the evidence. No Ghostty parity claim."
+}
