@@ -2068,3 +2068,41 @@ against libghostty-vt 1.0.1, history 0
 
 The ASCII, synchronized and ANSI workloads never reach the new code; their changes
 are within the host's noise.
+
+### ASCII chunks and the mixed scan out of line
+
+The first version cost the ASCII and long-line workloads 2% (rotated, seven passes:
+1290.0 to 1267.6 and 903.1 to 889.4 MiB/s). ASCII text never reached the chunks, but
+the run-once flag and the call grew the ASCII scan. The scan after a run's first
+multi-byte scalar now lives in its own out-of-line function (`mixed_text_end`): the
+chunks, then the per-scalar loop as before, so the ASCII scan holds less than it did
+before chunks. The long-line workload is one run with a wide character every 76
+bytes, so nearly all of it went through full validation, which costs more per byte
+than the ASCII words. A chunk with no high bit set now needs only the control
+compare and a check that the chunk before did not end inside a sequence (a lead in
+its last three bytes at or above F0, E0 or C0 by position).
+
+A new test puts every lead byte at each of the last six positions of a chunk with
+its continuation bytes cut by the chunk edge, before an ASCII chunk and before a
+mixed one; mutation checks catch each of the three limits, the control compare and
+the incomplete check. Not updating the previous chunk after an ASCII one is
+equivalent (both end at a character boundary, so the next chunk's first bytes are
+judged the same), as is leaving out the ASCII words in the mixed scan (only speed).
+
+Against the build before chunks, rotated, seven passes: ASCII 1286.9 to 1310.0
+(1.02x), long lines 906.6 to 936.7 (1.03x), Unicode 180.5 to 197.5 MiB/s (1.09x).
+
+Against libghostty-vt 1.0.1, rotated, seven passes, history 0
+([raw record](../benchmarks/results/neon-ascii-chunks-2026-11-18.json)):
+
+| Engine MiB/s | AkiTTY | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: |
+| Unicode | 195.5 | 184.3 | 0.94x |
+| ASCII | 1318.7 | 1250.9 | 0.95x |
+| Synchronized screen | 932.3 | 857.3 | 0.92x |
+| Long lines | 926.5 | 462.4 | 0.50x |
+| ANSI | 343.0 | 267.1 | 0.78x |
+| Alternate screen | 176.1 | 166.3 | 0.94x |
+
+AkiTTY's engine is now at least as fast as libghostty-vt on every workload of this
+suite on this host.

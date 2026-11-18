@@ -117,6 +117,30 @@ impl std::fmt::Debug for Parser {
     }
 }
 
+/// The end of the run scan from `index`, just after a run's first multi-byte scalar:
+/// whole chunks first (`text_chunks`), then printable ASCII bytes, ASCII words after
+/// each multi-byte scalar and complete scalars, up to the first other byte. Kept out
+/// of line so the ASCII scan stays small.
+#[inline(never)]
+fn mixed_text_end(input: &[u8], mut index: usize) -> usize {
+    index += text_chunks(&input[index..]);
+    index += whole_printable_words(&input[index..]);
+    while index < input.len() {
+        if (0x20..=0x7e).contains(&input[index]) {
+            index += 1;
+            continue;
+        }
+        match scalar_width(input, index) {
+            Some(width) => {
+                index += width;
+                index += whole_printable_words(&input[index..]);
+            }
+            None => break,
+        }
+    }
+    index
+}
+
 /// The length of a prefix of `input` (which starts at a character boundary) that the
 /// run scan would take whole: printable ASCII and complete valid multi-byte scalars,
 /// with no C0 control, DEL or invalid byte. Takes whole sixteen-byte chunks, then backs
@@ -158,6 +182,9 @@ mod chunks {
     const OVERLONG_4: u8 = 1 << 6;
     const TWO_CONTS: u8 = 1 << 7;
     const CARRY: u8 = TOO_SHORT | TOO_LONG | TWO_CONTS;
+
+    const INCOMPLETE_ABOVE: [u8; 16] =
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xef, 0xdf, 0xbf];
 
     /// Error classes by the previous byte's high nibble.
     const FIRST_HIGH: [u8; 16] = [
@@ -211,11 +238,24 @@ mod chunks {
             let first_high = vld1q_u8(FIRST_HIGH.as_ptr());
             let first_low = vld1q_u8(FIRST_LOW.as_ptr());
             let second_high = vld1q_u8(SECOND_HIGH.as_ptr());
+            // A lead byte in the last three positions at or above these needs
+            // continuation bytes in the next chunk.
+            let incomplete_above = vld1q_u8(INCOMPLETE_ABOVE.as_ptr());
             let mut previous = vdupq_n_u8(0);
             let mut taken = 0;
             while let Some(chunk) = input[taken..].first_chunk::<16>() {
                 let bytes = vld1q_u8(chunk.as_ptr());
                 let control = vorrq_u8(vcltq_u8(bytes, vdupq_n_u8(0x20)), vceqq_u8(bytes, vdupq_n_u8(0x7f)));
+                if vmaxvq_u8(bytes) < 0x80 {
+                    // An ASCII chunk is valid unless the chunk before ended inside a
+                    // sequence.
+                    if vmaxvq_u8(vorrq_u8(control, vqsubq_u8(previous, incomplete_above))) != 0 {
+                        break;
+                    }
+                    previous = bytes;
+                    taken += 16;
+                    continue;
+                }
                 let prev1 = vextq_u8::<15>(previous, bytes);
                 let special = vandq_u8(
                     vandq_u8(
@@ -310,7 +350,6 @@ impl Parser {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
                 let mut ascii = true;
-                let mut chunked = false;
                 // Printable ASCII is skipped a word at a time where a run opens and
                 // after each multi-byte scalar, up to the exact first other byte. The
                 // byte loop takes a short tail and the rest, and a complete multi-byte scalar
@@ -324,14 +363,8 @@ impl Parser {
                     match scalar_width(input, index) {
                         Some(width) => {
                             ascii = false;
-                            index += width;
-                            // Once per run, take whole chunks of text after the first
-                            // multi-byte scalar at a time.
-                            if !chunked {
-                                chunked = true;
-                                index += text_chunks(&input[index..]);
-                            }
-                            index += whole_printable_words(&input[index..]);
+                            index = mixed_text_end(input, index + width);
+                            break;
                         }
                         None => break,
                     }
@@ -988,6 +1021,24 @@ mod tests {
                 input.extend_from_slice(piece);
             }
             check_chunks(&input);
+        }
+        // A sequence cut by the end of a chunk, at every lead position near it, before
+        // an ASCII chunk and before a mixed one.
+        for at in 10..16 {
+            for lead in 0xc2..=0xf4u8 {
+                for next in [b'a', 0xc3] {
+                    let mut input = vec![b'a'; 64];
+                    input[at] = lead;
+                    for byte in &mut input[at + 1..16] {
+                        *byte = 0x90;
+                    }
+                    if next != b'a' {
+                        input[16] = next;
+                        input[17] = 0xa9;
+                    }
+                    check_chunks(&input);
+                }
+            }
         }
         let line = "中文 日本語 한국어 é 😀 👩🏽\u{200d}💻 🇯🇵 text\r\n".repeat(3);
         let taken = text_chunks(line.as_bytes());
