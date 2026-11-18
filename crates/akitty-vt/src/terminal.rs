@@ -1066,11 +1066,12 @@ impl Terminal {
             if !cursor.pending_wrap {
                 col = col.saturating_sub(1);
             }
-            let row = &mut self.screen_mut().rows[cursor.position.row];
+            let screen = self.screen_mut();
+            let row = &mut screen.rows[cursor.position.row];
             if row.cells[col].width() == 0 {
                 col = col.saturating_sub(1);
             }
-            if row.cells[col].push_combining(ch) {
+            if row.cells[col].push_combining_from(ch, &mut screen.pool) {
                 row.record_full_write(1);
                 row.cells[col].set_written(true);
                 row.mark_heap();
@@ -1218,8 +1219,9 @@ impl Terminal {
         }
         if width == usize::from(old_width) && position.col + width <= self.cols() {
             self.cluster_scratch = cluster;
-            let row = &mut self.screen_mut().rows[position.row];
-            let appended = row.cells[position.col].push_combining(ch);
+            let screen = self.screen_mut();
+            let row = &mut screen.rows[position.row];
+            let appended = row.cells[position.col].push_combining_from(ch, &mut screen.pool);
             debug_assert!(appended, "the combining bound was checked above");
             row.record_write(position.col + width, 1);
             row.mark_heap();
@@ -1233,7 +1235,7 @@ impl Terminal {
         let mut cell = std::mem::take(&mut self.screen_mut().rows[position.row].cells[position.col]);
         let bg = cell.style().bg;
         self.cluster_scratch = cluster;
-        cell.push_combining(ch);
+        cell.push_combining_from(ch, &mut self.screen_mut().pool);
         cell.set_width(width as u8);
         if position.col + width > self.cols() {
             self.clear_wide(position.row, position.col, bg, old_width);
@@ -2449,6 +2451,35 @@ mod tests {
                     "cols={cols} rows={rows} history={history} graphemes={graphemes} chunk={chunk} text={text:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn reused_side_records_carry_nothing_from_their_last_cell() {
+        // Marked, linked and wide clusters scroll off and are blanked, so their records
+        // are reused by the clusters written next, which must hold only their own marks.
+        let mut term = Terminal::new(12, 2, 0).unwrap();
+        term.enable_grapheme_support(true);
+        let old = "\x1b]8;;https://example.invalid\x1b\\e\u{301}\u{302}\u{303}o\u{308}\x1b]8;;\x1b\\👩🏽\u{200d}💻🇯🇵\r\n";
+        for _ in 0..4 {
+            feed(&mut term, old.as_bytes());
+        }
+        assert!(term.main.pool.len() > 0, "blanking kept the records");
+        feed(&mut term, "a\u{300}b\u{301}\u{302}🏳\u{fe0f}\r\n".as_bytes());
+        let row = &term.screen().rows[0];
+        assert_eq!(row.cells[0].text(), "a\u{300}");
+        assert_eq!(row.cells[1].text(), "b\u{301}\u{302}");
+        assert_eq!(row.cells[2].text(), "🏳\u{fe0f}");
+        assert!(row.cells.iter().all(|cell| cell.link().is_none()));
+        let mut reference = Terminal::new(12, 2, 0).unwrap();
+        reference.enable_grapheme_support(true);
+        feed(&mut reference, "\r\na\u{300}b\u{301}\u{302}🏳\u{fe0f}\r\n".as_bytes());
+        let expected = &reference.screen().rows[0];
+        for (cell, want) in row.cells.iter().zip(&expected.cells) {
+            assert_eq!(format!("{cell:?}"), format!("{want:?}"));
+        }
+        for row in &term.screen().rows {
+            row.assert_charge_matches_recount("after reuse");
         }
     }
 

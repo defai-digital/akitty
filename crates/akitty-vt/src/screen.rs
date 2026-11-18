@@ -1,6 +1,6 @@
 //! Screen storage with bounded history and stable row identities.
 
-use crate::cell::{Cell, Color};
+use crate::cell::{Cell, Color, RecordPool};
 use std::collections::VecDeque;
 
 pub const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
@@ -48,13 +48,13 @@ impl Charge {
 type Spare = Option<(Vec<Cell>, usize, Color, bool)>;
 
 /// A new blank row, reusing the spare cells when they have the screen's width.
-fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color) -> Row {
+fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color, pool: &mut RecordPool) -> Row {
     let id = *next_row_id;
     *next_row_id = next_row_id.wrapping_add(1);
     let cells = match spare.take() {
         Some((mut cells, modified_end, bg, heap)) if cells.len() == cols => {
             let end = if bg == background { modified_end } else { cells.len() };
-            refill_blank(&mut cells[..end], heap, background);
+            refill_blank(&mut cells[..end], heap, background, pool);
             cells
         }
         _ => vec![Cell::blank(background); cols],
@@ -80,14 +80,14 @@ fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background
 /// Turn `row` into the blank row that `Screen::recycle(row)` followed by
 /// `Screen::blank(background)` would produce, in place, so its cells and metadata are
 /// not moved through the spare slot.
-fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color) {
+fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color, pool: &mut RecordPool) {
     if row.cells.len() != cols {
         // `recycle` keeps no cells of another width, so `blank` uses the spare.
-        *row = build_blank(spare, next_row_id, cols, background);
+        *row = build_blank(spare, next_row_id, cols, background, pool);
         return;
     }
     let end = if row.blank_bg == background { row.blank_from() } else { row.cells.len() };
-    refill_blank(&mut row.cells[..end], row.has_heap, background);
+    refill_blank(&mut row.cells[..end], row.has_heap, background, pool);
     // `recycle` would have replaced the spare and `blank` taken it.
     *spare = None;
     row.id = *next_row_id;
@@ -108,12 +108,19 @@ fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize,
 
 /// Fill recycled cells with blanks of `background`. `heap` says whether any of them
 /// may own a side record; when neither they nor the blank do, the fill is plain stores.
-fn refill_blank(cells: &mut [Cell], heap: bool, background: Color) {
+/// Records the old cells alone own go to `pool`.
+fn refill_blank(cells: &mut [Cell], heap: bool, background: Color, pool: &mut RecordPool) {
+    if heap {
+        // Afterwards no old cell owns a record.
+        for cell in cells.iter_mut() {
+            pool.keep(cell);
+        }
+    }
     let blank = Cell::blank(background);
     match blank.packed_word() {
         // Neither the old cells nor the blank own heap: a pattern fill.
-        Some(_) if !heap => Cell::fill_heap_free(cells, &blank),
-        _ => cells.fill(blank),
+        Some(_) => Cell::fill_heap_free(cells, &blank),
+        None => cells.fill(blank),
     }
 }
 
@@ -358,7 +365,7 @@ impl Row {
     }
     /// Fill a column range with blanks, allocating one shared record for the range.
     pub(crate) fn fill_blank(&mut self, range: std::ops::Range<usize>, bg: Color) {
-        refill_blank(&mut self.cells[range], self.has_heap, bg);
+        refill_blank(&mut self.cells[range], self.has_heap, bg, &mut RecordPool::default());
         self.has_heap |= Cell::blank_owns_heap(bg);
         self.charge = None;
     }
@@ -404,6 +411,8 @@ pub struct Screen {
     /// Recycled cells, the bound past which they are still blanks of the colour, and
     /// whether any of them may own heap.
     spare: Spare,
+    /// Side records freed by blanking, for the next marks written on this screen.
+    pub(crate) pool: RecordPool,
 }
 
 impl Screen {
@@ -424,6 +433,7 @@ impl Screen {
             history_bytes: 0,
             next_row_id: if alternate { 1 << 63 } else { 1 },
             spare: None,
+            pool: RecordPool::default(),
         };
         for _ in 0..rows {
             let row = screen.blank(Color::Background);
@@ -433,7 +443,7 @@ impl Screen {
     }
 
     pub fn blank(&mut self, background: Color) -> Row {
-        build_blank(&mut self.spare, &mut self.next_row_id, self.cols, background)
+        build_blank(&mut self.spare, &mut self.next_row_id, self.cols, background, &mut self.pool)
     }
 
     /// Blank this screen in place, keeping its allocations. Row ids keep advancing from the
@@ -502,7 +512,7 @@ impl Screen {
     }
 
     fn reblank(&mut self, row: &mut Row, background: Color) {
-        reblank(row, &mut self.spare, &mut self.next_row_id, self.cols, background);
+        reblank(row, &mut self.spare, &mut self.next_row_id, self.cols, background, &mut self.pool);
     }
     fn recycle(&mut self, row: Row) {
         if row.cells.len() == self.cols {
@@ -586,7 +596,7 @@ impl Screen {
                     }
                     self.rows.rotate_left(1);
                     let last = self.rows.back_mut().expect("validated scroll region");
-                    reblank(last, &mut self.spare, &mut self.next_row_id, self.cols, bg);
+                    reblank(last, &mut self.spare, &mut self.next_row_id, self.cols, bg, &mut self.pool);
                     continue;
                 }
                 let removed = self.rows.remove(region.start).expect("validated scroll region");

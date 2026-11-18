@@ -1472,3 +1472,40 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/sin
 | Unicode | 151.5 | 151.6 | 1.00x | 191.8 | 1.3x |
 | Long lines | 795.6 | 915.9 | 1.15x | 497.7 | 0.56x |
 | Alternate screen | 175.0 | 173.3 | 0.99x | 177.2 | 1.02x |
+
+## Reused side records
+
+Every joined cluster (a marked letter, an emoji family, a flag) allocates one side
+record, and blanking its row frees it again, so output that scrolls such text paid
+an allocation and a free per cluster per line. A probe that made small allocations
+nearly free measured about 7% on the Unicode workload. Each screen now keeps up to 16
+empty records: blanking a row moves the records only its cells own into the pool,
+emptied on the way in so a pooled record holds no marks and no hyperlink, and a cell
+that needs a record takes one from the pool before allocating. Records shared with a
+style template are only released, after a plain reference-count load rules them out.
+Once the loop has taken every record, the row is refilled with the pattern fill that
+needs no destructor checks.
+
+A unit test checks that shared records stay with their owner, that a pooled record
+releases its link and comes back empty, and that the pool stays bounded; a terminal
+test scrolls marked, linked and wide clusters away and checks that the clusters
+written next hold exactly their own text, no link, the same cells as a fresh
+terminal and an exact history charge. Mutation checks confirm that a record kept
+with its contents, a record kept with only its marks cleared, an unbounded pool, a
+missing hand-off before the fill and a pool that is never drawn from are caught;
+dropping the reference-count pre-check is equivalent because the uniqueness check
+still guards it.
+
+The ANSI workload, whose colored cells share their template's record, measured about
+2-3% slower from the extra pass; it remains faster than libghostty-vt.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/record-pool-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 145.9 | 156.8 | 1.07x | 191.7 | 1.24x |
+| ANSI | 320.7 | 311.3 | 0.97x | 263.1 | 0.84x |
+| ASCII | 1087.5 | 1096.6 | 1.01x | 1211.1 | 1.13x |
+| Long lines | 881.4 | 898.6 | 1.02x | 464.2 | 0.52x |
+| Synchronized screen | 789.2 | 793.8 | 1.01x | 900.1 | 1.13x |
+| Alternate screen | 167.4 | 172.7 | 1.03x | 171.8 | 1.0x |

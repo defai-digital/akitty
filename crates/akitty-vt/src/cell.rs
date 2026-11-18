@@ -450,14 +450,19 @@ impl Cell {
         self.packed = if written { self.packed | WRITTEN } else { self.packed & !WRITTEN };
     }
     /// Attach a combining mark; `false` when the per-cell bound is already reached.
+    #[cfg(test)]
     pub(crate) fn push_combining(&mut self, ch: char) -> bool {
+        self.push_combining_from(ch, &mut RecordPool::default())
+    }
+    /// `push_combining`, taking a new side record from `pool` when one is needed.
+    pub(crate) fn push_combining_from(&mut self, ch: char, pool: &mut RecordPool) -> bool {
         if self.combining_len() >= MAX_COMBINING {
             return false;
         }
         if self.extras.is_none() {
-            let mut record = CellExtras::default();
-            record.combining.push(ch);
-            self.extras = Some(Arc::new(record));
+            let mut record = pool.take();
+            Arc::get_mut(&mut record).expect("pooled records are unshared").combining.push(ch);
+            self.extras = Some(record);
             return true;
         }
         Arc::make_mut(self.extras.as_mut().expect("a record exists")).combining.push(ch);
@@ -518,6 +523,41 @@ pub(crate) fn side_bytes(cells: &[Cell]) -> usize {
         }
     }
     total
+}
+
+/// Empty side records kept for reuse, so a row that is blanked and written again does
+/// not free and allocate a record for every cluster. Only records with no other owner
+/// enter it, and they are emptied on the way in, so a pooled record holds no link and
+/// no marks. It keeps at most `RecordPool::LIMIT` records.
+#[derive(Debug, Default)]
+pub(crate) struct RecordPool {
+    records: Vec<Arc<CellExtras>>,
+}
+
+impl RecordPool {
+    pub(crate) const LIMIT: usize = 16;
+    /// Take `cell`'s side record into the pool when nothing else shares it and there
+    /// is room; otherwise drop the cell's reference. The cell is left without one.
+    pub(crate) fn keep(&mut self, cell: &mut Cell) {
+        // A plain load rules out shared records (a run's template) before the
+        // uniqueness check, which is a compare-and-swap.
+        if let Some(mut record) = cell.extras.take()
+            && self.records.len() < Self::LIMIT
+            && Arc::strong_count(&record) == 1
+            && let Some(contents) = Arc::get_mut(&mut record)
+        {
+            *contents = CellExtras::default();
+            self.records.push(record);
+        }
+    }
+    /// An empty, unshared record.
+    fn take(&mut self) -> Arc<CellExtras> {
+        self.records.pop().unwrap_or_default()
+    }
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
+    }
 }
 
 /// Prepared presentation for a run of writes. Building one packs the colours once and
@@ -857,6 +897,48 @@ mod tests {
         let detached = marked.spacer();
         assert!(detached.combining().is_empty());
         assert_eq!(marked.combining(), &['\u{301}']);
+    }
+
+    #[test]
+    fn pooled_records_are_unshared_empty_and_bounded() {
+        let link = Arc::new(Link { id: 7, uri: "https://example.invalid".into() });
+        let mut pool = RecordPool::default();
+        // A record shared with a template stays with its other owner.
+        let template = CellStyle::new(&Style::default(), Some(&link));
+        let mut shared = template.cell('x', 1, true);
+        let before = Arc::strong_count(&link);
+        pool.keep(&mut shared);
+        assert!(shared.extras.is_none());
+        assert_eq!(pool.len(), 0);
+        assert_eq!(Arc::strong_count(&link), before, "the template still holds the link");
+        // A record the cell alone owns is emptied: its marks go, and so does its link.
+        let mut owned = template.cell('e', 1, true);
+        drop(template);
+        assert!(owned.push_combining('\u{301}'));
+        let holders = Arc::strong_count(&link);
+        pool.keep(&mut owned);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(Arc::strong_count(&link), holders - 1, "a pooled record releases its link");
+        let mut fresh = Cell::from_packed('a', owned.packed);
+        assert!(fresh.push_combining_from('\u{302}', &mut pool));
+        assert_eq!(pool.len(), 0);
+        assert_eq!(fresh.combining(), &['\u{302}']);
+        assert!(fresh.link().is_none());
+        assert_eq!(format!("{:?}", fresh.extras), format!("{:?}", Cell::from_packed('a', 0).with_mark('\u{302}').extras));
+        // At most `LIMIT` records are kept; the rest are freed.
+        for _ in 0..RecordPool::LIMIT + 3 {
+            let mut cell = Cell::default();
+            assert!(cell.push_combining('\u{301}'));
+            pool.keep(&mut cell);
+        }
+        assert_eq!(pool.len(), RecordPool::LIMIT);
+    }
+
+    impl Cell {
+        fn with_mark(mut self, mark: char) -> Self {
+            assert!(self.push_combining(mark));
+            self
+        }
     }
 
     #[test]
