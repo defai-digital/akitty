@@ -3243,15 +3243,25 @@ mod reply_tests {
         let ring = Ring::new();
         let wake = Wake::new().unwrap();
         let delivered = AtomicBool::new(false);
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (write_tx, write_rx) = std::sync::mpsc::sync_channel(0);
+        let (written_tx, written_rx) = std::sync::mpsc::sync_channel(0);
         let writer = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(10));
+            write_rx.recv().unwrap();
             // SAFETY: writing a valid slice into a descriptor this test owns.
             assert_eq!(unsafe { libc::write(descendant, b"\x1b[6n".as_ptr().cast(), 4) }, 4);
+            written_tx.send(()).unwrap();
         });
-        started_rx.recv().unwrap();
-        let failure = drain_after_exit(master, &ring, &wake, &delivered);
+        let mut requested = false;
+        let failure = drain_after_exit_with(&ring, &wake, &delivered,
+            |buffer| read_pty(master, buffer, true), |wait| {
+                // Schedule the descendant only after the drain sees an empty read, then wait for
+                // its write explicitly. A loaded CI host need not schedule it inside a 10 ms sleep.
+                if !requested { write_tx.send(()).unwrap(); written_rx.recv().unwrap(); requested = true; }
+                let mut poll = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };
+                // SAFETY: poll references this test's live master descriptor.
+                assert!(unsafe { libc::poll(&mut poll, 1, wait) } >= 0);
+                Ok(())
+            });
         writer.join().unwrap();
         ring.end(failure);
         // Finalization order: apply every remaining slot, then deliver every reply, while the
