@@ -679,3 +679,45 @@ The real native PTY probe reports 111.90 MiB/s Unicode (112.52 before this pass)
 comparison. No rendering or physical input latency improvement is claimed, and Ghostty remains faster
 in these engine probes. The [raw record](../benchmarks/results/unicode-hotpath-2026-11-17.json) retains
 source/artifact hashes, configuration, direct-comparison samples and the canonical engine result.
+
+### Unicode follow-up: boundary reuse, UTF-8 and symbols
+
+A second profile found three decisions for one joining pair: the ASCII-run probe, the cell run and
+the scalar grapheme fallback each classified both sides. The run now returns its first unconsumed
+join verdict, and a non-ASCII first character skips the ASCII probe entirely. Complete-feed tests
+count classifications through joins and split UTF-8 chunks. CR×LF also reaches its GB3 exception
+before the general control-break rules; every scalar is checked as a tail against exact segmentation.
+
+The parser validates a complete multibyte scalar with inline lead/continuation and overlong/surrogate
+checks instead of calling the general UTF-8 decoder for every scalar. Tests compare this check with
+the standard decoder over every three-byte input, a four-byte boundary matrix and every Unicode
+scalar. Common punctuation and symbol blocks no longer fall through the full combining-range chain.
+U+2100–2BFF is conservatively treated as possible pictographs: ordinary neighbours break directly,
+while anything after ZWJ still requires exact segmentation. CJK, Hangul, regional indicators and
+emoji answer before the broad range tables.
+
+Stationary same-width joins append in place, retain the existing trailing cell and record the actual
+modified prefix. Width changes and wrapping retain the complete wide-cell repair. Exact-analysis
+break entries no longer measure an unused cluster width. A 64-slot direct-mapped hash cache was
+measured and rejected because it regressed common complex-emoji and combining workloads; the bounded
+16-slot exact-key cache remains.
+
+Repeating the matched comparison above against the `8ac2953` candidate gives the following p50 rates.
+All cell and resize comparisons match.
+
+| Unicode workload | Akitty before | Akitty after | Change | Ghostty after | Ghostty / Akitty after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed | 69.74 | 102.53 | +47.0% | 193.91 | 1.89x |
+| CJK | 154.42 | 172.23 | +11.5% | 387.06 | 2.25x |
+| Standalone emoji | 173.43 | 188.73 | +8.8% | 479.78 | 2.54x |
+| Complex emoji | 42.52 | 71.44 | +68.0% | 128.40 | 1.80x |
+| Combining text | 37.73 | 51.70 | +37.0% | 82.87 | 1.60x |
+
+A separate mixed punctuation, arrows, box drawing and symbol workload improves from 22.84 to 149.66
+MiB/s (6.55x) after the classification expansion. Its baseline is the verdict-reuse candidate
+immediately before that expansion, not `8ac2953`. The canonical 30-sample/128-round Unicode rate is
+90.98 MiB/s native and 64.90 MiB/s WASM. The preceding section's 65.53/43.96 rates used 15 samples
+and 32 rounds, so they are not a same-configuration baseline for these figures. The actual PTY worker
+reports 107.97 MiB/s ASCII, 106.70 ANSI and 113.77 Unicode. These are engine and worker/model measurements,
+not full-application or physical-input parity claims. The [follow-up raw record](../benchmarks/results/unicode-followup-2026-11-18.json)
+contains source/artifact hashes, all direct samples, symbol samples, canonical results and PTY samples.

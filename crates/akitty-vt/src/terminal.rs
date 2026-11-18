@@ -179,6 +179,12 @@ struct ClusterAnalysis {
     joins: bool,
 }
 
+#[derive(Default)]
+struct RunWrite {
+    bytes: usize,
+    join: Option<Join>,
+}
+
 #[derive(Debug)]
 pub struct Terminal {
     parser: Parser,
@@ -520,9 +526,15 @@ impl Terminal {
                 || self.modes.insert
                 || self.single_shift.is_some()
                 || self.charsets[self.charset];
-            let written = if scalar { 0 } else { self.write_run(text, &template) };
-            if written != 0 {
-                text = &text[written..];
+            let written = if scalar { RunWrite::default() } else { self.write_run(text, &template) };
+            text = &text[written.bytes..];
+            if let Some(verdict) = written.join {
+                let ch = text.chars().next().expect("join stops inside the run");
+                self.print_with_verdict(ch, Some(verdict), emit);
+                text = &text[ch.len_utf8()..];
+                continue;
+            }
+            if written.bytes != 0 {
                 continue;
             }
             let ch = text.chars().next().expect("non-empty text");
@@ -571,21 +583,22 @@ impl Terminal {
     fn template_builds_for_test(&self) -> usize {
         self.template_builds
     }
-    /// Write the leading characters of `text` that this row can take in place, and
-    /// return the bytes consumed (zero when the first character needs `print`).
+    /// Write the leading characters of `text` that this row can take in place. A join
+    /// verdict belongs to the first unconsumed character, so its caller need not classify
+    /// the same pair again on the scalar path.
     ///
     /// A printable ASCII prefix over single-column cells — the ordinary case — is one
     /// store per byte against a prepared packed word. Everything else (wide glyphs,
     /// combining marks, possible grapheme joins, hyperlinks and presentations with a
     /// side record) goes through the per-character loop below, which applies exactly
     /// the checks `print` applies.
-    fn write_run(&mut self, text: &str, template: &CellStyle) -> usize {
+    fn write_run(&mut self, text: &str, template: &CellStyle) -> RunWrite {
         let cols = self.cols();
         let cursor = self.screen().cursor;
         // A pending wrap must go through `print`, which marks the row as wrapped and
         // moves the cursor before any cell is written.
         if cursor.pending_wrap {
-            return 0;
+            return RunWrite::default();
         }
         let pos = cursor.position;
         if self.plain_ascii_run_start(text) {
@@ -624,7 +637,7 @@ impl Terminal {
                     screen.cursor.pending_wrap = end >= cols;
                     self.last_printed = Some(char::from(bytes[count - 1]));
                     self.grapheme_target = Some(Position { row: pos.row, col: end - 1 });
-                    return count;
+                    return RunWrite { bytes: count, join: None };
                 }
             }
         }
@@ -632,12 +645,13 @@ impl Terminal {
     }
     /// One character at a time, for everything the batched prefix cannot take.
     #[allow(clippy::too_many_lines)]
-    fn write_run_cells(&mut self, text: &str, pos: Position, cols: usize, template: &CellStyle) -> usize {
+    fn write_run_cells(&mut self, text: &str, pos: Position, cols: usize, template: &CellStyle) -> RunWrite {
         let graphemes = self.modes.grapheme_clusters;
         // Only the cell recorded before the run can hold a cluster to join into.
         let target = self.grapheme_target;
         let mut col = pos.col;
         let mut bytes = 0;
+        let mut join = None;
         let mut previous: Option<char> = None;
         // The class `previous` got when the pair rules last looked at it, carried so a
         // character is classified once instead of once as `next` and again as the tail
@@ -688,6 +702,7 @@ impl Terminal {
                 // `Unknown` when it arrives, so it breaks to `print`, which decides from
                 // the complete cluster stored in the cell.
                 if verdict != Join::No {
+                    join = Some(verdict);
                     break;
                 }
             }
@@ -716,20 +731,19 @@ impl Terminal {
             previous_class = carried;
             previous_is_ascii = ch.is_ascii();
         }
-        if bytes == 0 {
-            return 0;
+        if bytes != 0 {
+            let advance = col - pos.col;
+            row.record_write(col, advance as u64);
+            row.charge_write(pos.col, advance, template.side_identity());
+            if template.has_side_data() {
+                row.mark_heap();
+            }
+            screen.cursor.position.col = col.min(cols - 1);
+            screen.cursor.pending_wrap = col >= cols;
+            self.last_printed = Some(last_char);
+            self.grapheme_target = Some(Position { row: pos.row, col: last_col });
         }
-        let advance = col - pos.col;
-        row.record_write(col, advance as u64);
-        row.charge_write(pos.col, advance, template.side_identity());
-        if template.has_side_data() {
-            row.mark_heap();
-        }
-        screen.cursor.position.col = col.min(cols - 1);
-        screen.cursor.pending_wrap = col >= cols;
-        self.last_printed = Some(last_char);
-        self.grapheme_target = Some(Position { row: pos.row, col: last_col });
-        bytes
+        RunWrite { bytes, join }
     }
     /// Whether the first character of `text` is certain to start a new cluster instead
     /// of joining the cell recorded before this run.
@@ -740,6 +754,9 @@ impl Terminal {
         let Some(ch) = text.chars().next() else {
             return false;
         };
+        if !ch.is_ascii() {
+            return false;
+        }
         if !self.modes.grapheme_clusters {
             return true;
         }
@@ -756,12 +773,15 @@ impl Terminal {
         }
         grapheme::join(cell.ch, cell.combining(), ch) == Join::No
     }
-    fn print(&mut self, mut ch: char, emit: &mut impl FnMut(Event)) {
+    fn print(&mut self, ch: char, emit: &mut impl FnMut(Event)) {
+        self.print_with_verdict(ch, None, emit);
+    }
+    fn print_with_verdict(&mut self, mut ch: char, verdict: Option<Join>, emit: &mut impl FnMut(Event)) {
         let charset = self.single_shift.take().unwrap_or(self.charset);
         if self.charsets[charset] {
             ch = dec_graphic(ch);
         }
-        if self.modes.grapheme_clusters && self.join_grapheme(ch, emit) {
+        if self.modes.grapheme_clusters && self.join_grapheme(ch, verdict, emit) {
             return;
         }
         let width = ch.width().unwrap_or(0).min(2).min(self.cols());
@@ -838,22 +858,25 @@ impl Terminal {
         self.last_printed = Some(ch);
         self.grapheme_target = Some(pos);
     }
-    fn join_grapheme(&mut self, ch: char, emit: &mut impl FnMut(Event)) -> bool {
+    fn join_grapheme(&mut self, ch: char, verdict: Option<Join>, emit: &mut impl FnMut(Event)) -> bool {
         let Some(mut position) = self.grapheme_target else {
             return false;
         };
         // Character properties answer the boundary question for ordinary pairs; the
         // candidate cluster is still built below because a cluster's column width is
         // not a sum of character widths (emoji sequences and variation selectors).
-        let verdict = {
-            let previous = &self.screen().rows[position.row].cells[position.col];
-            if ch.is_ascii() && previous.ch.is_ascii() && previous.combining_len() == 0 {
-                return false;
-            }
-            if previous.width() == 0 {
-                Join::Unknown
-            } else {
-                grapheme::join(previous.ch, previous.combining(), ch)
+        let verdict = match verdict {
+            Some(verdict) => verdict,
+            None => {
+                let previous = &self.screen().rows[position.row].cells[position.col];
+                if ch.is_ascii() && previous.ch.is_ascii() && previous.combining_len() == 0 {
+                    return false;
+                }
+                if previous.width() == 0 {
+                    Join::Unknown
+                } else {
+                    grapheme::join(previous.ch, previous.combining(), ch)
+                }
             }
         };
         if verdict == Join::No {
@@ -881,8 +904,7 @@ impl Terminal {
                 None => {
                     let joins = cluster.graphemes(true).nth(1).is_none();
                     if !joins {
-                        let width = cluster.width();
-                        self.remember_cluster(&cluster, false, width);
+                        self.remember_cluster(&cluster, false, 0);
                         self.cluster_scratch = cluster;
                         return false;
                     }
@@ -900,13 +922,7 @@ impl Terminal {
             self.cluster_scratch = cluster;
             return true;
         }
-        // Take the cell out of the grid instead of cloning it: the cluster is rebuilt
-        // here, so nothing can observe the slot meanwhile, and this value holds the only
-        // reference to its record. `push_combining` then grows that record in place
-        // instead of detaching a shared one and reallocating its storage on every mark.
-        let mut cell = std::mem::take(&mut self.screen_mut().rows[position.row].cells[position.col]);
-        let bg = cell.style().bg;
-        let old_width = cell.width();
+        let old_width = self.screen().rows[position.row].cells[position.col].width();
         // The remembered width is the unclamped `UnicodeWidthStr` measure; the column
         // clamp below is the only part of the decision that depends on this terminal.
         let measured = match cached {
@@ -923,6 +939,22 @@ impl Terminal {
         if position.col + width > self.cols() && !self.modes.wrap {
             width = self.cols() - position.col;
         }
+        if width == usize::from(old_width) && position.col + width <= self.cols() {
+            self.cluster_scratch = cluster;
+            let row = &mut self.screen_mut().rows[position.row];
+            let appended = row.cells[position.col].push_combining(ch);
+            debug_assert!(appended, "the combining bound was checked above");
+            row.record_write(position.col + width, 1);
+            row.mark_heap();
+            row.charge_unknown();
+            self.grapheme_target = Some(position);
+            self.last_printed = Some(ch);
+            return true;
+        }
+        // Width changes and wrapping still need the complete wide-cell repair. Take the
+        // cell instead of cloning it so its combining record can grow in place.
+        let mut cell = std::mem::take(&mut self.screen_mut().rows[position.row].cells[position.col]);
+        let bg = cell.style().bg;
         self.cluster_scratch = cluster;
         cell.push_combining(ch);
         cell.set_width(width as u8);
@@ -940,12 +972,12 @@ impl Terminal {
                 self.clear_wide_at(position.row, position.col + 1, bg);
             }
         }
-        let trail = cell.spacer();
+        let trail = (width == 2).then(|| cell.spacer());
         let row = &mut self.screen_mut().rows[position.row];
         row.record_full_write(1);
         row.cells[position.col] = cell;
         if width == 2 {
-            row.cells[position.col + 1] = trail;
+            row.cells[position.col + 1] = trail.expect("a wide cluster has a trailing cell");
         }
         row.mark_heap();
         row.charge_unknown();
@@ -3126,7 +3158,7 @@ mod tests {
             let mut term = Terminal::new(20, 2, 0).unwrap();
             term.enable_grapheme_support(true);
             let template = term.style_template();
-            term.write_run(text, &template)
+            term.write_run(text, &template).bytes
         }
         assert_eq!(run("中文字"), 9, "CJK is written as one run");
         assert_eq!(run("😀😀"), 8, "lone pictographs are written as a run");
@@ -3154,7 +3186,7 @@ mod tests {
         assert_eq!(unknown.screen().rows[0].cells[3].ch, '中');
         assert_eq!(unknown.screen().rows[0].cells[5].ch, '\u{915}');
 
-        for index in 0..20 {
+        for index in 0..CLUSTER_SLOTS * 2 {
             term.remember_cluster(&format!("cluster{index}"), true, 1);
         }
         assert_eq!(term.cluster_cache.iter().flatten().count(), CLUSTER_SLOTS);
@@ -3217,7 +3249,7 @@ mod tests {
             let template = term.style_template();
             grapheme::reset_classifications_for_test();
             let written = term.write_run(text, &template);
-            (written, grapheme::classifications_for_test())
+            (written.bytes, grapheme::classifications_for_test())
         }
         assert_eq!(run("中文字"), (9, 3), "one class per CJK character written");
         assert_eq!(run("한국어"), (9, 3));
@@ -3232,6 +3264,25 @@ mod tests {
         let (bytes, classes) = run("\u{915}\u{94d}\u{937}");
         assert_eq!(bytes, 3, "only the base character is written by the run");
         assert!(classes <= 3, "{classes} classifications for two deferred pairs");
+    }
+
+    #[test]
+    fn complete_feeds_reuse_the_boundary_verdict_across_scalar_fallback() {
+        fn classifications(text: &str, chunk: usize) -> usize {
+            let mut term = Terminal::new(20, 2, 0).unwrap();
+            term.enable_grapheme_support(true);
+            grapheme::reset_classifications_for_test();
+            for bytes in text.as_bytes().chunks(chunk) { feed(&mut term, bytes); }
+            grapheme::classifications_for_test()
+        }
+        for chunk in [1, 2, 3, 7, 64] {
+            assert_eq!(classifications("e\u{301}", chunk), 2, "one pair decision, chunk {chunk}");
+            assert_eq!(
+                classifications("👩🏽\u{200d}💻", chunk),
+                6,
+                "three pair decisions, chunk {chunk}",
+            );
+        }
     }
 
     #[test]

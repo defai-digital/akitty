@@ -82,38 +82,53 @@ fn class(ch: char) -> Option<Class> {
     }
     // © and ® are pictographs inside the Latin-1 letter block, and a soft hyphen there is
     // a format character, so both answer before the ordinary-script table.
-    if code == 0x00a9 || code == 0x00ae {
+    if matches!(code, 0x00a9 | 0x00ae | 0x203c | 0x2049) {
         return Some(Class::Emoji);
     }
-    if code == 0x00ad {
+    if matches!(code, 0x00ad | 0x200b | 0x200e..=0x200f | 0x2028..=0x202e | 0x2060..=0x206f) {
         return Some(Class::Control);
+    }
+    if matches!(code, 0x2000..=0x200a | 0x2010..=0x2027 | 0x202f..=0x205f) {
+        return Some(Class::Plain);
+    }
+    // Hot non-ASCII scripts answer before the broad ordinary/mark tables. In particular,
+    // Hangul and pictographs must not walk every combining range just to reach their own.
+    match code {
+        0x1100..=0x115f | 0xa960..=0xa97c => return Some(Class::HangulL),
+        0x1160..=0x11a7 | 0xd7b0..=0xd7c6 => return Some(Class::HangulV),
+        0x11a8..=0x11ff | 0xd7cb..=0xd7fb => return Some(Class::HangulT),
+        0xac00..=0xd7a3 => {
+            return Some(if (code - 0xac00).is_multiple_of(28) {
+                Class::HangulLv
+            } else {
+                Class::HangulLvt
+            });
+        }
+        0x3000..=0x3029 | 0x3041..=0x3096 | 0x30a1..=0x30fa | 0x3400..=0x4dbf | 0x4e00..=0x9fff => {
+            return Some(Class::Plain);
+        }
+        0x1f1e6..=0x1f1ff => return Some(Class::Regional),
+        0x1f3fb..=0x1f3ff => return Some(Class::Extend),
+        0x1f300..=0x1f5ff | 0x1f600..=0x1f64f | 0x1f680..=0x1f6ff | 0x1f900..=0x1f9ff | 0x1fa70..=0x1faff => {
+            return Some(Class::Emoji);
+        }
+        _ => {}
     }
     // Ordinary scripts answer before the mark table. The two tables never overlap, so
     // this order costs the common case one narrower test instead of the wide one.
     if is_plain(code) {
         return Some(Class::Plain);
     }
-    // Extending marks come before the pictograph blocks below, whose range also holds the
-    // emoji modifiers: those are `Grapheme_Extend` and must not classify as pictographs.
     if is_extend(code) {
         return Some(Class::Extend);
     }
-    if matches!(code, 0x1f300..=0x1f5ff | 0x1f600..=0x1f64f | 0x1f680..=0x1f6ff | 0x1f900..=0x1f9ff | 0x1fa70..=0x1faff)
-    {
+    // Symbol blocks contain both pictographs and ordinary symbols. Treating all of them as
+    // possible pictographs is conservative: their neighbours still break, while a symbol
+    // after ZWJ defers to exact segmentation instead of risking a false GB11 answer.
+    if matches!(code, 0x2100..=0x2bff) {
         return Some(Class::Emoji);
     }
-    match code {
-        0x1f1e6..=0x1f1ff => Some(Class::Regional),
-        0x1100..=0x115f | 0xa960..=0xa97c => Some(Class::HangulL),
-        0x1160..=0x11a7 | 0xd7b0..=0xd7c6 => Some(Class::HangulV),
-        0x11a8..=0x11ff | 0xd7cb..=0xd7fb => Some(Class::HangulT),
-        0xac00..=0xd7a3 => Some(if (code - 0xac00).is_multiple_of(28) {
-            Class::HangulLv
-        } else {
-            Class::HangulLvt
-        }),
-        _ => None,
-    }
+    None
 }
 
 /// `Grapheme_Extend` ranges the print path meets in ordinary text.
@@ -234,16 +249,14 @@ pub(crate) fn join_classes(tail: Classes, next: Classes, lead: char, combining: 
     let (Some(tail_class), Some(next_class)) = (tail.0, next.0) else {
         return Join::Unknown;
     };
-    // GB4/GB5: controls never extend or get extended, except CR LF.
-    if matches!(tail_class, Class::Control | Class::Cr | Class::Lf) {
-        return Join::No;
+    // GB3/GB4/GB5: CR LF stays together; other controls break on both sides.
+    if tail_class == Class::Cr && next_class == Class::Lf {
+        return Join::Yes;
     }
-    if matches!(next_class, Class::Control | Class::Cr | Class::Lf) {
-        return if tail_class == Class::Cr && next_class == Class::Lf {
-            Join::Yes
-        } else {
-            Join::No
-        };
+    if matches!(tail_class, Class::Control | Class::Cr | Class::Lf)
+        || matches!(next_class, Class::Control | Class::Cr | Class::Lf)
+    {
+        return Join::No;
     }
     // GB9: no break before an extending character or a zero width joiner.
     if matches!(next_class, Class::Extend | Class::Zwj) {
@@ -323,12 +336,22 @@ mod tests {
 
     #[test]
     fn pair_decisions_agree_with_exact_segmentation_over_unicode() {
-        // Plain text, a combining mark, a ZWJ, a regional indicator and pictographs:
-        // every class the fast path answers, and every character as the new one.
-        for lead in ['a', '\u{300}', '\u{200d}', '\u{1f1ef}', '\u{1f469}', '中'] {
+        // Plain text, controls, a combining mark, a ZWJ, a regional indicator and
+        // pictographs: every class the fast path answers, and every character as the new one.
+        for lead in ['a', '\r', '\n', '\0', '\u{300}', '\u{200d}', '\u{1f1ef}', '\u{1f469}', '中'] {
             for next in scalars() {
                 assert_agrees(lead, &[], next);
             }
+        }
+    }
+
+    #[test]
+    fn every_scalar_tail_agrees_with_exact_segmentation() {
+        for lead in scalars() {
+            for next in ['a', '\n', '\u{301}', '\u{1100}', '\u{1f1ef}', '👩'] {
+                assert_agrees(lead, &[], next);
+            }
+            assert_agrees(lead, &['\u{200d}'], '👩');
         }
     }
 

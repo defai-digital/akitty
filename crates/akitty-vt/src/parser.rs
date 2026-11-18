@@ -128,7 +128,29 @@ fn scalar_width(input: &[u8], index: usize) -> Option<usize> {
         _ => return None,
     };
     let sequence = input.get(index..index + width)?;
-    std::str::from_utf8(sequence).is_ok().then_some(width)
+    let continuation = |byte| byte & 0xc0 == 0x80;
+    let valid = match width {
+        2 => continuation(sequence[1]),
+        3 => {
+            continuation(sequence[2])
+                && match byte {
+                    0xe0 => (0xa0..=0xbf).contains(&sequence[1]),
+                    0xed => (0x80..=0x9f).contains(&sequence[1]),
+                    _ => continuation(sequence[1]),
+                }
+        }
+        4 => {
+            continuation(sequence[2])
+                && continuation(sequence[3])
+                && match byte {
+                    0xf0 => (0x90..=0xbf).contains(&sequence[1]),
+                    0xf4 => (0x80..=0x8f).contains(&sequence[1]),
+                    _ => continuation(sequence[1]),
+                }
+        }
+        _ => false,
+    };
+    valid.then_some(width)
 }
 
 impl Parser {
@@ -419,6 +441,43 @@ mod tests {
             parser.feed(bytes, |a| actions.push(a));
         }
         actions
+    }
+
+    #[test]
+    fn scalar_validation_matches_the_standard_utf8_decoder() {
+        fn expected(bytes: &[u8]) -> Option<usize> {
+            let width = match bytes[0] {
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => return None,
+            };
+            let sequence = bytes.get(..width)?;
+            std::str::from_utf8(sequence).is_ok().then_some(width)
+        }
+        for value in 0..=0xff_ffffu32 {
+            let bytes = value.to_be_bytes();
+            let bytes = &bytes[1..];
+            assert_eq!(scalar_width(bytes, 0), expected(bytes), "bytes {bytes:02x?}");
+        }
+        let tails = [0x00, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff];
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                for third in tails {
+                    for fourth in tails {
+                        let bytes = [first, second, third, fourth];
+                        assert_eq!(scalar_width(&bytes, 0), expected(&bytes), "bytes {bytes:02x?}");
+                    }
+                }
+            }
+        }
+        for code in 0..=0x10ffffu32 {
+            let Some(ch) = char::from_u32(code) else { continue };
+            let mut bytes = [0; 4];
+            let bytes = ch.encode_utf8(&mut bytes).as_bytes();
+            let expected = (!ch.is_ascii()).then_some(bytes.len());
+            assert_eq!(scalar_width(bytes, 0), expected, "scalar {code:#x}");
+        }
     }
 
     #[test]
