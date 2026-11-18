@@ -200,6 +200,24 @@ const CLUSTER_SLOTS: usize = 16;
 /// remembered, which keeps the footprint fixed and every key naturally bounded.
 const CLUSTER_KEY_BYTES: usize = 4 * (cell::MAX_COMBINING + 2);
 
+/// Slots for whole-tail analyses (see `join_tail`).
+const TAIL_SLOTS: usize = 8;
+
+/// Whether a cell's cluster takes a run of incoming characters as `print` would take
+/// them one at a time with the cell's width unchanged throughout, keyed by the cell's
+/// text and the characters together, with the split between them.
+#[derive(Clone, Copy, Debug)]
+struct TailAnalysis {
+    key_len: u8,
+    base_len: u8,
+    key: [u8; CLUSTER_KEY_BYTES],
+    /// The pair verdict for the first incoming character.
+    first: Join,
+    /// The clamped width every step keeps, or 0 when some step breaks the cluster or
+    /// changes its width.
+    width: u8,
+}
+
 /// One remembered exact analysis of a candidate cluster.
 #[derive(Clone, Copy, Debug)]
 struct ClusterAnalysis {
@@ -254,6 +272,8 @@ pub struct Terminal {
     /// next slot to overwrite.
     cluster_cache: [Option<ClusterAnalysis>; CLUSTER_SLOTS],
     cluster_slot: usize,
+    tail_cache: [Option<TailAnalysis>; TAIL_SLOTS],
+    tail_slot: usize,
     /// The bounded set of prepared templates allowed for this terminal (see
     /// `StyleCache`), with the next slot to overwrite.
     style_cache: [Option<StyleCache>; STYLE_SLOTS],
@@ -355,6 +375,8 @@ impl Terminal {
             cluster_scratch_at: None,
             cluster_cache: [None; CLUSTER_SLOTS],
             cluster_slot: 0,
+            tail_cache: [None; TAIL_SLOTS],
+            tail_slot: 0,
             style_cache: [None, None, None, None],
             style_slot: 0,
             current_slot: None,
@@ -768,6 +790,14 @@ impl Terminal {
             let written = if scalar { RunWrite::default() } else { self.write_run(text, ascii, &template) };
             text = &text[written.bytes..];
             if let Some(verdict) = written.join {
+                // The joining character and the non-simple characters after it, which
+                // the loop below would print one at a time, in one step when that is
+                // certain to end the same way.
+                let tail = cluster_tail(text);
+                if tail > text.chars().next().map_or(0, char::len_utf8) && self.join_tail(&text[..tail], verdict) {
+                    text = &text[tail..];
+                    continue;
+                }
                 let ch = text.chars().next().expect("join stops inside the run");
                 self.print_with_verdict(ch, Some(verdict), emit);
                 text = &text[ch.len_utf8()..];
@@ -1078,6 +1108,7 @@ impl Terminal {
             // would cost more than it saves. Plain ASCII never joins a non-ASCII
             // character before it.
             if !ch.is_ascii()
+                && text.as_bytes().get(bytes).is_some_and(u8::is_ascii)
                 && let Some(&next) = text.as_bytes()[bytes..].first_chunk::<ASCII_HANDOFF>()
                 && u128::from_ne_bytes(next) & u128::from_ne_bytes([0x80; ASCII_HANDOFF]) == 0
             {
@@ -1365,6 +1396,80 @@ impl Terminal {
         };
         self.grapheme_target = Some(position);
         self.last_printed = Some(ch);
+        true
+    }
+    /// Join `tail` (a run's joining character, with `verdict`, and the non-simple
+    /// characters after it) into the cluster target in one step, when `print` taking
+    /// them one at a time would append each to the cell and keep its width: then it
+    /// would neither repair neighbouring cells nor wrap, and the cell's marks, the
+    /// row's generation and certificates, the cluster scratch and target and the last
+    /// printed character end exactly as this leaves them. Returns false, changing
+    /// nothing, otherwise.
+    #[inline(never)]
+    fn join_tail(&mut self, tail: &str, verdict: Join) -> bool {
+        let Some(position) = self.grapheme_target else {
+            return false;
+        };
+        let cols = self.cols();
+        let cell = &self.screen().rows[position.row].cells[position.col];
+        let old_width = usize::from(cell.width());
+        let count = tail.chars().count();
+        if old_width == 0
+            || position.col + old_width > cols
+            || cell.combining_len() + count > cell::MAX_COMBINING
+            || tail.bytes().any(|byte| byte.is_ascii())
+        {
+            return false;
+        }
+        // The key is the cell's text followed by the tail.
+        let mut key = [0u8; CLUSTER_KEY_BYTES];
+        let mut len = 0;
+        for ch in std::iter::once(cell.ch).chain(cell.combining().iter().copied()) {
+            if len + ch.len_utf8() > CLUSTER_KEY_BYTES {
+                return false;
+            }
+            len += ch.encode_utf8(&mut key[len..]).len();
+        }
+        let base_len = len;
+        if len + tail.len() > CLUSTER_KEY_BYTES {
+            return false;
+        }
+        key[len..len + tail.len()].copy_from_slice(tail.as_bytes());
+        len += tail.len();
+        let found = self.tail_cache.iter().flatten().find(|slot| {
+            usize::from(slot.key_len) == len && usize::from(slot.base_len) == base_len && slot.key[..len] == key[..len]
+        });
+        let analysis = match found {
+            Some(analysis) => *analysis,
+            None => {
+                let width = analyze_tail(cell.ch, cell.combining(), tail, verdict);
+                let analysis =
+                    TailAnalysis { key_len: len as u8, base_len: base_len as u8, key, first: verdict, width };
+                self.tail_cache[self.tail_slot] = Some(analysis);
+                self.tail_slot = (self.tail_slot + 1) % TAIL_SLOTS;
+                analysis
+            }
+        };
+        // A width of 0 (a step breaks or changes the width) never equals `old_width`.
+        if analysis.first != verdict || usize::from(analysis.width).min(cols) != old_width {
+            return false;
+        }
+        let screen = self.screen_mut();
+        let row = &mut screen.rows[position.row];
+        for ch in tail.chars() {
+            let appended = row.cells[position.col].push_combining_from(ch, &mut screen.pool);
+            debug_assert!(appended, "the combining bound was checked above");
+        }
+        row.record_write(position.col + old_width, count as u64);
+        row.mark_heap();
+        row.charge_unknown();
+        let at = (position, row.id, row.generation);
+        // SAFETY: `key[..len]` is the cell's characters and `tail`, each encoded whole.
+        let text = unsafe { std::str::from_utf8_unchecked(&key[..len]) };
+        self.cluster_scratch.clear();
+        self.cluster_scratch.push_str(text);
+        self.cluster_scratch_at = Some(at);
+        self.last_printed = tail.chars().next_back();
         true
     }
     /// The remembered exact analysis of `cluster`, if this terminal has seen it.
@@ -2454,6 +2559,46 @@ fn dec_graphic(ch: char) -> char {
     }
 }
 
+/// The byte length of `text`'s first character and the characters after it that are
+/// not `simple_width` characters.
+fn cluster_tail(text: &str) -> usize {
+    let mut chars = text.char_indices();
+    if chars.next().is_none() {
+        return 0;
+    }
+    chars.find(|&(_, ch)| grapheme::simple_width(ch).is_some()).map_or(text.len(), |(index, _)| index)
+}
+
+/// Simulate `print` taking each character of `tail` into the cell `lead` + `marks`:
+/// the pair verdict (`first` for the first character, as the run writer gave it),
+/// settled by exact segmentation when it is `Unknown`, and the clamped width of each
+/// candidate. Returns the width every step keeps, or 0 when a step breaks or changes
+/// the width.
+fn analyze_tail(lead: char, marks: &[char], tail: &str, first: Join) -> u8 {
+    let mut marks = marks.to_vec();
+    let mut cluster = String::from(lead);
+    cluster.extend(marks.iter());
+    let mut width = None;
+    for (index, ch) in tail.chars().enumerate() {
+        let verdict = if index == 0 { first } else { grapheme::join(lead, &marks, ch) };
+        cluster.push(ch);
+        let joins = match verdict {
+            Join::No => false,
+            Join::Yes => true,
+            Join::Unknown => cluster.graphemes(true).nth(1).is_none(),
+        };
+        if !joins {
+            return 0;
+        }
+        let step = cluster.width().clamp(1, 2) as u8;
+        if *width.get_or_insert(step) != step {
+            return 0;
+        }
+        marks.push(ch);
+    }
+    width.unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2739,6 +2884,9 @@ mod tests {
             "ordinary ascii text 0123456789 !~",
             "中文 日本語 한국어 e\u{301} 😀 👩🏽‍💻 🇯🇵 🇺🇸 text",
             "\u{600}abc1\u{fe0f}\u{20e3}xyz ❤\u{fe0f} 🏳️‍🌈",
+            // Marks past the combining bound, in one run and after a full cell.
+            "e\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}\u{307}\u{308}\u{309}\u{30a}\u{30b}\u{30c}\u{30d}\u{30e}\u{30f}\u{310}\u{311}\u{312} x",
+            "☺\u{fe0f}\u{20e3}\u{20e3} 👩\u{200d}👩\u{200d}👧\u{200d}👦 ok",
             "\x1b[38;2;80;180;240mtruecolor run\x1b[0m plain",
             "\x1b[4:3;58;5;9munderlined\x1b[59m\x1b[24m",
             "\x1b[4hinsert\x1b[4l\x1b[2@\x1b[2P\x1b[2X",
@@ -4011,11 +4159,16 @@ mod tests {
     fn cluster_analysis_cache_hits_breaks_and_bounded_eviction() {
         let mut term = Terminal::new(20, 3, 10).unwrap();
         term.enable_grapheme_support(true);
-        feed(&mut term, "👩🏽\u{200d}💻".as_bytes());
+        // One character per feed takes `print` for each, not `join_tail`.
+        for ch in "👩🏽\u{200d}💻".chars() {
+            feed(&mut term, ch.to_string().as_bytes());
+        }
         assert_eq!(term.cluster_analysis("👩🏽"), Some((true, 2)));
         assert_eq!(term.cluster_analysis("👩🏽\u{200d}💻"), Some((true, 2)));
         // Every continuation of the second family reads the entries written above.
-        feed(&mut term, "👩🏽\u{200d}💻".as_bytes());
+        for ch in "👩🏽\u{200d}💻".chars() {
+            feed(&mut term, ch.to_string().as_bytes());
+        }
         assert_eq!(term.screen().rows[0].cells[0].text(), "👩🏽\u{200d}💻");
         assert_eq!(term.screen().rows[0].cells[2].text(), "👩🏽\u{200d}💻");
 

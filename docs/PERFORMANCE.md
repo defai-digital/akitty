@@ -1702,3 +1702,56 @@ and synchronized screen over seven passes, the rest over five:
 
 libghostty-vt's own ASCII result ranges from about 1210 to 1340 MiB/s between runs
 on this host, so ASCII is level with it here, not ahead.
+
+## Cluster tails joined in one step
+
+A profile of the Unicode workload put about a fifth of its samples in the
+per-character cluster path: each character after the first of a ZWJ sequence such
+as 👩🏽‍💻 went through `print` on its own, with a cluster-cache lookup, a combining
+push and the row's bookkeeping. When the run writer stops at a joining character,
+`join_tail` now takes it and the non-simple characters after it in one step, if
+`print` taking them one at a time is certain to append each to the target cell and
+keep the cell's width. Then `print` would neither repair neighbouring cells nor
+wrap, and the step leaves the same marks, generation (repeated `record_write` calls
+of one advance equal one call of their sum), certificates, cluster scratch and last
+printed character. The check simulates `print`'s rules: the run writer's verdict for
+the first character, the pair rules for the rest, exact segmentation where they say
+`Unknown`, the clamped width of every candidate and the combining bound. Its answer
+depends only on the cell's text and the tail, so it is kept in eight slots keyed by
+both, with the split between them. Anything else goes through `print` as before.
+
+The run-versus-scalar corpus gained marks past the combining bound and longer
+family and keycap sequences. Mutation checks catch a missing width check, combining
+bound, generation count, scratch, last printed character, heap mark or charge
+reset, and any change to the simulated rules. Survivors are equivalent: the first
+verdict check (the pair rules agree with exact segmentation), the zero-width and
+edge guards (a target is always a placed lead cell), the remembered scratch
+position (a cache only), the split in the key (a wrong split fails the width
+check) and the tail's end (a simple character fails the simulation). Two counting
+tests now feed the family one character per call, so they still reach `print`.
+
+The per-character writer also tests the next byte before loading sixteen to decide
+on an ASCII hand-off, so non-ASCII text that continues skips the load: CJK and `é`
+lines cost 2 to 4% less per character.
+
+Rejected: deferring rows whose cells own side records by releasing the records
+during the scroll (Unicode 0.97x, ANSI 0.91x: lines that start with an escape
+sequence complete the refill at once and pay a second pass), and comparing cluster
+keys as fixed-size arrays (Unicode 0.95x: padding the query costs more than the
+`memcmp` calls it saves).
+
+Engine results, rotated order, seven passes, history 0
+([raw record](../benchmarks/results/cluster-tails-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 161.3 | 169.3 | 1.05x | 196.1 | 1.16x |
+| ASCII | 1308.6 | 1320.5 | 1.01x | 1316.4 | 0.99x |
+| Synchronized screen | 916.4 | 929.1 | 1.01x | 911.2 | 0.98x |
+| Long lines | 891.3 | 910.7 | 1.02x | 496.1 | 0.54x |
+| ANSI | 328.2 | 335.1 | 1.02x | 272.3 | 0.82x |
+| Alternate screen | 179.5 | 177.7 | 0.99x | 173.4 | 0.97x |
+
+Per line of the Unicode workload, the family sequence now costs 87 ns against
+libghostty-vt's 80 ns; CJK (67 against 34 ns), the flag (70 against 45 ns), the
+lone pictograph and `é` hold the rest of the gap.
