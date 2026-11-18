@@ -460,7 +460,15 @@ impl Terminal {
                     self.defer_control(byte, &mut emit);
                 } else {
                     self.grapheme_target = None;
-                    self.control(byte, &mut emit);
+                    // A carriage return, half of every line ending, is applied here
+                    // as `control` applies it, without the call.
+                    if byte == b'\r' {
+                        let cursor = &mut self.screen_mut().cursor;
+                        cursor.position.col = 0;
+                        cursor.pending_wrap = false;
+                    } else {
+                        self.control(byte, &mut emit);
+                    }
                 }
             }
             Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
@@ -2499,6 +2507,18 @@ mod tests {
         term.materialize();
         if !bytes.is_empty() { term.revision = term.revision.wrapping_add(1); }
         events
+    }
+
+    #[test]
+    fn vertical_tab_and_form_feed_are_line_feeds_and_carriage_return_is_not() {
+        for control in [b'\n', 0x0b, 0x0c] {
+            let mut term = Terminal::new(10, 3, 0).unwrap();
+            feed(&mut term, b"abc");
+            feed(&mut term, &[control]);
+            assert_eq!(term.cursor(), Position { row: 1, col: 3 }, "control {control:#x}");
+            feed(&mut term, b"\r");
+            assert_eq!(term.cursor(), Position { row: 1, col: 0 });
+        }
     }
 
     #[test]

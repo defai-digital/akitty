@@ -1673,3 +1673,32 @@ together, with libghostty-vt measured afterwards:
 | ASCII | 0.99x | 0.99x | 1308.0 | 1.06x |
 | Unicode | 0.99x | 1.00x | 191.6 | 1.21x |
 | Long lines | 1.00x | 1.00x | 484.0 | 0.55x |
+
+## Carriage returns applied where they are parsed
+
+A longer profile of the ASCII workload put 26% of its samples in per-line dispatch:
+the feed closure, `print_run` and `control`. Every line ending passes a carriage
+return through the out-of-line `control`, which for it only clears the column and a
+pending wrap. The feed closure now applies a carriage return itself and calls
+`control` for every other control byte. A new test checks that a vertical tab and a
+form feed still act as line feeds and a carriage return does not; mutation checks
+confirm that a kept column, a kept pending wrap or the wrong byte is caught.
+
+Rejected: rotating rows with `pop_front` and `push_back` instead of `rotate_left`
+(ASCII 0.97x, long lines 0.96x).
+
+Engine results, rotated order, history 0
+([raw record](../benchmarks/results/inline-carriage-return-2026-11-18.json)); ASCII
+and synchronized screen over seven passes, the rest over five:
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 1219.5 | 1286.7 | 1.06x | 1262.9 | 0.99x |
+| Synchronized screen | 894.2 | 902.4 | 1.01x | 872.2 | 0.96x |
+| Unicode | 159.0 | 158.2 | 0.99x | 187.5 | 1.18x |
+| Long lines | 890.7 | 881.1 | 0.99x | 483.1 | 0.54x |
+| ANSI | 320.3 | 322.7 | 1.01x | 266.5 | 0.83x |
+| Alternate screen | 174.3 | 174.9 | 1.00x | 167.4 | 0.96x |
+
+libghostty-vt's own ASCII result ranges from about 1210 to 1340 MiB/s between runs
+on this host, so ASCII is level with it here, not ahead.

@@ -1,0 +1,141 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds",
+ "base_commit": "caa24f6",
+ "host": {
+  "os": "macOS 27.2",
+  "machine": "arm64"
+ },
+ "profile_ascii_samples": {
+  "write_run": 461,
+  "benchmark_run_with_inlined_parser": 260,
+  "Screen::scroll_deferring": 232,
+  "feed_closure": 181,
+  "print_run": 115,
+  "control": 103,
+  "fill_pending": 70,
+  "style_template": 50,
+  "wrap_copy": 29
+ },
+ "rotated_ab_5_passes_text": [
+  "ascii 1242.4 -> 1299.5 (1.05x)",
+  "synchronized-screen 912.9 -> 933.8 (1.02x)",
+  "unicode 0.99x",
+  "long-lines 0.99x",
+  "ansi 1.01x",
+  "alternate-screen 1.00x"
+ ],
+ "rotated_ab_7_passes_text": [
+  "ascii                base  1219.5  new  1286.7   1.06x  base=[1219, 1227, 1219, 1243, 1202, 1212, 1220] new=[1287, 1287, 1277, 1300, 1261, 1300, 1273]",
+  "synchronized-screen  base   894.2  new   902.4   1.01x  base=[610, 893, 894, 908, 894, 908, 911] new=[912, 902, 776, 654, 916, 900, 916]"
+ ],
+ "rejected": {
+  "pop_front_push_back_rotation": "ascii 0.97x, long-lines 0.96x"
+ },
+ "libghostty_vt_1_0_1_rotated_3_passes": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 1280.4,
+   "ghostty_mib_s": 1262.9,
+   "ghostty_over_akitty": 0.99,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    1280.4,
+    1282.0,
+    1279.7
+   ],
+   "ghostty_passes": [
+    1262.9,
+    1267.4,
+    1248.9
+   ]
+  },
+  {
+   "workload": "ansi",
+   "akitty_mib_s": 321.4,
+   "ghostty_mib_s": 266.5,
+   "ghostty_over_akitty": 0.83,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    326.3,
+    258.3,
+    321.4
+   ],
+   "ghostty_passes": [
+    266.2,
+    267.7,
+    266.5
+   ]
+  },
+  {
+   "workload": "unicode",
+   "akitty_mib_s": 159.4,
+   "ghostty_mib_s": 187.5,
+   "ghostty_over_akitty": 1.18,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    159.4,
+    160.0,
+    158.5
+   ],
+   "ghostty_passes": [
+    181.3,
+    187.5,
+    190.3
+   ]
+  },
+  {
+   "workload": "long-lines",
+   "akitty_mib_s": 889.2,
+   "ghostty_mib_s": 483.1,
+   "ghostty_over_akitty": 0.54,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    892.0,
+    889.2,
+    884.0
+   ],
+   "ghostty_passes": [
+    489.3,
+    483.1,
+    462.0
+   ]
+  },
+  {
+   "workload": "alternate-screen",
+   "akitty_mib_s": 174.5,
+   "ghostty_mib_s": 167.4,
+   "ghostty_over_akitty": 0.96,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    174.9,
+    174.5,
+    174.3
+   ],
+   "ghostty_passes": [
+    166.5,
+    172.0,
+    167.4
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 911.1,
+   "ghostty_mib_s": 872.2,
+   "ghostty_over_akitty": 0.96,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    911.1,
+    910.4,
+    935.8
+   ],
+   "ghostty_passes": [
+    901.1,
+    867.3,
+    872.2
+   ]
+  }
+ ],
+ "qualification": "Shared host; libghostty-vt ASCII itself ranged 1211-1340 MiB/s across runs. Ratios and sample overlap are the evidence."
+}
