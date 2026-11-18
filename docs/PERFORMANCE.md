@@ -1821,3 +1821,43 @@ before the others was flat (Unicode 1.00x) and was not kept.
 | Alternate screen | 174.6 | 174.6 | 1.00x | 171.5 | 0.98x |
 
 Raw record: [record-release-scan](../benchmarks/results/record-release-scan-2026-11-18.json).
+
+## Simple stretches in their own loop
+
+An instruction-level profile of `é` lines (a Time Profiler trace, its samples
+mapped to the binary by hand) put 64% of the time in the per-character writer.
+That was about 60 instructions per character, spread evenly, with the loop's state
+(the grapheme flag, the column count, the text length) reloaded from the stack: the
+general loop is large enough that its state does not stay in registers. After a
+simple character, a stretch of simple characters cannot join anything, so
+`simple_stretch` now writes it in a small out-of-line loop when the template has
+plain words and the row's cells own no record. It stops exactly where the general
+loop would: before any other character, a character that does not fit, an
+uncontained cell, or after the ASCII hand-off. The general loop then continues from
+there.
+
+The run-versus-scalar corpus gained simple non-ASCII text overwriting narrow cells,
+wide leads and spacers after a simple character. Mutation checks catch a missing
+edge, containment (narrow or wide), spacer or hand-off check, a hand-off that does
+not stop, use without a simple predecessor or over cells with records, and a lost
+last column or character. The width clamp is equivalent: it matters only for a
+wide character at column 0 of a one-column grid, and a stretch never starts at
+column 0.
+
+Per character, median of three runs: CJK lines 6.06 to 5.36 ns, `é` lines 5.13 to
+4.10 ns, CJK with spaces 4.75 to 3.92 ns. The Unicode workload, whose simple
+stretches end at its emoji, measured 1.01x; nothing else moved. libghostty-vt
+afterwards, per character: CJK 2.81, CJK with spaces 3.87, `é` 1.16, lone
+pictographs 3.84 (ours 9.98), flags 15.58 (ours 24.53), and the family sequence
+24.26 (ours 19.67).
+
+| Engine MiB/s | libghostty-vt | AkiTTY | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: |
+| Unicode | 189.4 | 168.2 | 1.13x |
+| ASCII | 1296.4 | 1295.5 | 1.0x |
+| Synchronized screen | 878.9 | 929.8 | 0.95x |
+| Long lines | 491.2 | 895.3 | 0.55x |
+| ANSI | 265.8 | 339.3 | 0.78x |
+| Alternate screen | 173.6 | 175.9 | 0.99x |
+
+Raw record: [simple-stretches](../benchmarks/results/simple-stretches-2026-11-18.json).

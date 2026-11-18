@@ -1017,7 +1017,28 @@ impl Terminal {
         let screen = self.screen_mut();
         let row = &mut screen.rows[pos.row];
         let heap_free = row.heap_free();
-        for ch in text.chars() {
+        let stretches = plain.filter(|_| heap_free);
+        while let Some(ch) = text[bytes..].chars().next() {
+            // After a simple character, a stretch of simple characters cannot join
+            // anything, so with plain words over cells without records a smaller loop
+            // that keeps its state in registers writes it. It stops exactly where this
+            // loop would: before any other character, a column that does not fit, an
+            // uncontained cell, or after a hand-off.
+            if previous_simple && let Some(words) = stretches {
+                let stretch = simple_stretch::<PENDING>(&mut row.cells, &text.as_bytes()[bytes..], col, cols, words);
+                if stretch.bytes != 0 {
+                    bytes += stretch.bytes;
+                    col = stretch.col;
+                    last_col = stretch.last_col;
+                    last_char = stretch.last_char;
+                    previous = Some(stretch.last_char);
+                    previous_class = None;
+                    if stretch.handoff {
+                        break;
+                    }
+                    continue;
+                }
+            }
             // A simple character never joins the simple character written before it
             // (ordinary ASCII, Latin text, CJK, kana and Hangul syllables), so such text
             // does no grapheme work at all.
@@ -2604,6 +2625,71 @@ fn dec_graphic(ch: char) -> char {
     }
 }
 
+/// What `simple_stretch` wrote.
+struct Stretch {
+    bytes: usize,
+    col: usize,
+    last_col: usize,
+    last_char: char,
+    /// It stopped after a non-ASCII character followed by a long ASCII stretch.
+    handoff: bool,
+}
+
+/// Write the leading `simple_width` characters of `text` (valid UTF-8) into `cells`
+/// from `col`, as `write_run_cells` writes them after a simple character: plain
+/// `words` over cells that own no record, each cell checked for containment unless
+/// `PENDING` (a pending row reads as blanks). Stops before any other character, a
+/// character that does not fit before `cols` or an uncontained cell, and after a
+/// non-ASCII character that `ASCII_HANDOFF` printable ASCII bytes follow.
+#[inline(never)]
+fn simple_stretch<const PENDING: bool>(
+    cells: &mut [Cell],
+    text: &[u8],
+    mut col: usize,
+    cols: usize,
+    words: [u32; 3],
+) -> Stretch {
+    // SAFETY: the caller passes a suffix of a `&str` that starts at a character
+    // boundary.
+    let text = unsafe { std::str::from_utf8_unchecked(text) };
+    let mut stretch = Stretch { bytes: 0, col, last_col: col, last_char: ' ', handoff: false };
+    for ch in text.chars() {
+        let Some(width) = grapheme::simple_width(ch) else { break };
+        let width = usize::from(width).min(cols);
+        if col + width > cols {
+            break;
+        }
+        if !PENDING {
+            let contained = if width == 1 {
+                cells[col].width() == 1
+            } else {
+                cells[col].width() != 0 && cells[col + 1].width() != 2
+            };
+            if !contained {
+                break;
+            }
+        }
+        cells[col].store_heap_free(Cell::from_packed(ch, words[width - 1]));
+        if width == 2 {
+            cells[col + 1].store_heap_free(Cell::from_packed(' ', words[2]));
+        }
+        stretch.last_col = col;
+        stretch.last_char = ch;
+        col += width;
+        stretch.bytes += ch.len_utf8();
+        if !ch.is_ascii()
+            && text.as_bytes().get(stretch.bytes).is_some_and(u8::is_ascii)
+            && let Some(&next) = text.as_bytes()[stretch.bytes..].first_chunk::<ASCII_HANDOFF>()
+            && u128::from_ne_bytes(next) & u128::from_ne_bytes([0x80; ASCII_HANDOFF]) == 0
+        {
+            stretch.handoff = true;
+            break;
+        }
+    }
+    stretch.col = col;
+    stretch
+}
+
 /// The byte length of `text`'s first character and the characters after it that are
 /// not `simple_width` characters.
 fn cluster_tail(text: &str) -> usize {
@@ -2969,6 +3055,10 @@ mod tests {
             // Marks past the combining bound, in one run and after a full cell.
             "e\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}\u{307}\u{308}\u{309}\u{30a}\u{30b}\u{30c}\u{30d}\u{30e}\u{30f}\u{310}\u{311}\u{312} x",
             "☺\u{fe0f}\u{20e3}\u{20e3} 👩\u{200d}👩\u{200d}👧\u{200d}👦 ok",
+            // Simple non-ASCII text after a simple character, over narrow cells, wide
+            // leads and spacers.
+            "\x1b[1;1Hab中中cd\x1b[1;1Hé中éé\x1b[1;1Habc中\x1b[1;2Héééé",
+            "\x1b[2;1H中中中中\x1b[2;2Héé中\x1b[2;1Hé中中é",
             "\x1b[38;2;80;180;240mtruecolor run\x1b[0m plain",
             "\x1b[4:3;58;5;9munderlined\x1b[59m\x1b[24m",
             "\x1b[4hinsert\x1b[4l\x1b[2@\x1b[2P\x1b[2X",
