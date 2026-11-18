@@ -30,6 +30,18 @@ describe('terminal replies', () => {
     expect(wasm.readResponse()).toBeNull();
     wasm.free();
   });
+
+  test('a bounded response discards a cut UTF-8 character and its tail', async () => {
+    const engine = await AkittyEngine.load();
+    const wasm = engine.createTerminal(80, 24);
+    try {
+      wasm.write('\x1b]52;中;?\x07');
+      expect(wasm.readResponse(6)).toBe('\x1b]52;');
+      expect(wasm.readResponse()).toBeNull();
+      wasm.write('\x1b]52;中;?\x07');
+      expect(wasm.readResponse()).toBe('\x1b]52;中;\x07');
+    } finally { wasm.free(); }
+  });
 });
 
 describe('wasm handle lifetime', () => {
@@ -184,6 +196,80 @@ describe('runtime terminal configuration', () => {
       for (let i = 0; i < 4; i++) container.dispatchEvent(new WheelEvent('wheel', { deltaY: -8.25 }));
       expect(sent).toEqual(['\x1bOA']);
     } finally { term.dispose(); }
+  });
+
+  test('reset during an alternate wheel gesture discards its remaining key reports', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => {
+      sent.push(data);
+      if (sent.length === 1) term.reset();
+    });
+    try {
+      term.write('\x1b[?1049h\x1b[?1007h');
+      container.dispatchEvent(new WheelEvent('wheel', { deltaY: 3, deltaMode: 1 }));
+      expect(sent).toEqual(['\x1b[B']);
+      expect(term.buffer.active.type).toBe('normal');
+    } finally { term.dispose(); }
+  });
+
+  test('reset from a custom key handler discards input for the old terminal', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => sent.push(data));
+    term.attachCustomKeyEventHandler(() => { term.reset(); return false; });
+    try {
+      term.write('\x1b[?1h');
+      container.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', code: 'ArrowUp' }));
+      expect(sent).toEqual([]);
+      term.attachCustomKeyEventHandler(undefined);
+      container.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', code: 'ArrowUp' }));
+      expect(sent).toEqual(['\x1b[A']);
+    } finally { term.dispose(); }
+  });
+
+  test('reset discards the old composition commit and accepts the next composition', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => sent.push(data));
+    const compose = (text: string): void => {
+      const event = new CompositionEvent('compositionend');
+      Object.defineProperty(event, 'data', { value: text });
+      container.dispatchEvent(event);
+    };
+    try {
+      container.dispatchEvent(new CompositionEvent('compositionstart'));
+      term.reset();
+      compose('旧');
+      expect(sent).toEqual([]);
+      container.dispatchEvent(new CompositionEvent('compositionstart'));
+      compose('新');
+      expect(sent).toEqual(['新']);
+    } finally { term.dispose(); }
+  });
+
+  test('reset from a focus report discards the mouse press that caused it', async () => {
+    const term = await createIsolatedTerminal();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    term.open(container);
+    const sent: string[] = [];
+    term.onData(data => {
+      sent.push(data);
+      if (data === '\x1b[I') term.reset();
+    });
+    try {
+      term.blur();
+      term.write('\x1b[?1000h\x1b[?1004h');
+      container.querySelector('canvas')!.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+      expect(sent).toEqual(['\x1b[I']);
+    } finally { term.dispose(); container.remove(); }
   });
 
   test('reset and disabled mouse tracking discard a held mouse button', async () => {

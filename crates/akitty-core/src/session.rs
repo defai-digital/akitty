@@ -955,6 +955,7 @@ impl Ring {
         self.ready.notify_all();
         self.space.notify_all();
     }
+    #[cfg(test)]
     fn ended(&self) -> bool {
         self.lock().end.is_some()
     }
@@ -1035,7 +1036,7 @@ fn fill_ring_coalescing(
         let Some(mut slot) = ring.checkout() else { return Ok(Fill::Full) };
         let mut filled = 0usize;
         let mut spins = 0usize;
-        let mut bridge_started: Option<Instant> = None;
+        let mut bridge_deadline = None;
         loop {
             match read(&mut slot[filled..]) {
                 // The stream ended: the bytes before it are still published, then EOF is reported.
@@ -1047,16 +1048,18 @@ fn fill_ring_coalescing(
                 // than held back for a fuller buffer.
                 Ok(None) => {
                     if filled >= SATURATED_BYTES && !stopping() {
-                        if spins < BRIDGE_SPINS {
-                            spins += 1;
-                            continue;
-                        }
                         let now = Instant::now();
-                        let started = *bridge_started.get_or_insert(now);
-                        if now.duration_since(started) < BRIDGE_BUDGET && ring.begin_bridge() {
-                            let outcome = bridge();
-                            ring.end_bridge();
-                            if outcome == Bridge::Readable && !stopping() { continue; }
+                        let deadline = *bridge_deadline.get_or_insert(now + BRIDGE_BUDGET);
+                        if now < deadline {
+                            if spins < BRIDGE_SPINS {
+                                spins += 1;
+                                continue;
+                            }
+                            if ring.begin_bridge() {
+                                let outcome = bridge();
+                                ring.end_bridge();
+                                if outcome == Bridge::Readable && !stopping() { continue; }
+                            }
                         }
                     }
                     publish_slot(ring, wake, slot, filled);
@@ -1064,17 +1067,15 @@ fn fill_ring_coalescing(
                 }
                 Ok(Some(count)) => {
                     filled += count;
-                    // Each refill gap gets a fresh retry allowance.
+                    // Each refill gap gets fresh retries within the same slot deadline.
                     spins = 0;
                     if filled == slot.len() {
-                        ring.publish(slot, filled);
-                        wake.signal();
+                        publish_slot(ring, wake, slot, filled);
                         break;
                     }
                     // A stop still publishes what was already gathered.
                     if stopping() {
-                        ring.publish(slot, filled);
-                        wake.signal();
+                        publish_slot(ring, wake, slot, filled);
                         return Ok(Fill::Idle);
                     }
                 }
@@ -1139,7 +1140,7 @@ fn read_loop(fd: i32, ring: &Ring, control: &ReaderControl, wake: &Wake, deliver
             return;
         }
         if control.finish.load(Ordering::SeqCst) {
-            ring.end(drain_after_exit(fd, ring, wake, delivered));
+            ring.end(drain_after_exit(fd, ring, wake, delivered, &control.abandon));
             return;
         }
         let mut poll = [
@@ -1187,7 +1188,7 @@ fn read_loop(fd: i32, ring: &Ring, control: &ReaderControl, wake: &Wake, deliver
                 // that just died may still have output in flight. Run the same bounded post-exit
                 // drain the child-exit path uses, so a trailing query is published and answered
                 // instead of ending the ring on the first empty read.
-                ring.end(drain_after_exit(fd, ring, wake, delivered));
+                ring.end(drain_after_exit(fd, ring, wake, delivered, &control.abandon));
                 return;
             }
             Err(error) => {
@@ -1283,15 +1284,9 @@ impl Pump<'_> {
     /// reader's own drains are bounded, so a healthy reader always ends first. That ordering is
     /// what keeps the final flush from racing a slot that is still being published.
     fn drain_until_end(&mut self, flush: bool, deadline: Instant) -> bool {
-        let mut fed = false;
         loop {
-            while let Some((slot, len)) = self.ring.take_ready_up_to(usize::MAX) {
-                self.feed(&slot[..len]);
-                self.ring.recycle(slot);
-                fed |= len > 0;
-            }
-            if fed && flush { self.flush(); }
-            if self.ring.ended() { return true; }
+            if self.parse_pass() && flush { self.flush(); }
+            if self.ring.idle() { return true; }
             let now = Instant::now();
             if now >= deadline { return false; }
             self.ring.wait_ready(deadline - now);
@@ -1429,6 +1424,8 @@ fn flush_replies(
 
 /// Longest the post-exit drain waits for a free slot before it gives up on publishing more.
 const DRAIN_SLOT_MS: u64 = 100;
+/// Absolute reader budget, leaving the worker time to apply its final published slots.
+const POST_EXIT_DRAIN_MS: u64 = 450;
 /// Longest the close drain waits for a free slot between reads.
 const CLOSE_SLOT_MS: u64 = 50;
 
@@ -1437,8 +1434,9 @@ const CLOSE_SLOT_MS: u64 = 50;
 /// still contains. `Err` is an IO failure to record. A descendant that keeps the slave open can
 /// never make this run past its bounds, and every published batch is applied before the next
 /// idle window starts, so an answer still reaches the program while the master is open.
-fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool) -> Result<(), String> {
-    drain_after_exit_with(ring, wake, delivered, |slot| read_pty(fd, slot, true), |wait| {
+fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool, abandon: &AtomicBool) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_millis(POST_EXIT_DRAIN_MS);
+    drain_after_exit_with(ring, wake, delivered, deadline, || abandon.load(Ordering::SeqCst), |slot| read_pty(fd, slot, true), |wait| {
         let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         // SAFETY: poll references one valid pollfd for this owned master.
         let ready = unsafe { libc::poll(&mut poll, 1, wait) };
@@ -1451,14 +1449,18 @@ fn drain_after_exit(fd: i32, ring: &Ring, wake: &Wake, delivered: &AtomicBool) -
 
 /// Keep the idle-window policy independent of scheduling so a quiet or interrupted first poll can be
 /// tested without racing a writer thread against a short wall-clock delay.
-fn drain_after_exit_with<R, P>(ring: &Ring, wake: &Wake, delivered: &AtomicBool, mut read: R, mut probe: P) -> Result<(), String>
+fn drain_after_exit_with<R, P>(
+    ring: &Ring, wake: &Wake, delivered: &AtomicBool, deadline: Instant, cancelled: impl Fn() -> bool, mut read: R, mut probe: P,
+) -> Result<(), String>
 where
     R: FnMut(&mut [u8]) -> Result<Option<usize>, String>,
     P: FnMut(libc::c_int) -> Result<(), String>,
 {
     let mut idle_waits = 0;
     for _ in 0..32 {
-        let Some(mut slot) = ring.checkout_within(Duration::from_millis(DRAIN_SLOT_MS)) else { return Ok(()) };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || cancelled() { return Ok(()); }
+        let Some(mut slot) = ring.checkout_within(remaining.min(Duration::from_millis(DRAIN_SLOT_MS))) else { return Ok(()) };
         match read(&mut slot[..]) {
             Ok(Some(0)) => {
                 ring.release(slot);
@@ -1475,10 +1477,13 @@ where
                 let wait = if delivered.load(Ordering::SeqCst) { DRAIN_SETTLE_MS } else { DRAIN_IDLE_MS };
                 // Let the parser apply and answer what was published first: its reply is written
                 // in the same pass, so `delivered` reflects this drain rather than a previous one.
-                ring.wait_parsed(Duration::from_millis(wait as u64));
+                let window = Duration::from_millis(wait as u64);
+                ring.wait_parsed(window.min(deadline.saturating_duration_since(Instant::now())));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() || cancelled() { return Ok(()); }
                 // A quiet poll spends one window, rather than bypassing the remaining idle budget.
                 // Re-read after either result: readiness can race and a late writer may now have data.
-                probe(wait)?;
+                probe(wait.min(remaining.as_millis() as libc::c_int))?;
             }
             Ok(Some(count)) => {
                 idle_waits = 0;
@@ -1562,8 +1567,7 @@ where
 /// Longest the worker may sleep with nothing pending. Input and shutdown wake it through the
 /// self-pipe, so this only bounds silent child-exit detection.
 const IDLE_POLL_MS: libc::c_int = 250;
-/// How long the worker waits for the reader's bounded post-exit drain before it finalizes; the
-/// reader's own windows (two idle waits plus 32 reads) always end inside it.
+/// Worker budget for the post-exit drain and applying the reader's final slots.
 const POST_EXIT_WAIT_MS: u64 = 500;
 /// How long a closing worker waits for the reader's bounded quiet drain. Both are bounded, so
 /// this only keeps close from returning before the shell's final write landed.
@@ -1730,12 +1734,6 @@ fn run(
                     drop(state);
                     // `exited` is the one change no further output will announce.
                     notify.signal();
-                    // Ask the reader for its bounded post-exit drain. A descendant can keep the
-                    // slave writable after shell exit, so the drain is bounded there and its
-                    // answers are written while the master is still open.
-                    finish.store(true, Ordering::SeqCst);
-                    reader.signal();
-                    pump.drain_until_end(true, Instant::now() + Duration::from_millis(POST_EXIT_WAIT_MS));
                     break;
                 }
                 Ok(None) => {}
@@ -1746,30 +1744,27 @@ fn run(
             }
         }
     }
-    // Deliver what the drain queued before the master closes; this also covers an EOF break.
-    // An explicit stop/close tears the session down, so it applies the reader's quiet drain and
-    // does not flush.
-    if !stop.load(Ordering::SeqCst) {
-        // The reader may still be finishing a bounded drain (an EOF or hangup that arrived before
-        // the exit was observed, or a descendant still writing). Joining it first would block it
-        // on a full ring, so keep applying its slots until it ends, then deliver every reply while
-        // the master is still open. `ReaderThread::drop` joins afterwards, bounded by `abandon`.
-        finish.store(true, Ordering::SeqCst);
-        reader.signal();
-        pump.drain_until_end(true, Instant::now() + Duration::from_millis(POST_EXIT_WAIT_MS));
-        let _ = pump.flush();
+    // Keep applying slots while the reader drains, so it cannot get stuck waiting for a free slot.
+    // A natural exit also delivers replies while the master is still open for descendants.
+    let closing = stop.load(Ordering::SeqCst);
+    let wait = if closing {
+        CLOSE_WAIT_MS
     } else {
-        // Nobody reads a closed pane, but the shell is usually still writing its last prompt.
-        reader.signal();
-        pump.drain_until_end(false, Instant::now() + Duration::from_millis(CLOSE_WAIT_MS));
-    }
+        finish.store(true, Ordering::SeqCst);
+        POST_EXIT_WAIT_MS
+    };
+    reader.signal();
+    let drained = pump.drain_until_end(!closing, Instant::now() + Duration::from_millis(wait));
+    // Join before inspecting the final error or closing the descriptor. If the worker timed out,
+    // apply the at most one ring's worth the reader could still publish on its way out.
+    drop(reader);
+    if !drained { pump.parse_pass(); }
+    if !closing { pump.flush(); }
     if let Some(error) = ring.end_error() { io_error = Some(error); }
     let cleanup_error = child.finish().err();
     finalize(&model, child.exit_code(), io_error.as_deref(), cleanup_error.as_deref());
     // `finalize` is the last revision bump; a missed exit would strand the pane's status.
     notify.signal();
-    // Join the reader before the master descriptor closes under it.
-    drop(reader);
     drop(master);
     if let Some(error) = io_error.or(cleanup_error) {
         Err(error)
@@ -3047,6 +3042,29 @@ mod reply_tests {
     }
 
     #[test]
+    fn a_small_refill_does_not_renew_the_bridge_budget() {
+        let (ring, held) = busy_bridging_ring();
+        let wake = Wake::new().unwrap();
+        let mut step = 0;
+        let result = fill_ring_coalescing(&ring, || false, &wake, |buffer| {
+            step += 1;
+            match step {
+                1 => { buffer[..SATURATED_BYTES].fill(b'x'); Ok(Some(SATURATED_BYTES)) }
+                2 | 4 => Ok(None),
+                3 => { thread::sleep(BRIDGE_BUDGET); buffer[0] = b'y'; Ok(Some(1)) }
+                5 => { buffer[0] = b'z'; Ok(Some(1)) }
+                _ => Ok(None),
+            }
+        }, || Bridge::Deliver);
+        assert!(matches!(result, Ok(Fill::Idle)));
+        let (slot, len) = ring.take_ready_up_to(usize::MAX).expect("budget published the slot");
+        assert_eq!(len, SATURATED_BYTES + 1);
+        assert_eq!(slot[len - 1], b'y', "refill bytes are still delivered");
+        ring.recycle(slot);
+        ring.recycle(held);
+    }
+
+    #[test]
     fn a_stop_during_a_bridge_publishes_what_was_gathered() {
         let (ring, held) = busy_bridging_ring();
         let wake = Wake::new().unwrap();
@@ -3225,7 +3243,7 @@ mod reply_tests {
         let ring = Ring::new();
         let wake = Wake::new().unwrap();
         let delivered = AtomicBool::new(false);
-        let failure = drain_after_exit(master, &ring, &wake, &delivered);
+        let failure = drain_after_exit(master, &ring, &wake, &delivered, &AtomicBool::new(false));
         ring.end(failure);
         let (mut pump, delivered) = pump_for(&session, &ring, master);
         pump.drain_until_end(true, Instant::now() + Duration::from_millis(200));
@@ -3443,7 +3461,7 @@ mod reply_tests {
         let delivered = AtomicBool::new(false);
         let mut reads = 0;
         let mut polls = 0;
-        drain_after_exit_with(&ring, &wake, &delivered, |buffer| {
+        drain_after_exit_with(&ring, &wake, &delivered, Instant::now() + Duration::from_secs(2), || false, |buffer| {
             reads += 1;
             if reads == 2 {
                 buffer[..4].copy_from_slice(b"\x1b[6n");
@@ -3466,7 +3484,7 @@ mod reply_tests {
     fn post_exit_drain_reports_poll_failure_without_leaking_a_slot() {
         let ring = Ring::new();
         let wake = Wake::new().unwrap();
-        let failure = drain_after_exit_with(&ring, &wake, &AtomicBool::new(false), |_| Ok(None),
+        let failure = drain_after_exit_with(&ring, &wake, &AtomicBool::new(false), Instant::now() + Duration::from_secs(2), || false, |_| Ok(None),
             |_| Err("PTY drain poll failed: test failure".into()));
         assert_eq!(failure.unwrap_err(), "PTY drain poll failed: test failure");
         assert_eq!(ring.lock().free.len(), RING_SLOTS);
@@ -3492,7 +3510,7 @@ mod reply_tests {
             written_tx.send(()).unwrap();
         });
         let mut requested = false;
-        let failure = drain_after_exit_with(&ring, &wake, &delivered,
+        let failure = drain_after_exit_with(&ring, &wake, &delivered, Instant::now() + Duration::from_secs(2), || false,
             |buffer| read_pty(master, buffer, true), |wait| {
                 // Schedule the descendant only after the drain sees an empty read, then wait for
                 // its write explicitly. A loaded CI host need not schedule it inside a 10 ms sleep.
@@ -3545,7 +3563,7 @@ mod reply_tests {
                 pump.drain_until_end(true, Instant::now() + Duration::from_secs(2));
             });
             let mut bursts = 0;
-            let failure = drain_after_exit_with(&ring, &wake, &delivered,
+            let failure = drain_after_exit_with(&ring, &wake, &delivered, Instant::now() + Duration::from_secs(2), || false,
                 |buffer| read_pty(master, buffer, true), |wait| {
                     if bursts < 3 { write_tx.send(()).unwrap(); written_rx.recv().unwrap(); bursts += 1; }
                     let mut poll = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };

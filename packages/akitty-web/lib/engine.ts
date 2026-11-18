@@ -362,6 +362,14 @@ export class AkittyTerminal {
     const limit = Math.max(0, Math.min(AkittyTerminal.RESPONSE_READ_MAX, Math.floor(maxBytes)));
     const pointer = this.replyBytes.reserve(AkittyTerminal.RESPONSE_READ_MAX);
     const count = this.exports.akitty_vt_replies(this.handle, pointer, AkittyTerminal.RESPONSE_READ_MAX);
-    return text.decode(new Uint8Array(this.exports.memory.buffer, pointer, Math.min(limit, count)));
+    const bytes = new Uint8Array(this.exports.memory.buffer, pointer, Math.min(limit, count));
+    if (bytes.length < count || count === AkittyTerminal.RESPONSE_READ_MAX) {
+      // A caller limit or a full core queue can cut a UTF-8 scalar. Return the complete prefix
+      // and clear the decoder's pending bytes, since the next read starts a different reply.
+      const prefix = text.decode(bytes, { stream: true });
+      text.decode();
+      return prefix;
+    }
+    return text.decode(bytes);
   }
 }

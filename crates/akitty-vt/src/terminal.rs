@@ -179,6 +179,17 @@ struct StyleCache {
     template: CellStyle,
 }
 
+impl StyleCache {
+    fn matches(&self, style: Style, link: Option<&Arc<Link>>) -> bool {
+        self.style == style
+            && match (self.link.as_ref(), link) {
+                (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
 /// Prepared presentations retained per terminal. Programs cycle through a handful of
 /// styles (a theme colour, the reset style, a truecolor accent measured per line), so a
 /// few slots stop the common alternating pattern from rebuilding — and reallocating a
@@ -442,7 +453,7 @@ impl Terminal {
         let mut sync_ends: Option<usize> = None;
         let mut sync_ends_seen = 0usize;
         parser.feed_runs(bytes, |input| match input {
-            Input::Text(text, ascii) => self.print_run(text, ascii, &mut emit),
+            Input::Text(text, ascii) => self.print_text(text, ascii, &mut emit),
             Input::Csi(csi) => {
                 let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
                     && matches!(csi.final_byte, b'h' | b'l')
@@ -551,7 +562,7 @@ impl Terminal {
         let mut text = std::mem::take(&mut self.sync.text);
         for entry in entries.drain(..) {
             match entry {
-                Deferred::Text(range) => self.print_run(&text[range], false, emit),
+                Deferred::Text(range) => self.print_text(&text[range], false, emit),
                 Deferred::Csi(csi) => {
                     self.grapheme_target = None;
                     self.csi(&csi, emit);
@@ -828,11 +839,6 @@ impl Terminal {
             text = &text[ch.len_utf8()..];
         }
     }
-    /// Write a parser-validated printable run. `Input::Text` is already a `&str`, so no
-    /// whole-run UTF-8 validation happens here.
-    fn print_run(&mut self, text: &str, ascii: bool, emit: &mut impl FnMut(Event)) {
-        self.print_text(text, ascii, emit);
-    }
     /// The prepared presentation for the current style and hyperlink, rebuilt only when
     /// both are absent from the bounded slot set. At most `STYLE_SLOTS` templates are
     /// retained per terminal.
@@ -840,12 +846,11 @@ impl Terminal {
         if let Some(slot) = self.current_slot
             && let Some(cache) = &self.style_cache[slot]
         {
-            let template = &cache.template;
             debug_assert!(
-                template.same_presentation(&CellStyle::new(&self.style, self.link.as_ref())),
+                cache.matches(self.style, self.link.as_ref()),
                 "a style or hyperlink change missed style_changed"
             );
-            return template.clone();
+            return cache.template.clone();
         }
         self.slot_template()
     }
@@ -858,13 +863,7 @@ impl Terminal {
         let link = self.link.as_ref();
         for (index, slot) in self.style_cache.iter().enumerate() {
             let Some(cache) = slot else { continue };
-            if cache.style == style
-                && match (&cache.link, link) {
-                    (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
-                    (None, None) => true,
-                    _ => false,
-                }
-            {
+            if cache.matches(style, link) {
                 self.current_slot = Some(index);
                 return cache.template.clone();
             }

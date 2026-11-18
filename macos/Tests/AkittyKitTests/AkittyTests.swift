@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Metal
+import Darwin
 @testable import AkittyKit
 
 final class AkittyTests: XCTestCase {
@@ -67,6 +68,16 @@ final class AkittyTests: XCTestCase {
         }
         XCTAssertThrowsError(try session.snapshot())
         XCTAssertNoThrow(try session.close())
+    }
+    func testNotificationDescriptorIsCloseOnExecAndOutlivesSession() throws {
+        let session = try TerminalSession(shell: "/bin/sh")
+        let fd = try XCTUnwrap(session.duplicateNotifyFD())
+        defer { Darwin.close(fd) }
+        try session.close()
+        let flags = fcntl(fd, F_GETFD)
+        XCTAssertGreaterThanOrEqual(flags, 0)
+        XCTAssertEqual(flags & FD_CLOEXEC, FD_CLOEXEC)
+        XCTAssertNil(session.duplicateNotifyFD())
     }
     func testClosingSessionRejectsCallsWithoutWaitingForChildReaping() throws {
         let session = try TerminalSession(headless: true)

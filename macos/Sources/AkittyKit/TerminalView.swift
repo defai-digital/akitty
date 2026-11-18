@@ -368,12 +368,9 @@ struct RenderReuse: Equatable {
     /// Reads the core's "model changed" pipe on the main queue through a duplicate descriptor that the
     /// source's cancel handler closes; the core still owns and closes its own ends with the session.
     private func startWakeSource() {
-        guard let shared = session.notifyFD() else { return } // headless: the host polls explicitly
         // libdispatch requires a monitored descriptor to stay open until the cancel handler runs, but the
         // core closes its pipe on a background queue at shutdown. Watch a private duplicate instead.
-        // Atomically close-on-exec, so a shell spawned meanwhile on another thread cannot inherit it.
-        let fd = fcntl(shared, F_DUPFD_CLOEXEC, 0)
-        guard fd >= 0 else { return } // the safety tick still refreshes the pane
+        guard let fd = session.duplicateNotifyFD() else { return } // the safety tick still refreshes the pane
         wakeFD = fd
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.wakeFromCore() } }

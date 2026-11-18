@@ -164,8 +164,8 @@ export class Terminal implements ITerminalCore {
       renderer.resize(this.cols, this.rows);
       const terminal = this.wasmTerm;
       this.selectionManager?.clearSelection();
-      if (this.isDisposed || this.wasmTerm !== terminal) return;
-      renderer.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
+      if (!terminal || !this.isCurrentTerminal(terminal)) return;
+      renderer.render(terminal, true, this.viewportY, this, this.scrollbarOpacity);
     }
   }
   private listen(target: EventTarget, type: string, listener: EventListener, options?: AddEventListenerOptions | boolean): void {
@@ -225,11 +225,14 @@ export class Terminal implements ITerminalCore {
     if (this.isDisposed) throw new Error('Terminal has been disposed');
     if (!this.isOpen) throw new Error('Terminal must be opened before use. Call terminal.open(parent) first.');
   }
+  private isCurrentTerminal(terminal: AkittyTerminal): boolean {
+    return this.isOpen && this.wasmTerm === terminal;
+  }
   private emitInput(data: string): void {
-    if (this.isDisposed || this.options.disableStdin) return;
     const terminal = this.wasmTerm;
+    if (!terminal || !this.isCurrentTerminal(terminal) || this.options.disableStdin) return;
     this.selectionManager?.clearSelection();
-    if (!this.isDisposed && this.wasmTerm === terminal) this.dataEmitter.fire(data);
+    if (this.isCurrentTerminal(terminal) && !this.options.disableStdin) this.dataEmitter.fire(data);
   }
   write(data: string | Uint8Array, callback?: () => void): void {
     this.assertOpen();
@@ -256,12 +259,12 @@ export class Terminal implements ITerminalCore {
     terminal.write(data, this.engineEvent);
     // Each event boundary can reset or dispose the terminal. An old write must
     // never publish buffer changes, replies or viewport updates for its replacement.
-    if (this.isDisposed || this.wasmTerm !== terminal) return;
+    if (!this.isCurrentTerminal(terminal)) return;
     this.revision++;
     this.notifyBufferChangeIfSwitched(alternate);
-    if (this.isDisposed || this.wasmTerm !== terminal) return;
-    this.processTerminalResponses();
-    if (this.isDisposed || this.wasmTerm !== terminal) return;
+    if (!this.isCurrentTerminal(terminal)) return;
+    this.processTerminalResponses(terminal);
+    if (!this.isCurrentTerminal(terminal)) return;
     this.scheduleSync(); this.linkDetector?.invalidateCache();
     this.preserveViewportOnOutput(terminal, viewport);
   }
@@ -277,14 +280,14 @@ export class Terminal implements ITerminalCore {
     const viewport = this.captureViewport(terminal);
     const dirty = terminal.update();
     // A tick can fire title/bell events, and their listeners can reset or dispose the terminal.
-    if (this.isDisposed || this.wasmTerm !== terminal) return false;
+    if (!this.isCurrentTerminal(terminal)) return false;
     // A synchronized-update expiry flushes held output, so cached links for those rows are
     // stale. Skip clean frames to avoid discarding the detector cache on every render tick.
     if (dirty !== DirtyState.NONE) this.linkDetector?.invalidateCache();
-    this.processTerminalResponses();
-    if (this.isDisposed || this.wasmTerm !== terminal) return false;
+    this.processTerminalResponses(terminal);
+    if (!this.isCurrentTerminal(terminal)) return false;
     this.preserveViewportOnOutput(terminal, viewport);
-    return true;
+    return this.isCurrentTerminal(terminal);
   }
   /** New output shifts every bottom-relative offset, so a reader scrolled up must move with it.
    *  Row anchors follow the same content past eviction, offset 0 tracks the live bottom and stays put,
@@ -313,7 +316,7 @@ export class Terminal implements ITerminalCore {
     if (event.type === 'title') this.applyTitle(event.title);
     else {
       const terminal = this.wasmTerm;
-      for (let i = 0; i < event.count && !this.isDisposed && this.wasmTerm === terminal; i++) this.bellEmitter.fire();
+      for (let i = 0; terminal && i < event.count && this.isCurrentTerminal(terminal); i++) this.bellEmitter.fire();
     }
   };
   private scheduleSync(): void {
@@ -349,7 +352,7 @@ export class Terminal implements ITerminalCore {
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
     this.settings.cols = cols; this.settings.rows = rows;
     this.selectionManager?.clearSelection();
-    if (this.isDisposed || this.wasmTerm !== terminal || this.cols !== cols || this.rows !== rows) return;
+    if (!this.isCurrentTerminal(terminal) || this.cols !== cols || this.rows !== rows) return;
     this.resizePaintPending = true; this.finishResize();
   }
   private finishResize(): void {
@@ -371,18 +374,19 @@ export class Terminal implements ITerminalCore {
     // Commit ownership before selection notifications can reenter reset/dispose.
     this.wasmTerm = replacement; previous.free();
     this.outputQueue.cancel(new Error('Terminal was reset before queued output completed'));
+    this.inputHandler?.reset();
     this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
     this.linkDetector?.invalidateCache(); this.renderer?.clear(); this.revision++;
     this.selectionManager?.setTerminal(replacement);
-    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    if (!this.isCurrentTerminal(replacement)) return;
     this.handleMouseLeave();
-    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    if (!this.isCurrentTerminal(replacement)) return;
     this.notifyBufferChangeIfSwitched(alternate);
-    if (this.isDisposed || this.wasmTerm !== replacement) return;
+    if (!this.isCurrentTerminal(replacement)) return;
     this.scrollEmitter.fire(0);
-    if (!this.isDisposed && this.wasmTerm === replacement) this.applyTitle('');
+    if (this.isCurrentTerminal(replacement)) this.applyTitle('');
   }
   private notifyBufferChangeIfSwitched(previous: boolean): void {
     if (this.wasmTerm && previous !== this.wasmTerm.isAlternateScreen()) {
@@ -441,21 +445,25 @@ export class Terminal implements ITerminalCore {
   private setViewport(value: number): void {
     const target = clamp(value, 0, this.getScrollbackLength());
     if (target === this.viewportY) return;
-    this.viewportY = target; this.scrollEmitter.fire(target); if (this.getScrollbackLength()) this.showScrollbar();
+    const terminal = this.wasmTerm;
+    this.viewportY = target; this.scrollEmitter.fire(target);
+    if (terminal && this.isCurrentTerminal(terminal) && terminal.getScrollbackLength()) this.showScrollbar();
   }
   private smoothScrollTo(value: number): void {
-    if (!this.wasmTerm) return;
+    const terminal = this.wasmTerm;
+    if (!terminal) return;
     this.scrollIntent++;
     this.targetViewportY = clamp(value, 0, this.getScrollbackLength());
     if (this.options.smoothScrollDuration <= 0 || !this.onScreen) this.setViewport(this.targetViewportY);
     else if (this.scrollAnimationFrame === undefined) {
       const animate = (): void => {
         this.scrollAnimationFrame = undefined;
-        if (!this.isOpen || this.isDisposed) return;
+        if (!this.isCurrentTerminal(terminal)) return;
+        const intent = this.scrollIntent;
         const distance = this.targetViewportY - this.viewportY;
         if (!this.onScreen || Math.abs(distance) < 0.01) { this.setViewport(this.targetViewportY); return; }
         this.setViewport(this.viewportY + distance * clamp(16 / Math.max(1, this.options.smoothScrollDuration), 0.05, 1));
-        this.scrollAnimationFrame = requestAnimationFrame(animate);
+        if (this.isCurrentTerminal(terminal) && intent === this.scrollIntent) this.scrollAnimationFrame = requestAnimationFrame(animate);
       };
       animate();
     }
@@ -506,7 +514,7 @@ export class Terminal implements ITerminalCore {
     const engine = this.wasmTerm!;
     if (this.customWheelEventHandler?.(event)) return;
     // Host handlers can reset or dispose the terminal before the gesture resumes.
-    if (this.isDisposed || this.wasmTerm !== engine || !event.deltaY) return;
+    if (!this.isCurrentTerminal(engine) || !event.deltaY) return;
     if (engine.hasMouseTracking() && !event.shiftKey) {
       const { x, y } = this.pointer(event); const button = (event.deltaY < 0 ? 64 : 65) | this.mouseModifiers(event);
       this.emitInput(mouseReport(button, x, y, false, engine.getMode(1006), engine.getMode(1005))); return;
@@ -518,7 +526,7 @@ export class Terminal implements ITerminalCore {
       const steps = Math.trunc(this.alternateWheelRemainder);
       this.alternateWheelRemainder -= steps;
       const prefix = engine.getMode(1) ? '\x1bO' : '\x1b[';
-      for (let i = 0; i < Math.min(5, Math.abs(steps)); i++) this.emitInput(prefix + (steps > 0 ? 'B' : 'A'));
+      for (let i = 0; i < Math.min(5, Math.abs(steps)) && this.isCurrentTerminal(engine); i++) this.emitInput(prefix + (steps > 0 ? 'B' : 'A'));
       return;
     }
     const lines = event.deltaMode === 1 ? event.deltaY : event.deltaMode === 2 ? event.deltaY * this.rows : event.deltaY / (this.renderer?.getMetrics().height ?? 20);
@@ -533,17 +541,19 @@ export class Terminal implements ITerminalCore {
       y: clamp(Math.floor((event.clientY - rect.top) / metrics.height), 0, this.rows - 1) };
   }
   private readonly handleMouseDown = (event: MouseEvent): void => {
-    if (!this.canvas || !this.renderer || !this.wasmTerm) return;
+    const terminal = this.wasmTerm;
+    if (!this.canvas || !this.renderer || !terminal) return;
     const rect = this.canvas.getBoundingClientRect(), history = this.getScrollbackLength();
     if (event.button === 0 && history > 0 && event.clientX - rect.left >= rect.width - 12 && rect.width > 0) {
       event.preventDefault(); event.stopImmediatePropagation();
       this.dragging = { y: event.clientY, viewport: this.viewportY }; this.showScrollbar(); return;
     }
-    if (this.wasmTerm.hasMouseTracking() && !event.shiftKey) {
+    if (terminal.hasMouseTracking() && !event.shiftKey) {
       event.preventDefault(); event.stopImmediatePropagation(); this.focus();
+      if (!this.isCurrentTerminal(terminal) || !terminal.hasMouseTracking()) return;
       this.mouseButton = event.button === 1 ? 1 : event.button === 2 ? 2 : 0;
       const { x, y } = this.pointer(event);
-      this.emitInput(mouseReport(this.mouseButton | this.mouseModifiers(event), x, y, false, this.wasmTerm.getMode(1006), this.wasmTerm.getMode(1005)));
+      this.emitInput(mouseReport(this.mouseButton | this.mouseModifiers(event), x, y, false, terminal.getMode(1006), terminal.getMode(1005)));
     }
   };
   private readonly handleMouseUp = (event: MouseEvent): void => {
@@ -575,7 +585,7 @@ export class Terminal implements ITerminalCore {
   private processMouseMove(event: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.wasmTerm || !this.linkDetector) return;
     const request = ++this.hoverRequest, terminal = this.wasmTerm, { x, y } = this.pointer(event);
-    const current = (): boolean => this.isOpen && !this.isDisposed && request === this.hoverRequest && terminal === this.wasmTerm;
+    const current = (): boolean => this.isCurrentTerminal(terminal) && request === this.hoverRequest;
     const row = this.getScrollbackLength() + y - Math.floor(this.viewportY);
     void this.linkDetector.getLinkAt(x, row).then(link => {
       if (!current()) return;
@@ -600,15 +610,15 @@ export class Terminal implements ITerminalCore {
   };
   private readonly handleClick = async (event: MouseEvent): Promise<void> => {
     if (!this.canvas || !this.renderer || !this.wasmTerm || !this.linkDetector) return;
-    const { x, y } = this.pointer(event), detector = this.linkDetector;
+    const { x, y } = this.pointer(event), detector = this.linkDetector, terminal = this.wasmTerm;
     try {
       const link = await detector.getLinkAt(x, this.getScrollbackLength() + y - Math.floor(this.viewportY));
-      if (this.isDisposed || !this.isOpen || detector !== this.linkDetector) return;
+      if (!this.isCurrentTerminal(terminal)) return;
       if (link) { link.activate(event); if (event.ctrlKey || event.metaKey) event.preventDefault(); }
     } catch (error) { console.warn('AkiTTY link activation failed', error); }
   };
-  private processTerminalResponses(): void {
-    const response = this.wasmTerm?.readResponse(); if (response) this.dataEmitter.fire(response);
+  private processTerminalResponses(terminal: AkittyTerminal): void {
+    const response = terminal.readResponse(); if (response) this.dataEmitter.fire(response);
   }
   private startRenderLoop(): void {
     const frame = (): void => {

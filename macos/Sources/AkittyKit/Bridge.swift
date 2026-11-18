@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import AkittyCore
+import Darwin
 
 public enum AkittyError: Error, LocalizedError {
     case core(String)
@@ -162,6 +163,16 @@ private struct SnapshotReply: Decodable {
     let ok: Bool
     let error: String?
     let data: Payload?
+    static func snapshot(from bytes: Data) throws -> Snapshot? {
+        let reply = try JSONDecoder().decode(Self.self, from: bytes)
+        guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
+        guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
+        switch reply.data {
+        case .full(let snapshot): return snapshot
+        case .unchanged: return nil
+        case nil: throw AkittyError.core("Missing response data")
+        }
+    }
     enum Payload: Decodable {
         case unchanged, full(Snapshot)
         private enum Key: String, CodingKey { case changed }
@@ -571,7 +582,10 @@ public final class TerminalSession: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async { try? cleanup() }
     }
     public func close() throws {
-        try close { id in _ = try CoreBridge.call(["op": "close", "id": id]) }
+        try prepareClose()?()
+    }
+    private static func closeCore(_ id: UInt64) throws -> Data {
+        try CoreBridge.call(["op": "close", "id": id])
     }
     private var isClosed: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -591,20 +605,16 @@ public final class TerminalSession: @unchecked Sendable {
     func prepareClose() -> (@Sendable () throws -> Void)? {
         guard markClosed() else { return nil }
         let handle = id
-        return { _ = try CoreBridge.call(["op": "close", "id": handle]) }
+        return { _ = try Self.closeCore(handle) }
     }
     public func call(_ op: String, _ values: [String: Any] = [:]) throws -> Data {
-        lock.lock()
-        guard !closed else { lock.unlock(); throw AkittyError.core("Session is closed") }
         if op == "close" {
-            // Mark closed before the call reaches Rust, like `close()`, so late app events
-            // see the state immediately. Do not route through `close()`: NSLock is not
-            // recursive and it would deadlock. The reply still follows the call contract.
-            closed = true
-            lock.unlock()
-            return try CoreBridge.call(["op": "close", "id": id])
+            guard markClosed() else { throw AkittyError.core("Session is closed") }
+            return try Self.closeCore(id)
         }
+        lock.lock()
         defer { lock.unlock() }
+        guard !closed else { throw AkittyError.core("Session is closed") }
         var request = values; request["op"] = op; request["id"] = id
         return try CoreBridge.call(request)
     }
@@ -651,56 +661,42 @@ public final class TerminalSession: @unchecked Sendable {
         if data == Self.unchangedEnvelope { return nil }
         // The core declines the block (a cell text over 255 bytes, an error reply) by answering with plain JSON:
         // that reply is complete and may carry one-shot events, so decode it rather than re-request.
-        if binary, data.contains(0) {
+        let decoded: Snapshot?
+        if binary, let separator = data.firstIndex(of: 0) {
+            let head = data[..<separator]
+            let block = data[data.index(after: separator)...]
             // Only a decode failure of this reply may recover its events; a failed resync inside
             // `finish` already held them, so it must propagate rather than hold them twice.
-            let decoded: Snapshot?
-            do { decoded = try decodeBinarySnapshot(data) }
+            do { decoded = try decodeBinarySnapshot(head: head, block: block) }
             catch {
                 // A bad block falls back to a full JSON snapshot. The core already committed this reply's
                 // one-shot events, so recover them from its head when it is readable.
-                let lost = Self.oneShotEvents(head: data[..<(data.firstIndex(of: 0) ?? data.endIndex)])
+                let lost = Self.oneShotEvents(head: head)
                 return try replacing(bell: lost.bell, clipboard: lost.clipboard) { try snapshot(since: nil, base: nil, binary: false) }
             }
-            guard let decoded else { return nil }
-            return try finish(decoded, since: since, base: base)
+        } else {
+            decoded = try decodeJSONSnapshot(data)
         }
-        return try decodeJSONSnapshot(data, since: since, base: base)
+        guard let decoded else { return nil }
+        return try finish(decoded, since: since, base: base)
     }
     /// The existing transport: read `data.cells` by hand and the rest with JSONDecoder.
-    private func decodeJSONSnapshot(_ data: Data, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
+    private func decodeJSONSnapshot(_ data: Data) throws -> Snapshot? {
         let scanned = CellScanner.split(data)
-        let reply = try JSONDecoder().decode(SnapshotReply.self, from: scanned?.rest ?? data)
-        guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
-        guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
-        switch reply.data {
-        case .full(var snapshot):
-            if let scanned { snapshot.cells = scanned.cells }
-            return try finish(snapshot, since: since, base: base)
-        case .unchanged: return nil
-        case nil: throw AkittyError.core("Missing response data")
-        }
+        guard var snapshot = try SnapshotReply.snapshot(from: scanned?.rest ?? data) else { return nil }
+        if let scanned { snapshot.cells = scanned.cells }
+        return snapshot
     }
     /// The negotiated transport: JSON head, one NUL separator, then the version-1 cell block.
     /// Decodes only; the caller applies `finish`, so its resync errors stay out of the decode fallback.
-    private func decodeBinarySnapshot(_ data: Data) throws -> Snapshot? {
-        guard let separator = data.firstIndex(of: 0) else { throw AkittyError.core("Missing binary cell separator") }
-        let head = data[..<separator]
-        let block = data[data.index(after: separator)...]
-        let reply = try JSONDecoder().decode(SnapshotReply.self, from: head)
-        guard reply.version == 1 else { throw AkittyError.core("Invalid core response schema") }
-        guard reply.ok else { throw AkittyError.core(reply.error ?? "Unknown core failure") }
-        switch reply.data {
-        case .full(var snapshot):
-            guard let meta = snapshot.cells_binary, meta.version == 1, meta.bytes == block.count,
-                  let cells = try? CellBlock.decode(block, count: meta.count) else {
-                throw AkittyError.core("Invalid binary cell block")
-            }
-            snapshot.cells = cells
-            return snapshot
-        case .unchanged: return nil
-        case nil: throw AkittyError.core("Missing response data")
+    private func decodeBinarySnapshot(head: Data, block: Data) throws -> Snapshot? {
+        guard var snapshot = try SnapshotReply.snapshot(from: head) else { return nil }
+        guard let meta = snapshot.cells_binary, meta.version == 1, meta.bytes == block.count,
+              let cells = try? CellBlock.decode(block, count: meta.count) else {
+            throw AkittyError.core("Invalid binary cell block")
         }
+        snapshot.cells = cells
+        return snapshot
     }
     /// Common partial-snapshot handling for both transports.
     private func finish(_ snapshot: Snapshot, since: UInt64?, base: Snapshot?) throws -> Snapshot? {
@@ -741,14 +737,16 @@ public final class TerminalSession: @unchecked Sendable {
     public func shellState() throws -> ShellState {
         try JSONDecoder().decode(ShellState.self, from: call("shell_state"))
     }
-    /// Read end of the core's host-notify pipe, or nil for a headless/closed session. The core owns
-    /// both ends and closes them with the session, so the caller must cancel its reader (not close
-    /// the descriptor) before `close()`/`prepareClose()`.
-    func notifyFD() -> Int32? {
-        guard !isClosed, let data = try? call("notify_fd"),
-              let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return nil }
-        return (value["fd"] as? NSNumber)?.int32Value
+    /// Duplicates the core's notification descriptor before a concurrent session close can reclaim it.
+    /// The caller owns the returned descriptor. Headless and closed sessions have no notification pipe.
+    func duplicateNotifyFD() -> Int32? {
+        struct Reply: Decodable { let fd: Int32 }
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, let data = try? CoreBridge.call(["op": "notify_fd", "id": id]),
+              let reply = try? JSONDecoder().decode(Reply.self, from: data) else { return nil }
+        // A shell spawned concurrently must never inherit the dispatch source's descriptor.
+        let duplicate = fcntl(reply.fd, F_DUPFD_CLOEXEC, 0)
+        return duplicate >= 0 ? duplicate : nil
     }
     public func commandHistory(after: UInt64 = 0) throws -> Data { try call("command_history", ["after": after]) }
     public func commandOutput(_ commandID: UInt64) throws -> Data { try call("command_output", ["command_id": commandID]) }

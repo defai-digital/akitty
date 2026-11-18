@@ -48,7 +48,8 @@ export class InputHandler {
   private readonly listeners: Array<[string, EventListener]> = [];
   private readonly reportedKeys = new Map<string, Key>();
   private closed = false;
-  private composing = false;
+  private composition: 'active' | 'cancelled' | undefined;
+  private generation = 0;
   constructor(engine: AkittyEngine, private readonly container: HTMLElement, private readonly onData: (data: string) => void,
     _onBell: () => void, private readonly onKey?: (event: IKeyEvent) => void,
     private customKeyEventHandler?: (event: KeyboardEvent) => boolean, private readonly getMode?: (mode: number) => boolean,
@@ -59,8 +60,7 @@ export class InputHandler {
     this.listen('keydown', event => this.key(event as KeyboardEvent, false));
     this.listen('keyup', event => this.key(event as KeyboardEvent, true));
     this.listen('paste', event => this.paste(event as ClipboardEvent));
-    this.listen('compositionstart', () => { this.composing = true; });
-    this.listen('compositionupdate', () => {});
+    this.listen('compositionstart', () => { this.composition = 'active'; });
     this.listen('compositionend', event => this.commit(event as CompositionEvent));
   }
   private listen(name: string, callback: EventListener): void {
@@ -68,21 +68,27 @@ export class InputHandler {
     this.container.addEventListener(name, listener); this.listeners.push([name, listener]);
   }
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void { this.customKeyEventHandler = handler; }
+  /** A replacement terminal has no pending key presses or composition. */
+  reset(): void {
+    this.generation++;
+    this.reportedKeys.clear();
+    if (this.composition === 'active') this.composition = 'cancelled';
+  }
   private key(event: KeyboardEvent, release: boolean): void {
     if (this.closed) return;
     const physicalKey = event.code || event.key;
     const reportedKey = release ? this.reportedKeys.get(physicalKey) : undefined;
     if (release) this.reportedKeys.delete(physicalKey);
-    if (this.composing || event.isComposing || event.keyCode === 229) return;
+    if (this.composition === 'active' || event.isComposing || event.keyCode === 229) return;
+    if (!release) {
+      const generation = this.generation;
+      this.onKey?.({ key: event.key, domEvent: event });
+      if (this.closed || generation !== this.generation) return;
+      if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
+      if (this.closed || generation !== this.generation) return;
+    }
     const flags = this.getKeyboardFlags?.() ?? 0;
     if (release && (reportedKey === undefined || !(flags & 2))) return;
-    if (!release) {
-      this.onKey?.({ key: event.key, domEvent: event });
-      if (this.closed) return;
-      if (this.customKeyEventHandler?.(event)) { event.preventDefault(); return; }
-      // User callbacks can synchronously dispose the terminal and its encoder.
-      if (this.closed) return;
-    }
     if (event.key === 'Dead') return;
     if (modifierKeys[event.code] !== undefined && !(flags & 8)) return;
     const printable = Array.from(event.key).length === 1;
@@ -121,10 +127,11 @@ export class InputHandler {
     if (data) (this.onPaste ?? this.onData)(data);
   }
   private commit(event: CompositionEvent): void {
-    this.composing = false;
-    if (event.data) this.onData(event.data);
+    const cancelled = this.composition === 'cancelled';
+    this.composition = undefined;
     // Contenteditable hosts may leave browser composition text beside the canvas.
     for (const node of Array.from(this.container.childNodes ?? [])) if (node.nodeType === 3) this.container.removeChild(node);
+    if (!cancelled && event.data) this.onData(event.data);
   }
   isActive(): boolean { return !this.closed; }
   dispose(): void {
