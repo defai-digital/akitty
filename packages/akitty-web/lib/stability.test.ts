@@ -113,6 +113,32 @@ describe('terminal lifecycle hygiene', () => {
     term.dispose();
   });
 
+  test('a resize during scrollback reflow only reports the final grid once', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      term.write('one\r\ntwo\r\nthree');
+      term.scrollToTop();
+      const sizes: Array<{ cols: number; rows: number }> = [];
+      term.onResize(size => sizes.push(size));
+      term.onScroll(offset => { if (offset === 0) term.resize(10, 5); });
+      term.resize(8, 4);
+      expect(sizes).toEqual([{ cols: 10, rows: 5 }]);
+    } finally { term.dispose(); }
+  });
+
+  test('reset from onResize prevents the old grid from announcing a render', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      const renders: number[] = [];
+      term.onRender(event => renders.push(event.end));
+      term.onResize(() => term.reset());
+      term.resize(10, 5);
+      expect(renders).toEqual([]);
+    } finally { term.dispose(); }
+  });
+
   test('dispose removes the tabindex open() added but keeps a host-provided one', async () => {
     const term = await createIsolatedTerminal();
     term.open(container);

@@ -356,15 +356,18 @@ export class Terminal implements ITerminalCore {
     this.resizePaintPending = true; this.finishResize();
   }
   private finishResize(): void {
-    this.settings.cols = this.cols; this.settings.rows = this.rows;
+    const terminal = this.wasmTerm!, { cols, rows } = this;
+    const isCurrentGrid = (): boolean => this.isCurrentTerminal(terminal) && this.cols === cols && this.rows === rows;
+    this.settings.cols = cols; this.settings.rows = rows;
     this.linkDetector?.invalidateCache();
     // Reflow can consume history. Clamp before painting and discard any wheel
     // animation whose target belonged to the previous grid.
     this.jumpViewport(this.viewportY);
-    if (this.isDisposed) return;
-    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this, this.scrollbarOpacity);
-    this.resizePaintPending = false; this.resizeEmitter.fire({ cols: this.cols, rows: this.rows });
-    if (!this.isDisposed) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
+    // Scroll listeners can finish another resize or reset the terminal before we paint.
+    if (!this.resizePaintPending || !isCurrentGrid()) return;
+    this.renderer!.render(terminal, true, this.viewportY, this, this.scrollbarOpacity);
+    this.resizePaintPending = false; this.resizeEmitter.fire({ cols, rows });
+    if (isCurrentGrid()) this.renderEmitter.fire({ start: 0, end: rows - 1 });
   }
   clear(): void { this.write('\x1b[2J\x1b[H'); }
   reset(): void {
@@ -375,6 +378,7 @@ export class Terminal implements ITerminalCore {
     this.wasmTerm = replacement; previous.free();
     this.outputQueue.cancel(new Error('Terminal was reset before queued output completed'));
     this.inputHandler?.reset();
+    this.resizePaintPending = false;
     this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
