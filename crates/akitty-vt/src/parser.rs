@@ -222,7 +222,7 @@ impl Parser {
                 // ESC [ with the whole introducer in this chunk: the byte machine would
                 // begin a CSI; collect its ordinary body here instead.
                 if input[index] == 0x1b && input.get(index + 1) == Some(&b'[') {
-                    self.begin(State::Csi);
+                    self.begin_from_text(State::Csi);
                     index = self.csi_body(input, index + 2, &mut emit);
                     continue;
                 }
@@ -299,11 +299,31 @@ impl Parser {
             self.utf8_expected = 0;
         }
     }
+    /// `begin` from the Text state, which only `begin(State::Text)` and `Default`
+    /// enter: everything `begin` resets is already reset.
+    #[inline(always)]
+    fn begin_from_text(&mut self, state: State) {
+        debug_assert!(matches!(self.state, State::Text));
+        debug_assert!(
+            self.intermediates.is_empty()
+                && self.params.is_empty()
+                && self.prefix.is_none()
+                && self.payload.is_empty()
+                && !self.discard
+                && self.string_utf8_remaining == 0,
+            "the Text state holds no sequence state"
+        );
+        self.state = state;
+    }
     fn begin(&mut self, state: State) {
         self.state = state;
         self.intermediates.clear();
-        for parameter in &mut self.params { parameter.clear(); }
-        self.param_pool.append(&mut self.params);
+        // A sequence has a parameter or two; moving them one at a time avoids the
+        // general block copy `Vec::append` calls for it.
+        while let Some(mut parameter) = self.params.pop() {
+            parameter.clear();
+            self.param_pool.push(parameter);
+        }
         self.prefix = None;
         self.payload.clear();
         self.discard = false;
@@ -349,7 +369,7 @@ impl Parser {
         }
         match self.state {
             State::Text => match byte {
-                0x1b => self.begin(State::Escape),
+                0x1b => self.begin_from_text(State::Escape),
                 0x9b => self.begin(State::Csi),
                 0x9d => self.begin(State::String(StringKind::Osc)),
                 0x90 => self.begin(State::String(StringKind::Dcs)),

@@ -1647,3 +1647,29 @@ Engine results, rotated order, seven passes, history 0
 | Long lines | 892.3 | 898.9 | 1.01x |
 | ANSI | 316.1 | 317.4 | 1.00x |
 | Alternate screen | 170.7 | 172.1 | 1.01x |
+
+## Escape sequences entered without a reset
+
+A profile of the synchronized-screen workload put 8.5% of its samples in
+`Parser::begin` and another 4% in `memmove`. `begin` runs twice per escape
+sequence: on entry and on the return to text. It returned parameter vectors to
+their pool with `Vec::append`, which calls a block copy for one or two entries; it
+now pops and pushes them. And the reset on entry is skipped when the sequence
+starts from the Text state, which only `begin(State::Text)` and `Default` enter, so
+everything `begin` resets is already reset there; a debug assertion checks that
+invariant on every entry in the test suite. Mutation checks: removing the state
+change, the parameter return, the parameter clear or the prefix reset in `begin`
+is caught.
+
+Engine results, rotated order, five passes, history 0
+([raw record](../benchmarks/results/escape-entry-2026-11-18.json)); the two steps
+together, with libghostty-vt measured afterwards:
+
+| Engine MiB/s | Pool step | Entry step | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: |
+| Synchronized screen | 1.05x | 1.07x | 895.2 | 1.0x |
+| ANSI | 1.01x | 1.03x | 267.2 | 0.83x |
+| Alternate screen | 1.03x | 1.04x | 169.7 | 0.99x |
+| ASCII | 0.99x | 0.99x | 1308.0 | 1.06x |
+| Unicode | 0.99x | 1.00x | 191.6 | 1.21x |
+| Long lines | 1.00x | 1.00x | 484.0 | 0.55x |
