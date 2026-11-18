@@ -48,7 +48,9 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
   A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;
   it has no unbounded map or per-key heap allocation. Synchronized output retains
-  the same bounded action queue and rebuilds ASCII runs when that queue flushes.
+  the same bounded action queue, holding printable text as runs that replay through
+  the row writer when the queue flushes; each character keeps its scalar-action
+  charge against the queue bound.
 - Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
   Each PTY is a bounded two-stage pipeline. A reader thread owns every `read(2)`
   and a worker thread owns the model, replies, writes, resize and child status, so

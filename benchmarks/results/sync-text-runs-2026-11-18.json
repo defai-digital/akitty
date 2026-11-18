@@ -1,0 +1,175 @@
+{
+ "schema": 1,
+ "measured_at": "2026-11-18",
+ "scope": "akitty-vt engine feed only (examples/benchmark), history 0, 30 samples x 256 rounds of the 8 KiB workloads in benchmarks/workloads.json; no snapshots, PTY or rendering",
+ "base_commit": "2e983994941ac0212381052ebd318fb6cd625547",
+ "host": {
+  "machine": "arm64",
+  "os": "macOS 27.2",
+  "load_average": "35-65 throughout"
+ },
+ "change": "synchronized-output queue holds printable runs as text entries replayed through the row writer; per-character scalar-action charge kept",
+ "rotated_ab_final": {
+  "passes": 5,
+  "median_mib_s": {
+   "synchronized-screen": {
+    "base": 83.0,
+    "new": 264.2,
+    "base_passes": [
+     86,
+     83,
+     86,
+     63,
+     68
+    ],
+    "new_passes": [
+     270,
+     264,
+     262,
+     224,
+     266
+    ]
+   },
+   "long-lines": {
+    "base": 301.5,
+    "new": 304.3,
+    "base_passes": [
+     303,
+     302,
+     304,
+     245,
+     212
+    ],
+    "new_passes": [
+     304,
+     305,
+     303,
+     305,
+     232
+    ]
+   },
+   "ascii": {
+    "base": 400.7,
+    "new": 400.2,
+    "base_passes": [
+     403,
+     401,
+     394,
+     402,
+     356
+    ],
+    "new_passes": [
+     406,
+     400,
+     402,
+     351,
+     347
+    ]
+   },
+   "ansi": {
+    "base": 203.4,
+    "new": 202.9,
+    "base_passes": [
+     205,
+     203,
+     205,
+     202,
+     138
+    ],
+    "new_passes": [
+     205,
+     203,
+     202,
+     206,
+     169
+    ]
+   }
+  }
+ },
+ "rotated_ab_non_sync_7_passes": {
+  "note": "host load spiked; medians not comparable, fastest samples shown",
+  "fastest_mib_s": {
+   "ascii": [
+    403,
+    405
+   ],
+   "ansi": [
+    200,
+    206
+   ],
+   "unicode": [
+    125,
+    125
+   ],
+   "long-lines": [
+    304,
+    305
+   ],
+   "alternate-screen": [
+    73,
+    72
+   ]
+  },
+  "order": "[base, new]"
+ },
+ "layout_probe": {
+  "note": "HEAD plus one unused String field on Terminal",
+  "long-lines_mib_s": {
+   "base": 302.3,
+   "field_only": 287.6,
+   "base_passes": [
+    305,
+    302,
+    302,
+    302,
+    301
+   ],
+   "field_passes": [
+    288,
+    288,
+    288,
+    287,
+    286
+   ]
+  },
+  "decision": "text owned by queue entries; Terminal size unchanged"
+ },
+ "libghostty_vt_1_0_1_rotated": [
+  {
+   "workload": "ascii",
+   "akitty_mib_s": 405.4,
+   "ghostty_mib_s": 1278.2,
+   "ghostty_over_akitty": 3.15,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    405.7,
+    402.5,
+    405.4
+   ],
+   "ghostty_passes": [
+    1276.7,
+    1278.2,
+    1286.1
+   ]
+  },
+  {
+   "workload": "synchronized-screen",
+   "akitty_mib_s": 268.2,
+   "ghostty_mib_s": 897.7,
+   "ghostty_over_akitty": 3.35,
+   "viewport_cursor_screen_agree": true,
+   "akitty_passes": [
+    269.2,
+    268.2,
+    266.1
+   ],
+   "ghostty_passes": [
+    897.7,
+    892.3,
+    962.0
+   ]
+  }
+ ],
+ "profile_after": "sample(1) on synchronized-screen: parser loop and write_run about 60%, malloc/free/grow about 20%",
+ "qualification": "Loaded shared host; ratios and sample overlap are the evidence, absolute rates are not. No Ghostty parity claim."
+}

@@ -850,3 +850,52 @@ moved ANSI from 146.5 to 176.9 MiB/s, with ASCII and Unicode unchanged. User-ini
 QoS on the reader and worker threads showed no measurable gain on this host and
 was not adopted; it should be measured again on an idle machine. These rates exclude snapshots and
 rendering and make no Ghostty parity claim.
+
+## Synchronized-output text runs
+
+The fresh engine comparison after the PTY bridge showed synchronized-screen as the
+largest remaining gap: 85.9 MiB/s against libghostty-vt's 887.8 (10.3x). AkiTTY
+holds synchronized output in a bounded queue and replays it when mode 2026 ends,
+so snapshots, the Web canvas and query replies never observe a half-drawn frame.
+That queue stored one `Print` action per character, and the flush rebuilt ASCII
+runs from them while dispatching every other character alone.
+
+Reviewing Ghostty's handling under `.internal/reference` confirmed the cost is in
+the queue, not in the mode itself: Ghostty applies synchronized output to the
+terminal at once and only holds rendering. AkiTTY keeps its own queue semantics
+and changes only how text is held:
+
+1. A printable run that arrives during synchronized output is queued as one text
+   entry, merged with a preceding text entry, and replayed through the same row
+   writer as unsynchronized text. Non-ASCII text now takes that path too.
+2. Each character is still charged the size of the scalar action it replaces, so
+   the 2 MiB bound is reached on the same run as before. Where the overflow flush
+   falls inside that run is not observable, because its characters print in order
+   either way. A test sweeps runs ending just short of, on and past the bound,
+   behind other queued actions and in multi-byte text, and mutation checks
+   confirm it catches a wrong charge, a lost flush or a lost character.
+3. The queue's entry storage is kept between ordinary frames and released after a
+   frame larger than 1024 entries.
+
+The text is owned by each entry rather than by a separate buffer on `Terminal`.
+Adding one unused `String` field to `Terminal` alone slowed long-lines from 302 to
+288 MiB/s with no sample overlap, a layout effect rather than a logic cost, so the
+struct keeps its size.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/sync-text-runs-2026-11-18.json)):
+
+| Synchronized screen, engine MiB/s | AkiTTY | libghostty-vt 1.0.1 |
+| --- | ---: | ---: |
+| Before, rotated against the change (5 passes) | 83.0 | |
+| After, same set | 264.2 | |
+| After, rotated against libghostty-vt (3 passes) | 268.2 | 897.7 |
+
+The Ghostty / AkiTTY ratio moves from 10.3x to 3.35x.
+
+The other five workloads were unchanged within noise on a host at load average
+35–65; their fastest samples matched within 3%. Final viewport, cursor and screen
+state agree with libghostty-vt. The remaining synchronized-screen cost is mostly
+the parser and row writer that every workload shares, plus about a fifth in
+allocation for queued runs and CSI parameters. These rates exclude snapshots and
+rendering and make no Ghostty parity claim.
+

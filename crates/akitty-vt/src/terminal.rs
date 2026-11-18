@@ -16,6 +16,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub const MAX_CELLS: usize = 1_048_576;
 pub const SYNC_TIMEOUT_MS: u64 = 150;
 const MAX_SYNC_MEMORY: usize = 2 * 1024 * 1024;
+/// Queue entries kept between synchronized frames; a larger frame releases its storage.
+const SYNC_RETAINED_ENTRIES: usize = 1024;
+
+/// One synchronized-output queue entry. Printable text stays a run so it replays
+/// through row writes when the update ends.
+#[derive(Debug)]
+enum Deferred {
+    Text(String),
+    Action(Action),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -205,7 +215,7 @@ pub struct Terminal {
     single_shift: Option<usize>,
     last_printed: Option<char>,
     sync_deadline: Option<u64>,
-    sync_actions: Vec<Action>,
+    sync_actions: Vec<Deferred>,
     sync_bytes: usize,
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
@@ -319,7 +329,7 @@ impl Terminal {
         self.expire_sync(now_ms, &mut emit);
         let mut parser = std::mem::take(&mut self.parser);
         parser.feed_runs(bytes, |input| match input {
-            Input::Text(text) => self.print_run(text, now_ms, &mut emit),
+            Input::Text(text) => self.print_run(text, &mut emit),
             Input::Csi(csi) => {
                 let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
                     && matches!(csi.final_byte, b'h' | b'l')
@@ -354,30 +364,36 @@ impl Terminal {
     fn flush_sync(&mut self, emit: &mut impl FnMut(Event)) {
         self.sync_deadline = None;
         self.sync_bytes = 0;
-        // Synchronized TUIs defer scalar actions. Reassemble their ordinary text
-        // at flush time so they also benefit from row writes, with bounded scratch.
-        let mut ascii = [0u8; 8192];
-        let mut count = 0;
-        for action in std::mem::take(&mut self.sync_actions) {
-            if let Action::Print(ch @ ' '..='~') = action {
-                ascii[count] = ch as u8;
-                count += 1;
-                if count == ascii.len() {
-                    // The deferred buffer only ever holds bytes collected from
-                    // `Action::Print(ch @ ' '..='~')`, so it is valid ASCII.
-                    self.print_run(std::str::from_utf8(&ascii).unwrap_or_default(), 0, emit);
-                    count = 0;
-                }
-                continue;
+        // Deferred text replays as whole runs, so a synchronized frame takes the same
+        // row writes as unsynchronized output instead of one dispatch per character.
+        let mut queue = std::mem::take(&mut self.sync_actions);
+        for entry in queue.drain(..) {
+            match entry {
+                Deferred::Text(text) => self.print_run(&text, emit),
+                Deferred::Action(action) => self.apply(action, emit),
             }
-            if count > 0 {
-                self.print_run(std::str::from_utf8(&ascii[..count]).unwrap_or_default(), 0, emit);
-                count = 0;
-            }
-            self.apply(action, emit);
         }
-        if count > 0 {
-            self.print_run(std::str::from_utf8(&ascii[..count]).unwrap_or_default(), 0, emit);
+        // Keep an ordinary frame's entry storage for the next update. A frame that
+        // grew toward the queue bound releases it instead of pinning it.
+        if queue.capacity() <= SYNC_RETAINED_ENTRIES {
+            self.sync_actions = queue;
+        }
+    }
+    /// Queue printable text during synchronized output. Each character is charged the
+    /// size of the scalar action it stands for, so the memory bound is reached on the
+    /// same run as with a per-character queue. Where the flush falls inside that run is
+    /// not observable: the run's characters print in order either way. Kept out of
+    /// line so the unsynchronized run writer in `print_text` stays small.
+    #[inline(never)]
+    fn defer_text(&mut self, text: &str, emit: &mut impl FnMut(Event)) {
+        match self.sync_actions.last_mut() {
+            Some(Deferred::Text(run)) => run.push_str(text),
+            _ => self.sync_actions.push(Deferred::Text(text.to_owned())),
+        }
+        let chars = text.bytes().filter(|byte| byte & 0xc0 != 0x80).count();
+        self.sync_bytes += chars * std::mem::size_of::<Action>();
+        if self.sync_bytes >= MAX_SYNC_MEMORY {
+            self.flush_sync(emit);
         }
     }
     fn dispatch(&mut self, action: Action, now: u64, emit: &mut impl FnMut(Event)) {
@@ -431,7 +447,7 @@ impl Terminal {
                         .sum(),
                     _ => 0,
                 };
-            self.sync_actions.push(action);
+            self.sync_actions.push(Deferred::Action(action));
             if self.sync_bytes >= MAX_SYNC_MEMORY {
                 self.flush_sync(emit);
             }
@@ -510,20 +526,23 @@ impl Terminal {
     }
     /// Write printable text a row at a time. Each run prepares one presentation
     /// template and writes the cells in a single pass, so an ordinary character costs
-    /// one cell store instead of a full scalar dispatch. Anything protocol-sensitive
-    /// stays on the scalar path one character at a time: insert mode, character-set
-    /// translation, synchronized output, a pending wrap, wide-cell repair, a combining
-    /// mark, or a possible grapheme join.
-    fn print_text(&mut self, mut text: &str, now: u64, emit: &mut impl FnMut(Event)) {
+    /// one cell store instead of a full scalar dispatch. Synchronized output queues the
+    /// whole run instead. Anything protocol-sensitive stays on the scalar path one
+    /// character at a time: insert mode, character-set translation, a pending wrap,
+    /// wide-cell repair, a combining mark, or a possible grapheme join.
+    fn print_text(&mut self, mut text: &str, emit: &mut impl FnMut(Event)) {
         if text.is_empty() {
+            return;
+        }
+        if self.sync_deadline.is_some() {
+            self.defer_text(text, emit);
             return;
         }
         // A printable run cannot change the style or the hyperlink — it only ever
         // dispatches `Print` — so one presentation serves every chunk this run writes.
         let template = self.style_template();
         while !text.is_empty() {
-            let scalar = self.sync_deadline.is_some()
-                || self.modes.insert
+            let scalar = self.modes.insert
                 || self.single_shift.is_some()
                 || self.charsets[self.charset];
             let written = if scalar { RunWrite::default() } else { self.write_run(text, &template) };
@@ -537,15 +556,16 @@ impl Terminal {
             if written.bytes != 0 {
                 continue;
             }
+            // Synchronized output was ruled out above, so this is `apply(Print)`.
             let ch = text.chars().next().expect("non-empty text");
-            self.dispatch(Action::Print(ch), now, emit);
+            self.print(ch, emit);
             text = &text[ch.len_utf8()..];
         }
     }
     /// Write a parser-validated printable run. `Input::Text` is already a `&str`, so no
     /// whole-run UTF-8 validation happens here.
-    fn print_run(&mut self, text: &str, now: u64, emit: &mut impl FnMut(Event)) {
-        self.print_text(text, now, emit);
+    fn print_run(&mut self, text: &str, emit: &mut impl FnMut(Event)) {
+        self.print_text(text, emit);
     }
     /// The prepared presentation for the current style and hyperlink, rebuilt only when
     /// both are absent from the bounded slot set. At most `STYLE_SLOTS` templates are
@@ -2038,8 +2058,20 @@ mod tests {
             (&term.modes, &term.palette, term.style, term.cell_pixels, term.revision,
              &term.title, &term.link, term.link_id, &term.title_stack, &term.saved_state),
             (term.charsets, term.charset, term.single_shift, term.last_printed, term.sync_deadline,
-             &term.sync_actions, term.sync_bytes, term.grapheme_supported, term.grapheme_target),
+             scalar_queue(term), term.sync_bytes, term.grapheme_supported, term.grapheme_target),
             (&term.cluster_scratch, term.preserve_erased_screen, term.title_max_bytes, term.title_max_chars))
+    }
+    /// The synchronized queue as the per-character action list it stands for, so a
+    /// run-holding queue compares equal to the scalar path's queue.
+    fn scalar_queue(term: &Terminal) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for entry in &term.sync_actions {
+            match entry {
+                Deferred::Text(text) => actions.extend(text.chars().map(Action::Print)),
+                Deferred::Action(action) => actions.push(action.clone()),
+            }
+        }
+        actions
     }
     /// The original scalar action path is an independent reference for run writes.
     fn feed_scalar(term: &mut Terminal, bytes: &[u8], now: u64) -> Vec<Event> {
@@ -2435,7 +2467,9 @@ mod tests {
             // Flush the reference strictly through the original scalar apply path.
             scalar.sync_deadline = None; scalar.sync_bytes = 0;
             let mut expected = Vec::new();
-            for action in std::mem::take(&mut scalar.sync_actions) {
+            let queued = scalar_queue(&scalar);
+            scalar.sync_actions.clear();
+            for action in queued {
                 scalar.apply(action, &mut |event| expected.push(event));
             }
             scalar.revision = scalar.revision.wrapping_add(1);
@@ -2446,6 +2480,27 @@ mod tests {
             assert_eq!(state(&fast), state(&scalar));
         }
     }
+    #[test]
+    fn deferred_text_overflows_at_the_scalar_queue_bound() {
+        // A per-character queue flushes on the character that reaches the memory bound.
+        // Runs that end just short of, on and just past that character must agree, as
+        // must runs behind other queued actions and runs of multi-byte characters.
+        let charge = std::mem::size_of::<Action>();
+        let room = MAX_SYNC_MEMORY.div_ceil(charge);
+        for lead in ["", "\x1b[31m", "\x1b[1;2H\x1b]0;title\x07"] {
+            for unit in ["a", "中", "é"] {
+                for count in room - 2..=room + 1 {
+                    let body = unit.repeat(count);
+                    let text = format!("\x1b[?2026h{lead}{body}\x1b[6nafter\x1b[?2026lend");
+                    let split = text.find("\x1b[6n").unwrap();
+                    for chunk in [split + 1, 4093] {
+                        assert_corpus_matches_scalar(9, 3, 4, false, &[&text], chunk);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn grapheme_widening_respects_decawm() {
         // With DECAWM off, widening the last-column cell into a two-column
