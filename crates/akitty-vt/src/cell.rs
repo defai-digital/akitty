@@ -587,6 +587,15 @@ impl RecordPool {
     pub(crate) const LIMIT: usize = 16;
     /// Take `cell`'s side record into the pool when nothing else shares it and there
     /// is room; otherwise drop the cell's reference. The cell is left without one.
+    /// `keep` for each of `cells`, touching only those that own a record; the others
+    /// are only read.
+    pub(crate) fn keep_all(&mut self, cells: &mut [Cell]) {
+        for cell in cells {
+            if cell.extras.is_some() {
+                self.keep(cell);
+            }
+        }
+    }
     pub(crate) fn keep(&mut self, cell: &mut Cell) {
         // A plain load rules out shared records (a run's template) before the
         // uniqueness check, which is a compare-and-swap.

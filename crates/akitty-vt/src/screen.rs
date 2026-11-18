@@ -142,9 +142,7 @@ pub(crate) struct PendingBlank {
 fn refill_blank(cells: &mut [Cell], heap: bool, background: Color, pool: &mut RecordPool) {
     if heap {
         // Afterwards no old cell owns a record.
-        for cell in cells.iter_mut() {
-            pool.keep(cell);
-        }
+        pool.keep_all(cells);
     }
     let blank = Cell::blank(background);
     match blank.packed_word() {

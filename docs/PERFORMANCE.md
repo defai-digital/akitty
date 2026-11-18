@@ -1800,3 +1800,24 @@ workload, whose CJK comes in short groups, measured 0.99x, as did ASCII and
 synchronized output. Using the same check in place of the general one at every
 scalar was worse everywhere: Unicode 0.94x, ASCII 0.96x, synchronized output
 0.95x. Neither was kept.
+
+## Releasing records only from cells that own one
+
+Refilling a recycled row whose cells may own side records passed every cell to
+`RecordPool::keep`, which also wrote `None` back into each cell before the fill
+overwrote it again. `keep_all` now only reads the cells that own no record and
+hands the others to `keep`. The end state is the same, since `keep` on a cell
+without a record does nothing the fill does not redo. ANSI rose 4% (its rows hold
+styled cells with records); the rest held. Trying the tail cache's last-hit slot
+before the others was flat (Unicode 1.00x) and was not kept.
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ANSI | 325.6 | 339.4 | 1.04x | 268.6 | 0.79x |
+| Unicode | 168.3 | 169.7 | 1.01x | 191.6 | 1.13x |
+| ASCII | 1300.2 | 1300.5 | 1.00x | 1290.9 | 0.99x |
+| Synchronized screen | 922.9 | 926.4 | 1.00x | 898.7 | 0.99x |
+| Long lines | 897.6 | 895.8 | 1.00x | 480.4 | 0.54x |
+| Alternate screen | 174.6 | 174.6 | 1.00x | 171.5 | 0.98x |
+
+Raw record: [record-release-scan](../benchmarks/results/record-release-scan-2026-11-18.json).
