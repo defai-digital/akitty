@@ -562,7 +562,7 @@ struct RenderReuse: Equatable {
         rasterQueue.async { [weak self] in
             if textEligible, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
                                                           fontName: fontName, fontSize: fontSize, cell: cells,
-                                                          cjkFontName: cjkFontName, appearance: appearance) {
+                                                          cjkFontName: cjkFontName, appearance: appearance, deferPublication: true) {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.rasterInFlight = false
@@ -573,6 +573,7 @@ struct RenderReuse: Equatable {
                         do {
                             presenter.frameRevision = snapshot.revision
                             try presenter.updateText(frame, grid: grid)
+                            self.rasterQueue.async { composer.acknowledgePublication() }
                             self.lastTextFramed = true
                             self.onNativeFrameEvent?(.handedOff(snapshot.revision))
                         } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }

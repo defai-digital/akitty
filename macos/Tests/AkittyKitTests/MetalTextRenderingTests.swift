@@ -237,6 +237,25 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(again, first, "returning to the atlas keeps every glyph")
     }
 
+    @MainActor func testDiscardedAtlasFrameDoesNotLoseGlyphsOnNextHandoff() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        let initial = try snapshot(cells: line(0, "aaaa"))
+        _ = try render(initial, scale: 2, presenter: presenter, composer: composer)
+        let next = try snapshot(cells: line(0, "ZZZZ") + line(1, "aaaa"))
+        let discarded = try XCTUnwrap(composer.compose(snapshot: next, damage: [0, 1], size: size, scale: 2,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard, deferPublication: true))
+        XCTAssertFalse(discarded.uploads.isEmpty, "the skipped handoff held a new glyph")
+
+        let (recovered, gpu) = try render(next, scale: 2, presenter: presenter, composer: composer, damage: [1])
+        XCTAssertEqual(recovered.dirtyRows.count, rows)
+        let cpu = try GridRasterizer.make(snapshot: next, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                          cellSize: cell, composition: "")
+        XCTAssertLessThanOrEqual(compare(cpu, gpu).max, 2, "the recovered frame shows the new glyph in row 0")
+    }
+
     // MARK: Buffer lifetime
 
     /// A frame submitted to the GPU keeps reading its instance buffer until it completes, so the next upload must

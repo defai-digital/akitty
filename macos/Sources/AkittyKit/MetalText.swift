@@ -166,8 +166,8 @@ final class GlyphAtlas: @unchecked Sendable {
         return entry
     }
     /// Masks rasterised since the last call; the presenter uploads them before the next draw.
-    private var pending: [Upload] = []
-    func takePending() -> [Upload] { defer { pending.removeAll(keepingCapacity: true) }; return pending }
+    private(set) var pending: [Upload] = []
+    func clearPending() { pending.removeAll(keepingCapacity: true) }
 
     private func allocate(_ width: Int, _ height: Int) -> (x: Int, y: Int)? {
         let size = Self.textureSize
@@ -243,8 +243,8 @@ final class TextComposer: @unchecked Sendable {
     private struct Epoch: Equatable { var layout: Layout; var appearance: RenderAppearance }
     private var epoch: Epoch?
     private var rebuilds = 0
-    /// A refused build may have changed masks and cursor bookkeeping without delivering a frame. Keep its
-    /// uploads and reset request until a complete frame can publish them, and rebuild every row on recovery.
+    /// A refused or discarded frame may change the atlas and cursor without reaching the presenter.
+    /// Keep uploads and reset requests until handoff, and rebuild every row when recovering.
     private var resetPending = false, recoveryPending = false
     private(set) var isSuspended = false
     private(set) var atlasEntries = 0
@@ -259,8 +259,9 @@ final class TextComposer: @unchecked Sendable {
     }
 
     /// Builds one frame, or nil when the atlas cannot represent it (the caller then keeps the CPU rasterizer).
+    /// Callers that hand off asynchronously defer publication and acknowledge only a successful upload.
     func compose(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat,
-                 cell: CGSize, cjkFontName: String, appearance: RenderAppearance) -> TextFrame? {
+                 cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false) -> TextFrame? {
         var damage = damage
         guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil,
               let geometry = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
@@ -303,10 +304,16 @@ final class TextComposer: @unchecked Sendable {
         guard let result else {
             recoveryPending = true; atlasEntries = atlas.count; atlasResets = atlas.resets; return nil
         }
-        resetPending = false; recoveryPending = false
         atlasEntries = atlas.count; atlasResets = atlas.resets
-        return TextFrame(rows: snapshot.rows, dirtyRows: result.rows, content: result.content,
-                         uploads: atlas.takePending(), resetAtlas: resetAtlas)
+        let frame = TextFrame(rows: snapshot.rows, dirtyRows: result.rows, content: result.content,
+                              uploads: atlas.pending, resetAtlas: resetAtlas)
+        if !deferPublication { acknowledgePublication() }
+        return frame
+    }
+
+    func acknowledgePublication() {
+        atlas.clearPending()
+        resetPending = false; recoveryPending = false
     }
 
     private func rebuildFonts(fontName: String, fontSize: CGFloat, cjkFontName: String) {
