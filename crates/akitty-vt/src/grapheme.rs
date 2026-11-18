@@ -13,6 +13,15 @@
 //! regional indicators, the pictographic emoji blocks, and the plain letter blocks
 //! used by ordinary UI text. Everything else is `Unknown` by design.
 
+use unicode_width::UnicodeWidthChar;
+use std::sync::OnceLock;
+
+/// One lazily initialized page per 256 scalars. Pages derive their entries from the
+/// original classifiers, so caching cannot introduce a second Unicode property table.
+/// The worst case is bounded at 1,114,112 payload bytes; ordinary text touches a few pages.
+static PROPERTY_PAGES: [OnceLock<Box<[u8; 256]>>; 0x1100] =
+    [const { OnceLock::new() }; 0x1100];
+
 /// Whether a character joins the cluster already in the cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Join {
@@ -43,7 +52,8 @@ pub(crate) fn classifications_for_test() -> usize {
     CLASSIFICATIONS.with(std::cell::Cell::get)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Class {
     /// Break on both sides: C0/C1 controls, format characters and separators.
     Control,
@@ -65,9 +75,7 @@ enum Class {
 }
 
 /// Classify a character, or `None` when it needs exact segmentation.
-fn class(ch: char) -> Option<Class> {
-    #[cfg(test)]
-    CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
+fn class_direct(ch: char) -> Option<Class> {
     let code = ch as u32;
     if code < 0x80 {
         return Some(match code {
@@ -226,11 +234,75 @@ fn is_plain(code: u32) -> bool {
 /// iteration; [`join_classes`] then decides the pair without classifying either side
 /// again.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Classes(Option<Class>);
+pub(crate) struct Classes(u8);
 
-/// Classify `ch` for the pair rules, so the caller can reuse the answer.
+impl Classes {
+    const UNKNOWN_CLASS: u8 = 0x0f;
+    const UNKNOWN_WIDTH: u8 = 3;
+
+    fn new(class: Option<Class>, width: Option<usize>) -> Self {
+        let class = class.map_or(Self::UNKNOWN_CLASS, |class| class as u8);
+        let width = width.map_or(Self::UNKNOWN_WIDTH, |width| width.min(2) as u8);
+        Self(class | width << 4)
+    }
+    const fn unknown() -> Self {
+        Self(Self::UNKNOWN_CLASS | Self::UNKNOWN_WIDTH << 4)
+    }
+    fn class(self) -> Option<Class> {
+        match self.0 & 0x0f {
+            0 => Some(Class::Control),
+            1 => Some(Class::Cr),
+            2 => Some(Class::Lf),
+            3 => Some(Class::Extend),
+            4 => Some(Class::Zwj),
+            5 => Some(Class::HangulL),
+            6 => Some(Class::HangulV),
+            7 => Some(Class::HangulT),
+            8 => Some(Class::HangulLv),
+            9 => Some(Class::HangulLvt),
+            10 => Some(Class::Regional),
+            11 => Some(Class::Emoji),
+            12 => Some(Class::Plain),
+            _ => None,
+        }
+    }
+    /// Width of this scalar outside a cluster; the column clamp stays at the call site.
+    pub(crate) fn width(self) -> Option<usize> {
+        match self.0 >> 4 {
+            0 => Some(0),
+            1 => Some(1),
+            2 => Some(2),
+            _ => None,
+        }
+    }
+}
+
+/// Look up both properties once. A page is built only from the existing class function
+/// and `UnicodeWidthChar`; `OnceLock` also makes concurrent first use deterministic.
+#[inline]
 pub(crate) fn classes(ch: char) -> Classes {
-    Classes(class(ch))
+    #[cfg(test)]
+    CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
+    let code = ch as u32;
+    if code < 0x80 {
+        return Classes::new(class_direct(ch), (!ch.is_ascii_control()).then_some(1));
+    }
+    let page = (code >> 8) as usize;
+    let entries = PROPERTY_PAGES[page].get_or_init(|| {
+        let mut entries = Box::new([Classes::unknown().0; 256]);
+        for (offset, entry) in entries.iter_mut().enumerate() {
+            let code = (page << 8) | offset;
+            if let Some(ch) = char::from_u32(code as u32) {
+                *entry = Classes::new(class_direct(ch), ch.width()).0;
+            }
+        }
+        entries
+    });
+    Classes(entries[code as usize & 0xff])
+}
+
+fn class(ch: char) -> Option<Class> {
+    classes(ch).class()
 }
 
 /// Whether `next` stays in the cluster that already ends with the cell content
@@ -246,7 +318,7 @@ pub(crate) fn join(lead: char, combining: &[char], next: char) -> Join {
 /// `lead` when there is none. `lead` and `combining` are still passed because the
 /// regional-indicator look-behind has to count the run that ends at the tail.
 pub(crate) fn join_classes(tail: Classes, next: Classes, lead: char, combining: &[char]) -> Join {
-    let (Some(tail_class), Some(next_class)) = (tail.0, next.0) else {
+    let (Some(tail_class), Some(next_class)) = (tail.class(), next.class()) else {
         return Join::Unknown;
     };
     // GB3/GB4/GB5: CR LF stays together; other controls break on both sides.
@@ -312,6 +384,30 @@ mod tests {
     /// segmentation for the whole of Unicode and not just the ranges they name.
     fn scalars() -> impl Iterator<Item = char> {
         (0..=0x10ffffu32).filter_map(char::from_u32)
+    }
+
+    #[test]
+    fn cached_properties_match_the_original_classifiers_over_unicode() {
+        for ch in scalars() {
+            let cached = classes(ch);
+            assert_eq!(cached.class(), class_direct(ch), "class for scalar {:#x}", ch as u32);
+            assert_eq!(cached.width(), ch.width().map(|width| width.min(2)), "width for scalar {:#x}", ch as u32);
+        }
+    }
+
+    #[test]
+    fn property_pages_are_safe_during_concurrent_first_use() {
+        let chars = ['\u{10ffff}', '\u{e01ef}', '\u{2fa1d}', '😀', '한', '中'];
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for ch in chars {
+                        assert_eq!(classes(ch).class(), class_direct(ch));
+                        assert_eq!(classes(ch).width(), ch.width().map(|width| width.min(2)));
+                    }
+                });
+            }
+        });
     }
 
     /// `join` must either agree with exact segmentation or report `Unknown`.

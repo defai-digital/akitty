@@ -20,11 +20,9 @@ pub const INVISIBLE: u16 = 16;
 pub const STRIKE: u16 = 32;
 pub const BLINK: u16 = 64;
 pub const MAX_COMBINING: usize = 16;
-/// Combining storage reserved when a cell first takes marks. Common emoji families and
-/// stacked diacritics add a handful, so one small allocation avoids the 1-2-4 growth
-/// copies. It stays far under [`MAX_COMBINING`], and heap accounting reads the real
-/// capacity, so the reservation is charged honestly.
-const COMBINING_RESERVE: usize = 8;
+/// Marks stored inside the side record itself. Common clusters need no second allocation;
+/// only the less common ninth through sixteenth marks spill into separate vector storage.
+const COMBINING_INLINE: usize = 8;
 
 /// Bits 0..=6 of [`Style::attrs`] are the only attributes the packed word carries.
 const ATTRS_BITS: u32 = 0x7f;
@@ -123,12 +121,86 @@ fn unpack_color(field: u16) -> Color {
     }
 }
 
+#[derive(Clone, Default)]
+enum Combining {
+    #[default]
+    Empty,
+    Inline { len: u8, chars: [char; COMBINING_INLINE] },
+    Heap { len: u8, chars: Box<[char; MAX_COMBINING]> },
+}
+
+impl Combining {
+    fn as_slice(&self) -> &[char] {
+        match self {
+            Self::Empty => &[],
+            Self::Inline { len, chars } => &chars[..usize::from(*len)],
+            Self::Heap { len, chars } => &chars[..usize::from(*len)],
+        }
+    }
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Inline { .. } => COMBINING_INLINE,
+            Self::Heap { .. } => MAX_COMBINING,
+        }
+    }
+    fn spilled_bytes(&self) -> usize {
+        match self {
+            Self::Heap { .. } => std::mem::size_of::<[char; MAX_COMBINING]>(),
+            _ => 0,
+        }
+    }
+    fn push(&mut self, ch: char) {
+        match self {
+            Self::Empty => {
+                let mut chars = ['\0'; COMBINING_INLINE];
+                chars[0] = ch;
+                *self = Self::Inline { len: 1, chars };
+            }
+            Self::Inline { len, chars } if usize::from(*len) < COMBINING_INLINE => {
+                chars[usize::from(*len)] = ch;
+                *len += 1;
+            }
+            Self::Inline { chars, .. } => {
+                let mut spilled = Box::new(['\0'; MAX_COMBINING]);
+                spilled[..COMBINING_INLINE].copy_from_slice(chars);
+                spilled[COMBINING_INLINE] = ch;
+                *self = Self::Heap { len: (COMBINING_INLINE + 1) as u8, chars: spilled };
+            }
+            Self::Heap { len, chars } => {
+                debug_assert!(usize::from(*len) < MAX_COMBINING);
+                chars[usize::from(*len)] = ch;
+                *len += 1;
+            }
+        }
+    }
+}
+
+impl PartialEq for Combining {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+impl Eq for Combining {}
+impl std::fmt::Debug for Combining {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_slice().fmt(formatter)
+    }
+}
+
 /// Presentation that the packed word cannot hold, or a hyperlink, or both.
 /// Cells written in one run share one record; a record never owns combining marks
 /// while it is shared as a style template.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CellExtras {
-    combining: Vec<char>,
+    combining: Combining,
     link: Option<Arc<Link>>,
     style: Option<Style>,
 }
@@ -136,7 +208,7 @@ struct CellExtras {
 impl CellExtras {
     fn heap_bytes(&self) -> usize {
         std::mem::size_of::<CellExtras>()
-            + self.combining.capacity() * std::mem::size_of::<char>()
+            + self.combining.spilled_bytes()
             + self
                 .link
                 .as_ref()
@@ -184,7 +256,7 @@ impl Cell {
         let encoded = pack_color(bg);
         let extras = (encoded == PACKED_RARE).then(|| {
             Arc::new(CellExtras {
-                combining: Vec::new(),
+                combining: Combining::default(),
                 link: None,
                 style: Some(Style { bg, ..Style::default() }),
             })
@@ -290,7 +362,7 @@ impl Cell {
     pub(crate) fn side_bytes(&self) -> usize {
         self.extras.as_ref().map_or(0, |record| record.heap_bytes())
     }
-    /// Combining storage capacity, for tests that prove the first append reserves once.
+    /// Inline or spilled capacity, for tests that check the storage boundary and charge.
     #[cfg(test)]
     pub(crate) fn combining_capacity(&self) -> usize {
         self.extras.as_ref().map_or(0, |record| record.combining.capacity())
@@ -308,19 +380,13 @@ impl Cell {
         if self.combining_len() >= MAX_COMBINING {
             return false;
         }
-        let record = self.extras.get_or_insert_with(|| {
-            Arc::new(CellExtras {
-                combining: Vec::with_capacity(COMBINING_RESERVE),
-                ..CellExtras::default()
-            })
-        });
-        let record = Arc::make_mut(record);
-        // A record reached through a shared style template starts with no mark storage,
-        // so the reservation happens on the append that first adds one.
-        if record.combining.capacity() < COMBINING_RESERVE {
-            record.combining.reserve_exact(COMBINING_RESERVE - record.combining.len());
+        if self.extras.is_none() {
+            let mut record = CellExtras::default();
+            record.combining.push(ch);
+            self.extras = Some(Arc::new(record));
+            return true;
         }
-        record.combining.push(ch);
+        Arc::make_mut(self.extras.as_mut().expect("a record exists")).combining.push(ch);
         true
     }
     /// The trailing column of a wide glyph: same presentation and hyperlink, no
@@ -334,7 +400,7 @@ impl Cell {
             // a wide emoji cluster stops allocating a record for its second column.
             Some(record) if record.link.is_none() && record.style.is_none() => None,
             Some(record) => Some(Arc::new(CellExtras {
-                combining: Vec::new(),
+                combining: Combining::default(),
                 link: record.link.clone(),
                 style: record.style,
             })),
@@ -404,7 +470,7 @@ impl CellStyle {
             | u32::from(style.underline.min(7)) << UNDERLINE_SHIFT;
         let extras = (rare || link.is_some()).then(|| {
             Arc::new(CellExtras {
-                combining: Vec::new(),
+                combining: Combining::default(),
                 link: link.cloned(),
                 style: rare.then_some(*style),
             })
@@ -532,6 +598,12 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn marks(chars: &[char]) -> Combining {
+        let mut combining = Combining::default();
+        for &ch in chars { combining.push(ch); }
+        combining
+    }
 
     #[test]
     fn cell_layout_stays_compact() {
@@ -700,43 +772,41 @@ mod tests {
     }
 
     #[test]
-    fn the_first_mark_reserves_one_small_bounded_allocation() {
-        // One reservation serves a common emoji family instead of 1-2-4 growth copies.
+    fn inline_marks_spill_with_fixed_accounting_and_bounded_clones() {
+        let expected: Vec<char> = (0..MAX_COMBINING)
+            .map(|offset| char::from_u32(0x300 + offset as u32).unwrap())
+            .collect();
         let mut cell = Cell::default();
         assert_eq!(cell.combining_capacity(), 0, "an untouched cell owns no storage");
-        assert!(cell.push_combining('\u{301}'));
-        let capacity = cell.combining_capacity();
-        assert!(capacity >= COMBINING_RESERVE, "{capacity} reserved for the first mark");
-        assert!(capacity <= MAX_COMBINING, "{capacity} must stay inside the cell bound");
-        assert_eq!(cell.combining_len(), 1);
-        let charged = cell.side_bytes();
-        assert_eq!(
-            charged,
-            std::mem::size_of::<CellExtras>() + capacity * std::mem::size_of::<char>(),
-            "heap accounting charges the real capacity, not the length"
-        );
-        // A record reached through a shared template reserves on its first append too.
-        let link = Arc::new(Link { id: 1, uri: "https://template.test".into() });
-        let template = CellStyle::new(&Style::default(), Some(&link));
-        let mut shared = template.cell('a', 1, true);
-        assert_eq!(shared.combining_capacity(), 0, "a template carries no mark storage");
-        assert!(shared.push_combining('\u{301}'));
-        assert!(shared.combining_capacity() >= COMBINING_RESERVE);
-        assert_eq!(shared.combining(), &['\u{301}']);
-        assert_eq!(shared.link_uri(), Some("https://template.test"));
-        // The per-cell bound still wins: the reservation never widens it.
-        for _ in 0..MAX_COMBINING {
-            shared.push_combining('\u{302}');
-        }
-        assert_eq!(shared.combining_len(), MAX_COMBINING);
-        assert!(!shared.push_combining('\u{302}'));
-        assert!(shared.combining_capacity() <= MAX_COMBINING);
+        for &ch in &expected[..COMBINING_INLINE] { assert!(cell.push_combining(ch)); }
+        assert_eq!(cell.combining_capacity(), COMBINING_INLINE);
+        assert_eq!(cell.combining(), &expected[..COMBINING_INLINE]);
+        assert_eq!(cell.side_bytes(), std::mem::size_of::<CellExtras>());
+
+        let mut spilled = cell.clone();
+        assert!(spilled.push_combining(expected[COMBINING_INLINE]));
+        assert_eq!(cell.combining_len(), COMBINING_INLINE, "inline detach leaves the original unchanged");
+        assert_eq!(spilled.combining_len(), COMBINING_INLINE + 1);
+        assert_eq!(spilled.combining_capacity(), MAX_COMBINING);
+        let spilled_charge = std::mem::size_of::<CellExtras>()
+            + std::mem::size_of::<[char; MAX_COMBINING]>();
+        assert_eq!(spilled.side_bytes(), spilled_charge);
+
+        let mut detached = spilled.clone();
+        assert!(detached.push_combining(expected[COMBINING_INLINE + 1]));
+        assert_eq!(spilled.combining_len(), COMBINING_INLINE + 1, "spilled detach leaves the original unchanged");
+        for &ch in &expected[COMBINING_INLINE + 1..] { assert!(spilled.push_combining(ch)); }
+        assert_eq!(spilled.combining(), expected);
+        assert_eq!(spilled.side_bytes(), spilled_charge);
+        assert!(!spilled.push_combining('\u{301}'));
+        assert_eq!(spilled.combining_len(), MAX_COMBINING);
+        assert_eq!(spilled.side_bytes(), spilled_charge);
     }
 
     #[test]
     fn equality_ignores_side_record_sharing_but_not_content() {
         let shared = Arc::new(CellExtras {
-            combining: vec!['\u{301}'],
+            combining: marks(&['\u{301}']),
             link: Some(Arc::new(Link { id: 1, uri: "https://a.test".into() })),
             style: None,
         });
@@ -744,7 +814,7 @@ mod tests {
         left.extras = Some(Arc::clone(&shared));
         let mut right = Cell::plain('e');
         right.extras = Some(Arc::new(CellExtras {
-            combining: vec!['\u{301}'],
+            combining: marks(&['\u{301}']),
             link: Some(Arc::new(Link { id: 1, uri: "https://a.test".into() })),
             style: None,
         }));

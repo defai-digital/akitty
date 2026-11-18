@@ -721,3 +721,81 @@ and 32 rounds, so they are not a same-configuration baseline for these figures. 
 reports 107.97 MiB/s ASCII, 106.70 ANSI and 113.77 Unicode. These are engine and worker/model measurements,
 not full-application or physical-input parity claims. The [follow-up raw record](../benchmarks/results/unicode-followup-2026-11-18.json)
 contains source/artifact hashes, all direct samples, symbol samples, canonical results and PTY samples.
+
+### Unicode follow-up: cached scalar properties and bounded wide repairs
+
+A fresh profile and two independent source reviews found that each non-ASCII scalar paid for a
+boundary classification and a separate width lookup. The run now reads both properties from one
+byte. A bounded array of lazy 256-scalar pages supplies those bytes; each page is initialized from
+AkiTTY's existing classifier and `UnicodeWidthChar`, rather than from a second hand-maintained
+Unicode table. The payload is bounded at 1,114,112 bytes if every page is used, while ordinary text
+touches only a few pages. `OnceLock` makes concurrent initialization safe. All scalar properties
+match the original functions, including concurrent first use, and unknown widths retain the
+original lookup. Full-cluster segmentation and width measurement are unchanged.
+
+Width-changing grapheme repairs also invalidated the whole row's modified prefix even though their
+writes cover at most the glyph and its neighbour. Those repairs now record their actual end column,
+as same-width joins already did. Generation advances, wide-neighbour cleanup, wrapping and history
+accounting are unchanged. A regression checks the bounded prefix, and the existing differential
+prefix-reset, scalar/run, cell and resize comparisons pass. Two smaller experiments—carrying a few
+hand-classified widths without page caching, and filtering the exact cluster cache by a tail
+fingerprint—were rejected because they reduced throughput.
+
+Repeating the matched comparison against `1c9cfac` gives these p50 rates. The candidate runs use
+120x40, no history, grapheme support enabled, 256 rounds, three warmups and 30 randomized paired
+samples; every cell and resize comparison matches.
+
+| Unicode workload | Akitty before | Akitty after | Change | Ghostty after | Ghostty / Akitty after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed | 102.53 | 123.66 | +20.6% | 191.12 | 1.55x |
+| CJK | 172.23 | 193.23 | +12.2% | 393.72 | 2.04x |
+| Standalone emoji | 188.73 | 214.86 | +13.8% | 484.46 | 2.25x |
+| Complex emoji | 71.44 | 84.81 | +18.7% | 128.00 | 1.51x |
+| Combining text | 51.70 | 58.73 | +13.6% | 80.84 | 1.38x |
+
+The canonical 30-sample/128-round Unicode rate is 104.00 MiB/s native and 74.43 MiB/s WASM,
+compared with 90.98/64.90 under the same configuration before this pass. The final actual-PTY run
+reports 102.45 MiB/s ASCII, 102.06 ANSI and 103.02 Unicode. That worker uses different grapheme
+defaults and is not a matched Ghostty comparison; a prior run with severe scheduling outliers was
+not used for the reported rates.
+
+Ghostty remains faster in these engine probes. The results do not establish full-application,
+rendering or physical-input parity. The [property-page raw record](../benchmarks/results/unicode-property-pages-2026-11-18.json)
+contains the direct samples, source/artifact hashes and final canonical and PTY measurements.
+
+### Unicode follow-up: inline combining storage
+
+Profiling after the property-page pass still showed two allocations on a cell's first combining
+mark: one for the shared side record and another for its vector buffer. Combining storage now holds
+up to eight marks inside that record. The ninth mark moves the ordered sequence into a fixed
+16-slot boxed array; the sixteenth is accepted and the seventeenth is rejected before mutation.
+A fixed spill makes history charging deterministic even after copy-on-write. Debug output and
+equality inspect only the visible mark slice. New records receive their first mark directly, while
+existing shared style/link records still detach through `Arc::make_mut`. Spacers never inherit
+marks, and the row charge includes the record and any spill exactly once.
+
+The tradeoff is a larger side record, including style-only records, offset by eliminating the
+separate allocation for the common one-to-eight-mark case. Tests cover ordered marks at 8/9/16,
+the rejected seventeenth, inline and spilled clones, shared templates, links, spacers, exact history
+charges and scalar/run agreement. A `strong_count` shortcut and a 64-slot identity scratch for
+history recounts were both measured and rejected: neither improved the paired history-enabled runs.
+Those history runs are Akitty-only because Ghostty's history row semantics differ, so they are not
+reported as a cross-engine comparison.
+
+Repeating the matched history-zero comparison against the property-page candidate gives the
+following p50 rates, with every cell and resize comparison matching:
+
+| Unicode workload | Akitty before | Akitty after | Change | Ghostty after | Ghostty / Akitty after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mixed | 123.66 | 126.82 | +2.6% | 193.02 | 1.52x |
+| CJK | 193.23 | 191.81 | -0.7% | 382.68 | 2.00x |
+| Standalone emoji | 214.86 | 216.20 | +0.6% | 472.56 | 2.19x |
+| Complex emoji | 84.81 | 84.95 | +0.2% | 127.69 | 1.50x |
+| Combining text | 58.73 | 65.35 | +11.3% | 82.80 | 1.27x |
+
+Small non-combining differences are run-to-run variation, not claimed regressions or improvements.
+The canonical Unicode rate is 110.19 MiB/s native and 76.27 MiB/s WASM, compared with 104.00/74.43
+before inline storage. The [inline-combining raw record](../benchmarks/results/unicode-inline-combining-2026-11-18.json)
+contains direct samples, paired history measurements, rejected-experiment results, source hashes
+and the canonical result. Ghostty remains faster, and no full-application or physical-input parity
+is claimed.

@@ -188,7 +188,7 @@ impl Parser {
                 if index > start {
                     // SAFETY: every byte in `start..index` was accepted either as
                     // printable ASCII or as a complete scalar sequence that
-                    // `str::from_utf8` validated for that exact slice, and the scan
+                    // `scalar_width` validated for that exact slice, and the scan
                     // only advances by whole ASCII bytes or whole scalars. The range is
                     // therefore a concatenation of valid UTF-8 sequences. Malformed
                     // input never reaches this point: the scan stops and the byte state

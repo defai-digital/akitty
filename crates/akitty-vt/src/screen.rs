@@ -224,6 +224,10 @@ impl Row {
         self.generation = self.generation.wrapping_add(advances);
         self.modified_end = self.cells.len();
     }
+    #[cfg(test)]
+    pub(crate) fn modified_end_for_test(&self) -> usize {
+        self.modified_end
+    }
     /// Clear only the possibly changed prefix when the untouched suffix has the
     /// requested background. Changing the blank colour requires a complete fill.
     pub(crate) fn reset_cells(&mut self, bg: Color) {

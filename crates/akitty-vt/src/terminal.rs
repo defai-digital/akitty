@@ -495,11 +495,11 @@ impl Terminal {
     fn clear_wide(&mut self, row: usize, col: usize, bg: Color, width: u8) {
         let cols = self.cols();
         let line = &mut self.screen_mut().rows[row];
-        line.record_full_write(1);
         // One blank per repair, so an RGB background shares one side record instead of
         // allocating one per cleared cell. `put_blank` keeps the row's heap flag honest.
         let spacer = width == 0 && col > 0;
         let tail = width == 2 && col + 1 < cols;
+        line.record_write(col + 1 + usize::from(tail), 1);
         if spacer {
             line.put_blank(col - 1, bg);
         }
@@ -706,7 +706,13 @@ impl Terminal {
                     break;
                 }
             }
-            let width = if ch.is_ascii() { 1 } else { char_width(ch, cols) };
+            let width = if ch.is_ascii() {
+                1
+            } else {
+                carried
+                    .and_then(grapheme::Classes::width)
+                    .map_or_else(|| char_width(ch, cols), |width| width.min(cols))
+            };
             if width == 0 || col + width > cols {
                 break;
             }
@@ -974,7 +980,7 @@ impl Terminal {
         }
         let trail = (width == 2).then(|| cell.spacer());
         let row = &mut self.screen_mut().rows[position.row];
-        row.record_full_write(1);
+        row.record_write(position.col + width, 1);
         row.cells[position.col] = cell;
         if width == 2 {
             row.cells[position.col + 1] = trail.expect("a wide cluster has a trailing cell");
@@ -2457,6 +2463,16 @@ mod tests {
         term.enable_grapheme_support(true);
         feed(&mut term, "abc\u{2764}\u{fe0f}".as_bytes());
         assert_eq!(term.cursor().row, 1, "wrap allowed with DECAWM on");
+    }
+    #[test]
+    fn width_changing_graphemes_keep_a_bounded_modified_prefix() {
+        let mut term = Terminal::new(12, 2, 10).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, "abc\u{2764}".as_bytes());
+        assert_eq!(term.screen().rows[0].modified_end_for_test(), 4);
+        feed(&mut term, "\u{fe0f}".as_bytes());
+        assert_eq!(term.screen().rows[0].cells[3].width(), 2);
+        assert_eq!(term.screen().rows[0].modified_end_for_test(), 5);
     }
     #[test]
     fn edits_styles_and_queries_survive_all_chunk_boundaries() {
