@@ -107,11 +107,8 @@ fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize,
 fn refill_blank(cells: &mut [Cell], heap: bool, background: Color) {
     let blank = Cell::blank(background);
     match blank.packed_word() {
-        Some(packed) if !heap => {
-            for cell in cells {
-                cell.store_heap_free(Cell::from_packed(blank.ch, packed));
-            }
-        }
+        // Neither the old cells nor the blank own heap: a pattern fill.
+        Some(_) if !heap => Cell::fill_heap_free(cells, &blank),
         _ => cells.fill(blank),
     }
 }
@@ -339,16 +336,7 @@ impl Row {
     }
     /// Fill a column range with blanks, allocating one shared record for the range.
     pub(crate) fn fill_blank(&mut self, range: std::ops::Range<usize>, bg: Color) {
-        let blank = Cell::blank(bg);
-        match blank.packed_word() {
-            // Neither the old cells nor the blank own heap: a plain store fill.
-            Some(packed) if !self.has_heap => {
-                for cell in &mut self.cells[range] {
-                    cell.store_heap_free(Cell::from_packed(blank.ch, packed));
-                }
-            }
-            _ => self.cells[range].fill(blank),
-        }
+        refill_blank(&mut self.cells[range], self.has_heap, bg);
         self.has_heap |= Cell::blank_owns_heap(bg);
         self.charge = None;
     }

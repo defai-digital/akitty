@@ -1141,3 +1141,43 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/wid
 The remaining cluster cost is the per-cluster side-record allocation and the exact
 cluster cache comparison; libghostty-vt keeps grapheme data in page-owned storage.
 
+## Single-store cell images for blank fills and ASCII runs
+
+Removing parts of the line path one at a time, in throwaway builds, showed where
+ASCII lines still lost to libghostty-vt. Its pure line feed was already slower than
+AkiTTY's (21.7 against 17 ns), but refilling each recycled row with blanks cost
+about 0.3 ns per written byte, and every cell store was two separate field stores.
+libghostty-vt clears a row with a zero fill; AkiTTY's blank is not all zero bytes,
+since it holds a space and a packed presentation.
+
+1. A heap-free blank fill writes one 16-byte image of the blank per cell, which the
+   compiler unrolls. `Row::fill_blank` and recycled-row refills share it.
+2. A heap-free ASCII run writes one 16-byte image per cell, built from a base image
+   and the character field's unit. Both come from reference cells, so no field layout
+   is assumed, and the compiler widens the bytes in vector registers.
+
+Both are `unsafe` writes guarded by the existing heap certificate: the source cell
+has no side record (asserted), and no target owns one (debug-asserted; `has_heap`
+certifies it). They apply on 64-bit targets, where a cell without a side record is
+sixteen bytes with no padding (a compile-time assertion checks the size); the
+WebAssembly build keeps the element-wise stores. Tests compare every fill length and every ASCII byte with the safe
+element-wise stores for several presentations, and mutation checks confirm each
+image term is caught. A 32-byte two-cell image was also measured and gave no
+further gain.
+
+| Synthetic ns per byte | Before | After | libghostty-vt |
+| --- | ---: | ---: | ---: |
+| One column rewritten (`x` wrap) | 1.128 | 0.876 | 0.483 |
+| 54-byte lines with scrolling | 1.305 | 1.020 | 0.709 |
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/cell-images-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 744.3 | 931.6 | 1.25x | 1322.3 | 1.75x → 1.39x |
+| ANSI | 326.7 | 326.7 | 1.00x | 272.8 | 0.84x |
+| Unicode | 145.7 | 144.6 | 0.99x | 192.6 | 1.33x |
+| Long lines | 382.5 | 408.9 | 1.07x | 500.3 | 1.30x → 1.21x |
+| Alternate screen | 170.5 | 172.9 | 1.01x | 174.1 | 1.02x |
+| Synchronized screen | 566.6 | 567.0 | 1.00x | 894.1 | 1.56x |
+

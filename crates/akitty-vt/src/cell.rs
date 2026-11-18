@@ -224,6 +224,19 @@ pub struct Cell {
     extras: Option<Arc<CellExtras>>,
 }
 
+/// The bytes of a cell without a side record, which is then plain data: a character,
+/// a packed word and a null record pointer, sixteen bytes with no padding on 64-bit
+/// targets.
+#[cfg(target_pointer_width = "64")]
+#[inline]
+fn cell_image(cell: &Cell) -> u128 {
+    const _: () = assert!(std::mem::size_of::<Cell>() == std::mem::size_of::<u128>());
+    assert!(cell.extras.is_none(), "cell image with a side record");
+    // SAFETY: the sizes match and the cell has no padding; reading its bytes copies no
+    // ownership because its record pointer is null.
+    unsafe { std::mem::transmute_copy(cell) }
+}
+
 impl PartialEq for Cell {
     /// Compares the values a host can observe, not the internal sharing: two cells
     /// with the same character, presentation, width, written flag, combining marks
@@ -300,6 +313,52 @@ impl Cell {
     pub(crate) fn store_heap_free(&mut self, value: Cell) {
         debug_assert!(self.extras.is_none(), "heap-free store over a side record");
         std::mem::forget(std::mem::replace(self, value));
+    }
+    /// Fill `cells` with copies of `value` when neither owns a side record. Such a cell
+    /// is plain data, so each copy is one 16-byte store of the same image, which the
+    /// compiler turns into a pattern fill; element-wise assignment stores the fields
+    /// separately.
+    pub(crate) fn fill_heap_free(cells: &mut [Cell], value: &Cell) {
+        assert!(value.extras.is_none(), "heap-free fill with a side record");
+        debug_assert!(cells.iter().all(|cell| cell.extras.is_none()), "heap-free fill over a side record");
+        #[cfg(target_pointer_width = "64")]
+        {
+            let image = cell_image(value);
+            for cell in cells {
+                // SAFETY: the target owns no side record, so overwriting it without
+                // running its destructor leaks nothing; `image` is a whole `Cell`.
+                unsafe { std::ptr::write_unaligned((cell as *mut Cell).cast::<u128>(), image) };
+            }
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        for cell in cells {
+            cell.store_heap_free(Cell::from_packed(value.ch, value.packed));
+        }
+    }
+    /// Store the ASCII `bytes` as cells of the packed presentation `packed` over `cells`,
+    /// none of which owns a side record. On 64-bit targets each cell is one 16-byte
+    /// store of an image whose character field is filled in arithmetically; the field's
+    /// position is taken from two reference cells, so no field order is assumed.
+    pub(crate) fn store_ascii_heap_free(cells: &mut [Cell], bytes: &[u8], packed: u32) {
+        debug_assert!(cells.iter().all(|cell| cell.extras.is_none()), "heap-free store over a side record");
+        debug_assert!(bytes.is_ascii());
+        #[cfg(target_pointer_width = "64")]
+        {
+            let base = cell_image(&Cell::from_packed('\0', packed));
+            let unit = cell_image(&Cell::from_packed('\u{1}', packed)) ^ base;
+            for (cell, &byte) in cells.iter_mut().zip(bytes) {
+                // SAFETY: the target owns no side record, so overwriting it leaks nothing.
+                // The image differs from `base` only in the character field, which holds
+                // `byte`, so it is the whole cell `from_packed(byte, packed)`.
+                unsafe {
+                    std::ptr::write_unaligned((cell as *mut Cell).cast::<u128>(), base | (u128::from(byte) * unit));
+                }
+            }
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        for (cell, &byte) in cells.iter_mut().zip(bytes) {
+            cell.store_heap_free(Cell::from_packed(char::from(byte), packed));
+        }
     }
     /// A written single-column cell in the default presentation (DECALN fill).
     pub(crate) fn plain(ch: char) -> Self {
@@ -717,6 +776,37 @@ mod tests {
         assert_eq!(marked.style(), style);
         assert!(second.combining().is_empty());
         assert_eq!(first.combining(), &[] as &[char]);
+    }
+
+    #[test]
+    fn heap_free_ascii_stores_build_the_packed_cells() {
+        let styles = [Style::default(), Style { fg: Color::Indexed(9), attrs: 5, bg: Color::Indexed(200), ..Style::default() }];
+        let bytes: Vec<u8> = (0u8..0x80).collect();
+        for style in styles {
+            let template = CellStyle::new(&style, None);
+            let packed = template.packed_written_column();
+            for len in [0usize, 1, 7, 16, 17, 40, 128] {
+                let mut cells = vec![Cell::blank(Color::Indexed(1)); len];
+                Cell::store_ascii_heap_free(&mut cells, &bytes[..len], packed);
+                for (cell, &byte) in cells.iter().zip(&bytes) {
+                    let expected = Cell::from_packed(char::from(byte), packed);
+                    assert_eq!(format!("{cell:?}"), format!("{expected:?}"));
+                    assert!(*cell == expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn heap_free_fills_copy_the_cell_exactly() {
+        for bg in [Color::Background, Color::Indexed(3), Color::Foreground] {
+            let blank = Cell::blank(bg);
+            for len in 0..9 {
+                let mut cells = vec![Cell::from_packed('x', blank.packed ^ WRITTEN); len];
+                Cell::fill_heap_free(&mut cells, &blank);
+                assert!(cells.iter().all(|cell| format!("{cell:?}") == format!("{blank:?}") && *cell == blank));
+            }
+        }
     }
 
     #[test]

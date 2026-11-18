@@ -754,9 +754,7 @@ impl Terminal {
                         row.mark_heap();
                     } else if heap_free {
                         // No old cell owns heap, so the stores need no destructor.
-                        for (cell, &byte) in cells.iter_mut().zip(bytes) {
-                            cell.store_heap_free(Cell::from_packed(char::from(byte), packed));
-                        }
+                        Cell::store_ascii_heap_free(cells, bytes, packed);
                     } else {
                         for (cell, &byte) in cells.iter_mut().zip(bytes) {
                             *cell = Cell::from_packed(char::from(byte), packed);
