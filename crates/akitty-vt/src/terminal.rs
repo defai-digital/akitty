@@ -644,6 +644,16 @@ impl Terminal {
                 let ch = text.chars().next().expect("join stops inside the run");
                 self.print_with_verdict(ch, Some(verdict), emit);
                 text = &text[ch.len_utf8()..];
+                // A cluster usually continues (modifiers, joiners, the second regional
+                // indicator), so characters up to the next simple one go straight to
+                // the scalar path instead of setting up another run for each.
+                while let Some(ch) = text.chars().next() {
+                    if grapheme::simple_width(ch).is_some() {
+                        break;
+                    }
+                    self.print(ch, emit);
+                    text = &text[ch.len_utf8()..];
+                }
                 continue;
             }
             if written.bytes != 0 {
@@ -783,8 +793,12 @@ impl Terminal {
         let mut previous_simple = false;
         let mut last_col = pos.col;
         let mut last_char = ' ';
+        // Without a side record the cells are built from packed words, and over a row
+        // whose cells own no heap they are stored without running a destructor.
+        let plain = template.plain_words();
         let screen = self.screen_mut();
         let row = &mut screen.rows[pos.row];
+        let heap_free = row.heap_free();
         for ch in text.chars() {
             // A simple character never joins the simple character written before it
             // (ordinary ASCII, Latin text, CJK, kana and Hangul syllables), so such text
@@ -848,10 +862,26 @@ impl Terminal {
             if !contained {
                 break;
             }
-            row.cells[col] = template.cell(ch, width as u8, true);
-            if width == 2 {
-                let spacer = row.cells[col].spacer();
-                row.cells[col + 1] = spacer;
+            if let Some(words) = plain {
+                let cells = &mut row.cells[col..col + width];
+                let lead = Cell::from_packed(ch, words[width - 1]);
+                if heap_free {
+                    cells[0].store_heap_free(lead);
+                    if width == 2 {
+                        cells[1].store_heap_free(Cell::from_packed(' ', words[2]));
+                    }
+                } else {
+                    cells[0] = lead;
+                    if width == 2 {
+                        cells[1] = Cell::from_packed(' ', words[2]);
+                    }
+                }
+            } else {
+                row.cells[col] = template.cell(ch, width as u8, true);
+                if width == 2 {
+                    let spacer = row.cells[col].spacer();
+                    row.cells[col + 1] = spacer;
+                }
             }
             last_col = col;
             last_char = ch;

@@ -1103,3 +1103,41 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/sim
 The mixed Unicode workload is dominated by emoji, ZWJ and flag sequences, which
 still take the pair path, so its gain is smaller than the per-script lines.
 
+## Packed stores for wide runs and scalar cluster continuation
+
+Two costs remained on Unicode lines after simple runs skipped the pair decision.
+
+1. The general run writer built each cell through the template, cloning its side
+   record, and built a wide cell's trailing half with `spacer()`. Without a side
+   record the cells now come from three precomputed packed words, and over a row
+   whose cells own no heap they are stored without a destructor, as ASCII runs are.
+2. After a character joined the cluster before it, the rest of the text went back
+   through the run writer, which set up a run only to stop again at the next
+   modifier, joiner or regional indicator. Characters up to the next simple one now
+   go straight to `print`, the scalar reference the run writer is tested against.
+
+A test checks that the packed words build exactly the template's cells and spacer for
+several presentations, and mutation checks confirm each word, the heap-free choice
+and both store paths are caught.
+
+| Synthetic line | Before ns | After ns | libghostty-vt ns |
+| --- | ---: | ---: | ---: |
+| CJK and ASCII | 152.3 | 147.3 | 98.4 |
+| Hangul and ASCII | 139.2 | 125.9 | 87.8 |
+| ZWJ sequences | 352.9 | 325.3 | 282.7 |
+| Mixed Unicode workload line | 479.7 | 447.5 | 331.1 |
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/wide-runs-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 738.4 | 733.3 | 0.99x | 1280.4 | 1.75x |
+| ANSI | 320.2 | 321.7 | 1.00x | 263.6 | 0.83x |
+| Unicode | 132.7 | 142.8 | 1.08x | 190.2 | 1.48x → 1.33x |
+| Long lines | 374.4 | 374.5 | 1.00x | 480.7 | 1.30x |
+| Alternate screen | 161.0 | 165.9 | 1.03x | 169.5 | 1.02x |
+| Synchronized screen | 546.3 | 550.9 | 1.01x | 897.0 | 1.63x |
+
+The remaining cluster cost is the per-cluster side-record allocation and the exact
+cluster cache comparison; libghostty-vt keeps grapheme data in page-owned storage.
+

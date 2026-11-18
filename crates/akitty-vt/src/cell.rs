@@ -521,6 +521,18 @@ impl CellStyle {
     pub(crate) fn packed_written_column(&self) -> u32 {
         (self.packed & !(WIDTH_MASK | WRITTEN)) | (1 << WIDTH_SHIFT) | WRITTEN
     }
+    /// The packed words of a written one- and two-column cell of this presentation and
+    /// of a wide cell's spacer, for a template without a side record. The cells they
+    /// build with `Cell::from_packed` equal `cell(ch, width, true)` and its `spacer()`.
+    #[inline]
+    pub(crate) fn plain_words(&self) -> Option<[u32; 3]> {
+        let base = self.packed & !(WIDTH_MASK | WRITTEN);
+        self.extras.is_none().then_some([
+            base | (1 << WIDTH_SHIFT) | WRITTEN,
+            base | (2 << WIDTH_SHIFT) | WRITTEN,
+            base,
+        ])
+    }
     /// A written single-column cell of this presentation, sharing the side record.
     #[inline]
     pub(crate) fn written_column(&self, ch: char) -> Cell {
@@ -705,6 +717,24 @@ mod tests {
         assert_eq!(marked.style(), style);
         assert!(second.combining().is_empty());
         assert_eq!(first.combining(), &[] as &[char]);
+    }
+
+    #[test]
+    fn plain_words_build_the_template_cells() {
+        let styles = [Style::default(), Style { fg: Color::Indexed(2), attrs: 1, bg: Color::Indexed(4), ..Style::default() },
+                      Style { fg: Color::Rgb([1, 2, 3]), underline: 1, ..Style::default() }];
+        for style in styles {
+            let template = CellStyle::new(&style, None);
+            let Some(words) = template.plain_words() else { continue };
+            for (width, ch) in [(1u8, 'a'), (2, '中')] {
+                let lead = template.cell(ch, width, true);
+                let built = Cell::from_packed(ch, words[usize::from(width) - 1]);
+                assert_eq!(format!("{built:?}"), format!("{lead:?}"));
+                assert_eq!(format!("{:?}", Cell::from_packed(' ', words[2])), format!("{:?}", lead.spacer()));
+            }
+        }
+        let link = Arc::new(Link { id: 1, uri: "https://plain.test".into() });
+        assert!(CellStyle::new(&Style::default(), Some(&link)).plain_words().is_none());
     }
 
     #[test]
