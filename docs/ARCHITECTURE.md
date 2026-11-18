@@ -42,8 +42,10 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   keyboard encoder in `akitty-vt`. It has no PTY, filesystem or wall-clock access;
   hosts supply time and enforce clipboard/process policy. Unicode libraries and
   other ordinary dependencies retain their own licenses.
-  The parser lends printable UTF-8 runs to the terminal. Plain ASCII uses packed
-  spans; ordinary narrow/wide Unicode codepoints use batched cells with each grapheme
+  The parser lends printable UTF-8 runs to the terminal, skipping whole eight-byte
+  words of printable ASCII where a run opens and after each multi-byte scalar. Plain
+  ASCII uses packed spans, stored without destructor checks on rows certified
+  heap-free; ordinary narrow/wide Unicode codepoints use batched cells with each grapheme
   class carried into the next pair decision. Insert mode, character-set shifts,
   contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
   A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;

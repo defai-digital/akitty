@@ -899,3 +899,51 @@ the parser and row writer that every workload shares, plus about a fifth in
 allocation for queued runs and CSI parameters. These rates exclude snapshots and
 rendering and make no Ghostty parity claim.
 
+## Heap-free row stores and word-at-a-time ASCII scanning
+
+After the synchronized-output change, plain ASCII remained 3.2x behind libghostty-vt.
+A profile of the ASCII workload put about 37% of the time in the row writer, 22% in
+the parser's text scan, 12% in blanking recycled rows and 14% in scrolling.
+
+Reviewing Ghostty's batched print path under `.internal/reference` showed two ideas
+that fit AkiTTY's own structures: a row known to be blank needs no inspection of its
+old cells, and a store of a cell that owns nothing needs no per-cell branch. AkiTTY's
+cell is 16 bytes with an optional shared side record, so every assignment ran its
+destructor check. The changes are:
+
+1. Each row already certifies, for history accounting, whether any cell may own a
+   side record. When it does not, ASCII run writes and recycled-row blanking store
+   cells without running a destructor (`Cell::store_heap_free`). This is safe code:
+   a wrong certificate would leak a record, never corrupt memory, and debug builds
+   assert the precondition on every store.
+2. Columns past the row's blank certificate hold single-column blanks, so an ASCII
+   run written there skips the old-cell width scan.
+3. A scroll whose region ends at the bottom row appends the new blank row instead
+   of taking `VecDeque::insert`'s general move path.
+4. The parser skips whole eight-byte words of printable ASCII where a text run
+   opens and after each multi-byte scalar, with an exact SWAR test. Other bytes
+   keep the original one-test-per-byte loop. Testing words at every ASCII byte
+   kept costing mixed Unicode text 2–5% even when no word matched, so words are
+   only tried at those two points.
+
+Tests check the word test against the byte test for every byte value in every lane
+and across lane boundaries, compare runs over link, combining-mark and RGB-blank
+rows with the scalar path, write over either half of a wide glyph behind a stale
+blank certificate, and move rows for every scroll region against a reference
+model. Mutation checks confirm each of those tests catches its targeted defect.
+
+Engine results, rotated order, history 0, 7 passes against the previous commit and
+3 against libghostty-vt 1.0.1 ([raw record](../benchmarks/results/ascii-heap-free-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 408.8 | 573.0 | 1.40x | 1298.3 | 3.18x → 2.27x |
+| ANSI | 208.0 | 217.6 | 1.05x | 267.0 | 1.30x → 1.25x |
+| Unicode | 126.5 | 125.9 | 1.00x | 194.6 | 1.56x |
+| Long lines | 308.8 | 345.2 | 1.12x | 485.9 | 1.62x → 1.42x |
+| Alternate screen | | 74.1 | | 168.2 | 2.27x |
+| Synchronized screen | | 297.5 | | 903.4 | 3.35x → 3.04x |
+
+Final viewport, cursor and screen state agree with libghostty-vt on every workload.
+These rates exclude snapshots and rendering and make no Ghostty parity claim.
+

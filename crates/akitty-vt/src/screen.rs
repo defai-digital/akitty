@@ -240,6 +240,17 @@ impl Row {
     }
     /// Record that a cell in this row now owns heap (a side record with combining
     /// marks, a hyperlink, or presentation the packed word cannot hold).
+    /// True when the heap flag certifies that no cell owns a side record.
+    #[inline]
+    pub(crate) fn heap_free(&self) -> bool {
+        !self.has_heap
+    }
+    /// The column from which every cell still equals the row's last full blank, or the
+    /// row length when that certificate is not current.
+    #[inline]
+    pub(crate) fn blank_from(&self) -> usize {
+        if self.modified_gen == self.generation { self.modified_end } else { self.cells.len() }
+    }
     pub(crate) fn mark_heap(&mut self) {
         self.has_heap = true;
     }
@@ -293,7 +304,9 @@ pub struct Screen {
     history_limit: usize,
     history_bytes: usize,
     next_row_id: u64,
-    spare: Option<(Vec<Cell>, usize, Color)>,
+    /// Recycled cells, the bound past which they are still blanks of the colour, and
+    /// whether any of them may own heap.
+    spare: Option<(Vec<Cell>, usize, Color, bool)>,
 }
 
 impl Screen {
@@ -326,9 +339,18 @@ impl Screen {
         let id = self.next_row_id;
         self.next_row_id = self.next_row_id.wrapping_add(1);
         let cells = match self.spare.take() {
-            Some((mut cells, modified_end, bg)) if cells.len() == self.cols => {
+            Some((mut cells, modified_end, bg, heap)) if cells.len() == self.cols => {
                 let end = if bg == background { modified_end } else { cells.len() };
-                cells[..end].fill(Cell::blank(background));
+                let blank = Cell::blank(background);
+                match blank.packed_word() {
+                    // Neither the old cells nor the blank own heap: a plain store fill.
+                    Some(packed) if !heap => {
+                        for cell in &mut cells[..end] {
+                            cell.store_heap_free(Cell::from_packed(blank.ch, packed));
+                        }
+                    }
+                    _ => cells[..end].fill(blank),
+                }
                 cells
             }
             _ => vec![Cell::blank(background); self.cols],
@@ -414,7 +436,7 @@ impl Screen {
     fn recycle(&mut self, row: Row) {
         if row.cells.len() == self.cols {
             let end = if row.modified_gen == row.generation { row.modified_end } else { row.cells.len() };
-            self.spare = Some((row.cells, end, row.blank_bg));
+            self.spare = Some((row.cells, end, row.blank_bg, row.has_heap));
         }
     }
     fn remember(&mut self, mut row: Row) {
@@ -456,7 +478,7 @@ impl Screen {
             (self.cursor, self.saved_cursor, self.offset, self.selection, &self.keyboard_stack,
              self.keyboard_flags, &self.region, &self.tabs, self.cols),
             (self.history_limit, self.history_bytes, self.next_row_id,
-             self.spare.as_ref().map(|(cells, _, bg)| (cells, bg))))
+             self.spare.as_ref().map(|(cells, _, bg, _)| (cells, bg))))
     }
 
     #[cfg(test)]
@@ -464,7 +486,7 @@ impl Screen {
         for row in self.rows.iter_mut().chain(self.history.iter_mut()) {
             row.modified_end = row.cells.len();
         }
-        if let Some((cells, end, _)) = &mut self.spare { *end = cells.len(); }
+        if let Some((cells, end, _, heap)) = &mut self.spare { *end = cells.len(); *heap = true; }
     }
 
     /// Rotate a region. Positive counts move text up; only a top-anchored region
@@ -489,7 +511,13 @@ impl Screen {
                     self.recycle(removed);
                 }
                 let blank = self.blank(bg);
-                self.rows.insert(region.end - 1, blank);
+                // A region ending at the bottom row appends; `insert` would take the
+                // general wrap-aware move path for what is a push.
+                if region.end == self.rows.len() + 1 {
+                    self.rows.push_back(blank);
+                } else {
+                    self.rows.insert(region.end - 1, blank);
+                }
             } else {
                 let removed = self.rows.remove(region.end - 1).expect("validated scroll region");
                 self.recycle(removed);
@@ -809,6 +837,39 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_moves_rows_like_a_reference_for_every_region() {
+        // Up and down scrolls of every region and count, including regions that end at
+        // the bottom row (the append path) and one row above it.
+        for rows in 1..=5usize {
+            for start in 0..rows {
+                for end in start + 1..=rows {
+                    for lines in [-6i32, -2, -1, 1, 2, 6] {
+                        let mut screen = Screen::new(3, rows, 0, false);
+                        let mut model: Vec<Option<u64>> = screen.rows.iter().map(|r| Some(r.id)).collect();
+                        let moved = screen.scroll(start..end, lines, false, Color::Background);
+                        let count = (lines.unsigned_abs() as usize).min(end - start);
+                        assert_eq!(moved, count as i32 * lines.signum());
+                        for _ in 0..count {
+                            if lines > 0 {
+                                model.remove(start);
+                                model.insert(end - 1, None);
+                            } else {
+                                model.remove(end - 1);
+                                model.insert(start, None);
+                            }
+                        }
+                        let actual: Vec<Option<u64>> = screen.rows.iter().map(|r| {
+                            let original = r.id < rows as u64 + 1 && model.contains(&Some(r.id));
+                            original.then_some(r.id)
+                        }).collect();
+                        assert_eq!(actual, model, "rows={rows} region={start}..{end} lines={lines}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn untracked_generation_changes_force_full_clear_and_recycle() {

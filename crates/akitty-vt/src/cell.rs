@@ -286,6 +286,21 @@ impl Cell {
     pub(crate) fn from_packed(ch: char, packed: u32) -> Self {
         Self { ch, packed, extras: None }
     }
+    /// The packed word of a cell without a side record, so a heap-free fill can rebuild
+    /// it with `from_packed`.
+    #[inline]
+    pub(crate) fn packed_word(&self) -> Option<u32> {
+        self.extras.is_none().then_some(self.packed)
+    }
+    /// Overwrite a cell that owns no side record without running its destructor, so a
+    /// run of such stores is a plain, vectorizable copy. Callers use it only on rows
+    /// whose heap flag certifies every cell heap-free. A wrong caller would leak a side
+    /// record rather than corrupt memory; tests assert the precondition.
+    #[inline(always)]
+    pub(crate) fn store_heap_free(&mut self, value: Cell) {
+        debug_assert!(self.extras.is_none(), "heap-free store over a side record");
+        std::mem::forget(std::mem::replace(self, value));
+    }
     /// A written single-column cell in the default presentation (DECALN fill).
     pub(crate) fn plain(ch: char) -> Self {
         Self {

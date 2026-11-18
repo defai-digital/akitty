@@ -173,15 +173,21 @@ impl Parser {
         while index < input.len() {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
-                // Plain ASCII stays a single inline test per byte; a complete
-                // multi-byte scalar extends the same run so hosts decode it once.
+                // Whole eight-byte words of printable ASCII are skipped where a run
+                // opens and after each multi-byte scalar. The byte loop takes the rest,
+                // one inline test per ASCII byte, and a complete multi-byte scalar
+                // extends the same run so hosts decode it once.
+                index += ascii_words(&input[index..]);
                 while index < input.len() {
                     if (0x20..=0x7e).contains(&input[index]) {
                         index += 1;
                         continue;
                     }
                     match scalar_width(input, index) {
-                        Some(width) => index += width,
+                        Some(width) => {
+                            index += width;
+                            index += ascii_words(&input[index..]);
+                        }
                         None => break,
                     }
                 }
@@ -431,8 +437,68 @@ impl Parser {
     }
 }
 
+/// The length of the leading whole eight-byte words of printable ASCII in `input`.
+#[inline(always)]
+fn ascii_words(input: &[u8]) -> usize {
+    let mut length = 0;
+    while let Some(word) = input.get(length..length + 8) {
+        if !all_printable_ascii(u64::from_le_bytes(word.try_into().expect("eight bytes"))) {
+            break;
+        }
+        length += 8;
+    }
+    length
+}
+
+/// Whether all eight bytes of `word` are printable ASCII (`0x20..=0x7e`). Each test is
+/// exact for "any byte": a byte below 0x20, a byte with the high bit set, or a 0x7f.
+#[inline(always)]
+fn all_printable_ascii(word: u64) -> bool {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let below_space = word.wrapping_sub(ONES * 0x20) & !word & HIGH;
+    let delete = (word ^ (ONES * 0x7f)).wrapping_sub(ONES) & !(word ^ (ONES * 0x7f)) & HIGH;
+    (below_space | delete | (word & HIGH)) == 0
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn word_scan_matches_the_byte_test() {
+        let naive = |word: u64| word.to_le_bytes().iter().all(|byte| (0x20..=0x7e).contains(byte));
+        // Every byte value in every lane, over printable and boundary fillers.
+        for filler in [b'a', 0x20, 0x7e] {
+            for lane in 0..8 {
+                for byte in 0..=255u8 {
+                    let mut bytes = [filler; 8];
+                    bytes[lane] = byte;
+                    let word = u64::from_le_bytes(bytes);
+                    assert_eq!(super::all_printable_ascii(word), naive(word), "{bytes:?}");
+                }
+            }
+        }
+        // Pairs of boundary bytes, where a borrow from one lane could reach the next.
+        let edges = [0x00, 0x01, 0x1f, 0x20, 0x21, 0x7e, 0x7f, 0x80, 0x9f, 0xff];
+        for lane in 0..7 {
+            for &a in &edges {
+                for &b in &edges {
+                    let mut bytes = [b'a'; 8];
+                    bytes[lane] = a;
+                    bytes[lane + 1] = b;
+                    let word = u64::from_le_bytes(bytes);
+                    assert_eq!(super::all_printable_ascii(word), naive(word), "{bytes:?}");
+                }
+            }
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..200_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            // Bias toward printable lanes so both outcomes are common.
+            let word = state & 0x7f7f_7f7f_7f7f_7f7f | 0x2020_2020_2020_2020 & (state >> 1);
+            assert_eq!(super::all_printable_ascii(word), naive(word));
+            assert_eq!(super::all_printable_ascii(state), naive(state));
+        }
+    }
     use super::*;
     fn parse(parts: &[&[u8]]) -> Vec<Action> {
         let mut parser = Parser::default();

@@ -628,15 +628,22 @@ impl Terminal {
                 .take_while(|byte| (0x20..=0x7e).contains(*byte))
                 .count();
             if ascii > 0 {
-                let count = self.screen().rows[pos.row].cells[pos.col..pos.col + ascii]
-                    .iter()
-                    .take_while(|cell| cell.width() == 1)
-                    .count();
+                let line = &self.screen().rows[pos.row];
+                // Cells past the blank certificate are single-column blanks already.
+                let count = if pos.col >= line.blank_from() {
+                    ascii
+                } else {
+                    line.cells[pos.col..pos.col + ascii]
+                        .iter()
+                        .take_while(|cell| cell.width() == 1)
+                        .count()
+                };
                 if count > 0 {
                     let packed = template.packed_written_column();
                     let side_data = template.has_side_data();
                     let screen = self.screen_mut();
                     let row = &mut screen.rows[pos.row];
+                    let heap_free = row.heap_free();
                     row.record_write(pos.col + count, count as u64);
                     let bytes = &text.as_bytes()[..count];
                     let cells = &mut row.cells[pos.col..pos.col + count];
@@ -646,6 +653,11 @@ impl Terminal {
                             *cell = template.written_column(char::from(byte));
                         }
                         row.mark_heap();
+                    } else if heap_free {
+                        // No old cell owns heap, so the stores need no destructor.
+                        for (cell, &byte) in cells.iter_mut().zip(bytes) {
+                            cell.store_heap_free(Cell::from_packed(char::from(byte), packed));
+                        }
                     } else {
                         for (cell, &byte) in cells.iter_mut().zip(bytes) {
                             *cell = Cell::from_packed(char::from(byte), packed);
@@ -2478,6 +2490,40 @@ mod tests {
             else { fast.feed(b"\x1b[?2026l", 1, |event| actual.push(event)); }
             assert_eq!(actual, expected);
             assert_eq!(state(&fast), state(&scalar));
+        }
+    }
+    #[test]
+    fn ascii_runs_scan_cells_when_the_blank_certificate_is_stale() {
+        // A cell change that bypasses the row's write tracking leaves its blank
+        // certificate stale. ASCII written over either half of a wide glyph must
+        // still repair the other half.
+        for (column, text) in [(5, "a"), (6, "a"), (4, "ab"), (6, "abc")] {
+            let edit = format!("\x1b[1;{column}H{text}");
+            let mut reference = Terminal::new(12, 2, 0).unwrap();
+            feed(&mut reference, format!("\x1b[1;5H中{edit}").as_bytes());
+            let mut wide = Terminal::new(12, 2, 0).unwrap();
+            feed(&mut wide, "\x1b[1;5H中".as_bytes());
+            let mut term = Terminal::new(12, 2, 0).unwrap();
+            let row = &mut term.main.rows[0];
+            row.cells.clone_from(&wide.main.rows[0].cells);
+            row.generation = row.generation.wrapping_add(1);
+            feed(&mut term, edit.as_bytes());
+            assert_eq!(term.main.rows[0].cells, reference.main.rows[0].cells, "{edit:?}");
+        }
+    }
+    #[test]
+    fn ascii_runs_overwrite_heap_rows_and_blanks_without_losing_records() {
+        // Rows holding links, combining marks and RGB blanks take the destructor path;
+        // heap-free rows take plain stores. Both must agree with the scalar path.
+        let corpus = [
+            "\x1b]8;;https://example.test\x1b\\linked\x1b]8;;\x1b\\\x1b[1;1Hplain over link",
+            "e\u{301}e\u{301}\x1b[1;1Hascii over marks\r\n",
+            "\x1b[48;2;1;2;3m\x1b[2Kblank rgb\x1b[0m\r\nnext\r\n\x1b[3;1Hover rgb\n\n\n",
+            "ordinary text written into recycled rows 0123456789\r\n",
+        ];
+        for chunk in [1usize, 5, 64] {
+            assert_corpus_matches_scalar(9, 3, 0, false, &corpus, chunk);
+            assert_corpus_matches_scalar(9, 3, 4, true, &corpus, chunk);
         }
     }
     #[test]
