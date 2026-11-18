@@ -479,6 +479,48 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertLessThanOrEqual(GlyphAtlas.textureSize, 2048, "one bounded atlas texture, never one per glyph")
     }
 
+    /// A refused build can add masks without publishing them to the GPU.
+    func testRefusedFrameKeepsUnpublishedGlyphUploadsForRecovery() throws {
+        let composer = TextComposer()
+        for frame in 0..<12 {
+            let cells = (0..<(rows * cols)).map { index -> [Any] in
+                let key = frame * rows * cols + index
+                return wire(index / cols, index % cols, text: "A", Style(fg: [key % 251, key / 251, 100]))
+            }
+            func make(_ snapshot: Snapshot, damage: Set<Int>?) -> TextFrame? {
+                composer.compose(snapshot: snapshot, damage: damage, size: size, scale: 1,
+                                 fontName: "Menlo", fontSize: 5, cell: cell, cjkFontName: "", appearance: .standard)
+            }
+            if make(try snapshot(cells: cells), damage: nil) != nil { continue }
+            // This frame inserted some masks before reaching the entry cap. A smaller frame can reuse
+            // its first glyph, but that mask has never been delivered to the presenter.
+            let recovered = try XCTUnwrap(make(try snapshot(cells: [cells[0]]), damage: [0]))
+            XCTAssertFalse(recovered.uploads.isEmpty, "a cached but unpublished glyph still needs its pixels uploaded")
+            XCTAssertEqual(recovered.dirtyRows.count, rows, "a refused frame cannot certify partial row damage")
+            return
+        }
+        XCTFail("the colour workload must reach the entry cap")
+    }
+
+    func testRefusedFirstFrameKeepsItsAtlasResetUntilRecovery() throws {
+        let composer = TextComposer()
+        let wideCols = 100, tallRows = 50
+        let largeSize = CGSize(width: CGFloat(wideCols) * cell.width + 16, height: CGFloat(tallRows) * cell.height + 16)
+        let cells = (0..<(wideCols * tallRows)).map { key in
+            wire(key / wideCols, key % wideCols, text: "A", Style(fg: [key % 251, key / 251, 100]))
+        }
+        func make(_ cells: [[Any]], damage: Set<Int>?) throws -> TextFrame? {
+            composer.compose(snapshot: try snapshot(cells: cells, cols: wideCols, rows: tallRows), damage: damage,
+                             size: largeSize, scale: 1, fontName: "Menlo", fontSize: 5, cell: cell,
+                             cjkFontName: "", appearance: .standard)
+        }
+        XCTAssertNil(try make(cells, damage: nil))
+        let recovered = try XCTUnwrap(make([cells[0]], damage: [0]))
+        XCTAssertTrue(recovered.resetAtlas, "the presenter has never received this atlas layout")
+        XCTAssertEqual(recovered.uploads.count, composer.atlasEntries)
+        XCTAssertEqual(recovered.dirtyRows.count, tallRows)
+    }
+
     /// A storm that keeps exhausting the atlas must stand down instead of re-rasterising the whole window
     /// through CoreText on every frame.
     func testPersistentAtlasExhaustionStandsDownToTheCpuPath() throws {
@@ -652,8 +694,9 @@ final class MetalTextRenderingTests: XCTestCase {
         text.enumerated().map { offset, character in wire(row, col + offset, text: String(character), style) }
     }
 
-    private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [],
+    private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], cols: Int? = nil, rows: Int? = nil,
                           cursor: [String: Any] = ["row": 4, "col": 2, "visible": false]) throws -> Snapshot {
+        let cols = cols ?? self.cols, rows = rows ?? self.rows
         let object: [String: Any] = ["changed": true, "revision": 1, "cols": cols, "rows": rows, "title": "", "cells": cells,
             "lines": Array(repeating: String(repeating: " ", count: cols), count: rows), "images": images.map { placement in
                 ["id": placement.id, "gen": placement.gen, "w": placement.w, "h": placement.h, "row": placement.row,

@@ -168,7 +168,6 @@ final class GlyphAtlas: @unchecked Sendable {
     /// Masks rasterised since the last call; the presenter uploads them before the next draw.
     private var pending: [Upload] = []
     func takePending() -> [Upload] { defer { pending.removeAll(keepingCapacity: true) }; return pending }
-    func discardPending() { pending.removeAll(keepingCapacity: true) }
 
     private func allocate(_ width: Int, _ height: Int) -> (x: Int, y: Int)? {
         let size = Self.textureSize
@@ -244,6 +243,9 @@ final class TextComposer: @unchecked Sendable {
     private struct Epoch: Equatable { var layout: Layout; var appearance: RenderAppearance }
     private var epoch: Epoch?
     private var rebuilds = 0
+    /// A refused build may have changed masks and cursor bookkeeping without delivering a frame. Keep its
+    /// uploads and reset request until a complete frame can publish them, and rebuild every row on recovery.
+    private var resetPending = false, recoveryPending = false
     private(set) var isSuspended = false
     private(set) var atlasEntries = 0
     private(set) var atlasResets = 0
@@ -252,6 +254,7 @@ final class TextComposer: @unchecked Sendable {
     func releaseFrames() {
         rows = []; layout = nil; lastCursorRow = nil; colors.removeAll(keepingCapacity: true)
         epoch = nil; rebuilds = 0; isSuspended = false
+        resetPending = false; recoveryPending = false
         atlas.reset(); atlasEntries = 0; atlasResets = atlas.resets
     }
 
@@ -267,9 +270,10 @@ final class TextComposer: @unchecked Sendable {
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
                             rows: snapshot.rows, descent: geometry.descent)
         let signature = Epoch(layout: wanted, appearance: appearance)
-        if epoch != signature { epoch = signature; rebuilds = 0; isSuspended = false }
+        if epoch != signature { epoch = signature; rebuilds = 0; isSuspended = false; damage = nil }
         if isSuspended { return nil }
-        var resetAtlas = false
+        var resetAtlas = resetPending
+        if recoveryPending { damage = nil }
         if layout != wanted || base == nil || rows.count != snapshot.rows {
             // A new font, size, scale or grid invalidates every UV and every row.
             layout = wanted
@@ -278,9 +282,10 @@ final class TextComposer: @unchecked Sendable {
             rows = Array(repeating: [], count: snapshot.rows)
             lastCursorRow = nil
             resetAtlas = true
+            resetPending = true
             damage = nil
         }
-        atlas.discardPending()
+        recoveryPending = true
         var result = build(snapshot: snapshot, damage: damage, geometry: geometry, appearance: appearance,
                            resetAtlas: resetAtlas)
         if result == nil, atlas.exhausted {
@@ -292,9 +297,13 @@ final class TextComposer: @unchecked Sendable {
             atlas.reset()
             rows = Array(repeating: [], count: snapshot.rows)
             resetAtlas = true
+            resetPending = true
             result = build(snapshot: snapshot, damage: nil, geometry: geometry, appearance: appearance, resetAtlas: true)
         }
-        guard let result else { atlasEntries = atlas.count; atlasResets = atlas.resets; return nil }
+        guard let result else {
+            recoveryPending = true; atlasEntries = atlas.count; atlasResets = atlas.resets; return nil
+        }
+        resetPending = false; recoveryPending = false
         atlasEntries = atlas.count; atlasResets = atlas.resets
         return TextFrame(rows: snapshot.rows, dirtyRows: result.rows, content: result.content,
                          uploads: atlas.takePending(), resetAtlas: resetAtlas)
