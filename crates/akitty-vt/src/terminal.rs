@@ -250,6 +250,33 @@ pub struct Terminal {
     pub title_max_chars: usize,
 }
 
+/// The length of the leading bytes below 0x80, eight at a time.
+fn ascii_prefix(bytes: &[u8]) -> usize {
+    let mut length = 0;
+    while let Some(word) = bytes.get(length..length + 8) {
+        let word = u64::from_le_bytes(word.try_into().expect("eight bytes"));
+        let high = word & 0x8080_8080_8080_8080;
+        if high != 0 {
+            return length + (high.trailing_zeros() / 8) as usize;
+        }
+        length += 8;
+    }
+    length + bytes[length..].iter().take_while(|byte| byte.is_ascii()).count()
+}
+
+/// The length of the leading single-column cells, checked eight at a time without an
+/// early exit inside each group so the check needs no per-cell branch.
+fn single_width_prefix(cells: &[Cell]) -> usize {
+    let mut length = 0;
+    for group in cells.as_chunks::<8>().0 {
+        if !group.iter().fold(true, |all, cell| all & (cell.width() == 1)) {
+            break;
+        }
+        length += 8;
+    }
+    length + cells[length..].iter().take_while(|cell| cell.width() == 1).count()
+}
+
 impl Terminal {
     pub fn validate_size(cols: usize, rows: usize) -> Result<(), &'static str> {
         if cols == 0
@@ -363,6 +390,12 @@ impl Terminal {
                     self.grapheme_target = None;
                     self.csi(csi, &mut emit);
                 }
+            }
+            // Outside synchronized output a control is applied at once, as `dispatch`
+            // would, without the general action path.
+            Input::Action(Action::Control(byte)) if self.sync_deadline.is_none() => {
+                self.grapheme_target = None;
+                self.control(byte, &mut emit);
             }
             Input::Action(action) => self.dispatch(action, now_ms, &mut emit),
         });
@@ -510,35 +543,40 @@ impl Terminal {
             self.apply(action, emit);
         }
     }
+    /// A C0 control, as `apply(Action::Control(byte))` performs it after clearing the
+    /// grapheme target.
+    fn control(&mut self, byte: u8, emit: &mut impl FnMut(Event)) {
+        match byte {
+            7 => emit(Event::Bell),
+            8 => {
+                let cursor = &mut self.screen_mut().cursor;
+                cursor.position.col = cursor.position.col.saturating_sub(1);
+                cursor.pending_wrap = false;
+            }
+            9 => self.tab(1, false),
+            10..=12 => {
+                self.linefeed(emit);
+                if self.modes.newline {
+                    self.screen_mut().cursor.position.col = 0;
+                }
+            }
+            13 => {
+                let cursor = &mut self.screen_mut().cursor;
+                cursor.position.col = 0;
+                cursor.pending_wrap = false;
+            }
+            14 => self.charset = 1,
+            15 => self.charset = 0,
+            _ => {}
+        }
+    }
     fn apply(&mut self, action: Action, emit: &mut impl FnMut(Event)) {
         if !matches!(&action, Action::Print(_)) {
             self.grapheme_target = None;
         }
         match action {
             Action::Print(ch) => self.print(ch, emit),
-            Action::Control(byte) => match byte {
-                7 => emit(Event::Bell),
-                8 => {
-                    let cursor = &mut self.screen_mut().cursor;
-                    cursor.position.col = cursor.position.col.saturating_sub(1);
-                    cursor.pending_wrap = false;
-                }
-                9 => self.tab(1, false),
-                10..=12 => {
-                    self.linefeed(emit);
-                    if self.modes.newline {
-                        self.screen_mut().cursor.position.col = 0;
-                    }
-                }
-                13 => {
-                    let cursor = &mut self.screen_mut().cursor;
-                    cursor.position.col = 0;
-                    cursor.pending_wrap = false;
-                }
-                14 => self.charset = 1,
-                15 => self.charset = 0,
-                _ => {}
-            },
+            Action::Control(byte) => self.control(byte, emit),
             Action::Escape {
                 intermediates,
                 final_byte,
@@ -678,20 +716,16 @@ impl Terminal {
         let pos = cursor.position;
         if self.plain_ascii_run_start(text) {
             let span = (cols - pos.col).min(text.len());
-            let ascii = text.as_bytes()[..span]
-                .iter()
-                .take_while(|byte| (0x20..=0x7e).contains(*byte))
-                .count();
+            // A text run holds printable ASCII and whole multi-byte scalars only, so its
+            // ASCII prefix ends at the first byte with the high bit set.
+            let ascii = ascii_prefix(&text.as_bytes()[..span]);
             if ascii > 0 {
                 let line = &self.screen().rows[pos.row];
                 // Cells past the blank certificate are single-column blanks already.
                 let count = if pos.col >= line.blank_from() {
                     ascii
                 } else {
-                    line.cells[pos.col..pos.col + ascii]
-                        .iter()
-                        .take_while(|cell| cell.width() == 1)
-                        .count()
+                    single_width_prefix(&line.cells[pos.col..pos.col + ascii])
                 };
                 if count > 0 {
                     let packed = template.packed_written_column();
@@ -2613,6 +2647,23 @@ mod tests {
         let mut term = Terminal::new(12, 2, 0).unwrap();
         feed(&mut term, b"\x1b[41m\x1b[1;5H\x1b[K\x1b[0m\x1b[?1049h\x1b[?1049l\x1b[2J");
         assert_eq!(term.main.rows[0].cells, fresh.main.rows[0].cells);
+    }
+    #[test]
+    fn word_prefixes_match_their_one_at_a_time_forms() {
+        // Every length up to three words, with the stopping element at every position.
+        for length in 0..=24usize {
+            for stop in 0..=length {
+                let mut bytes = vec![b'a'; length];
+                if stop < length { bytes[stop] = 0xe4; }
+                assert_eq!(ascii_prefix(&bytes), bytes.iter().take_while(|b| b.is_ascii()).count());
+                let mut wide = Terminal::new(2, 1, 0).unwrap();
+                feed(&mut wide, "中".as_bytes());
+                let mut cells = vec![Cell::default(); length];
+                if stop < length { cells[stop] = wide.main.rows[0].cells[(stop % 2).min(1)].clone(); }
+                assert_eq!(single_width_prefix(&cells), cells.iter().take_while(|c| c.width() == 1).count(),
+                           "length {length} stop {stop}");
+            }
+        }
     }
     #[test]
     fn ascii_runs_scan_cells_when_the_blank_certificate_is_stale() {

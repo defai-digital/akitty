@@ -205,6 +205,13 @@ impl Parser {
                 if index == input.len() {
                     break;
                 }
+                // A C0 control other than the cancels and ESC is the byte machine's
+                // Text-state control action; skip its general dispatch.
+                if input[index] < 0x20 && !matches!(input[index], 0x18 | 0x1a | 0x1b) {
+                    emit(Input::Action(Action::Control(input[index])));
+                    index += 1;
+                    continue;
+                }
                 // ESC [ with the whole introducer in this chunk: the byte machine would
                 // begin a CSI; collect its ordinary body here instead.
                 if input[index] == 0x1b && input.get(index + 1) == Some(&b'[') {
@@ -528,6 +535,37 @@ fn all_printable_ascii(word: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn control_fast_path_matches_the_byte_machine() {
+        // Every C0 byte after text, after an incomplete UTF-8 lead and in a sequence,
+        // through `feed_runs` and through the byte machine alone.
+        for byte in 0x00..0x20u8 {
+            for lead in [&b"ab"[..], b"\xe4", b"\x1b[1", b"\x1b]2;t", b""] {
+                let mut fast = Parser::default();
+                let mut slow = Parser::default();
+                let mut fast_actions = Vec::new();
+                let mut slow_actions = Vec::new();
+                fn collect(actions: &mut Vec<Action>) -> impl FnMut(Input<'_>) + '_ {
+                    move |input| match input {
+                        Input::Text(text) => actions.extend(text.chars().map(Action::Print)),
+                        Input::Csi(csi) => actions.push(Action::Csi(csi.clone())),
+                        Input::Action(action) => actions.push(action),
+                    }
+                }
+                let mut input = lead.to_vec();
+                input.extend_from_slice(&[byte, b'z']);
+                fast.feed_runs(&input, collect(&mut fast_actions));
+                let mut emit = collect(&mut slow_actions);
+                for &b in &input {
+                    slow.byte(b, &mut emit);
+                }
+                drop(emit);
+                assert_eq!(fast_actions, slow_actions, "{byte:#04x} after {lead:?}");
+                assert_eq!(format!("{:?}", (&fast.state, fast.utf8_len, &fast.params)),
+                           format!("{:?}", (&slow.state, slow.utf8_len, &slow.params)));
+            }
+        }
+    }
     #[test]
     fn csi_fast_path_matches_the_byte_machine() {
         // Feeding one byte per call never sees an introducer whole, so it takes the

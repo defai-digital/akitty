@@ -45,6 +45,77 @@ impl Charge {
     }
 }
 
+type Spare = Option<(Vec<Cell>, usize, Color, bool)>;
+
+/// A new blank row, reusing the spare cells when they have the screen's width.
+fn build_blank(spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color) -> Row {
+    let id = *next_row_id;
+    *next_row_id = next_row_id.wrapping_add(1);
+    let cells = match spare.take() {
+        Some((mut cells, modified_end, bg, heap)) if cells.len() == cols => {
+            let end = if bg == background { modified_end } else { cells.len() };
+            refill_blank(&mut cells[..end], heap, background);
+            cells
+        }
+        _ => vec![Cell::blank(background); cols],
+    };
+    Row {
+        id,
+        cells,
+        wrapped: false,
+        wrap_padding: false,
+        generation: 0,
+        history_cost: 0,
+        blank_gen: 0,
+        blank_bg: background,
+        modified_end: 0,
+        modified_gen: 0,
+        has_heap: Cell::blank_owns_heap(background),
+        charge: if Cell::blank_owns_heap(background) { None } else { Some(Charge::fresh()) },
+    }
+}
+
+/// Turn `row` into the blank row that `Screen::recycle(row)` followed by
+/// `Screen::blank(background)` would produce, in place, so its cells and metadata are
+/// not moved through the spare slot.
+fn reblank(row: &mut Row, spare: &mut Spare, next_row_id: &mut u64, cols: usize, background: Color) {
+    if row.cells.len() != cols {
+        // `recycle` keeps no cells of another width, so `blank` uses the spare.
+        *row = build_blank(spare, next_row_id, cols, background);
+        return;
+    }
+    let end = if row.blank_bg == background { row.blank_from() } else { row.cells.len() };
+    refill_blank(&mut row.cells[..end], row.has_heap, background);
+    // `recycle` would have replaced the spare and `blank` taken it.
+    *spare = None;
+    row.id = *next_row_id;
+    *next_row_id = next_row_id.wrapping_add(1);
+    row.wrapped = false;
+    row.wrap_padding = false;
+    row.generation = 0;
+    row.history_cost = 0;
+    row.blank_gen = 0;
+    row.blank_bg = background;
+    row.modified_end = 0;
+    row.modified_gen = 0;
+    row.has_heap = Cell::blank_owns_heap(background);
+    row.charge = if row.has_heap { None } else { Some(Charge::fresh()) };
+}
+
+/// Fill recycled cells with blanks of `background`. `heap` says whether any of them
+/// may own a side record; when neither they nor the blank do, the fill is plain stores.
+fn refill_blank(cells: &mut [Cell], heap: bool, background: Color) {
+    let blank = Cell::blank(background);
+    match blank.packed_word() {
+        Some(packed) if !heap => {
+            for cell in cells {
+                cell.store_heap_free(Cell::from_packed(blank.ch, packed));
+            }
+        }
+        _ => cells.fill(blank),
+    }
+}
+
 /// Whether `tabs` holds the default stop every eight columns and no other.
 fn default_tabs(tabs: &[bool]) -> bool {
     tabs.iter().enumerate().all(|(col, &stop)| stop == (col != 0 && col % 8 == 0))
@@ -320,7 +391,7 @@ pub struct Screen {
     next_row_id: u64,
     /// Recycled cells, the bound past which they are still blanks of the colour, and
     /// whether any of them may own heap.
-    spare: Option<(Vec<Cell>, usize, Color, bool)>,
+    spare: Spare,
 }
 
 impl Screen {
@@ -350,39 +421,7 @@ impl Screen {
     }
 
     pub fn blank(&mut self, background: Color) -> Row {
-        let id = self.next_row_id;
-        self.next_row_id = self.next_row_id.wrapping_add(1);
-        let cells = match self.spare.take() {
-            Some((mut cells, modified_end, bg, heap)) if cells.len() == self.cols => {
-                let end = if bg == background { modified_end } else { cells.len() };
-                let blank = Cell::blank(background);
-                match blank.packed_word() {
-                    // Neither the old cells nor the blank own heap: a plain store fill.
-                    Some(packed) if !heap => {
-                        for cell in &mut cells[..end] {
-                            cell.store_heap_free(Cell::from_packed(blank.ch, packed));
-                        }
-                    }
-                    _ => cells[..end].fill(blank),
-                }
-                cells
-            }
-            _ => vec![Cell::blank(background); self.cols],
-        };
-        Row {
-            id,
-            cells,
-            wrapped: false,
-            wrap_padding: false,
-            generation: 0,
-            history_cost: 0,
-            blank_gen: 0,
-            blank_bg: background,
-            modified_end: 0,
-            modified_gen: 0,
-            has_heap: Cell::blank_owns_heap(background),
-            charge: if Cell::blank_owns_heap(background) { None } else { Some(Charge::fresh()) },
-        }
+        build_blank(&mut self.spare, &mut self.next_row_id, self.cols, background)
     }
 
     /// Blank this screen in place, keeping its allocations. Row ids keep advancing from the
@@ -450,6 +489,9 @@ impl Screen {
         self.offset = self.offset.min(self.history.len());
     }
 
+    fn reblank(&mut self, row: &mut Row, background: Color) {
+        reblank(row, &mut self.spare, &mut self.next_row_id, self.cols, background);
+    }
     fn recycle(&mut self, row: Row) {
         if row.cells.len() == self.cols {
             let end = if row.modified_gen == row.generation { row.modified_end } else { row.cells.len() };
@@ -521,13 +563,29 @@ impl Screen {
         let count = lines.unsigned_abs().min((region.end - region.start) as u32) as usize;
         for _ in 0..count {
             if lines > 0 {
-                let removed = self.rows.remove(region.start).expect("validated scroll region");
-                if history && region.start == 0 {
-                    self.remember(removed);
-                } else {
-                    self.recycle(removed);
+                let remember = history && region.start == 0 && self.history_limit != 0;
+                if !remember && region.start == 0 && region.end == self.rows.len() {
+                    // The whole screen: rotate the top row to the bottom and blank it
+                    // where it lands, instead of removing and inserting a row.
+                    // At exactly its length the deque rotates by moving its head alone;
+                    // with spare capacity each rotation would copy a row.
+                    if self.rows.capacity() != self.rows.len() {
+                        self.rows.shrink_to_fit();
+                    }
+                    self.rows.rotate_left(1);
+                    let last = self.rows.back_mut().expect("validated scroll region");
+                    reblank(last, &mut self.spare, &mut self.next_row_id, self.cols, bg);
+                    continue;
                 }
-                let blank = self.blank(bg);
+                let removed = self.rows.remove(region.start).expect("validated scroll region");
+                let blank = if remember {
+                    self.remember(removed);
+                    self.blank(bg)
+                } else {
+                    let mut removed = removed;
+                    self.reblank(&mut removed, bg);
+                    removed
+                };
                 // A region ending at the bottom row appends; `insert` would take the
                 // general wrap-aware move path for what is a push.
                 if region.end == self.rows.len() + 1 {
@@ -536,9 +594,8 @@ impl Screen {
                     self.rows.insert(region.end - 1, blank);
                 }
             } else {
-                let removed = self.rows.remove(region.end - 1).expect("validated scroll region");
-                self.recycle(removed);
-                let blank = self.blank(bg);
+                let mut blank = self.rows.remove(region.end - 1).expect("validated scroll region");
+                self.reblank(&mut blank, bg);
                 self.rows.insert(region.start, blank);
             }
         }

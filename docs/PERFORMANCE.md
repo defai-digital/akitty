@@ -1024,3 +1024,43 @@ Unicode and long lines were unchanged. Final viewport, cursor and screen state
 agree with libghostty-vt. These rates exclude snapshots and rendering and make no
 Ghostty parity claim.
 
+## Fewer passes per written line
+
+Synthetic engine workloads split the remaining ASCII cost: rewriting one row with
+carriage returns cost 1.19 ns per byte, and each line feed that scrolls about
+17 ns. The row writer passed over each character three times: re-checking that
+bytes the parser had already validated were printable, scanning the old cells'
+widths with an early exit per cell, then storing.
+
+1. A text run holds printable ASCII and whole multi-byte scalars only, so its ASCII
+   prefix is found eight bytes at a time from the high bits.
+2. The old-cell width check tests groups of eight cells without a per-cell branch.
+3. A scroll of the whole screen that recycles its top row rotates the row deque and
+   blanks the row where it lands. The deque is first trimmed to its length, so a
+   rotation moves its head instead of copying a row; other scrolls blank the removed
+   row in place rather than passing its cells through the spare slot.
+4. A C0 control in text, other than the cancels and ESC, is emitted directly by the
+   parser and applied directly outside synchronized output.
+
+Rewriting a row now costs 0.81 ns per byte. Tests compare both prefix helpers with
+their one-at-a-time forms at every stopping position, every C0 byte through the
+fast path with the byte machine after text, a partial UTF-8 lead and inside
+sequences, and the existing scroll-region and scalar-path tests cover the row
+rotation. Mutation checks confirm each is caught.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/write-passes-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 579.2 | 758.5 | 1.31x | 1273.7 | 2.21x → 1.70x |
+| ANSI | 285.1 | 327.6 | 1.15x | 272.5 | 0.95x → 0.82x |
+| Unicode | 127.7 | 130.2 | 1.02x | 194.0 | 1.57x → 1.48x |
+| Long lines | 343.8 | 377.1 | 1.10x | 494.4 | 1.44x → 1.32x |
+| Alternate screen | 166.5 | 166.6 | 1.00x | 174.2 | 1.07x → 1.02x |
+| Synchronized screen | 463.5 | 561.7 | 1.21x | 903.3 | 1.93x → 1.57x |
+
+A vectorizable fill of recycled rows through a word image of the blank cell was
+also measured. It showed no gain and was not adopted, since it needed `unsafe`.
+Final viewport, cursor and screen state agree with libghostty-vt. These rates
+exclude snapshots and rendering and make no Ghostty parity claim.
+
