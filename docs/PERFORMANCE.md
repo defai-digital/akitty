@@ -1787,3 +1787,16 @@ the host was noisy during the libghostty-vt run:
 | Long lines | 893.9 | 896.9 | 1.00x | 488.1 | 0.55x |
 | ANSI | 327.4 | 324.7 | 0.99x | 265.3 | 0.82x |
 | Alternate screen | 173.7 | 174.0 | 1.00x | 165.3 | 0.95x |
+
+## Rejected: a parser loop for scalars without constrained continuations
+
+Two- and three-byte scalars whose lead is not 0xe0 or 0xed (Latin, Greek,
+Cyrillic, most CJK, kana and Hangul) are valid exactly when their continuation
+bytes have the top bits `10`, so a loop can take consecutive ones without the
+general check. After each multi-byte scalar, it cut the parse-and-write cost per
+character of CJK-only lines from 6.06 to 5.06 ns and of `é` lines from 5.18 to
+4.45 ns. However, CJK separated by spaces rose from 4.73 to 5.11 ns. The Unicode
+workload, whose CJK comes in short groups, measured 0.99x, as did ASCII and
+synchronized output. Using the same check in place of the general one at every
+scalar was worse everywhere: Unicode 0.94x, ASCII 0.96x, synchronized output
+0.95x. Neither was kept.
