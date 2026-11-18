@@ -1217,6 +1217,22 @@ impl Terminal {
         };
         self.goto(row, if cr { 0 } else { pos.col }, false);
     }
+    /// Erase whole rows to blanks of the current background. A row that already holds
+    /// only such blanks, with no wrap state, would come out identical: it is left as it
+    /// is, generation included, so a snapshot does not resend it.
+    fn erase_rows(&mut self, rows: Range<usize>) {
+        let bg = self.style.bg;
+        for row in self.screen_mut().rows.range_mut(rows) {
+            if row.is_blank(bg) && !row.wrapped && !row.wrap_padding {
+                continue;
+            }
+            row.reset_cells(bg);
+            row.generation = row.generation.wrapping_add(1);
+            row.mark_blank(bg);
+            row.wrapped = false;
+            row.wrap_padding = false;
+        }
+    }
     fn erase(&mut self, row: usize, range: Range<usize>) {
         let cols = self.cols();
         let bg = self.style.bg;
@@ -1224,10 +1240,8 @@ impl Terminal {
         let end = range.end.min(cols);
         if start < end {
             if start == 0 && end == cols {
-                let row = &mut self.screen_mut().rows[row];
-                row.reset_cells(bg);
-                row.generation = row.generation.wrapping_add(1);
-                row.mark_blank(bg);
+                self.erase_rows(row..row + 1);
+                return;
             } else {
                 self.clear_wide_at(row, start, bg);
                 if end < cols && self.screen().rows[row].cells[end].width() == 0 {
@@ -1250,14 +1264,10 @@ impl Terminal {
         match mode {
             0 => {
                 self.erase(pos.row, pos.col..cols);
-                for row in pos.row + 1..rows {
-                    self.erase(row, 0..cols);
-                }
+                self.erase_rows(pos.row + 1..rows);
             }
             1 => {
-                for row in 0..pos.row {
-                    self.erase(row, 0..cols);
-                }
+                self.erase_rows(0..pos.row);
                 self.erase(pos.row, 0..pos.col + 1);
             }
             2 => {
@@ -1274,9 +1284,7 @@ impl Terminal {
                         .map_or(0, |i| i + 1);
                     self.scroll(0..rows, used as i32, true, emit);
                 }
-                for row in 0..rows {
-                    self.erase(row, 0..cols);
-                }
+                self.erase_rows(0..rows);
             }
             3 => {
                 self.screen_mut().clear_history();
@@ -2491,6 +2499,64 @@ mod tests {
             assert_eq!(actual, expected);
             assert_eq!(state(&fast), state(&scalar));
         }
+    }
+    #[test]
+    fn entering_the_alternate_screen_restores_default_tab_stops() {
+        // Stops cleared or added on the alternate screen do not survive its next clear.
+        let defaults = Terminal::new(20, 2, 0).unwrap().alternate.tabs.clone();
+        for edit in ["\x1b[3g", "\x1b[1;3H\x1bH", "\x1b[1;9H\x1b[g"] {
+            let mut term = Terminal::new(20, 2, 0).unwrap();
+            feed(&mut term, format!("\x1b[?1049h{edit}\x1b[?1049l").as_bytes());
+            assert_ne!(term.alternate.tabs, defaults, "{edit:?} changed a stop");
+            feed(&mut term, b"\x1b[?1049h");
+            assert_eq!(term.alternate.tabs, defaults, "{edit:?}");
+        }
+    }
+    #[test]
+    fn erasing_rows_that_are_already_blank_keeps_their_generation() {
+        // ED and EL over rows that would come out identical leave them untouched, so a
+        // snapshot does not resend them; rows with content or wrap state still change.
+        // Each case names the rows it erases whole; a partial erase still edits cells.
+        let cases: [(&str, &[usize]); 4] = [
+            ("\x1b[2J", &[0, 1, 2]),
+            ("\x1b[1;1H\x1b[J", &[0, 1, 2]),
+            ("\x1b[3;1H\x1b[1J", &[0, 1]),
+            ("\x1b[2;1H\x1b[2K", &[1]),
+        ];
+        for (erase, whole) in cases {
+            let mut term = Terminal::new(6, 3, 0).unwrap();
+            // Row 0 wraps into row 1 and row 2 holds text, so the first erase changes them.
+            feed(&mut term, b"abcdefgh\x1b[3;1Hz");
+            let written: Vec<u64> = term.main.rows.iter().map(|row| row.generation).collect();
+            feed(&mut term, erase.as_bytes());
+            let erased: Vec<u64> = term.main.rows.iter().map(|row| row.generation).collect();
+            feed(&mut term, erase.as_bytes());
+            let again: Vec<u64> = term.main.rows.iter().map(|row| row.generation).collect();
+            for &row in whole {
+                assert_ne!(erased[row], written[row], "{erase:?} row {row} had content");
+                assert_eq!(again[row], erased[row], "{erase:?} row {row} was already blank");
+            }
+        }
+        // A row of blanks that still carries wrap state is cleared of it. Input cannot
+        // produce one today (full-width erases clear the flags), so set it directly.
+        let mut term = Terminal::new(4, 2, 0).unwrap();
+        term.main.rows[0].wrapped = true;
+        let generation = term.main.rows[0].generation;
+        feed(&mut term, b"\x1b[2K");
+        assert!(!term.main.rows[0].wrapped);
+        assert_ne!(term.main.rows[0].generation, generation);
+    }
+    #[test]
+    fn full_erases_after_a_coloured_partial_erase_restore_default_blanks() {
+        // The skip for rows already certified blank must not hide a partial erase in
+        // another colour, through ED/EL or the alternate screen's clear.
+        let mut term = Terminal::new(12, 2, 0).unwrap();
+        feed(&mut term, b"\x1b[41m\x1b[1;5H\x1b[K\x1b[0m\x1b[2K");
+        let fresh = Terminal::new(12, 2, 0).unwrap();
+        assert_eq!(term.main.rows[0].cells, fresh.main.rows[0].cells);
+        let mut term = Terminal::new(12, 2, 0).unwrap();
+        feed(&mut term, b"\x1b[41m\x1b[1;5H\x1b[K\x1b[0m\x1b[?1049h\x1b[?1049l\x1b[2J");
+        assert_eq!(term.main.rows[0].cells, fresh.main.rows[0].cells);
     }
     #[test]
     fn ascii_runs_scan_cells_when_the_blank_certificate_is_stale() {

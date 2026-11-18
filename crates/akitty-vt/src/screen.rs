@@ -45,6 +45,11 @@ impl Charge {
     }
 }
 
+/// Whether `tabs` holds the default stop every eight columns and no other.
+fn default_tabs(tabs: &[bool]) -> bool {
+    tabs.iter().enumerate().all(|(col, &stop)| stop == (col != 0 && col % 8 == 0))
+}
+
 #[derive(Clone, Debug)]
 pub struct Row {
     pub id: u64,
@@ -263,7 +268,16 @@ impl Row {
     }
     /// Fill a column range with blanks, allocating one shared record for the range.
     pub(crate) fn fill_blank(&mut self, range: std::ops::Range<usize>, bg: Color) {
-        self.cells[range.clone()].fill(Cell::blank(bg));
+        let blank = Cell::blank(bg);
+        match blank.packed_word() {
+            // Neither the old cells nor the blank own heap: a plain store fill.
+            Some(packed) if !self.has_heap => {
+                for cell in &mut self.cells[range] {
+                    cell.store_heap_free(Cell::from_packed(blank.ch, packed));
+                }
+            }
+            _ => self.cells[range].fill(blank),
+        }
         self.has_heap |= Cell::blank_owns_heap(bg);
         self.charge = None;
     }
@@ -381,15 +395,16 @@ impl Screen {
         for row in &mut self.rows {
             row.id = next_id;
             next_id = next_id.wrapping_add(1);
-            if row.cells.len() == cols {
-                row.reset_cells(Color::Background);
-            } else {
+            if row.cells.len() != cols {
                 row.cells = vec![Cell::blank(Color::Background); cols];
+                row.charge_blank(Color::Background);
+            } else if !row.is_blank(Color::Background) {
+                // A row still certified blank has its blank cells and charge already.
+                row.reset_cells(Color::Background);
             }
             row.wrapped = false;
             row.wrap_padding = false;
             row.generation = row.generation.wrapping_add(1);
-            row.charge_blank(Color::Background);
             row.mark_blank(Color::Background);
             row.history_cost = 0;
         }
@@ -403,8 +418,10 @@ impl Screen {
         self.keyboard_stack.clear();
         self.keyboard_flags = 0;
         self.region = 0..rows;
-        self.tabs.clear();
-        self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
+        if self.tabs.len() != cols || !default_tabs(&self.tabs) {
+            self.tabs.clear();
+            self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
+        }
     }
 
     /// Negative indices address history, with -1 immediately before screen row 0.

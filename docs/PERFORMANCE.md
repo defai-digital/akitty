@@ -947,3 +947,40 @@ Engine results, rotated order, history 0, 7 passes against the previous commit a
 Final viewport, cursor and screen state agree with libghostty-vt on every workload.
 These rates exclude snapshots and rendering and make no Ghostty parity claim.
 
+## Erasing rows that are already blank
+
+The alternate-screen workload enters the alternate screen, erases it with ED 2,
+writes two rows and leaves, so nearly every row it erases is already blank. A
+profile put most of its time in `Screen::clear`, the per-row `erase` calls and the
+cell fills they ran.
+
+Ghostty's `clearRows` under `.internal/reference` resets only a row's metadata when
+the row is already blank and keeps its dirty state. AkiTTY's rows carry a blank
+certificate (the generation at which they were last fully blanked, and the colour),
+so the same idea applies to its own structures:
+
+1. A full-row erase of a row certified blank in the current background, with no
+   wrap state, leaves the row untouched, generation included. The host compares
+   row identity and generation to decide what a snapshot resends, so such rows are
+   no longer resent either.
+2. ED erases whole rows in one pass over the screen instead of one call per row.
+3. Clearing the alternate screen on entry skips the cell reset for rows that are
+   already blank, sets the blank charge once, and rebuilds tab stops only when
+   they differ from the defaults.
+4. Blank fills on heap-free rows use the destructor-free store from the ASCII path.
+
+Tests check that repeated erases keep the generation of rows they erase whole,
+that rows with content or wrap state still change, that a coloured partial erase
+is not hidden by a later full erase, and that tab stops changed on the alternate
+screen are reset on its next entry. Mutation checks confirm each one is caught.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/blank-erase-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Alternate screen | 73.8 | 131.7 | 1.78x | 169.1 | 2.27x → 1.29x |
+
+The other five workloads were unchanged within noise. Final viewport, cursor and
+screen state agree with libghostty-vt. These rates exclude snapshots and rendering
+and make no Ghostty parity claim.
+
