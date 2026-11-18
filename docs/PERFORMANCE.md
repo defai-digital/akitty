@@ -1371,3 +1371,37 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/asc
 | Unicode | 150.7 | 147.8 | 0.98x |
 | Long lines | 782.6 | 783.9 | 1.00x |
 | Alternate screen | 175.0 | 174.3 | 1.00x |
+
+## Exact printable prefixes where a run opens
+
+Where a text run opens, the parser skipped whole eight-byte words of printable ASCII
+and left the bytes before the first control or escape to its byte loop, up to seven
+per line. The word test's mask already marks that byte: a borrow starts only at a
+byte below 0x20 or at a 0x7f and only reaches the bytes above it, so the lowest
+flagged byte is exactly the first one that is not printable ASCII. The scan where a
+run opens now returns that exact length. The scan after a multi-byte scalar keeps
+whole words: there the ASCII stretches are short, and the exact form measured about
+3% slower on the Unicode and ANSI workloads.
+
+The word test now asserts that the lowest flagged byte equals the first
+non-printable byte for every byte value in every lane, boundary pairs and random
+words, and a new test checks the prefix length for every edge byte at every
+position. Mutation checks confirm the wrong end of the mask, an off-by-one, a wrong
+space bound and a dropped 0x7f test are caught.
+
+A per-line split against libghostty-vt shows where ASCII time remains: about 9 ns of
+fixed cost per text run and carriage return (two-character lines: 19.6 against
+10.5 ns), and 0.37 against 0.26 ns per character. Checking the overwritten cells'
+widths while storing, instead of in a vector pass before, measured slower and was
+not kept.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/exact-prefix-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 1020.4 | 1078.1 | 1.06x | 1286.5 | 1.19x |
+| ANSI | 341.4 | 336.2 | 0.98x | 264.6 | 0.78x |
+| Unicode | 148.4 | 148.9 | 1.00x | 195.1 | 1.3x |
+| Long lines | 749.8 | 782.4 | 1.04x | 501.2 | 0.64x |
+| Synchronized screen | 743.9 | 754.3 | 1.01x | 878.0 | 1.19x |
+| Alternate screen | 173.1 | 178.4 | 1.03x | 173.8 | 0.98x |

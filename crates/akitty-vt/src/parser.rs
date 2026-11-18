@@ -179,11 +179,11 @@ impl Parser {
             if matches!(self.state, State::Text) && self.utf8_len == 0 {
                 let start = index;
                 let mut ascii = true;
-                // Whole eight-byte words of printable ASCII are skipped where a run
-                // opens and after each multi-byte scalar. The byte loop takes the rest,
-                // one inline test per ASCII byte, and a complete multi-byte scalar
+                // Printable ASCII is skipped a word at a time where a run opens and
+                // after each multi-byte scalar, up to the exact first other byte. The
+                // byte loop takes a short tail and the rest, and a complete multi-byte scalar
                 // extends the same run so hosts decode it once.
-                index += ascii_words(&input[index..]);
+                index += printable_words(&input[index..]);
                 while index < input.len() {
                     if (0x20..=0x7e).contains(&input[index]) {
                         index += 1;
@@ -193,7 +193,7 @@ impl Parser {
                         Some(width) => {
                             ascii = false;
                             index += width;
-                            index += ascii_words(&input[index..]);
+                            index += whole_printable_words(&input[index..]);
                         }
                         None => break,
                     }
@@ -525,12 +525,26 @@ impl Parser {
     }
 }
 
+/// The length of the printable-ASCII prefix of `input`, eight bytes at a time; a
+/// tail shorter than a word is left to the caller's byte loop.
+#[inline(always)]
+fn printable_words(input: &[u8]) -> usize {
+    let (words, _) = input.as_chunks::<8>();
+    for (index, word) in words.iter().enumerate() {
+        let flagged = non_printable(u64::from_le_bytes(*word));
+        if flagged != 0 {
+            return index * 8 + (flagged.trailing_zeros() / 8) as usize;
+        }
+    }
+    words.len() * 8
+}
+
 /// The length of the leading whole eight-byte words of printable ASCII in `input`.
 #[inline(always)]
-fn ascii_words(input: &[u8]) -> usize {
+fn whole_printable_words(input: &[u8]) -> usize {
     let mut length = 0;
     while let Some(word) = input.get(length..length + 8) {
-        if !all_printable_ascii(u64::from_le_bytes(word.try_into().expect("eight bytes"))) {
+        if non_printable(u64::from_le_bytes(word.try_into().expect("eight bytes"))) != 0 {
             break;
         }
         length += 8;
@@ -538,15 +552,23 @@ fn ascii_words(input: &[u8]) -> usize {
     length
 }
 
-/// Whether all eight bytes of `word` are printable ASCII (`0x20..=0x7e`). Each test is
-/// exact for "any byte": a byte below 0x20, a byte with the high bit set, or a 0x7f.
+/// The high bit of each byte of `word` that may not be printable ASCII (`0x20..=0x7e`).
+/// The lowest flagged byte is exactly the first one that is not: each test flags a byte
+/// below 0x20, a byte with the high bit set, or a 0x7f exactly, and a borrow only
+/// starts at a byte below 0x20 or at a 0x7f and only reaches the bytes above it.
 #[inline(always)]
-fn all_printable_ascii(word: u64) -> bool {
+fn non_printable(word: u64) -> u64 {
     const ONES: u64 = 0x0101_0101_0101_0101;
     const HIGH: u64 = 0x8080_8080_8080_8080;
     let below_space = word.wrapping_sub(ONES * 0x20) & !word & HIGH;
     let delete = (word ^ (ONES * 0x7f)).wrapping_sub(ONES) & !(word ^ (ONES * 0x7f)) & HIGH;
-    (below_space | delete | (word & HIGH)) == 0
+    below_space | delete | (word & HIGH)
+}
+
+/// Whether all eight bytes of `word` are printable ASCII.
+#[cfg(test)]
+fn all_printable_ascii(word: u64) -> bool {
+    non_printable(word) == 0
 }
 
 #[cfg(test)]
@@ -627,7 +649,12 @@ mod tests {
     }
     #[test]
     fn word_scan_matches_the_byte_test() {
-        let naive = |word: u64| word.to_le_bytes().iter().all(|byte| (0x20..=0x7e).contains(byte));
+        let naive = |word: u64| {
+            let first = word.to_le_bytes().iter().position(|byte| !(0x20..=0x7e).contains(byte));
+            let flagged = super::non_printable(word);
+            assert_eq!(first, (flagged != 0).then(|| (flagged.trailing_zeros() / 8) as usize), "{word:#x}");
+            first.is_none()
+        };
         // Every byte value in every lane, over printable and boundary fillers.
         for filler in [b'a', 0x20, 0x7e] {
             for lane in 0..8 {
@@ -659,6 +686,24 @@ mod tests {
             let word = state & 0x7f7f_7f7f_7f7f_7f7f | 0x2020_2020_2020_2020 & (state >> 1);
             assert_eq!(super::all_printable_ascii(word), naive(word));
             assert_eq!(super::all_printable_ascii(state), naive(state));
+        }
+    }
+    #[test]
+    fn printable_words_stop_at_the_first_other_byte() {
+        let edges = [0x00, 0x0d, 0x1b, 0x1f, 0x7f, 0x80, 0xe4, 0xff];
+        for length in 0..40 {
+            for at in 0..=length {
+                for &edge in &edges {
+                    let mut bytes = vec![b'q'; length];
+                    if at < length {
+                        bytes[at] = edge;
+                    }
+                    let first = bytes.iter().position(|byte| !(0x20..=0x7e).contains(byte)).unwrap_or(length);
+                    let words = super::printable_words(&bytes);
+                    // Exact inside whole words; a shorter tail is left to the byte loop.
+                    assert_eq!(words, first.min(length / 8 * 8), "{length} {at} {edge:#x}");
+                }
+            }
         }
     }
     use super::*;
