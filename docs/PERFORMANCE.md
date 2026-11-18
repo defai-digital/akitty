@@ -1209,3 +1209,33 @@ charge, the grapheme reset, the character count and the control routing are caug
 | Unicode | 141.4 | 141.8 | 1.00x |
 | Long lines | 405.4 | 403.8 | 1.00x |
 
+## Returning long ASCII stretches to the packed path
+
+The long-lines workload wraps text that holds one wide glyph every 74 bytes. Once a
+run reached that glyph, the general cell writer took it and then every ASCII byte
+after it, one character at a time, until the run ended, so the packed ASCII path
+handled only the very first stretch of each run. After writing a non-ASCII
+character the cell writer now returns when the next 16 bytes are ASCII (one 128-bit
+test of their high bits); the caller's next run starts on the packed path. Plain
+ASCII never joins a non-ASCII character before it, so the handoff changes no
+grapheme decision. Shorter stretches stay, as switching would cost more than it
+saves. Placing the test after a non-ASCII write, instead of before each ASCII
+character, kept the per-script lines within noise of their previous cost.
+
+A test pins where the handoff happens and compares the resulting screens with the
+scalar path; mutation checks confirm the condition, the mask and the window length
+are caught. Enabling the test after ASCII characters as well is equivalent in
+practice: a cell-path ASCII character followed by 16 ASCII bytes can only arise
+after a non-ASCII character that already handed off.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/ascii-handoff-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Long lines | 406.4 | 737.3 | 1.81x | 498.3 | 1.21x → 0.67x |
+| ASCII | 920.6 | 944.1 | 1.03x | 1343.3 | 1.42x |
+| ANSI | 326.9 | 325.5 | 1.00x | 277.6 | 0.83x |
+| Unicode | 142.7 | 143.5 | 1.01x | 198.4 | 1.35x |
+| Alternate screen | 174.0 | 173.0 | 0.99x | 174.6 | 1.01x |
+| Synchronized screen | 593.0 | 607.3 | 1.02x | 906.2 | 1.49x |
+

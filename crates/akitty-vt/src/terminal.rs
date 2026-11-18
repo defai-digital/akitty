@@ -21,6 +21,8 @@ const SYNC_RETAINED_ENTRIES: usize = 1024;
 const SYNC_RETAINED_TEXT: usize = 64 * 1024;
 /// Deferred CSI records kept for reuse, so their parameter storage is not reallocated.
 const SYNC_SPARE_CSI: usize = 64;
+/// ASCII bytes after a non-ASCII character that send a run back to the packed path.
+const ASCII_HANDOFF: usize = 16;
 /// Parameter vectors kept for reuse between recycled CSI records.
 const SYNC_SPARE_PARAMS: usize = 256;
 
@@ -925,6 +927,16 @@ impl Terminal {
             previous = Some(ch);
             previous_class = carried;
             previous_simple = simple.is_some();
+            // After a non-ASCII character, a long ASCII stretch returns to the caller so
+            // the packed ASCII path writes it; a short one stays here, where switching
+            // would cost more than it saves. Plain ASCII never joins a non-ASCII
+            // character before it.
+            if !ch.is_ascii()
+                && let Some(&next) = text.as_bytes()[bytes..].first_chunk::<ASCII_HANDOFF>()
+                && u128::from_ne_bytes(next) & u128::from_ne_bytes([0x80; ASCII_HANDOFF]) == 0
+            {
+                break;
+            }
         }
         if bytes != 0 {
             let advance = col - pos.col;
@@ -3598,6 +3610,30 @@ mod tests {
                     assert_corpus_matches_scalar(cols, 3, 12, graphemes, &corpus, chunk);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn long_ascii_after_a_non_ascii_character_returns_to_the_packed_path() {
+        fn run(text: &str) -> usize {
+            let mut term = Terminal::new(80, 2, 0).unwrap();
+            term.enable_grapheme_support(true);
+            let template = term.style_template();
+            term.write_run(text, &template).bytes
+        }
+        let long = "a".repeat(ASCII_HANDOFF);
+        let short = "a".repeat(ASCII_HANDOFF - 1);
+        assert_eq!(run(&format!("中{long}")), 3, "the cell path stops before a long ASCII stretch");
+        assert_eq!(run(&format!("中{short}")), 3 + short.len(), "a short stretch stays");
+        assert_eq!(run(&format!("中{short}é{long}")), 3 + short.len() + 2);
+        // The packed path then writes the stretch whole, ending where the scalar path does.
+        for text in [format!("中{long}中{short}"), format!("é{long}{long}")] {
+            let mut fast = Terminal::new(40, 3, 0).unwrap();
+            let mut scalar = Terminal::new(40, 3, 0).unwrap();
+            for term in [&mut fast, &mut scalar] { term.enable_grapheme_support(true); }
+            feed(&mut fast, text.as_bytes());
+            feed_scalar(&mut scalar, text.as_bytes(), 0);
+            assert_eq!(state(&fast), state(&scalar), "{text:?}");
         }
     }
 
