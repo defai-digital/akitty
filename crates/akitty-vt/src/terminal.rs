@@ -244,6 +244,10 @@ pub struct Terminal {
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
     cluster_scratch: String,
+    /// The cell whose complete cluster text `cluster_scratch` holds: its position, row
+    /// id and row generation. Every cell write advances the generation and a recycled
+    /// row gets a new id, so a match means the text is still the cell's.
+    cluster_scratch_at: Option<(Position, u64, u64)>,
     /// The bounded set of remembered cluster analyses (see `ClusterAnalysis`), with the
     /// next slot to overwrite.
     cluster_cache: [Option<ClusterAnalysis>; CLUSTER_SLOTS],
@@ -342,6 +346,7 @@ impl Terminal {
             grapheme_supported: false,
             grapheme_target: None,
             cluster_scratch: String::new(),
+            cluster_scratch_at: None,
             cluster_cache: [None; CLUSTER_SLOTS],
             cluster_slot: 0,
             style_cache: [None, None, None, None],
@@ -1164,12 +1169,22 @@ impl Terminal {
         // String for every printed non-ASCII character. It is moved back out below and
         // restored on every early return.
         let mut cluster = std::mem::take(&mut self.cluster_scratch);
-        cluster.clear();
+        let remembered = self.cluster_scratch_at.take();
         {
-            let previous = &self.screen().rows[position.row].cells[position.col];
-            if previous.width() != 0 {
-                cluster.push(previous.ch);
-                cluster.extend(previous.combining());
+            let row = &self.screen().rows[position.row];
+            let previous = &row.cells[position.col];
+            if remembered == Some((position, row.id, row.generation)) {
+                debug_assert_eq!(
+                    cluster,
+                    if previous.width() != 0 { previous.text() } else { String::new() },
+                    "the remembered cluster is the cell's"
+                );
+            } else {
+                cluster.clear();
+                if previous.width() != 0 {
+                    cluster.push(previous.ch);
+                    cluster.extend(previous.combining());
+                }
             }
             cluster.push(ch);
         }
@@ -1226,6 +1241,7 @@ impl Terminal {
             row.record_write(position.col + width, 1);
             row.mark_heap();
             row.charge_unknown();
+            self.cluster_scratch_at = Some((position, row.id, row.generation));
             self.grapheme_target = Some(position);
             self.last_printed = Some(ch);
             return true;
@@ -1260,6 +1276,7 @@ impl Terminal {
         }
         row.mark_heap();
         row.charge_unknown();
+        self.cluster_scratch_at = Some((position, row.id, row.generation));
         let cols = self.cols();
         self.screen_mut().cursor = Cursor {
             position: Position {
@@ -2169,6 +2186,7 @@ impl Terminal {
     ) -> Result<(), &'static str> {
         Self::validate_size(cols, rows)?;
         self.grapheme_target = None;
+        self.cluster_scratch_at = None;
         if (cols, rows) == (self.cols(), self.rows()) {
             return Ok(());
         }

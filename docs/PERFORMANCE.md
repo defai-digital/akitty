@@ -1509,3 +1509,33 @@ Engine results, rotated order, history 0 ([raw record](../benchmarks/results/rec
 | Long lines | 881.4 | 898.6 | 1.02x | 464.2 | 0.52x |
 | Synchronized screen | 789.2 | 793.8 | 1.01x | 900.1 | 1.13x |
 | Alternate screen | 167.4 | 172.7 | 1.03x | 171.8 | 1.0x |
+
+## A cluster's text kept between its characters
+
+Each character that joins a cluster rebuilt the candidate text from the cell (lead,
+every mark so far, then the new character) before looking it up, so a family emoji
+rebuilt its text three times. The terminal now keeps the text of the cell it last
+joined into, with that cell's position, row id and row generation. The next join
+reuses it only while all three still match: every cell write advances the generation
+and a recycled row gets a new id. Resize is the exception, because reflow gives a
+rebuilt row its logical line's id while restarting the generation, so resize forgets
+the text. In debug builds every reuse is compared with a rebuilt text, and mutation
+checks confirm that a key without the generation, a key without the row id and a
+resize that keeps the text are caught.
+
+Two neighbouring ideas measured flat and were not kept: starting the cluster cache
+search at the slot after the last hit, and a dedicated loop for runs of simple
+non-ASCII characters (Unicode flat, ASCII and long lines 5% slower). A per-character
+split shows where simple non-ASCII text stands: an accented letter costs about 5.7
+against 1.1 ns in libghostty-vt, and CJK, Hangul and emoji about 2.7 times as much.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/kept-cluster-text-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unicode | 160.0 | 166.1 | 1.04x | 197.7 | 1.21x |
+| ASCII | 1091.1 | 1116.8 | 1.02x | 1340.4 | 1.19x |
+| ANSI | 320.3 | 314.9 | 0.98x | 270.0 | 0.84x |
+| Long lines | 864.9 | 906.0 | 1.05x | 498.9 | 0.56x |
+| Synchronized screen | 796.6 | 801.2 | 1.01x | 894.0 | 1.1x |
+| Alternate screen | 175.4 | 176.1 | 1.00x | 174.2 | 0.98x |

@@ -4,7 +4,7 @@
   "abi": 1,
   "rust": "1.99.1",
   "artifact": "akitty-vt.wasm",
-  "sha256": "731e0fbbb1243005e538fc99441aaa2ada01ef7270d49120f87e2f9985a561fb",
+  "sha256": "42ab2aa26657ea547220880c7389854428918455eb11f1364dd1630309187411",
   "inputs": {
     "Cargo.lock": "a583d64aa6b587d4714d8866736c275dd255105ba05a2eebcbe283e46c33a450",
     "Cargo.toml": "e3ad7bb51add8b351671eae764448490a58ee0b85ac69d5fb6faf082fab24744",
@@ -16,7 +16,7 @@
     "crates/akitty-vt/src/lib.rs": "601d4a2a73ba68db08cc3f6690e07c5ef029a70f00284b8eabaee188e27dac8c",
     "crates/akitty-vt/src/parser.rs": "c21d05d944b702066a43ecac8b8cfb0dce42894be9f2701724bef5bda8fb4343",
     "crates/akitty-vt/src/screen.rs": "e725cfef297e6bd5ca64dc904b5c1505615237104fbfb76ba18cfc331bfbb818",
-    "crates/akitty-vt/src/terminal.rs": "26bd416756c4d22c576be853de3235a283c447e748aaad8a89e2143164522276",
+    "crates/akitty-vt/src/terminal.rs": "2d8510c3c90a280a8acdf1aacba9da837da8409f638dd51859423e186d5f9e22",
     "crates/akitty-vt/src/wasm.rs": "2969d7a78c7b6eba11e7bb95d568107303e7ec721883033f9ac92e05d6c2fa96",
     "crates/akitty-vt/tests/contracts.rs": "7fdcdc4cda8408ee1ac5bf0ebcb2b9ece772a092668d632de38efee0b49037f0",
     "scripts/build-vt-wasm.sh": "c0c8a5b7f8d245819faae89a9bcb085ede3eff51eb944ad6c3f29f2c8c745665",
