@@ -984,3 +984,43 @@ The other five workloads were unchanged within noise. Final viewport, cursor and
 screen state agree with libghostty-vt. These rates exclude snapshots and rendering
 and make no Ghostty parity claim.
 
+## Reused synchronized-queue storage and a CSI body fast path
+
+Synchronized output still spent about a fifth of its time in the allocator: each
+queued text run owned a `String`, and each deferred CSI took the parser's parameter
+vectors, so the parser had to allocate new ones. CSI-heavy workloads also paid for
+the byte state machine on every parameter digit.
+
+1. The synchronized queue is boxed, so `Terminal` does not grow, and holds one
+   shared text buffer that queued runs index into. A deferred CSI is copied into a
+   recycled record with `clone_from` instead of being taken from the parser, and
+   up to 64 records are kept for reuse. Mode 2026 set and reset with a single
+   parameter are applied without taking the parser's storage. Every queued item
+   is charged exactly as before.
+2. When `ESC [` arrives whole in a chunk, the parser collects the CSI body in a
+   tight loop: a leading prefix, digits, `;` and the final byte, with the current
+   parameter's digits kept in a local. It applies exactly the byte machine's
+   transitions for those bytes. Any other byte, the parameter limit or the end of
+   the chunk stops it with the parser state the byte machine would have, and the
+   byte machine continues from there.
+
+Feeding one byte per call never sees an introducer whole, so it always takes the
+byte machine. A differential test feeds 20,000 random CSI-heavy streams whole, one
+byte at a time and split at a moving point, and compares actions and live parser
+state, including at and past the parameter limit. Mutation checks confirm it
+catches wrong digit arithmetic, a lost parameter, a missing parameter on a leading
+`;` and an incomplete reset after the final byte.
+
+Engine results, rotated order, history 0 ([raw record](../benchmarks/results/csi-fast-path-2026-11-18.json)):
+
+| Engine MiB/s | Before | After | Change | libghostty-vt | Ghostty / AkiTTY |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ANSI | 217.6 | 286.9 | 1.32x | 271.9 | 1.24x → 0.95x |
+| Synchronized screen | 297.4 | 456.3 | 1.53x | 903.5 | 3.01x → 1.93x |
+| Alternate screen | 133.2 | 164.0 | 1.23x | 177.5 | 1.29x → 1.07x |
+
+The queue change alone moved synchronized screen from 304 to 374 MiB/s. ASCII,
+Unicode and long lines were unchanged. Final viewport, cursor and screen state
+agree with libghostty-vt. These rates exclude snapshots and rendering and make no
+Ghostty parity claim.
+

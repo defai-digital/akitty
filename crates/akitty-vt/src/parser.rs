@@ -205,10 +205,75 @@ impl Parser {
                 if index == input.len() {
                     break;
                 }
+                // ESC [ with the whole introducer in this chunk: the byte machine would
+                // begin a CSI; collect its ordinary body here instead.
+                if input[index] == 0x1b && input.get(index + 1) == Some(&b'[') {
+                    self.begin(State::Csi);
+                    index = self.csi_body(input, index + 2, &mut emit);
+                    continue;
+                }
             }
             self.byte(input[index], &mut emit);
             index += 1;
         }
+    }
+
+    /// Collect a CSI body from `input[index..]` in the state the byte machine has right
+    /// after its introducer. Handles the bytes that sequence almost always holds (a
+    /// leading prefix, digits, `;` and the final byte) with the parameter's digits kept
+    /// in a local, and applies exactly the byte machine's transitions for them. Any
+    /// other byte, a parameter beyond the limit or the end of the chunk stops here with
+    /// the parser state the byte machine would have, and returns the index of the first
+    /// byte it has not consumed.
+    fn csi_body(&mut self, input: &[u8], mut index: usize, emit: &mut impl FnMut(Input<'_>)) -> usize {
+        if let Some(&prefix @ 0x3c..=0x3f) = input.get(index) {
+            self.prefix = Some(prefix);
+            index += 1;
+        }
+        // The value of the last parameter's (only) subparameter, while it has one.
+        let mut value: Option<u16> = None;
+        while let Some(&byte) = input.get(index) {
+            match byte {
+                b'0'..=b'9' => {
+                    if self.params.is_empty() {
+                        self.push_parameter();
+                    }
+                    value = Some(value.unwrap_or(0).saturating_mul(10).saturating_add(u16::from(byte - b'0')));
+                }
+                // At the limit the byte machine discards the sequence; it takes this `;`.
+                b';' if self.params.len() < MAX_PARAMETERS => {
+                    if let Some(last) = self.params.last_mut() {
+                        last[0] = value;
+                    } else {
+                        self.push_parameter();
+                    }
+                    self.push_parameter();
+                    value = None;
+                }
+                0x40..=0x7e => {
+                    if let Some(last) = self.params.last_mut() {
+                        last[0] = value;
+                    }
+                    let mut csi = Csi {
+                        prefix: self.prefix,
+                        params: std::mem::take(&mut self.params),
+                        intermediates: std::mem::take(&mut self.intermediates),
+                        final_byte: byte,
+                    };
+                    emit(Input::Csi(&mut csi));
+                    self.params = csi.params;
+                    self.intermediates = csi.intermediates;
+                    self.begin(State::Text);
+                    return index + 1;
+                }
+                _ => break,
+            }
+            index += 1;
+        }
+        if let Some(last) = self.params.last_mut() {
+            last[0] = value;
+        }
+        index
     }
 
     fn begin(&mut self, state: State) {
@@ -463,6 +528,45 @@ fn all_printable_ascii(word: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csi_fast_path_matches_the_byte_machine() {
+        // Feeding one byte per call never sees an introducer whole, so it takes the
+        // byte machine throughout. Whole and split feeds must produce the same actions
+        // and leave the same parser state, including at the parameter limit.
+        let alphabet: &[&[u8]] = &[
+            b"\x1b[", b"\x1b", b"[", b"?", b">", b"<", b"=", b"0", b"1", b"9", b"65535", b"70000",
+            b";", b";;", b":", b"m", b"H", b"J", b"h", b"l", b" ", b"!", b"\x7f", b"\x18", b"\x07",
+            b"\x1b]", b"\x9b", b"a", b"\xe4\xb8\xad", b"\r\n",
+        ];
+        let limit = format!("\x1b[{}m", "1;".repeat(MAX_PARAMETERS - 1));
+        let over = format!("\x1b[{}m", "1;".repeat(MAX_PARAMETERS));
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for round in 0..20_000 {
+            let mut bytes = Vec::new();
+            if round % 50 == 0 { bytes.extend_from_slice(limit.as_bytes()); }
+            if round % 50 == 1 { bytes.extend_from_slice(over.as_bytes()); }
+            for _ in 0..(round % 24) + 1 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                bytes.extend_from_slice(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            let run = |chunks: Vec<&[u8]>| {
+                let mut parser = Parser::default();
+                let mut actions = Vec::new();
+                for chunk in chunks {
+                    parser.feed(chunk, |action| actions.push(action));
+                }
+                // The UTF-8 scratch beyond its live length is not state.
+                let live = (&parser.state, &parser.intermediates, parser.prefix, &parser.params,
+                            &parser.payload, parser.discard, &parser.utf8[..parser.utf8_len],
+                            parser.string_utf8_remaining);
+                (actions, format!("{live:?}"))
+            };
+            let whole = run(vec![&bytes]);
+            assert_eq!(whole, run(bytes.chunks(1).collect()), "{:?}", String::from_utf8_lossy(&bytes));
+            let cut = round % (bytes.len() + 1);
+            assert_eq!(whole, run(vec![&bytes[..cut], &bytes[cut..]]));
+        }
+    }
     #[test]
     fn word_scan_matches_the_byte_test() {
         let naive = |word: u64| word.to_le_bytes().iter().all(|byte| (0x20..=0x7e).contains(byte));

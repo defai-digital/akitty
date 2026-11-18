@@ -16,15 +16,30 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub const MAX_CELLS: usize = 1_048_576;
 pub const SYNC_TIMEOUT_MS: u64 = 150;
 const MAX_SYNC_MEMORY: usize = 2 * 1024 * 1024;
-/// Queue entries kept between synchronized frames; a larger frame releases its storage.
+/// Queue storage kept between synchronized frames; a larger frame releases its own.
 const SYNC_RETAINED_ENTRIES: usize = 1024;
+const SYNC_RETAINED_TEXT: usize = 64 * 1024;
+/// Deferred CSI records kept for reuse, so their parameter storage is not reallocated.
+const SYNC_SPARE_CSI: usize = 64;
 
-/// One synchronized-output queue entry. Printable text stays a run so it replays
-/// through row writes when the update ends.
+/// One synchronized-output queue entry. Printable text stays a run (a range of the
+/// queue's text) so it replays through row writes when the update ends.
 #[derive(Debug)]
 enum Deferred {
-    Text(String),
+    Text(std::ops::Range<usize>),
+    Csi(Csi),
     Action(Action),
+}
+
+/// Synchronized output held until mode 2026 ends, a timeout or the memory bound.
+/// Boxed so the terminal's own layout does not grow with the queue's buffers.
+#[derive(Debug, Default)]
+struct SyncQueue {
+    entries: Vec<Deferred>,
+    text: String,
+    /// Bytes charged against `MAX_SYNC_MEMORY`, at the scalar-action rate.
+    bytes: usize,
+    spare_csi: Vec<Csi>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,8 +230,7 @@ pub struct Terminal {
     single_shift: Option<usize>,
     last_printed: Option<char>,
     sync_deadline: Option<u64>,
-    sync_actions: Vec<Deferred>,
-    sync_bytes: usize,
+    sync: Box<SyncQueue>,
     grapheme_supported: bool,
     grapheme_target: Option<Position>,
     cluster_scratch: String,
@@ -270,8 +284,7 @@ impl Terminal {
             single_shift: None,
             last_printed: None,
             sync_deadline: None,
-            sync_actions: Vec::new(),
-            sync_bytes: 0,
+            sync: Box::default(),
             grapheme_supported: false,
             grapheme_target: None,
             cluster_scratch: String::new(),
@@ -334,8 +347,18 @@ impl Terminal {
                 let sync_control = csi.prefix == Some(b'?') && csi.intermediates.is_empty()
                     && matches!(csi.final_byte, b'h' | b'l')
                     && csi.params.iter().any(|p| p.first() == Some(&Some(2026)));
-                if self.sync_deadline.is_some() || sync_control {
+                if sync_control && csi.params.len() == 1 {
+                    // Start (or re-arm) or end synchronized output, as `dispatch` does,
+                    // without taking the parser's parameter storage.
+                    if csi.final_byte == b'h' {
+                        self.sync_deadline = Some(now_ms.saturating_add(SYNC_TIMEOUT_MS));
+                    } else {
+                        self.flush_sync(&mut emit);
+                    }
+                } else if sync_control {
                     self.dispatch(Action::Csi(std::mem::take(csi)), now_ms, &mut emit);
+                } else if self.sync_deadline.is_some() {
+                    self.defer_csi(csi, &mut emit);
                 } else {
                     self.grapheme_target = None;
                     self.csi(csi, &mut emit);
@@ -363,20 +386,30 @@ impl Terminal {
     }
     fn flush_sync(&mut self, emit: &mut impl FnMut(Event)) {
         self.sync_deadline = None;
-        self.sync_bytes = 0;
+        self.sync.bytes = 0;
         // Deferred text replays as whole runs, so a synchronized frame takes the same
         // row writes as unsynchronized output instead of one dispatch per character.
-        let mut queue = std::mem::take(&mut self.sync_actions);
-        for entry in queue.drain(..) {
+        let mut entries = std::mem::take(&mut self.sync.entries);
+        let mut text = std::mem::take(&mut self.sync.text);
+        for entry in entries.drain(..) {
             match entry {
-                Deferred::Text(text) => self.print_run(&text, emit),
+                Deferred::Text(range) => self.print_run(&text[range], emit),
+                Deferred::Csi(csi) => {
+                    self.grapheme_target = None;
+                    self.csi(&csi, emit);
+                    if self.sync.spare_csi.len() < SYNC_SPARE_CSI {
+                        self.sync.spare_csi.push(csi);
+                    }
+                }
                 Deferred::Action(action) => self.apply(action, emit),
             }
         }
-        // Keep an ordinary frame's entry storage for the next update. A frame that
-        // grew toward the queue bound releases it instead of pinning it.
-        if queue.capacity() <= SYNC_RETAINED_ENTRIES {
-            self.sync_actions = queue;
+        // Keep an ordinary frame's storage for the next update. A frame that grew
+        // toward the queue bound releases it instead of pinning it.
+        text.clear();
+        if entries.capacity() <= SYNC_RETAINED_ENTRIES && text.capacity() <= SYNC_RETAINED_TEXT {
+            self.sync.entries = entries;
+            self.sync.text = text;
         }
     }
     /// Queue printable text during synchronized output. Each character is charged the
@@ -386,13 +419,35 @@ impl Terminal {
     /// line so the unsynchronized run writer in `print_text` stays small.
     #[inline(never)]
     fn defer_text(&mut self, text: &str, emit: &mut impl FnMut(Event)) {
-        match self.sync_actions.last_mut() {
-            Some(Deferred::Text(run)) => run.push_str(text),
-            _ => self.sync_actions.push(Deferred::Text(text.to_owned())),
+        let queue = &mut *self.sync;
+        let start = queue.text.len();
+        queue.text.push_str(text);
+        let end = queue.text.len();
+        match queue.entries.last_mut() {
+            Some(Deferred::Text(range)) if range.end == start => range.end = end,
+            _ => queue.entries.push(Deferred::Text(start..end)),
         }
         let chars = text.bytes().filter(|byte| byte & 0xc0 != 0x80).count();
-        self.sync_bytes += chars * std::mem::size_of::<Action>();
-        if self.sync_bytes >= MAX_SYNC_MEMORY {
+        queue.bytes += chars * std::mem::size_of::<Action>();
+        if queue.bytes >= MAX_SYNC_MEMORY {
+            self.flush_sync(emit);
+        }
+    }
+    /// Queue a CSI during synchronized output, charged exactly as `dispatch` charges an
+    /// `Action::Csi`. The parser keeps its parameter storage: the sequence is copied
+    /// into a recycled record instead of being taken.
+    #[inline(never)]
+    fn defer_csi(&mut self, csi: &Csi, emit: &mut impl FnMut(Event)) {
+        let queue = &mut *self.sync;
+        let mut owned = queue.spare_csi.pop().unwrap_or_default();
+        owned.prefix = csi.prefix;
+        owned.final_byte = csi.final_byte;
+        owned.intermediates.clone_from(&csi.intermediates);
+        owned.params.clone_from(&csi.params);
+        queue.bytes += std::mem::size_of::<Action>()
+            + csi.params.iter().map(|p| p.len() * std::mem::size_of::<Option<u16>>()).sum::<usize>();
+        queue.entries.push(Deferred::Csi(owned));
+        if queue.bytes >= MAX_SYNC_MEMORY {
             self.flush_sync(emit);
         }
     }
@@ -437,7 +492,7 @@ impl Terminal {
             }
         }
         if self.sync_deadline.is_some() {
-            self.sync_bytes += std::mem::size_of::<Action>()
+            self.sync.bytes += std::mem::size_of::<Action>()
                 + match &action {
                     Action::String { payload, .. } => payload.len(),
                     Action::Csi(csi) => csi
@@ -447,8 +502,8 @@ impl Terminal {
                         .sum(),
                     _ => 0,
                 };
-            self.sync_actions.push(Deferred::Action(action));
-            if self.sync_bytes >= MAX_SYNC_MEMORY {
+            self.sync.entries.push(Deferred::Action(action));
+            if self.sync.bytes >= MAX_SYNC_MEMORY {
                 self.flush_sync(emit);
             }
         } else {
@@ -2078,16 +2133,17 @@ mod tests {
             (&term.modes, &term.palette, term.style, term.cell_pixels, term.revision,
              &term.title, &term.link, term.link_id, &term.title_stack, &term.saved_state),
             (term.charsets, term.charset, term.single_shift, term.last_printed, term.sync_deadline,
-             scalar_queue(term), term.sync_bytes, term.grapheme_supported, term.grapheme_target),
+             scalar_queue(term), term.sync.bytes, term.grapheme_supported, term.grapheme_target),
             (&term.cluster_scratch, term.preserve_erased_screen, term.title_max_bytes, term.title_max_chars))
     }
     /// The synchronized queue as the per-character action list it stands for, so a
     /// run-holding queue compares equal to the scalar path's queue.
     fn scalar_queue(term: &Terminal) -> Vec<Action> {
         let mut actions = Vec::new();
-        for entry in &term.sync_actions {
+        for entry in &term.sync.entries {
             match entry {
-                Deferred::Text(text) => actions.extend(text.chars().map(Action::Print)),
+                Deferred::Text(range) => actions.extend(term.sync.text[range.clone()].chars().map(Action::Print)),
+                Deferred::Csi(csi) => actions.push(Action::Csi(csi.clone())),
                 Deferred::Action(action) => actions.push(action.clone()),
             }
         }
@@ -2485,10 +2541,10 @@ mod tests {
                 assert!(term.sync_deadline.is_some());
             }
             // Flush the reference strictly through the original scalar apply path.
-            scalar.sync_deadline = None; scalar.sync_bytes = 0;
+            scalar.sync_deadline = None; scalar.sync.bytes = 0;
             let mut expected = Vec::new();
             let queued = scalar_queue(&scalar);
-            scalar.sync_actions.clear();
+            scalar.sync.entries.clear(); scalar.sync.text.clear();
             for action in queued {
                 scalar.apply(action, &mut |event| expected.push(event));
             }
