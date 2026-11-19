@@ -364,7 +364,16 @@ each sending 8 requests (each admitted to its pane's queue, which Agent Overview
 counts, with a p95 of about 30 ms from submission on the development Mac against
 a 250 ms target; the 65th refused as full; an unanswered pane never holds up the
 others), three panes answered out of order with a real
-zsh dispatch that runs exactly once, and a request from one pane for another. `scripts/build-app.sh` bundles and audits both native executables.
+zsh dispatch that runs exactly once, and a request from one pane for another.
+`AgentLiveTests` (opt-in: `AKITTY_LIVE_AGENTS=1 AKITTY_LIVE_AXCODE_MODEL=<model>`)
+runs the installed Claude Code, Codex and AX Code at once in real panes: Claude
+Code's and Codex's permission prompts (Codex with AkiTTY's hooks, trusted for
+that run only) and AX Code's MCP request are answered through AkiTTY, each
+command runs, and all three report their conversations. It changes no global
+agent configuration. `AgentAccessibilityAuditTests` walks the accessibility tree
+of the approval sheets (names of every control, the source and target panes, the
+whole command, Deny as default). A VoiceOver user session, including Settings →
+Agents, is still outstanding. `scripts/build-app.sh` bundles and audits both native executables.
 Tests establish bounded behavior and observed effects, not complete terminal
 conformance, multi-day stability, vendor hook compatibility or VoiceOver user
 qualification. Native and Web share the Rust VT engine, while their rendering,
