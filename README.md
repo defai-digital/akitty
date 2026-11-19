@@ -127,20 +127,20 @@ Manage the feature in Settings. [History behavior and storage](docs/ARCHITECTURE
 ## Performance
 
 The released macOS apps processed the same four workloads through real PTYs.
-Each rate is the median of 27 samples, from the first payload write to the
-terminal's reply to a trailing cursor-position request.
+Each rate uses the median elapsed time across 54 samples. Timing runs from the
+first payload write to the terminal's reply to a trailing cursor-position request.
 
-| Workload (median MiB/s) | AkiTTY 1.4.0 | cmux 0.65.2.2 |
+| Workload (median MiB/s) | AkiTTY 1.4.1 | cmux 0.65.2.2 |
 | --- | ---: | ---: |
-| ASCII | 224.0 | 232.8 |
-| ANSI color | 251.7 | 189.3 |
-| CJK and combining text | 222.7 | 156.8 |
-| Long lines | 222.5 | 242.9 |
+| ASCII | 194.8 | 212.5 |
+| ANSI color | 214.8 | 166.3 |
+| CJK and combining text | 212.8 | 152.3 |
+| Long lines | 203.0 | 218.4 |
 
 The apps ran hidden on the same Apple M3 Max with macOS 27.2.1, a 98×25 PTY
-grid and scrollback configured off. Results cover PTY transport and terminal
-processing through the cursor reply. The ASCII and long-line launch median
-ranges overlap. [App benchmark method and raw data](docs/PERFORMANCE.md#macos-pty-throughput)
+grid and scrollback configured off. The ranges of per-launch medians overlap
+for ASCII, ANSI color and long lines.
+[App benchmark method and raw data](docs/PERFORMANCE.md#macos-pty-throughput)
 
 The engine benchmark feeds bytes directly into the parser and grid. It includes
 AkiTTY, libghostty-vt, Alacritty and Kitty. [Headless engine results](docs/PERFORMANCE.md#reference-engine-throughput)

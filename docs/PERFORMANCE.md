@@ -2111,7 +2111,7 @@ In that zero-history run, AkiTTY recorded the higher median on each workload.
 On 2026-11-19, five arm64 engine builds processed identical fixtures from
 `benchmarks/workloads.json` on an Apple M3 Max running macOS 27.2.1 (26B131).
 
-- AkiTTY 1.4.0 at `c0e5f9d3f5b18776aeb2da00fe728e5d6fe484da` and
+- AkiTTY 1.4.1 at `27ff1eac3650807bcaa76f1f63bba00988c85e31` and
   `alacritty_terminal` 0.26.1-dev at
   `aa5d942f46c40184a3f214830ff5f7989f4733a1` used Rust 1.99.1 release builds
   with thin LTO and one codegen unit. Alacritty used the dependency versions
@@ -2150,37 +2150,36 @@ raw record. The synchronized-screen fixture contains complete frames in each fee
 
 Headless feed throughput in MiB/s, using the median of the ten pass rates.
 
-| Workload | AkiTTY 1.4.0 | libghostty-vt 1.0.1 | libghostty-vt 1.0.2-dev | Alacritty terminal | Kitty 0.50.0 |
+| Workload | AkiTTY 1.4.1 | libghostty-vt 1.0.1 | libghostty-vt 1.0.2-dev | Alacritty terminal | Kitty 0.50.0 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| ASCII | 480.7 | 642.5 | 658.6 | 113.6 | 99.5 |
-| ANSI color | 269.4 | 362.9 | 374.5 | 107.6 | 88.8 |
-| Unicode | 137.7 | 119.5 | 124.6 | — | 83.9 |
-| Long lines | 621.5 | 385.2 | 391.4 | 100.5 | 162.1 |
-| Alternate screen | 144.5 | 139.6 | 145.1 | 80.1 | 10.6 |
-| Synchronized screen | 942.8 | 854.1 | 829.9 | 231.2 | 33.6 |
+| ASCII | 492.4 | 655.6 | 691.6 | 114.9 | 103.7 |
+| ANSI color | 271.1 | 397.4 | 395.7 | 109.5 | 93.8 |
+| Unicode | 141.5 | 135.4 | 135.2 | — | 90.9 |
+| Long lines | 635.3 | 416.7 | 424.1 | 114.5 | 183.7 |
+| Alternate screen | 146.6 | 151.6 | 150.3 | 82.2 | 11.0 |
+| Synchronized screen | 952.5 | 863.1 | 878.1 | 234.3 | 34.2 |
 
 The dash marks the Alacritty Unicode case described above.
 
 AkiTTY recorded the highest medians for long lines, synchronized output and
-the matched Unicode workload. The Ghostty builds had higher ASCII and ANSI
-color medians. Pass ranges overlap on several workloads, including alternate
-screen and Unicode. The November 18 comparison above used zero history and
-different batching. This run covered the three reference projects represented
-in the table. Calyx, cmux, iTerm2, Warp, Zellij and Zentty were outside the
-timed set.
+the matched Unicode workload. Both Ghostty builds had higher medians for ASCII,
+ANSI color and alternate-screen output. The AkiTTY and Ghostty pass-rate ranges
+overlap for synchronized output. The November 18 comparison above used zero
+history and different batching.
 
 The raw record includes every measured duration, pass order, pass-rate ranges,
 state digests, the probe results and artifact fingerprints. The headless
 comparison adapters were built locally outside the product build.
-[Raw reference engine measurements](../benchmarks/results/reference-engine-throughput-2026-11-19.json)
+[Raw v1.4.1 engine measurements](../benchmarks/results/reference-engine-throughput-v1.4.1-2026-11-19.json)
+· [Earlier v1.4.0 measurements](../benchmarks/results/reference-engine-throughput-2026-11-19.json)
 
 ## macOS PTY throughput
 
-On 2026-11-19, the signed arm64 AkiTTY 1.4.0 bundle (build 10400, commit
-`3d7cd93e3056d4dd6ec6499de1b72c1c8cdb015d`) and the signed cmux v0.65.2.2
+On 2026-11-19, the signed arm64 AkiTTY 1.4.1 bundle (build 10401, commit
+`27ff1eac3650807bcaa76f1f63bba00988c85e31`) and the signed cmux v0.65.2.2
 release bundle (marketing version 0.65.2, build 113) ran on the same Apple
 M3 Max with macOS 27.2.1. The benchmark verified both download hashes and
-bundle signatures. [AkiTTY release](https://github.com/defai-digital/akitty/releases/tag/v1.4.0)
+bundle signatures. [AkiTTY release](https://github.com/defai-digital/akitty/releases/tag/v1.4.1)
 · [cmux release](https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2)
 
 Each launch used an isolated home, one hidden terminal and a 98×25 PTY grid.
@@ -2194,15 +2193,18 @@ The timer ran from the first payload write through receipt of the cursor
 position report after a trailing marker. This measures PTY transport,
 terminal processing and the reply path. Screen preparation was outside the
 timer. The harness verified the app was hidden at each workload boundary.
-The three pairs ran in the order AkiTTY/cmux, cmux/AkiTTY, AkiTTY/cmux.
-Both members of each pair used the
-same shuffled workload order. Each launch ran three warmups and nine timed
-samples per workload. Two additional cmux launches stopped before timing
-because windows became visible during setup.
+The two sweeps ran three app pairs each, reversing each pair's app order
+in the second sweep. Both members of each pair used the same shuffled
+workload order. Each launch ran three warmups and nine timed samples per
+workload. Two cmux attempts stopped before any workload ran because
+windows became visible during startup. The successful retry hid the app
+again before the first workload and passed the same visibility checks.
 
 The table in the README divides the payload byte count by the median
-elapsed time across 27 samples. AkiTTY's ANSI color and CJK medians were
-1.33× and 1.42× cmux's, respectively. The per-launch median ranges overlap
-for ASCII and long lines. The raw record includes payload hashes, app
-fingerprints, PTY geometry, cursor-width checks and every timed sample.
-[Raw macOS PTY measurements](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)
+elapsed time across 54 samples per app and workload. AkiTTY's ANSI color
+and CJK medians were 1.29× and 1.40× cmux's, respectively. The ranges of
+per-launch medians overlap for ASCII, ANSI color and long lines. The raw
+record includes payload hashes, app fingerprints, PTY geometry, cursor-width
+checks and every timed sample.
+[Raw v1.4.1 PTY measurements](../benchmarks/results/cmux-pty-throughput-v1.4.1-2026-11-19.json)
+· [Earlier v1.4.0 measurements](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)
