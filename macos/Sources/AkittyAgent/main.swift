@@ -12,24 +12,27 @@ do {
         try await AkittyMCPServer.run(path: path)
         exit(0)
     }
-    if args == [ClaudeHookSettings.subcommand] {
-        // Never fail the agent: any error means no output, and Claude Code keeps its own prompt.
-        let input = FileHandle.standardInput.readData(ofLength: ClaudeHook.inputLimit + 1)
-        if let output = ClaudeHook.respond(to: input, path: path) {
+    if args.count == 1, let agent = HookAgent.allCases.first(where: { $0.subcommand == args[0] }) {
+        // Never fail the agent: any error means no output, and the agent keeps its own prompt.
+        let input = FileHandle.standardInput.readData(ofLength: AgentHook.inputLimit + 1)
+        if let output = AgentHook.respond(to: input, agent: agent, path: path) {
             FileHandle.standardOutput.write(output); FileHandle.standardOutput.write(Data("\n".utf8))
         }
         exit(0)
     }
-    if args.first == "claude-hooks", args.count >= 2 {
-        var settingsPath = ClaudeHookSettings.defaultPath
-        if args.count == 4, args[2] == "--settings" { settingsPath = args[3] } else if args.count != 2 { throw AgentIPCError.failure("Usage: akitty-agent claude-hooks install|uninstall|status [--settings path]") }
+    if args.count >= 2, let agent = HookAgent.allCases.first(where: { $0.settingsCommand == args[0] }) {
+        let usage = "Usage: akitty-agent \(agent.settingsCommand) install|uninstall|status [--settings path]"
+        var settingsPath = agent.defaultSettingsPath
+        if args.count == 4, args[2] == "--settings" { settingsPath = args[3] } else if args.count != 2 { throw AgentIPCError.failure(usage) }
         let executable = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0]).resolvingSymlinksInPath().path
-        let settings = ClaudeHookSettings(path: settingsPath, executable: executable)
+        let settings = AgentHookSettings(agent: agent, path: settingsPath, executable: executable)
+        var reload = agent == .codex ? "Then trust them with /hooks in Codex; Codex skips new or changed hooks until they are trusted." : "Restart running Claude Code sessions to load them."
+        if agent == .codex, let value = ProcessInfo.processInfo.environment["CODEX_HOME"], !value.hasPrefix("/"), let warning = agent.codexHomeWarning { reload += " " + warning }
         switch args[1] {
-        case "install": try settings.install(); print("Installed AkiTTY hooks for Claude Code in \(settingsPath). Restart running Claude Code sessions to load them.")
+        case "install": try settings.install(); print("Installed AkiTTY hooks for \(agent.displayName) in \(settingsPath). \(reload)")
         case "uninstall": try settings.uninstall(); print("Removed AkiTTY hooks from \(settingsPath). Other hooks were left in place.")
         case "status": print("\(try settings.state()) (\(settingsPath))")
-        default: throw AgentIPCError.failure("Usage: akitty-agent claude-hooks install|uninstall|status [--settings path]")
+        default: throw AgentIPCError.failure(usage)
         }
         exit(0)
     }
@@ -43,7 +46,7 @@ do {
     } else if args.count == 2, args[0] == "status" {
         request["op"] = "status"; request["request_id"] = args[1]
     } else {
-        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request [--id <request-id>] <pane-id> '<exact shell command>' | status <request-id> | mcp | claude-hook | claude-hooks install|uninstall|status [--settings path]\nEvery request needs human approval. Reusing a request ID never runs a command again. Normal agent subprocesses are not intercepted.")
+        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request [--id <request-id>] <pane-id> '<exact shell command>' | status <request-id> | mcp | claude-hook | codex-hook | claude-hooks | codex-hooks install|uninstall|status [--settings path]\nEvery request needs human approval. Reusing a request ID never runs a command again. Normal agent subprocesses are not intercepted.")
     }
     let reply = try LocalSocket.request(JSONSerialization.data(withJSONObject: request), path: path)
     FileHandle.standardOutput.write(reply); FileHandle.standardOutput.write(Data("\n".utf8))

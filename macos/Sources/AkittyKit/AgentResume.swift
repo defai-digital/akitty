@@ -9,7 +9,7 @@ struct AgentConversation: Codable, Equatable {
     var reported: Double
 
     /// Agents whose CLI resumes a conversation by its ID. Each one starts a new process in the pane's shell.
-    static let resumeCommands: [String: String] = ["claude-code": "claude --resume"]
+    static let resumeCommands: [String: String] = ["claude-code": "claude --resume", "codex": "codex resume"]
 
     /// The exact command typed when the human chooses Resume. Nil for an agent AkiTTY cannot resume, or an ID that
     /// is not a plain token (it must start with a letter or digit, so it can never read as an option).

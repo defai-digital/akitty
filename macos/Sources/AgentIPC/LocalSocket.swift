@@ -62,10 +62,11 @@ public enum LocalSocket {
         }
         throw AgentIPCError.failure("Local connection setup timed out. No command was sent; do not automatically retry.")
     }
-    public static func request(_ data: Data, path: String = defaultPath) throws -> Data {
-        try request(data, path: path, cancellation: nil)
+    /// `timeout` bounds the reply (at most 135 s); a short one suits callers killed by their host after a few seconds.
+    public static func request(_ data: Data, path: String = defaultPath, timeout: TimeInterval = 135) throws -> Data {
+        try request(data, path: path, cancellation: nil, timeout: timeout)
     }
-    static func request(_ data: Data, path: String, cancellation: LocalSocketRequest?) throws -> Data {
+    static func request(_ data: Data, path: String, cancellation: LocalSocketRequest?, timeout: TimeInterval = 135) throws -> Data {
         let fd = try descriptor(); defer { Darwin.close(fd) }
         try cancellation?.attach(fd)
         defer { cancellation?.detach() }
@@ -74,8 +75,8 @@ public enum LocalSocket {
         var uid: uid_t = 0, gid: gid_t = 0
         guard getpeereid(fd, &uid, &gid) == 0, uid == getuid() else { throw AgentIPCError.failure("Local server is not owned by your OS account.") }
         try configure(fd, timeout: 135)
-        try writeFrame(data, to: fd)
-        return try readFrame(from: fd)
+        try writeFrame(data, to: fd, timeout: min(3, timeout))
+        return try readFrame(from: fd, timeout: timeout)
     }
     static func readExact(_ count: Int, from fd: Int32, deadline: TimeInterval) throws -> Data {
         var data = Data(count: count), offset = 0
@@ -202,12 +203,23 @@ public struct LocalPeer: @unchecked Sendable {
     /// Device number of the caller's controlling terminal, or nil when it has none. A process started inside a
     /// pane inherits that pane's PTY, so this binds a request to its pane without trusting anything it sends.
     /// Nil unless the process is still the one that connected (same PID and start time) and still holds the connection.
+    ///
+    /// An agent may start its hooks in a new session (Codex does), which leaves them without a terminal. Then the
+    /// nearest ancestor that has one counts: the agent itself, started in the pane. An unprivileged process cannot
+    /// choose its parent, an orphan is reparented to launchd (which has none), and each ancestor must have started
+    /// no later than its child, so a recycled parent PID is never followed.
     public var controllingTerminal: UInt64? {
-        guard let started, connected, let info = LocalPeer.info(pid),
+        guard let started, connected, var info = LocalPeer.info(pid),
               info.pbi_start_tvsec == started.0, info.pbi_start_tvusec == started.1 else { return nil }
-        return LocalPeer.device(info)
+        for _ in 0..<8 {
+            if let device = LocalPeer.device(info) { return device }
+            let parent = pid_t(bitPattern: info.pbi_ppid)
+            guard parent > 1, let next = LocalPeer.info(parent),
+                  (next.pbi_start_tvsec, next.pbi_start_tvusec) <= (info.pbi_start_tvsec, info.pbi_start_tvusec) else { return nil }
+            info = next
+        }
+        return nil
     }
-    public static func controllingTerminal(of pid: pid_t) -> UInt64? { info(pid).flatMap(device) }
     private static func device(_ info: proc_bsdinfo) -> UInt64? {
         let device = info.e_tdev
         // NODEV (all bits set) means no controlling terminal.

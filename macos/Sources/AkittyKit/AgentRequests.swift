@@ -410,7 +410,7 @@ import AgentIPC
         let cwd: String?
         let reason: String?
     }
-    nonisolated static let agentNames = ["claude-code": "Claude Code"]
+    nonisolated static let agentNames = ["claude-code": "Claude Code", "codex": "Codex"]
     /// Shell commands shown for a decision may span lines, but no other control or invisible formatting character.
     static func validateDecisionCommand(_ command: String) throws {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, command.utf8.count <= 4096,

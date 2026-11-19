@@ -29,7 +29,7 @@ final class AgentDecisionTests: XCTestCase {
             ]
         ]
         try JSONSerialization.data(withJSONObject: original).write(to: URL(fileURLWithPath: path))
-        let settings = ClaudeHookSettings(path: path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        let settings = AgentHookSettings(path: path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
         XCTAssertEqual(try settings.state(), .notInstalled)
         try settings.install(); try settings.install()
         XCTAssertEqual(try settings.state(), .installed)
@@ -56,7 +56,7 @@ final class AgentDecisionTests: XCTestCase {
             XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), text)
         }
         // A missing file is created.
-        let fresh = ClaudeHookSettings(path: root.appendingPathComponent("new/settings.json").path, executable: "/x/akitty-agent")
+        let fresh = AgentHookSettings(path: root.appendingPathComponent("new/settings.json").path, executable: "/x/akitty-agent")
         try fresh.install()
         XCTAssertEqual(try fresh.state(), .installed)
     }
@@ -64,7 +64,7 @@ final class AgentDecisionTests: XCTestCase {
     func testInstallerQuotingMatchingPartialStatePermissionsAndSymlinks() throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
         // A path with shell metacharacters stays one literal argument.
-        let odd = ClaudeHookSettings(path: root.appendingPathComponent("a.json").path, executable: "/Apps/It's $(x) `y`/akitty-agent")
+        let odd = AgentHookSettings(path: root.appendingPathComponent("a.json").path, executable: "/Apps/It's $(x) `y`/akitty-agent")
         XCTAssertEqual(odd.command, "'/Apps/It'\\''s $(x) `y`/akitty-agent' claude-hook")
         XCTAssertTrue(odd.isManaged(["command": odd.command]))
         XCTAssertTrue(odd.isManaged(["command": "'/Applications/Akitty Old.app/Contents/MacOS/akitty-agent' claude-hook"]), "another AkiTTY bundle")
@@ -75,14 +75,14 @@ final class AgentDecisionTests: XCTestCase {
         }
         // One managed hook out of three is partial; uninstall removes it; uninstalling an untouched file writes nothing.
         let path = root.appendingPathComponent("settings.json").path
-        let settings = ClaudeHookSettings(path: path, executable: "/x/Akitty.app/Contents/MacOS/akitty-agent")
+        let settings = AgentHookSettings(path: path, executable: "/x/Akitty.app/Contents/MacOS/akitty-agent")
         // AkiTTY's entry shares a group with the user's own hook; removing ours keeps theirs.
         let one: [String: Any] = ["hooks": ["SessionStart": [["hooks": [["type": "command", "command": settings.command], ["type": "command", "command": "/usr/bin/mine"]]]],
                                             "Stop": [["hooks": [["type": "command", "command": "/bin/true"]]]]]]
         try JSONSerialization.data(withJSONObject: one).write(to: URL(fileURLWithPath: path))
         XCTAssertEqual(try settings.state(), .partial)
         // An entry for another AkiTTY copy also counts as partial.
-        let other = ClaudeHookSettings(path: path, executable: "/elsewhere/Akitty.app/Contents/MacOS/akitty-agent")
+        let other = AgentHookSettings(path: path, executable: "/elsewhere/Akitty.app/Contents/MacOS/akitty-agent")
         XCTAssertEqual(try other.state(), .partial)
         _ = chmod(path, 0o600)
         try settings.uninstall()
@@ -93,16 +93,16 @@ final class AgentDecisionTests: XCTestCase {
         XCTAssertEqual(start?.compactMap { $0["command"] as? String }, ["/usr/bin/mine"])
         let untouched = root.appendingPathComponent("untouched.json").path
         try Data("{\"model\":\"x\"}".utf8).write(to: URL(fileURLWithPath: untouched))
-        try ClaudeHookSettings(path: untouched, executable: "/x/akitty-agent").uninstall()
+        try AgentHookSettings(path: untouched, executable: "/x/akitty-agent").uninstall()
         XCTAssertFalse(FileManager.default.fileExists(atPath: untouched + ".akitty-backup"))
         // A symlinked settings file is written through; the backup sits beside the link, not in the link's target folder.
         let dotfiles = root.appendingPathComponent("dotfiles"); try FileManager.default.createDirectory(at: dotfiles, withIntermediateDirectories: true)
         let real = dotfiles.appendingPathComponent("settings.json"); try Data("{}".utf8).write(to: real)
         let link = root.appendingPathComponent("linked.json").path
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: real.path)
-        try ClaudeHookSettings(path: link, executable: "/x/akitty-agent").install()
+        try AgentHookSettings(path: link, executable: "/x/akitty-agent").install()
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link), real.path)
-        XCTAssertEqual(try ClaudeHookSettings(path: real.path, executable: "/x/akitty-agent").state(), .installed)
+        XCTAssertEqual(try AgentHookSettings(path: real.path, executable: "/x/akitty-agent").state(), .installed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: link + ".akitty-backup"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: real.path + ".akitty-backup"))
     }
@@ -242,8 +242,84 @@ final class AgentDecisionTests: XCTestCase {
         XCTAssertEqual(AgentOverviewRow.describe(ended), "Claude Code · one (ended)")
         var sent: [[String: Any]] = []
         let end = try JSONSerialization.data(withJSONObject: ["session_id": "one", "hook_event_name": "SessionEnd", "reason": "exit"])
-        XCTAssertNil(ClaudeHook.respond(to: end) { data, _ in sent.append(try JSONSerialization.jsonObject(with: data) as! [String: Any]); return Data("{}".utf8) })
+        XCTAssertNil(AgentHook.respond(to: end) { data, _, _ in sent.append(try JSONSerialization.jsonObject(with: data) as! [String: Any]); return Data("{}".utf8) })
         XCTAssertEqual(sent.first?["event"] as? String, "session_end")
+    }
+
+    func testCodexUsesTheSameContractWithItsOwnFileCommandAndTimeouts() throws {
+        // The same PermissionRequest maps to a decide for Codex, and the answer uses the shared output shape.
+        let prompt = try JSONSerialization.data(withJSONObject: ["session_id": "01a1f59f-a4e3-7ce1-9cc8-fd0b666e313c", "hook_event_name": "PermissionRequest",
+                                                                 "turn_id": "t1", "permission_mode": "default", "cwd": "/repo",
+                                                                 "tool_name": "Bash", "tool_input": ["command": "cargo test", "description": "Run tests outside the sandbox"]])
+        var sent: [String: Any] = [:]
+        let output = AgentHook.respond(to: prompt, agent: .codex) { data, _, _ in
+            sent = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": ["decision": "deny"]])
+        }
+        XCTAssertEqual(sent["agent"] as? String, "codex")
+        XCTAssertEqual(sent["command"] as? String, "cargo test")
+        XCTAssertEqual(sent["reason"] as? String, "Run tests outside the sandbox")
+        let answer = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(output)) as? [String: Any])
+        let decision = (answer["hookSpecificOutput"] as? [String: Any])?["decision"] as? [String: Any]
+        XCTAssertEqual(decision?["behavior"] as? String, "deny")
+        // apply_patch, MCP tools, network approvals and requests with fields the sheet cannot show stay with Codex.
+        let kept: [(String, [String: Any])] = [("apply_patch", ["command": "x"]), ("mcp__fs__write", ["command": "x"]),
+                                               ("Bash", ["command": "curl example.com", "description": "network-access example.com"]),
+                                               ("Bash", ["command": "make", "sandbox_permissions": "require_escalated"])]
+        for (tool, input) in kept {
+            let other = try JSONSerialization.data(withJSONObject: ["hook_event_name": "PermissionRequest", "tool_name": tool, "tool_input": input])
+            XCTAssertNil(AgentHook.respond(to: other, agent: .codex) { _, _, _ in XCTFail("not forwarded"); return Data() }, "\(tool) \(input)")
+        }
+        var reported: [String: Any] = [:]
+        let start = try JSONSerialization.data(withJSONObject: ["session_id": "01a1f59f", "hook_event_name": "SessionStart", "source": "resume"])
+        var deadline: TimeInterval = 0
+        XCTAssertNil(AgentHook.respond(to: start, agent: .codex) { data, _, timeout in deadline = timeout; reported = try JSONSerialization.jsonObject(with: data) as! [String: Any]; return Data() })
+        XCTAssertLessThan(deadline, 3, "a report finishes inside Codex's 3-second SessionEnd limit")
+        XCTAssertEqual(reported["agent"] as? String, "codex"); XCTAssertEqual(reported["event"] as? String, "session_start")
+
+        // Codex's own hooks file, command and timeouts; SessionEnd stays within Codex's 3-second limit.
+        XCTAssertTrue(HookAgent.codex.defaultSettingsPath.hasSuffix("/hooks.json"))
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("hooks.json").path
+        try Data(#"{"description":"mine","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/true"}]}]}}"#.utf8).write(to: URL(fileURLWithPath: path))
+        let codex = AgentHookSettings(agent: .codex, path: path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        XCTAssertEqual(codex.command, "'/Applications/Akitty.app/Contents/MacOS/akitty-agent' codex-hook")
+        try codex.install(); try codex.install()
+        XCTAssertEqual(try codex.state(), .installed)
+        let written = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        XCTAssertEqual(written["description"] as? String, "mine")
+        let hooks = try XCTUnwrap(written["hooks"] as? [String: Any])
+        func timeout(_ event: String) -> Int? { (((hooks[event] as? [[String: Any]])?.first?["hooks"] as? [[String: Any]])?.first?["timeout"] as? Int) }
+        XCTAssertEqual(timeout("SessionEnd"), 3); XCTAssertEqual(timeout("PermissionRequest"), 150)
+        XCTAssertEqual((hooks["PermissionRequest"] as? [[String: Any]])?.count, 1, "installing twice keeps one copy")
+        // A Claude Code entry is not Codex's, and the other way round.
+        let claude = AgentHookSettings(agent: .claudeCode, path: path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        XCTAssertFalse(claude.isManaged(["command": codex.command]))
+        XCTAssertEqual(try claude.state(), .notInstalled)
+        try codex.uninstall()
+        let cleaned = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        XCTAssertEqual((cleaned["hooks"] as? [String: Any])?.keys.sorted(), ["Stop"])
+    }
+
+    @MainActor func testServiceAcceptsCodexDecisionsAndReports() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (terminal, window) = try readyPane()
+        let service = AgentRequests(source: { [terminal] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("s.sock").path)
+        service.cooldownInterval = 0
+        defer { service.stop(); terminal.shutdown(); window.close() }
+        let request = AgentRequests.PermissionRequest(agent: "codex", tool: "Bash", command: "cargo test", cwd: "/repo", reason: "Run tests outside the sandbox")
+        let decision = Task { @MainActor in try await service.decide(request, in: terminal, origin: .siri, requestID: "codex-1") }
+        try await waitUntil { window.attachedSheet != nil }
+        let alert = try XCTUnwrap(window.attachedSheet?.contentView?.subviews.compactMap { $0 as? NSTextField }.map(\.stringValue).joined(separator: "\n"))
+        XCTAssertTrue(alert.contains("Codex"), alert)
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertFirstButtonReturn)
+        let answer = try await decision.value
+        XCTAssertEqual(answer["executor"] as? String, "codex")
+        XCTAssertEqual(answer["akitty_sent_input"] as? Bool, false)
+        service.report(agent: "codex", event: "session_start", sessionID: "01a1f59f-a4e3-7ce1-9cc8-fd0b666e313c", in: terminal)
+        XCTAssertEqual(service.describeConversation(for: terminal.session.id), "Codex · 01a1f59f…")
+        XCTAssertEqual(service.conversation(for: terminal)?.resumeCommand, "codex resume 01a1f59f-a4e3-7ce1-9cc8-fd0b666e313c")
     }
 
     func testHookMapsOnlyBashPromptsAndFallsBackOnAnyFailure() throws {
@@ -252,10 +328,10 @@ final class AgentDecisionTests: XCTestCase {
         }
         let bash = try event(["tool_name": "Bash", "tool_input": ["command": "rm -rf build\nls", "description": "Clean build output"]])
         var sent: [[String: Any]] = []
-        func reply(_ text: String) -> (Data, String) throws -> Data {
-            { data, _ in sent.append(try JSONSerialization.jsonObject(with: data) as! [String: Any]); return Data(text.utf8) }
+        func reply(_ text: String) -> (Data, String, TimeInterval) throws -> Data {
+            { data, _, _ in sent.append(try JSONSerialization.jsonObject(with: data) as! [String: Any]); return Data(text.utf8) }
         }
-        let allow = try XCTUnwrap(ClaudeHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"allow\"}}")))
+        let allow = try XCTUnwrap(AgentHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"allow\"}}")))
         let allowed = try XCTUnwrap(JSONSerialization.jsonObject(with: allow) as? [String: Any])
         let output = try XCTUnwrap(allowed["hookSpecificOutput"] as? [String: Any])
         XCTAssertEqual(output["hookEventName"] as? String, "PermissionRequest")
@@ -265,21 +341,21 @@ final class AgentDecisionTests: XCTestCase {
         XCTAssertEqual(sent.last?["cwd"] as? String, "/repo")
         XCTAssertEqual(sent.last?["reason"] as? String, "Clean build output")
         XCTAssertNil(sent.last?["pane"], "the pane comes from the caller's terminal, never from the hook")
-        let deny = try XCTUnwrap(ClaudeHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"deny\"}}")))
+        let deny = try XCTUnwrap(AgentHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"deny\"}}")))
         let denied = (try JSONSerialization.jsonObject(with: deny) as? [String: Any])?["hookSpecificOutput"] as? [String: Any]
         XCTAssertEqual((denied?["decision"] as? [String: Any])?["behavior"] as? String, "deny")
         // Errors, unknown answers, transport failures and other tools leave Claude Code's own prompt in place.
-        XCTAssertNil(ClaudeHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":false,\"error\":\"expired\"}")))
-        XCTAssertNil(ClaudeHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"maybe\"}}")))
-        XCTAssertNil(ClaudeHook.respond(to: bash, send: { _, _ in throw AgentIPCError.failure("refused") }))
+        XCTAssertNil(AgentHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":false,\"error\":\"expired\"}")))
+        XCTAssertNil(AgentHook.respond(to: bash, send: reply("{\"version\":1,\"ok\":true,\"data\":{\"decision\":\"maybe\"}}")))
+        XCTAssertNil(AgentHook.respond(to: bash, send: { _, _, _ in throw AgentIPCError.failure("refused") }))
         let count = sent.count
-        XCTAssertNil(ClaudeHook.respond(to: try event(["tool_name": "Edit", "tool_input": ["file_path": "/x"]]), send: reply("{}")))
-        XCTAssertNil(ClaudeHook.respond(to: try event(["tool_name": "Bash", "tool_input": ["command": String(repeating: "a", count: 4097)]]), send: reply("{}")))
-        XCTAssertNil(ClaudeHook.respond(to: Data("not json".utf8), send: reply("{}")))
+        XCTAssertNil(AgentHook.respond(to: try event(["tool_name": "Edit", "tool_input": ["file_path": "/x"]]), send: reply("{}")))
+        XCTAssertNil(AgentHook.respond(to: try event(["tool_name": "Bash", "tool_input": ["command": String(repeating: "a", count: 4097)]]), send: reply("{}")))
+        XCTAssertNil(AgentHook.respond(to: Data("not json".utf8), send: reply("{}")))
         XCTAssertEqual(sent.count, count, "unsupported prompts are never sent")
         // Session events are reported and print nothing.
         let start = try JSONSerialization.data(withJSONObject: ["session_id": "abc-123", "hook_event_name": "SessionStart", "source": "startup"])
-        XCTAssertNil(ClaudeHook.respond(to: start, send: reply("{\"version\":1,\"ok\":true,\"data\":{}}")))
+        XCTAssertNil(AgentHook.respond(to: start, send: reply("{\"version\":1,\"ok\":true,\"data\":{}}")))
         XCTAssertEqual(sent.last?["op"] as? String, "report")
         XCTAssertEqual(sent.last?["event"] as? String, "session_start")
         XCTAssertEqual(sent.last?["session_id"] as? String, "abc-123")
@@ -325,6 +401,19 @@ final class AgentDecisionTests: XCTestCase {
         let events = String(decoding: try service.store.export(), as: UTF8.self)
         XCTAssertTrue(events.contains("permission_allowed")); XCTAssertTrue(events.contains("permission_denied"))
         XCTAssertFalse(events.contains("typed-by-akitty"))
+
+        // Codex starts hooks in a new session, without a terminal: the pane is found through the agent that started it.
+        let codexPrompt = root.appendingPathComponent("codex.json"), codexOut = root.appendingPathComponent("codex-out.json"), codexDone = root.appendingPathComponent("codex-done")
+        try JSONSerialization.data(withJSONObject: ["session_id": "01a1f59f", "cwd": root.path, "hook_event_name": "PermissionRequest", "turn_id": "t",
+            "tool_name": "Bash", "tool_input": ["command": "make check", "description": "Run checks"]]).write(to: codexPrompt)
+        let detached = "import os,sys\npid=os.fork()\nif pid==0:\n os.setsid()\n fd=os.open(sys.argv[2],os.O_RDONLY); os.dup2(fd,0)\n out=os.open(sys.argv[3],os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.dup2(out,1)\n os.execv(sys.argv[1],[sys.argv[1],'--socket',sys.argv[4],'codex-hook'])\nos.waitpid(pid,0)"
+        try detached.write(to: root.appendingPathComponent("detach.py"), atomically: true, encoding: .utf8)
+        try terminal.session.input("/usr/bin/python3 '\(root.appendingPathComponent("detach.py").path)' '\(cli)' '\(codexPrompt.path)' '\(codexOut.path)' '\(path)'; : > '\(codexDone.path)'\r", paste: false)
+        try await waitUntil { window.attachedSheet != nil }
+        window.endSheet(try XCTUnwrap(window.attachedSheet), returnCode: .alertSecondButtonReturn)
+        try await waitUntil { FileManager.default.fileExists(atPath: codexDone.path) }
+        let codexReply = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: codexOut)) as? [String: Any])
+        XCTAssertEqual(((codexReply["hookSpecificOutput"] as? [String: Any])?["decision"] as? [String: Any])?["behavior"] as? String, "deny")
 
         // This test process does not run inside the pane, so it cannot ask on the pane's behalf.
         let outside = try JSONSerialization.data(withJSONObject: ["version": 1, "op": "decide", "agent": "claude-code", "tool": "Bash", "command": "echo x"])

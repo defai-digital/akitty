@@ -43,25 +43,31 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         catch { NSAlert(error: error).runModal() }
     }
     @objc private func showAgentTimeline(_ sender: Any?) { agentRequests.showTimeline() }
-    /// Adds or removes AkiTTY's entries in Claude Code's user settings. Other settings and hooks are kept.
-    @objc private func configureClaudeCode(_ sender: Any?) {
+    @objc private func configureClaudeCode(_ sender: Any?) { configureHooks(for: .claudeCode) }
+    @objc private func configureCodex(_ sender: Any?) { configureHooks(for: .codex) }
+    /// Adds or removes AkiTTY's entries in the agent's user hooks settings. Other settings and hooks are kept.
+    private func configureHooks(for agent: HookAgent) {
         let executable = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("akitty-agent").path ?? ""
         guard FileManager.default.isExecutableFile(atPath: executable) else {
             NSAlert(error: AkittyError.core("The bundled akitty-agent companion was not found next to AkiTTY.")).runModal(); return
         }
-        let settings = ClaudeHookSettings(executable: executable)
+        let settings = AgentHookSettings(agent: agent, executable: executable)
+        let name = agent.displayName, file = URL(fileURLWithPath: settings.path).lastPathComponent
+        let reload = agent == .codex
+            ? "After installing, trust the hooks with /hooks in Codex: Codex skips new or changed hooks until they are trusted."
+            : "Restart running Claude Code sessions to load the change."
         do {
             let state = try settings.state()
             let alert = NSAlert()
-            alert.messageText = "Claude Code Integration"
+            alert.messageText = "\(name) Integration"
             let status = state == .installed ? "Installed." : state == .partial ? "Partly installed; Install repairs it." : "Not installed."
             alert.informativeText = """
                 \(status)
 
-                Claude Code's Bash permission prompts in an AkiTTY pane are answered in AkiTTY's approval queue, and the pane shows the reported conversation. Claude Code still runs every command itself. When AkiTTY cannot answer (Local Agent Requests off, the prompt times out, or another tool), Claude Code shows its own prompt.
+                \(name)'s Bash permission prompts in an AkiTTY pane are answered in AkiTTY's approval queue, and the pane shows the reported conversation. \(name) still runs every command itself, under its own sandbox and approval policy. When AkiTTY cannot answer (Local Agent Requests off, the prompt times out, or another tool), \(name) shows its own prompt.
 
-                Settings file: \(settings.path)
-                The first change keeps a copy as settings.json.akitty-backup. Remove deletes only AkiTTY's entries. Restart running Claude Code sessions to load the change.
+                File: \(settings.path)
+                The first change keeps a copy as \(file).akitty-backup. Remove deletes only AkiTTY's entries. \(reload)\(agent.codexHomeWarning.map { "\n\n" + $0 } ?? "")
                 """
             alert.addButton(withTitle: state == .installed ? "Reinstall" : "Install")
             if state != .notInstalled { alert.addButton(withTitle: "Remove") }
@@ -470,6 +476,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let requests = app.addItem(withTitle: "Enable Local Agent Requests", action: #selector(toggleAgentRequests(_:)), keyEquivalent: ""); requests.target = self
         let timeline = app.addItem(withTitle: "Agent Event Timeline…", action: #selector(showAgentTimeline(_:)), keyEquivalent: ""); timeline.target = self
         let claude = app.addItem(withTitle: "Claude Code Integration…", action: #selector(configureClaudeCode(_:)), keyEquivalent: ""); claude.target = self
+        let codex = app.addItem(withTitle: "Codex Integration…", action: #selector(configureCodex(_:)), keyEquivalent: ""); codex.target = self
         eventMenuItem = timeline
         let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

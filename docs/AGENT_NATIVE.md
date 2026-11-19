@@ -133,8 +133,11 @@ or takes its input lease. This uses Claude Code's documented `PermissionRequest`
    span lines; the directory and reason are what Claude Code reported.
 
 The pane is found from the hook process's controlling terminal, which it inherits
-from the pane's PTY; the request cannot name a pane. A process outside every pane
-is refused. When AkiTTY cannot answer (requests disabled, AkiTTY not running, a
+from the pane's PTY; the request cannot name a pane. A hook started in a new
+session has no terminal (Codex starts hooks that way), so AkiTTY uses the nearest
+ancestor process that has one: the agent running in the pane. Each ancestor must
+have started no later than its child, so a reused PID is never followed. A
+process outside every pane is refused. When AkiTTY cannot answer (requests disabled, AkiTTY not running, a
 non-Bash tool, an empty command, one over 4096 bytes or with control characters
 other than line breaks and tabs, unreadable hook input, a full queue, the
 120-second lifetime expired, or the pane, its window or the caller went away),
@@ -153,6 +156,36 @@ a command fingerprint, never the command.
 | Decide | `{"version":1,"op":"decide","agent":"claude-code","tool":"Bash","command":"…","cwd":"…","reason":"…"}`; `cwd`, `reason`, `request_id` optional. Returns `{decision, request_id, executor, akitty_sent_input: false}` with `decision` `allow` or `deny` |
 | Report | `{"version":1,"op":"report","agent":"claude-code","event":"session_start","session_id":"…"}`; `event` is `session_start` or `session_end` |
 
+`agent` is `claude-code` or `codex`.
+
+## Codex permission prompts
+
+Codex uses the same hook contract, so the same queue answers its Bash
+permission prompts, such as a command that asks to run outside Codex's sandbox.
+Codex still runs the command under its own sandbox and approval policy, and
+AkiTTY never types into the pane. `apply_patch`, MCP tools and network approvals
+stay with Codex's own prompt.
+
+1. Choose **Akitty → Codex Integration…** and **Install**, or run
+   `akitty-agent codex-hooks install`. This adds the same three hooks, running
+   `akitty-agent codex-hook`, to `$CODEX_HOME/hooks.json` (default
+   `~/.codex/hooks.json`), with the installer behavior described above; the
+   first change saves `hooks.json.akitty-backup`. `SessionEnd` uses Codex's
+   3-second maximum, and session reports wait at most 1.5 seconds for AkiTTY.
+   Apps opened from the Finder do not see a `CODEX_HOME` set in your shell; if
+   you set one, run the command from that shell. A relative `CODEX_HOME` is
+   ignored with a warning.
+2. In Codex, run `/hooks` and trust the new hooks. Codex skips new or changed
+   hooks until they are trusted, so until then it shows its own prompts.
+3. Enable Local Agent Requests and start Codex in an AkiTTY pane.
+
+The sheet shows the command, its folder and Codex's reason
+(`tool_input.description`) when Codex gives one. Agent Overview shows the
+conversation ID Codex reports, and a restored workspace resumes it with
+`codex resume <id>` (Codex 0.170.0 keeps the ID when resuming). The hook
+contract follows Codex's published hooks documentation; it has not been
+qualified end to end against a running Codex with trusted hooks.
+
 ## Reopen windows and resume agent conversations
 
 **Shell → Window Layouts → Reopen Windows and Agent Conversations at Launch**
@@ -168,24 +201,25 @@ At the next launch the windows reopen with fresh shells. Each pane that had a
 conversation shows a line naming it, and Agent Overview marks it
 **(can resume)**. Nothing starts on its own. Choose **Shell → Resume Agent
 Conversation** for the focused pane, or **Resume Conversation** in Agent
-Overview, and AkiTTY clears the line (Ctrl-U) and types `claude --resume <id>`
-at that pane's prompt. The shell must be at an empty, idle integrated prompt
+Overview, and AkiTTY clears the line (Ctrl-U) and types the agent's resume command
+with that ID at the pane's prompt. The shell must be at an empty, idle integrated prompt
 (nothing typed since it was drawn), and its input under your control. The Shell
 menu item acts only on the pane with keyboard focus.
 Each pane resumes its own ID, so several conversations in the same folder never
 swap, and AkiTTY never picks "the most recent" one.
 
-The resume is shown as **(resumed)** only when Claude Code reports the same
+The resume is shown as **(resumed)** only when the agent reports the same
 conversation ID from that pane (Claude Code 2.1.327 keeps the ID when resuming).
-That report needs Claude Code Integration and Local Agent Requests on. Otherwise,
+That report needs the agent's integration and Local Agent Requests on. Otherwise,
 or if the CLI is missing, the conversation was deleted or the folder moved, Agent
 Overview shows **(resume not confirmed)** after 30 seconds, or as soon as a
 different conversation starts in that pane. The CLI's own output in the pane
 says why, and you can choose Resume again; a later report of the same ID still
 confirms it. Once resumed or never started, a different conversation in the pane
 replaces the offer. Approvals that were waiting, earlier approvals and input
-leases end with the app and are never replayed. Only Claude Code conversations
-can be resumed so far.
+leases end with the app and are never replayed. Conversations of two agents
+can be resumed: Claude Code with `claude --resume <id>` and Codex with
+`codex resume <id>`.
 
 ## Local request protocol and trust boundary
 

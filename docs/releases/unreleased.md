@@ -23,19 +23,33 @@
 - Claude Code's Bash permission prompts in an AkiTTY pane appear as Allow Once /
   Deny sheets in that pane's approval queue. Claude Code runs the command; AkiTTY
   sends no input. When AkiTTY cannot answer, Claude Code shows its own prompt.
-- The pane is identified from the hook's controlling terminal. The core's
+- The pane is identified from the hook's controlling terminal, or that of its
+  nearest ancestor when the agent starts hooks in a new session. The core's
   `shell_state` now reports the PTY device (`tty_device`).
 - Agent Overview shows the conversation ID Claude Code reported for each pane.
 
-## Reopen windows and resume Claude Code conversations
+## Codex permission prompts in AkiTTY
+
+- **Akitty → Codex Integration…** (or `akitty-agent codex-hooks install`) adds
+  the same hooks to `~/.codex/hooks.json` (`$CODEX_HOME`), keeping other hooks.
+  Trust them with `/hooks` in Codex.
+- Codex's Bash permission prompts in an AkiTTY pane appear in the same approval
+  queue; Codex runs the command under its own sandbox and policy. `apply_patch`,
+  MCP and network approvals stay with Codex.
+- Agent Overview shows Codex's conversation ID, and a restored workspace can
+  resume it with `codex resume <id>`.
+
+## Reopen windows and resume Claude Code and Codex conversations
 
 - **Shell → Window Layouts → Reopen Windows and Agent Conversations at Launch**
   (off by default) saves the open windows and each pane's last reported Claude
-  Code conversation ID, never text or commands, and reopens them at launch.
+  Code or Codex conversation ID, never text or commands, and reopens them at
+  launch.
 - A restored pane offers its own conversation. **Shell → Resume Agent
   Conversation** or **Resume Conversation** in Agent Overview types
-  `claude --resume <id>` at the pane's idle prompt. Agent Overview shows
-  "(resumed)" only after Claude Code reports that same ID from the pane.
+  `claude --resume <id>` or `codex resume <id>` at the pane's idle prompt. Agent
+  Overview shows "(resumed)" only after the agent reports that same ID from the
+  pane.
 - **Clear Saved Workspace** removes the saved workspace and turns the option off.
 - The core's control summary now reports `prompt_edited`, so Resume refuses a
   prompt that already holds typed text.
