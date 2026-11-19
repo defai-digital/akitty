@@ -20,8 +20,8 @@ provider, cloud account or AX product is required.
 | --- | --- | --- |
 | macOS 27.2+ · Apple Silicon | Stable | [Download and install](#quick-start) |
 
-[Install AkiTTY](#quick-start) · [Try the workflow](#try-the-agent-workflow) ·
-[Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.4.0.md) ·
+[Install AkiTTY](#quick-start) · [Performance](#performance) ·
+[Try the workflow](#try-the-agent-workflow) · [Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.4.0.md) ·
 [Agent integration guide](docs/AGENT_NATIVE.md)
 
 This README describes source version 1.4.0.
@@ -104,6 +104,40 @@ For a shared installation in `/Applications`, run the downloaded installer with
 
 You can also [download the latest published release](https://github.com/defai-digital/akitty/releases/latest).
 Choose the macOS arm64 ZIP, unzip it, move **Akitty.app** into **Applications**, and open it.
+
+## Performance
+
+AkiTTY's terminal engine (`akitty-vt`) is measured against the official
+`libghostty-vt 1.0.1` library. Both engines receive identical input through the
+same C host, and every sample checks that their final screens agree.
+
+| Workload | AkiTTY MiB/s | libghostty-vt MiB/s | AkiTTY / libghostty-vt |
+| --- | ---: | ---: | ---: |
+| ASCII | 1,318.7 | 1,250.9 | 1.05x |
+| ANSI color | 343.0 | 267.1 | 1.28x |
+| Unicode | 195.5 | 184.3 | 1.06x |
+| Long lines | 926.5 | 462.4 | 2.00x |
+| Alternate screen | 176.1 | 166.3 | 1.06x |
+| Synchronized screen | 932.3 | 857.3 | 1.09x |
+
+Higher is better. These were measured on an Apple Silicon Mac with macOS 27.2,
+using a 120x40 grid, no history, 30 samples of 256 rounds, and repeated passes in
+rotated order on 2026-11-18. The first throughput pass after 1.3.26 alone made the
+engine 2.6x faster on ASCII output and 2.5x faster on long lines. In the native app, Metal now draws
+ASCII text from a glyph atlas. With several ASCII panes streaming, that cuts
+CPU use by 23–41% and GPU upload volume by about 73%.
+
+These figures cover engine feed throughput only. They exclude the PTY, font
+shaping, rendering and input latency, so they are not an app-to-app comparison
+with Ghostty or any other terminal. Unicode text in the native app is still drawn
+by the CPU rasterizer. The [performance record](docs/PERFORMANCE.md) has the
+method, every pass and the [raw measurements](benchmarks/results/neon-ascii-chunks-2026-11-18.json).
+The libghostty-vt comparison harness is kept local. To reproduce AkiTTY's own
+Native/WASM benchmark, run:
+
+```sh
+bash scripts/benchmark.sh --samples 30 --rounds 128 --output build/throughput.json
+```
 
 ## Siri and Shortcuts
 
@@ -423,13 +457,14 @@ selection, character counts and cursor-line APIs already exist. Current developm
 adds line navigation, coalesced text notifications, state announcements and keyboard
 focus improvements to the existing Overview and approval sheet. **VoiceOver user
 validation is not complete.** See [accessibility usage and validation](docs/ACCESSIBILITY.md).
-Performance parity and testing
-on every supported Mac version are not claimed.
+The [engine benchmark](#performance) does not establish full-app performance
+parity, and testing on every supported Mac version is not claimed.
 
 ### Planned work
 
-- **Performance and stability:** measure parser/snapshot/rendering costs, reduce
-  unnecessary idle and hidden-pane work, and expand malformed-input and PTY
+- **Performance and stability:** measure end-to-end PTY-to-paint and input
+  latency, move Unicode text onto the GPU path, reduce unnecessary idle and
+  hidden-pane work, and expand malformed-input and PTY
   lifecycle stress coverage.
 - **Agent Overview and accessibility:** improve and validate the existing cross-window
   overview and text accessibility APIs, including keyboard focus, command approval,
