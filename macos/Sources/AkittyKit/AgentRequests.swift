@@ -354,7 +354,37 @@ import AgentIPC
     /// Siri does not enable the local socket or carry core authorizations.
     /// Requests for different panes queue independently. Each pane presents only its oldest request, and
     /// a request's lifetime (120 s by default) counts from enqueue; waiting never extends it.
-    func request(_ command: String, in terminal: TerminalView, origin: Origin, requestID: String? = nil) async throws -> [String: Any] {
+    /// Where a local request came from: the pane whose program asked (found from the caller's terminal, never
+    /// from what it sends), or nil for a caller outside every pane. The request still queues on its target pane.
+    enum Source: Equatable {
+        case notLocal
+        case outsidePanes
+        case pane(UInt64)
+    }
+    /// The line the approval sheet shows about the source, relative to the target pane.
+    static func describe(_ source: Source, target: UInt64) -> String? {
+        switch source {
+        case .notLocal: return nil
+        case .outsidePanes: return "Requested by a program outside every AkiTTY pane."
+        case .pane(let id):
+            // The pane is where the requesting program (or the agent that started it) runs. Program-set titles are
+            // left out: any program can set one, and quoting it would let a title masquerade as AkiTTY's text.
+            if id == target { return "Requested by a program started in this pane. The command runs here, in Terminal \(target)." }
+            return "Requested by a program started in another pane, Terminal \(id). The command runs in Terminal \(target), not in the requesting pane."
+        }
+    }
+    static func sourceFields(_ source: Source) -> [String: Any] {
+        switch source {
+        case .notLocal: return [:]
+        case .outsidePanes: return ["source": "outside_panes"]
+        case .pane(let id): return ["source_pane_session_id": id]
+        }
+    }
+    func source(for peer: LocalPeer) -> Source {
+        guard let pane = pane(for: peer) else { return .outsidePanes }
+        return .pane(pane.session.id)
+    }
+    func request(_ command: String, in terminal: TerminalView, origin: Origin, requestID: String? = nil, source: Source = .notLocal) async throws -> [String: Any] {
         try Task.checkCancellation()
         try AgentCommandHost.validateCommand(command)
         let (id, deadline) = try admit(requestID: requestID, terminal: terminal, origin: origin)
@@ -373,13 +403,15 @@ import AgentIPC
                 records[id]?.state = "awaiting_approval"
                 // Persist intent before acquiring authority; an I/O failure prevents dispatch.
                 try await store.appendDurably(event: "execution_requested", session: eventSession, provenance: "host",
-                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "request_id": id, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count]) { _, value in value })
+                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "request_id": id, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count]) { _, value in value }
+                        .merging(Self.sourceFields(source)) { _, value in value })
                 try Task.checkCancellation()
                 guard !stopped, origin.isValid(enabled: enabled) else { throw AkittyError.core("Request service or caller has stopped.") }
                 let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: origin.actor, command: command) { [weak self] request in
                     // A cancelled intent or an unshown sheet is not a human denial: throwing releases the lease instead.
                     guard let self else { throw CancellationError() }
-                    let alert = AgentCommandHost.approvalAlert(request, callerDescription: origin.explanation)
+                    let from = Self.describe(source, target: terminal.session.id)
+                    let alert = AgentCommandHost.approvalAlert(request, callerDescription: from.map { $0 + "\n" + origin.explanation } ?? origin.explanation)
                     // Anything but an explicit allow fails closed for a command: nothing is typed.
                     return try await self.showSheet(alert, id: id, window: window, terminal: terminal, origin: origin, deadline: deadline) { prompted = true } == .allow
                 }
@@ -657,7 +689,7 @@ import AgentIPC
                         ? "Pane \(pane) is no longer open. Run list again and use a current pane value."
                         : "Pane identifier is from another AkiTTY launch or was copied incorrectly. Run list again and use a current pane value.")
                 }
-                result = try await request(command, in: terminal, origin: .localProcess(peer), requestID: requestID)
+                result = try await request(command, in: terminal, origin: .localProcess(peer), requestID: requestID, source: source(for: peer))
             } else if operation == "decide", Set(input.keys).isSubset(of: ["version", "op", "agent", "tool", "command", "cwd", "reason", "request_id"]),
                       let agent = input["agent"] as? String, let tool = input["tool"] as? String, let command = input["command"] as? String {
                 guard Self.agentNames[agent] != nil, tool == "Bash" else { throw AkittyError.core("Unsupported agent or tool; the agent keeps its own prompt.") }

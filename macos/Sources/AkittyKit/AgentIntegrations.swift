@@ -10,7 +10,9 @@ struct AgentCLI: Identifiable, Equatable {
     let installURL: URL
     /// The hook integration, or nil when this agent has none in this version.
     let hooks: HookAgent?
-    /// Why an agent without hooks has no integration yet.
+    /// Whether AkiTTY's MCP server is the integration (AX Code), instead of hooks.
+    var usesMCP: Bool { id == "ax-code" }
+    /// What this version cannot do for an agent, and why.
     let unavailableReason: String?
 
     static let all: [AgentCLI] = [
@@ -20,11 +22,15 @@ struct AgentCLI: Identifiable, Equatable {
                  installURL: URL(string: "https://developers.openai.com/codex/cli")!, hooks: .codex, unavailableReason: nil),
         AgentCLI(id: "ax-code", name: "AX Code", executable: "ax-code",
                  installURL: URL(string: "https://github.com/defai-digital/ax-code")!, hooks: nil,
-                 unavailableReason: "AX Code has no AkiTTY adapter yet. It runs in a pane as an ordinary terminal program."),
+                 unavailableReason: "AX Code does not report its conversation to AkiTTY yet, so its status and resume by ID wait for an AX Code release that does."),
     ]
 
     /// What AkiTTY offers once the integration is installed and Local Agent Requests are on.
     var capabilities: [(name: String, available: Bool)] {
+        if usesMCP {
+            return [("Command requests with approval (MCP)", true), ("Status and conversation reports", false),
+                    ("Resume a conversation by ID", false)]
+        }
         let integrated = hooks != nil
         return [("Status and conversation reports", integrated), ("Bash command approval", integrated),
                 ("Resume a conversation by ID", AgentConversation.resumeCommands[id] != nil)]
@@ -193,8 +199,18 @@ enum AgentRequestsLaunchSetting {
                 } else {
                     Text("Restart running Claude Code sessions to load a change.").font(.caption).foregroundStyle(.secondary)
                 }
-            } else if let reason = cli.unavailableReason {
-                Text(reason).font(.caption).foregroundStyle(.secondary)
+            } else if cli.usesMCP {
+                LabeledContent("MCP server", value: describe(row.hooks))
+                if let file = row.hooksPath { Text(file).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                HStack {
+                    Button(row.hooks == .installed ? "Reinstall" : "Install") { changeMCP { try $0.install() } }
+                        .disabled(companion == nil || row.hooks == .conflict)
+                    if row.hooks == .installed || row.hooks == .partial { Button("Remove") { changeMCP { try $0.uninstall() } } }
+                }
+                Text("AX Code asks AkiTTY to run a shell command in a pane through the akitty request_command tool; every command waits for your approval. AkiTTY writes only ax-code.json, never your commented ax-code.jsonc. Restart AX Code to load a change.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(AXCodeMCPSettings.configHomeWarning).font(.caption).foregroundStyle(.secondary)
+                if let reason = cli.unavailableReason { Text(reason).font(.caption).foregroundStyle(.secondary) }
             }
         }
     }
@@ -204,12 +220,19 @@ enum AgentRequestsLaunchSetting {
         case .installed?: return "Installed"
         case .partial?: return "Partly installed; Reinstall repairs it"
         case .notInstalled?: return "Not installed"
+        case .conflict?: return "A server named akitty that AkiTTY did not add is there; AkiTTY leaves it alone"
         case nil: return companion == nil ? "Unknown (companion missing)" : "Unreadable settings file"
         }
     }
     private func change(_ agent: HookAgent, _ action: (AgentHookSettings) throws -> Void) {
         guard let companion else { message = "The bundled akitty-agent companion was not found next to AkiTTY."; return }
         do { try action(AgentHookSettings(agent: agent, executable: companion)); message = "" }
+        catch { message = error.localizedDescription }
+        refresh()
+    }
+    private func changeMCP(_ action: (AXCodeMCPSettings) throws -> Void) {
+        guard let companion else { message = "The bundled akitty-agent companion was not found next to AkiTTY."; return }
+        do { try action(AXCodeMCPSettings(executable: companion)); message = "" }
         catch { message = error.localizedDescription }
         refresh()
     }
@@ -222,6 +245,9 @@ enum AgentRequestsLaunchSetting {
                 // Without the companion there is no command to recognize as this copy's, so no state is claimed.
                 row.hooksPath = hooks.defaultSettingsPath
                 row.hooks = companion.flatMap { try? AgentHookSettings(agent: hooks, executable: $0).state() }
+            } else if cli.usesMCP {
+                row.hooksPath = AXCodeMCPSettings.defaultPath
+                row.hooks = companion.flatMap { try? AXCodeMCPSettings(executable: $0).state() }
             }
             row.lastReport = app?.agentRequests.lastReport(agent: cli.id)
             rows[cli.id] = row

@@ -211,7 +211,8 @@ public struct LocalPeer: @unchecked Sendable {
     public var controllingTerminal: UInt64? {
         guard let started, connected, var info = LocalPeer.info(pid),
               info.pbi_start_tvsec == started.0, info.pbi_start_tvusec == started.1 else { return nil }
-        for _ in 0..<8 {
+        // 16 levels covers launcher chains such as nvm, npm and node between an agent and the server it starts.
+        for _ in 0..<16 {
             if let device = LocalPeer.device(info) { return device }
             let parent = pid_t(bitPattern: info.pbi_ppid)
             guard parent > 1, let next = LocalPeer.info(parent),

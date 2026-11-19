@@ -16,12 +16,22 @@ Use AkiTTY 1.3.21 or later. AkiTTY 1.3.20 and earlier do not include this featur
 The companion is bundled with the macOS app; no Node or Python runtime is needed.
 
 1. Launch AkiTTY and choose **Akitty → Enable Local Agent Requests**. This grant
-   is off again on every app launch.
+   is off again on every app launch unless you turn on **Turn on when AkiTTY
+   starts** in **Settings → Agents**.
 2. Configure your agent to launch the bundled companion with the `mcp` argument.
    For Grok, this command registers it in the current project's settings:
 
    ```sh
    grok mcp add --scope project akitty -- "$HOME/Applications/Akitty.app/Contents/MacOS/akitty-agent" mcp
+   ```
+
+   For AX Code, **Settings → Agents → AX Code → Install** (or
+   `akitty-agent ax-code-mcp install`) adds the server to
+   `~/.config/ax-code/ax-code.json` without touching `ax-code.jsonc`. AX Code's
+   shape differs from the example below:
+
+   ```json
+   {"mcp": {"akitty": {"type": "local", "command": ["/Applications/Akitty.app/Contents/MacOS/akitty-agent", "mcp"]}}}
    ```
 
    Use `/Applications/Akitty.app/Contents/MacOS/akitty-agent` for a system-wide

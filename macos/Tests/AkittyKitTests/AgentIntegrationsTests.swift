@@ -65,10 +65,55 @@ final class AgentIntegrationsTests: XCTestCase {
         XCTAssertNil(byID["ax-code"]?.hooks)
         XCTAssertNotNil(byID["ax-code"]?.unavailableReason)
         XCTAssertTrue(byID["codex"]?.capabilities.allSatisfy(\.available) == true)
-        XCTAssertTrue(byID["ax-code"]?.capabilities.allSatisfy { !$0.available } == true)
+        // AX Code connects through AkiTTY's MCP server: command requests yes, reports and resume not yet.
+        XCTAssertEqual(byID["ax-code"]?.usesMCP, true)
+        XCTAssertEqual(byID["ax-code"]?.capabilities.map(\.available), [true, false, false])
         // Every agent the service accepts has a row, and every row with hooks is an accepted agent.
         XCTAssertEqual(Set(AgentRequests.agentNames.keys), Set(AgentCLI.all.filter { $0.hooks != nil }.map(\.id)))
         XCTAssertFalse(AgentRequestsLaunchSetting.isOn(UserDefaults(suiteName: "akitty-empty-\(UUID().uuidString)")!), "off by default")
+    }
+
+    func testAXCodeMCPServerIsAddedOnlyToThePlainJSONConfigAndNeverReplacesAPersonsServer() throws {
+        let root = try directory()
+        let path = root.appendingPathComponent("ax-code/ax-code.json").path
+        let settings = AXCodeMCPSettings(path: path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        XCTAssertEqual(try settings.state(), .notInstalled)
+        try FileManager.default.createDirectory(atPath: root.appendingPathComponent("ax-code").path, withIntermediateDirectories: true)
+        try Data(#"{"model":"x","mcp":{"mine":{"type":"remote","url":"https://example.com/mcp"}}}"#.utf8).write(to: URL(fileURLWithPath: path))
+        try settings.install(); try settings.install()
+        XCTAssertEqual(try settings.state(), .installed)
+        let written = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        XCTAssertEqual(written["model"] as? String, "x")
+        let servers = try XCTUnwrap(written["mcp"] as? [String: Any])
+        XCTAssertEqual(servers.keys.sorted(), ["akitty", "mine"])
+        XCTAssertEqual((servers["akitty"] as? [String: Any])?["command"] as? [String], ["/Applications/Akitty.app/Contents/MacOS/akitty-agent", "mcp"])
+        // Another AkiTTY copy's entry is partial and repaired by installing.
+        XCTAssertEqual(try AXCodeMCPSettings(path: path, executable: "/Other/Akitty.app/Contents/MacOS/akitty-agent").state(), .partial)
+        try settings.uninstall()
+        let cleaned = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        XCTAssertEqual((cleaned["mcp"] as? [String: Any])?.keys.sorted(), ["mine"])
+        // A server the person named "akitty" themselves is never replaced or removed.
+        let own = #"{"mcp":{"akitty":{"type":"local","command":["/usr/local/bin/akitty-agent","mcp"]}}}"#
+        try Data(own.utf8).write(to: URL(fileURLWithPath: path))
+        XCTAssertThrowsError(try settings.install())
+        try settings.uninstall()
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), own)
+        XCTAssertEqual(try settings.state(), .conflict)
+        // An "mcp" that is not an object is refused rather than overwritten.
+        try Data(#"{"mcp":[1]}"#.utf8).write(to: URL(fileURLWithPath: path))
+        XCTAssertThrowsError(try settings.install())
+        XCTAssertTrue(AXCodeMCPSettings.defaultPath.hasSuffix("/ax-code/ax-code.json"))
+        // ax-code.json linked to the commented file, or to a missing file, is never written.
+        let commented = root.appendingPathComponent("ax-code/ax-code.jsonc")
+        try Data("{\n  // mine\n}\n".utf8).write(to: commented)
+        let linked = root.appendingPathComponent("ax-code/linked.json").path
+        try FileManager.default.createSymbolicLink(atPath: linked, withDestinationPath: commented.path)
+        XCTAssertThrowsError(try AXCodeMCPSettings(path: linked, executable: settings.executable).install())
+        XCTAssertEqual(try String(contentsOf: commented, encoding: .utf8), "{\n  // mine\n}\n")
+        let dangling = root.appendingPathComponent("ax-code/dangling.json").path
+        try FileManager.default.createSymbolicLink(atPath: dangling, withDestinationPath: root.appendingPathComponent("missing.json").path)
+        XCTAssertThrowsError(try AXCodeMCPSettings(path: dangling, executable: settings.executable).install())
+        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: dangling), "the link stays a link")
     }
 
     @MainActor func testLastReportShowsTheNewestConversationOfThatAgent() throws {

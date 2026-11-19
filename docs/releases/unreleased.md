@@ -47,6 +47,17 @@
 - **Turn on when AkiTTY starts** (off by default) enables Local Agent Requests
   at launch.
 
+## AX Code and requests from another pane
+
+- **Settings → Agents → AX Code → Install** (or `akitty-agent ax-code-mcp
+  install`) adds AkiTTY's MCP server to `~/.config/ax-code/ax-code.json`, leaving
+  the commented `ax-code.jsonc` alone. AX Code's command requests then wait in the
+  approval queue.
+- A request for another pane queues on that pane, and its sheet names the pane
+  the request came from (found from the caller's terminal) or says it came from
+  outside every pane. The timeline records `source_pane_session_id`, or
+  `source: outside_panes`.
+
 ## Reopen windows and resume Claude Code and Codex conversations
 
 - **Shell → Window Layouts → Reopen Windows and Agent Conversations at Launch**

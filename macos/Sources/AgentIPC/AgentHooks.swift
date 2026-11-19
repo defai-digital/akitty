@@ -109,15 +109,11 @@ public struct AgentHookSettings {
         if value == command { return true }
         return value.hasPrefix("'/") && value.hasSuffix(".app/Contents/MacOS/\(Self.marker)' \(agent.subcommand)")
     }
-    public enum State: Equatable { case notInstalled, installed, partial }
+    /// `conflict`: an entry with AkiTTY's name that AkiTTY did not add (AX Code's MCP server); it is left alone.
+    public enum State: Equatable { case notInstalled, installed, partial, conflict }
 
     func load() throws -> [String: Any] {
-        guard FileManager.default.fileExists(atPath: path) else { return [:] }
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        if data.isEmpty { return [:] }
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AgentIPCError.failure("\(path) is not a JSON object; it was left unchanged.")
-        }
+        let object = try SettingsFile.load(path)
         // Refuse shapes AkiTTY would otherwise have to overwrite, rather than lose a hand-written entry.
         if let hooks = object["hooks"] {
             guard let hooks = hooks as? [String: Any] else { throw AgentIPCError.failure("\(path): \"hooks\" is not an object; it was left unchanged.") }
@@ -168,10 +164,39 @@ public struct AgentHookSettings {
         settings["hooks"] = hooks
         return settings
     }
+    func save(_ settings: [String: Any]) throws { try SettingsFile.save(settings, to: path) }
+    public func install() throws { try save(installing(into: try load())) }
+    public func uninstall() throws {
+        let settings = try load()
+        let cleaned = removingManaged(from: settings)
+        if NSDictionary(dictionary: cleaned) != NSDictionary(dictionary: settings) { try save(cleaned) }
+    }
+}
+
+/// Writes an agent's JSON settings file the way a person would want it kept.
+enum SettingsFile {
+    /// The file a write lands in. A symlink to a missing file is refused rather than replaced by a plain file.
+    static func resolved(_ path: String) throws -> URL {
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) != nil, !FileManager.default.fileExists(atPath: path) {
+            throw AgentIPCError.failure("\(path) is a symbolic link to a missing file; it was left unchanged.")
+        }
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath()
+    }
+    /// Reads a JSON object, or an empty one when the file is missing or empty.
+    static func load(_ path: String) throws -> [String: Any] {
+        _ = try resolved(path)
+        guard FileManager.default.fileExists(atPath: path) else { return [:] }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        if data.isEmpty { return [:] }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AgentIPCError.failure("\(path) is not a JSON object; it was left unchanged.")
+        }
+        return object
+    }
     /// Read, change and write are not locked against another program editing the file at the same moment.
-    func save(_ settings: [String: Any]) throws {
+    static func save(_ settings: [String: Any], to path: String) throws {
         // Write through a symlink (a dotfiles checkout, for example) instead of replacing it with a plain file.
-        let target = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let target = try resolved(path)
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         var info = stat()
         let existing = stat(target.path, &info) == 0
@@ -186,11 +211,5 @@ public struct AgentHookSettings {
         try data.write(to: target, options: .atomic)
         // An atomic write creates a new file; keep the original's permissions (new files are private to the user).
         _ = chmod(target.path, existing ? info.st_mode & 0o777 : 0o600)
-    }
-    public func install() throws { try save(installing(into: try load())) }
-    public func uninstall() throws {
-        let settings = try load()
-        let cleaned = removingManaged(from: settings)
-        if NSDictionary(dictionary: cleaned) != NSDictionary(dictionary: settings) { try save(cleaned) }
     }
 }

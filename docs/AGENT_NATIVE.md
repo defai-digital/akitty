@@ -39,7 +39,8 @@ retain their normal lifecycle. Protocol details are in [ABI.md](ABI.md).
 ## Request a command from a local agent
 
 1. In the running native app, choose **Akitty → Enable Local Agent Requests**.
-   This is off at every app launch; it is not a persisted grant.
+   This is off at every app launch unless you choose **Turn on when AkiTTY
+   starts** in **Settings → Agents** (off by default).
 2. Use the bundled companion to list panes:
 
    ```sh
@@ -80,6 +81,18 @@ an idle integrated prompt at that moment. After an approved command, the pane
 stays leased until you reclaim it; its next request waits for that (still within
 its 120 seconds) instead of failing.
 
+A request may name another pane than the one its program runs in, for example an
+agent in one pane asking for a command in an idle shell pane. It queues on the
+pane it names, and the sheet says where it came from and where it runs:
+**Requested by a program started in this pane** (and that it runs there),
+**… started in another pane, Terminal N** (and that it runs in the named pane, not
+the requesting one), or **Requested by a program outside every AkiTTY pane**.
+Program-set titles are not shown there, since any program can set one. The
+source is the pane whose terminal the caller, or its nearest ancestor with a
+terminal (up to 16 levels), uses, as for hooks, never what the request says, so
+a server an agent started counts as that agent's pane. The event timeline records
+`source_pane_session_id`, or `source: outside_panes`.
+
 The first visible approval brings its window forward. While one approval is on
 screen, later ones attach to their own windows without taking focus; the app asks
 for attention instead. **Agent Overview** lists each pane's waiting count and the
@@ -117,8 +130,16 @@ reports, Bash command approval, and resuming a conversation by ID. A missing CLI
 links to its install instructions. **Install**, **Reinstall** and **Remove**
 change only AkiTTY's hook entries and apply at once. **Connected** shows the
 newest conversation the agent reported from an open pane, which confirms the
-integration works. AX Code has no AkiTTY adapter yet and runs as an ordinary
-terminal program.
+integration works. For AX Code, **Install** adds AkiTTY's MCP server (`akitty`,
+running `akitty-agent mcp`) to `~/.config/ax-code/ax-code.json`
+(`$XDG_CONFIG_HOME/ax-code`), or run `akitty-agent ax-code-mcp install`. AX Code
+merges that plain-JSON file with the commented `ax-code.jsonc` people edit, so
+AkiTTY never rewrites the commented file; a server named `akitty` that AkiTTY did
+not add is never replaced or removed. AX Code then asks for commands through the
+MCP `request_command` tool, and each waits in the approval queue. AX Code does not report
+its conversation to AkiTTY yet, so its status and resume by ID wait for an AX
+Code release that does. AX Code 7.31.2 connects to the server
+(`ax-code mcp list` shows `akitty connected`).
 
 **Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
 launch, so integrations work without the menu each time. **Turn On** / **Turn
@@ -331,7 +352,12 @@ followed by recording failure is reported as uncertain rather than retried.
 
 The canonical `scripts/verify.sh` includes parser/ABI conformance, native socket,
 actual zsh PTY approval and denial, input reclaim, record rotation and file-safety
-regressions. `scripts/build-app.sh` bundles and audits both native executables.
+regressions. `AgentAcceptanceTests` covers the multi-agent release cases: 8 panes
+each sending 8 requests (each admitted to its pane's queue, which Agent Overview
+counts, with a p95 of about 30 ms from submission on the development Mac against
+a 250 ms target; the 65th refused as full; an unanswered pane never holds up the
+others), three panes answered out of order with a real
+zsh dispatch that runs exactly once, and a request from one pane for another. `scripts/build-app.sh` bundles and audits both native executables.
 Tests establish bounded behavior and observed effects, not complete terminal
 conformance, multi-day stability, vendor hook compatibility or VoiceOver user
 qualification. Native and Web share the Rust VT engine, while their rendering,
