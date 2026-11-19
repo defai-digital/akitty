@@ -21,10 +21,10 @@ provider, cloud account or AX product is required.
 | macOS 27.2+ · Apple Silicon | Stable | [Download and install](#quick-start) |
 
 [Install AkiTTY](#quick-start) · [Performance](#performance) ·
-[Try the workflow](#try-the-agent-workflow) · [Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.4.0.md) ·
+[Try the workflow](#try-the-agent-workflow) · [Use Siri](#siri-and-shortcuts) · [Release notes](docs/releases/1.4.1.md) ·
 [Agent integration guide](docs/AGENT_NATIVE.md)
 
-This README describes source version 1.4.0.
+This README describes source version 1.4.1.
 [Unreleased changes](docs/releases/unreleased.md) lists anything newer.
 Published downloads may contain an earlier feature set; check their release notes.
 
@@ -403,7 +403,7 @@ lightweight TypeScript/JavaScript SDK for terminal titles, status text, progress
 and small title-bar sprites. It writes the existing terminal protocols through a
 host-supplied output queue; native embedding continues to use the C ABI.
 
-[Release notes for 1.4.0](docs/releases/1.4.0.md) record this version.
+[Release notes for 1.4.1](docs/releases/1.4.1.md) record this version.
 [Unreleased changes](docs/releases/unreleased.md) lists anything newer.
 The [compatibility matrix](docs/COMPATIBILITY.md), [quality plan](docs/QUALITY_IMPROVEMENTS.md),
 [Native/WASM benchmark](benchmarks/README.md) and [agent approval demo](docs/AGENT_DEMO.md)
@@ -456,7 +456,7 @@ and WebKit on macOS, with additional Ubuntu and Windows browser CI jobs. Details
 
 ## Limitations and roadmap
 
-**Source version: 1.4.0.** AkiTTY is not a drop-in Ghostty replacement.
+**Source version: 1.4.1.** AkiTTY is not a drop-in Ghostty replacement.
 Bash/zsh shell integration is on by default (other shells start normally; turn it off
 in Settings); quick terminal is opt-in.
 Ghostty configuration compatibility and third-party plugins are outside the current

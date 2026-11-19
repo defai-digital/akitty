@@ -67,6 +67,7 @@ export class Terminal implements ITerminalCore {
   private isOpen = false;
   private isDisposed = false;
   private resizePaintPending = false;
+  private resizeRevision = 0
   private revision = 0;
   private currentTitle = '';
   private animationFrameId?: number;
@@ -352,6 +353,7 @@ export class Terminal implements ITerminalCore {
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
     // Mark the announcement before selection listeners run: a nested reset keeps it pending
     // (the grid size is unchanged), and a nested resize that completes clears it.
+    this.resizeRevision++
     this.resizePaintPending = true;
     this.selectionManager?.clearSelection();
     if (this.isOpen && this.resizePaintPending) this.finishResize(terminal);
@@ -365,17 +367,17 @@ export class Terminal implements ITerminalCore {
     // Listeners can finish another resize (which announces itself) or reset the terminal,
     // so read the grid only now.
     if (!this.isOpen || !this.resizePaintPending) return;
-    const { cols, rows } = this;
-    if (this.wasmTerm !== reflowed) {
-      // A reset replaced the reflowed grid at the same size and paints its own frames, but
-      // the host still has to learn the new size to resize its PTY.
-      this.resizePaintPending = false; this.resizeEmitter.fire({ cols, rows });
-      return;
-    }
+    const { cols, rows, resizeRevision } = this
+    const currentSize = () => this.isOpen && this.resizeRevision === resizeRevision && this.cols === cols && this.rows === rows
+    // A reset paints its own frames, but the host still needs the new size for its PTY.
+    const painted = this.wasmTerm === reflowed
     // A failed paint leaves the announcement pending; an identical resize retries it.
-    this.renderer!.render(reflowed, true, this.viewportY, this, this.scrollbarOpacity);
-    this.resizePaintPending = false; this.resizeEmitter.fire({ cols, rows });
-    if (this.isCurrentTerminal(reflowed) && this.cols === cols && this.rows === rows) this.renderEmitter.fire({ start: 0, end: rows - 1 });
+    if (painted) this.renderer!.render(reflowed, true, this.viewportY, this, this.scrollbarOpacity)
+    this.resizePaintPending = false
+    // A listener can complete a different resize before the rest of this dispatch.
+    this.resizeEmitter.fire({ cols, rows }, currentSize)
+    const currentFrame = () => currentSize() && this.isCurrentTerminal(reflowed)
+    if (painted && currentFrame()) this.renderEmitter.fire({ start: 0, end: rows - 1 }, currentFrame)
   }
   clear(): void { this.write('\x1b[2J\x1b[H'); }
   reset(): void {

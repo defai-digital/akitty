@@ -172,6 +172,36 @@ describe('terminal lifecycle hygiene', () => {
     } finally { term.dispose(); }
   });
 
+  test('a nested resize cannot leave later listeners with the previous size', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      const sizes: Array<{ cols: number; rows: number }> = [];
+      term.onResize(({ cols }) => { if (cols === 10) term.resize(12, 6); });
+      term.onResize(size => sizes.push(size));
+      term.resize(10, 5);
+      expect(sizes).toEqual([{ cols: 12, rows: 6 }]);
+    } finally { term.dispose(); }
+  });
+
+  test('returning to the original size during onResize does not announce its old frame', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      const renders: number[] = [];
+      let resized = false;
+      term.onResize(() => {
+        if (resized) return;
+        resized = true;
+        term.resize(12, 6);
+        term.resize(10, 5);
+      });
+      term.onRender(event => renders.push(event.end));
+      term.resize(10, 5);
+      expect(renders).toEqual([5, 4]);
+    } finally { term.dispose(); }
+  });
+
   test('dispose removes the tabindex open() added but keeps a host-provided one', async () => {
     const term = await createIsolatedTerminal();
     term.open(container);

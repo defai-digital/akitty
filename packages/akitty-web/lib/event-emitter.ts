@@ -8,8 +8,9 @@ export class EventEmitter<T> {
     this.subscriptions.set(subscription, listener);
     return { dispose: () => { this.subscriptions.delete(subscription); } };
   };
-  fire(value: T): void {
+  fire(value: T, shouldContinue?: () => boolean): void {
     for (const listener of Array.from(this.subscriptions.values())) {
+      if (shouldContinue && !shouldContinue()) return
       try { listener(value); }
       catch (error) {
         if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
