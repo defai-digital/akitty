@@ -159,7 +159,8 @@ final class AgentEventStoreTests: XCTestCase {
         let root = URL(fileURLWithPath: "/tmp/akitty-restart-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("socket").path
-        let server = LocalRequestServer(path: path)
+        // One slot, so the second connection exercises the busy rejection.
+        let server = LocalRequestServer(path: path, maxConcurrentRequests: 1)
         let gate = AsyncStream<Void>.makeStream(), entered = DispatchSemaphore(value: 0)
         defer { gate.continuation.finish(); server.stop() }
         try server.start { data, _ in

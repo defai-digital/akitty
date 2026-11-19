@@ -197,23 +197,27 @@ public final class LocalRequestServer: @unchecked Sendable {
     private let lock = NSLock()
     private var source: DispatchSourceRead?
     private var running = false
-    private var requestToken: UUID?
-    private var activeClient: Int32 = -1
-    private var activeTask: Task<Void, Never>?
+    /// Connections being handled. Each holds one request; approval queuing happens in the handler.
+    private var clients: [UUID: (descriptor: Int32, task: Task<Void, Never>?)] = [:]
+    /// Bounded concurrency: the native queue holds at most 64 approvals, plus headroom for list/status.
+    public let maxConcurrentRequests: Int
     private var socketIdentity: ino_t = 0
     private var lockDescriptor: Int32 = -1
     private var generation: UInt64 = 0
-    public init(path: String = LocalSocket.defaultPath) { self.path = path }
+    public init(path: String = LocalSocket.defaultPath, maxConcurrentRequests: Int = 72) {
+        self.path = path; self.maxConcurrentRequests = max(1, maxConcurrentRequests)
+    }
+    public var activeRequestCount: Int { lock.lock(); defer { lock.unlock() }; return clients.count }
     private var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
     private func isActive(_ expected: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return running && generation == expected }
     private func finishRequest(_ client: Int32, token: UUID) {
         lock.lock(); defer { lock.unlock() }
         Darwin.close(client)
-        if requestToken == token { requestToken = nil; activeClient = -1; activeTask = nil }
+        clients.removeValue(forKey: token)
     }
     private func track(_ task: Task<Void, Never>, token: UUID) {
         lock.lock(); defer { lock.unlock() }
-        if requestToken == token { activeTask = task } else { task.cancel() }
+        if clients[token] != nil { clients[token]?.task = task } else { task.cancel() }
     }
     public func start(handler: @escaping Handler) throws {
         guard !isRunning else { throw AgentIPCError.failure("Local request server is already running.") }
@@ -243,7 +247,7 @@ public final class LocalRequestServer: @unchecked Sendable {
         let fd = try LocalSocket.descriptor()
         do {
             guard try LocalSocket.withAddress(path, { Darwin.bind(fd, $0, $1) }) == 0 else { throw AgentIPCError.failure("Cannot bind agent socket.") }
-            guard chmod(path, 0o600) == 0, listen(fd, 4) == 0, lstat(path, &info) == 0 else { throw AgentIPCError.failure("Cannot protect or listen on agent socket.") }
+            guard chmod(path, 0o600) == 0, listen(fd, 128) == 0, lstat(path, &info) == 0 else { throw AgentIPCError.failure("Cannot protect or listen on agent socket.") }
             socketIdentity = info.st_ino
             guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { throw AgentIPCError.failure("Cannot configure agent listener.") }
             lock.lock(); running = true; generation += 1; let activeGeneration = generation; lock.unlock()
@@ -262,8 +266,8 @@ public final class LocalRequestServer: @unchecked Sendable {
                     guard fcntl(client, F_SETFL, 0) == 0 else { Darwin.close(client); continue }
                     let token = UUID()
                     self.lock.lock()
-                    let busy = self.requestToken != nil || !self.running || self.generation != activeGeneration
-                    if !busy { self.requestToken = token; self.activeClient = client }
+                    let busy = self.clients.count >= self.maxConcurrentRequests || !self.running || self.generation != activeGeneration
+                    if !busy { self.clients[token] = (client, nil) }
                     self.lock.unlock()
                     if busy {
                         let reply = Data("{\"version\":1,\"ok\":false,\"error\":\"Local server busy; request not dispatched. Retry later.\"}".utf8)
@@ -286,8 +290,8 @@ public final class LocalRequestServer: @unchecked Sendable {
                             let request = try LocalSocket.readFrame(from: client, timeout: 3)
                             let peer = LocalPeer(uid: uid, pid: pid, descriptor: client, enabled: { [weak self] in self?.isActive(activeGeneration) == true })
                             guard peer.connected, !Task.isCancelled else { return }
+                            // A reply the handler produced is always written, even after stop(): it may report a dispatch.
                             let response = await handler(request, peer)
-                            guard !Task.isCancelled else { return }
                             try LocalSocket.writeFrame(response, to: client)
                         } catch {
                             let reply = try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription])
@@ -302,9 +306,11 @@ public final class LocalRequestServer: @unchecked Sendable {
     }
     public func stop() {
         lock.lock(); running = false
-        // Shutdown wakes blocked I/O; the owning task alone closes its descriptor.
-        if activeClient >= 0 { _ = shutdown(activeClient, SHUT_RDWR) }
-        activeTask?.cancel(); activeTask = nil; activeClient = -1; requestToken = nil
+        // Shutting down the read side wakes blocked reads and reads as a disconnect, which abandons pending approval.
+        // The write side stays open so a handler that already dispatched can still deliver its receipt.
+        // The owning task alone closes its descriptor.
+        for (_, client) in clients { _ = shutdown(client.descriptor, SHUT_RD); client.task?.cancel() }
+        clients.removeAll()
         lock.unlock()
         source?.cancel(); source = nil
         var info = stat()

@@ -68,6 +68,38 @@ shell and submit a command through `akitty-agent request`. This is an adapter
 example, not automatic interception or a claim of vendor-certified integration.
 The same agent's normal subprocesses and file tools remain outside this path.
 
+### Several agents at once
+
+Requests for different panes wait in one approval queue. Each pane keeps its own
+first-in, first-out list of at most 8 requests, and AkiTTY holds at most 64 in
+total; a request beyond either limit is refused with that reason and nothing is
+queued. Only a pane's oldest request is shown. One window shows one sheet at a
+time, so split panes in the same window take turns. A queued request holds no
+input lease: the pane stays usable until its sheet appears, and the shell must be
+an idle integrated prompt at that moment. After an approved command, the pane
+stays leased until you reclaim it; its next request waits for that (still within
+its 120 seconds) instead of failing.
+
+The first visible approval brings its window forward. While one approval is on
+screen, later ones attach to their own windows without taking focus; the app asks
+for attention instead. **Agent Overview** lists each pane's waiting count and the
+oldest wait in **Approvals (host)**, and **Show Terminal** opens the pane with its
+sheet. Every request expires 120 seconds after it was queued. Waiting does not
+extend that time; when less than 10 seconds would remain for review, the request
+expires as `expired` instead of showing a sheet.
+
+Pass `--id <request-id>` (1–64 letters, digits, `.`, `_`, `:` or `-`) to choose
+the request's ID; otherwise AkiTTY assigns one. Replies to a request carry
+`request_id` once it is known: the assigned ID, or a valid ID the caller supplied. Reusing an ID in the same launch never queues or dispatches again,
+even after the first request finished. `akitty-agent status <request-id>` reports
+`queued`, `awaiting_approval`, `dispatched`, `denied`, `expired`, `cancelled`,
+`failed` or `outcome_unknown`, with the pane and queue position; it never
+returns the command or its fingerprint. `dispatched` means input was queued, not that the command succeeded.
+The most recent 256 finished requests are kept in memory only and end with the
+app; caller-chosen IDs stay reserved for the whole launch even after their status
+is gone. IDs are not secrets: any same-user process can query or reuse a
+guessable ID such as `job-1`, so prefer a random one such as a UUID.
+
 List pages contain at most 16 panes. If `next_offset` is an integer, use
 `akitty-agent list <offset>` to fetch the next page. Pane identifiers are scoped
 to the running app instance and become invalid after restart. A request for a
@@ -96,19 +128,23 @@ Accessibility permission or equivalent control of the app/PTY/filesystem.
 Each connection carries one length-prefixed UTF-8 JSON request and response: a
 4-byte unsigned big-endian length, then 1..16384 bytes. A full incoming frame has
 a 3-second deadline. Keep both directions open until the reply; half-closed writes
-are deliberately treated as canceled requests. Pending approval expires after
-120 seconds and is canceled on disconnect, pane removal or disabling the service.
-Only one connection is dispatched at a time. Extra connections get a busy rejection
+are deliberately treated as canceled requests. Pending approval expires 120 seconds
+after it was queued and is canceled on disconnect, pane removal or disabling the
+service. Up to 72 connections are handled at once. A request beyond the 64-request
+queue limit is refused at once and does not keep its connection, so at least 8
+remain for list and status. Extra connections get a busy rejection
 after their bounded frame is consumed, so closing cannot reset a client still writing.
 An extra connection that supplies an invalid frame or stalls beyond one second is
-closed without dispatch or a reply. A
-3-second cooldown after a prompt prevents repeated focus stealing. Failure is
+closed without dispatch or a reply. After a sheet closes, its window waits
+3 seconds before showing the next one, so a click meant for one approval cannot
+land on the next. Failure is
 reported; no request is automatically retried.
 
 | Request | Fields |
 | --- | --- |
 | List | `{"version":1,"op":"list","offset":0}`; offset optional, 0..64 |
-| Request | `{"version":1,"op":"request","pane":"<opaque-id>","command":"git status"}` |
+| Request | `{"version":1,"op":"request","pane":"<opaque-id>","command":"git status","request_id":"job-1"}`; `request_id` optional |
+| Status | `{"version":1,"op":"status","request_id":"job-1"}` |
 
 Unknown fields/operations and boolean versions are rejected. Commands are at most
 4096 UTF-8 bytes, one nonempty line without control or Unicode format characters.

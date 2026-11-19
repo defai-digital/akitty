@@ -4,6 +4,11 @@ import AppKit
 
 /// The overview shows host control apart from what programs and shells report, and never reads terminal text.
 final class AgentOverviewTests: XCTestCase {
+    func testApprovalsColumnShowsHostQueueOnly() {
+        XCTAssertEqual(AgentOverviewRow(sessionID: 1, snapshot: nil).approvals, "None")
+        XCTAssertEqual(AgentOverviewRow(sessionID: 1, snapshot: nil, pending: (count: 2, oldestWait: 14.7)).approvals, "2 waiting · oldest 14 s")
+    }
+
     @MainActor func testReturnBelongsToTableAndWindowCloseStopsRefreshTimer() throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)

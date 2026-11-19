@@ -78,7 +78,7 @@ class MCPProtocolTests(unittest.TestCase):
         init = self.session.initialize()
         self.assertEqual(set(init['result']['capabilities']), {'tools'})
         tools = self.session.request('tools/list')['result']['tools']
-        self.assertEqual([tool['name'] for tool in tools], ['list_panes', 'request_command'])
+        self.assertEqual([tool['name'] for tool in tools], ['list_panes', 'request_command', 'request_status'])
         self.assertTrue(tools[0]['annotations']['readOnlyHint'])
         self.assertFalse(tools[1]['annotations']['idempotentHint'])
         self.assertTrue(tools[1]['annotations']['destructiveHint'])
@@ -135,7 +135,7 @@ class MCPProtocolTests(unittest.TestCase):
             self.session.send({'jsonrpc': '2.0', 'id': ident, 'method': 'tools/list'})
         received = [self.session.read() for _ in range(20)]
         self.assertEqual({item['id'] for item in received}, set(range(20)))
-        self.assertTrue(all(len(item['result']['tools']) == 2 for item in received))
+        self.assertTrue(all(len(item['result']['tools']) == 3 for item in received))
 
     def test_eof_can_stop_server_with_backpressured_output(self):
         self.session.initialize()

@@ -48,7 +48,8 @@ The companion is bundled with the macOS app; no Node or Python runtime is needed
    before connecting; `grok mcp doctor` reports this condition.
 
 3. Allow at least **150 seconds** for command tool calls in clients that support
-   timeout configuration. Native approval expires after 120 seconds; local IPC
+   timeout configuration. Native approval expires 120 seconds after the request
+   is queued, including time spent behind other requests for that pane; local IPC
    has a 135-second response deadline. A shorter client timeout can abandon an
    approval. Cancellation cannot stop a command already dispatched.
 4. Try an explicit instruction:
@@ -66,7 +67,8 @@ resume typing. Reclaim does not interrupt the process.
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
 | `list_panes` | Optional integer `offset`, 0–64 | Returns the native list page (up to 16 panes), opaque pane IDs, untrusted titles, input ownership, and `next_offset`. |
-| `request_command` | `pane`, `command` | Requests native approval of one exact shell command in an idle integrated bash/zsh prompt. |
+| `request_command` | `pane`, `command`, optional `request_id` | Requests native approval of one exact shell command in an idle integrated bash/zsh prompt. Reusing a `request_id` never queues or dispatches again. |
+| `request_status` | `request_id` | Read-only. Returns the request's state in this launch: `queued`, `awaiting_approval`, `dispatched`, `denied`, `expired`, `cancelled`, `failed` or `outcome_unknown`. |
 
 Follow `next_offset` to fetch another page. Pane IDs expire when a pane closes or
 AkiTTY restarts. A title is display data, not an authenticated agent identity or
@@ -123,8 +125,9 @@ The socket identifies the adapter's OS process, not an authenticated AI product.
 MCP cancellation disconnects the local request, abandoning pending approval.
 Stdin EOF also abandons pending approval and exits the server. A command already
 queued can still run and retain its lease after cancellation or server exit.
-Overlapping tool calls receive a busy error instead of being queued for later
-execution. Input messages are bounded to 64 KiB with a 32-message transport queue;
+Calls for different panes may wait in AkiTTY's approval queue at the same time,
+up to 8 per bridge. A second call for a pane that already has a call waiting
+receives a busy error and is not sent. Input messages are bounded to 64 KiB with a 32-message transport queue;
 exceeding either bound ends the session without replaying requests. Unterminated
 input is discarded on EOF. Stdout contains only MCP messages.
 

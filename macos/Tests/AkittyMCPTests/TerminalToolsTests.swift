@@ -11,7 +11,7 @@ final class TerminalToolsTests: XCTestCase {
         return root
     }
     func testSurfaceAndAnnotations() {
-        XCTAssertEqual(TerminalTools.tools.map(\.name), ["list_panes", "request_command"])
+        XCTAssertEqual(TerminalTools.tools.map(\.name), ["list_panes", "request_command", "request_status"])
         XCTAssertEqual(TerminalTools.tools[0].annotations.readOnlyHint, true)
         XCTAssertEqual(TerminalTools.tools[1].annotations.destructiveHint, true)
         XCTAssertEqual(TerminalTools.tools[1].annotations.idempotentHint, false)
@@ -36,6 +36,58 @@ final class TerminalToolsTests: XCTestCase {
         }
         XCTAssertThrowsError(try TerminalTools.payload(.init(name: "list_panes", arguments: ["actor": "agent"])))
         XCTAssertThrowsError(try TerminalTools.payload(.init(name: "control_reclaim")))
+    }
+
+    func testRequestIDAndStatusPayloads() throws {
+        let data = try TerminalTools.payload(.init(name: "request_command", arguments: ["pane": "x", "command": "pwd", "request_id": "job-1.a:b_c"]))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["request_id"] as? String, "job-1.a:b_c")
+        let status = try XCTUnwrap(JSONSerialization.jsonObject(with: TerminalTools.payload(.init(name: "request_status", arguments: ["request_id": "job-1"]))) as? [String: Any])
+        XCTAssertEqual(status["op"] as? String, "status"); XCTAssertEqual(status["request_id"] as? String, "job-1")
+        for bad: Value in ["", "has space", "slash/no", .string(String(repeating: "a", count: 65)), 7, true] {
+            XCTAssertThrowsError(try TerminalTools.payload(.init(name: "request_command", arguments: ["pane": "x", "command": "pwd", "request_id": bad])))
+            XCTAssertThrowsError(try TerminalTools.payload(.init(name: "request_status", arguments: ["request_id": bad])))
+        }
+        XCTAssertThrowsError(try TerminalTools.payload(.init(name: "request_status", arguments: [:])))
+        XCTAssertThrowsError(try TerminalTools.payload(.init(name: "request_status", arguments: ["request_id": "a", "pane": "x"])))
+        XCTAssertEqual(TerminalTools.tools[2].annotations.readOnlyHint, true)
+    }
+
+    func testDifferentPanesWaitTogetherAndSamePaneStaysBusy() async throws {
+        let root = try socketDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("requests.sock").path
+        let server = LocalRequestServer(path: path), count = Counter(), gate = Counter()
+        try server.start { _, peer in
+            await count.increment()
+            // Hold every request until the test opens the gate, as an approval queue would.
+            while await gate.value == 0 && peer.connected { try? await Task.sleep(for: .milliseconds(5)) }
+            return Data("{\"version\":1,\"ok\":false,\"error\":\"Command execution denied.\",\"request_id\":\"r\"}".utf8)
+        }
+        defer { server.stop() }
+        let tools = TerminalTools(path: path); defer { tools.stop() }
+        let first = Task { try await tools.call(.init(name: "request_command", arguments: ["pane": "p/1", "command": "pwd"])) }
+        let second = Task { try await tools.call(.init(name: "request_command", arguments: ["pane": "p/2", "command": "pwd"])) }
+        try await waitUntil { await count.value == 2 }
+        XCTAssertEqual(server.activeRequestCount, 2, "the server must hold requests for two panes at once")
+        for alias in [" p/1 ", "p\\/1"] {
+            let busy = try await tools.call(.init(name: "request_command", arguments: ["pane": .string(alias), "command": "ls"]))
+            XCTAssertEqual(busy.isError, true, alias)
+        }
+        let value = await count.value
+        XCTAssertEqual(value, 2, "a same-pane overlap is rejected locally and never sent")
+        var more: [Task<CallTool.Result, Error>] = []
+        for index in 3...TerminalTools.concurrentRequestLimit {
+            more.append(Task { try await tools.call(.init(name: "request_command", arguments: ["pane": .string("p/\(index)"), "command": "pwd"])) })
+        }
+        try await waitUntil { await count.value == TerminalTools.concurrentRequestLimit }
+        let over = try await tools.call(.init(name: "request_command", arguments: ["pane": "p/99", "command": "pwd"]))
+        XCTAssertEqual(over.isError, true)
+        let afterLimit = await count.value
+        XCTAssertEqual(afterLimit, TerminalTools.concurrentRequestLimit, "the call beyond the bridge limit is never sent")
+        await gate.increment()
+        let results = try await [first.value, second.value]
+        XCTAssertTrue(results.allSatisfy { $0.isError == true })
+        for task in more { let result = try await task.value; XCTAssertEqual(result.isError, true) }
     }
 
     func testDisabledServiceDoesNotClaimSuccessOrRetry() async throws {

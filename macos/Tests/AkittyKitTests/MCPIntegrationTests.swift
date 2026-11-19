@@ -47,7 +47,7 @@ final class MCPIntegrationTests: XCTestCase {
         let transport = StdioTransport(input: .init(rawValue: output.fileHandleForReading.fileDescriptor), output: .init(rawValue: input.fileHandleForWriting.fileDescriptor))
         _ = try await client.connect(transport: transport)
         let listing = try await client.listTools()
-        XCTAssertEqual(Set(listing.tools.map(\.name)), ["list_panes", "request_command"])
+        XCTAssertEqual(Set(listing.tools.map(\.name)), ["list_panes", "request_command", "request_status"])
         let listed: CallTool.Result = try await client.send(CallTool.request(.init(name: "list_panes"))).value
         let pane = try XCTUnwrap(listed.structuredContent?.objectValue?["data"]?.objectValue?["panes"]?.arrayValue?.first?.objectValue?["pane"]?.stringValue)
 

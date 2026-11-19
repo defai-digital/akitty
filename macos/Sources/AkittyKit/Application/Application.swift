@@ -89,7 +89,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private(set) var agentOverview: AgentOverviewController?
     @objc func showAgentOverview(_ sender: Any?) {
         if agentOverview == nil {
-            agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }, requestsEnabled: { [weak self] in self?.agentRequests.enabled == true }) { [weak self] window, terminal in
+            agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }, requestsEnabled: { [weak self] in self?.agentRequests.enabled == true },
+                                                   pending: { [weak self] in self?.agentRequests.pendingSummary(for: $0) }) { [weak self] window, terminal in
                 // A hidden quick terminal is shown through its controller so its hide and focus restore keep working.
                 if window === self?.quickTerminal.terminalWindow, window.window?.isVisible != true {
                     do { try self?.quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }

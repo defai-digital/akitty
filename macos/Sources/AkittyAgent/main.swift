@@ -17,8 +17,12 @@ do {
     else if args.count == 2, args[0] == "list", let offset = Int(args[1]) { request["op"] = "list"; request["offset"] = offset }
     else if args.count == 3, args[0] == "request" {
         request["op"] = "request"; request["pane"] = args[1]; request["command"] = args[2]
+    } else if args.count == 5, args[0] == "request", args[1] == "--id" {
+        request["op"] = "request"; request["request_id"] = args[2]; request["pane"] = args[3]; request["command"] = args[4]
+    } else if args.count == 2, args[0] == "status" {
+        request["op"] = "status"; request["request_id"] = args[1]
     } else {
-        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request <pane-id> '<exact shell command>' | mcp\nEvery request needs human approval. Normal agent subprocesses are not intercepted.")
+        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request [--id <request-id>] <pane-id> '<exact shell command>' | status <request-id> | mcp\nEvery request needs human approval. Reusing a request ID never runs a command again. Normal agent subprocesses are not intercepted.")
     }
     let reply = try LocalSocket.request(JSONSerialization.data(withJSONObject: request), path: path)
     FileHandle.standardOutput.write(reply); FileHandle.standardOutput.write(Data("\n".utf8))

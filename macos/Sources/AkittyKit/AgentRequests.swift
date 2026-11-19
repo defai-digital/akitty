@@ -13,16 +13,47 @@ import AgentIPC
     /// Program-status state counts last recorded per pane. Only a change in counts is recorded: progress and message
     /// updates arrive at 2 Hz from a busy program and would otherwise rotate host records out of retention.
     private var reports: [UInt64: [String: Int]] = [:]
-    private weak var pendingWindow: NSWindow?
-    private weak var pendingSheet: NSWindow?
-    private var activeRequest: UUID?
-    /// Whether a request is still unwinding; its cooldown is armed only once this turns false.
-    var hasActiveRequest: Bool { activeRequest != nil }
-    private var pendingLocalRequest = false
+    /// A visible approval sheet. Each window shows at most one; each pane presents only its queue head.
+    private struct Presented { weak var window: NSWindow?; weak var sheet: NSWindow?; let local: Bool }
+    private var presented: [String: Presented] = [:]
+    /// Windows reserved by a request between leaving the queue and attaching its sheet.
+    private var reservedWindows: Set<ObjectIdentifier> = []
+    /// Per-window time before which the next sheet may not appear: a click meant for one sheet must not land on the next.
+    private var windowReadyTime: [ObjectIdentifier: TimeInterval] = [:]
+    /// FIFO request IDs per pane session. Only the head can be presented or approved.
+    private var queues: [UInt64: [String]] = [:]
+    private var records: [String: RequestRecord] = [:]
+    private var finishedOrder: [String] = []
+    /// Every caller-chosen ID seen this launch, kept after its status record is evicted so an ID never dispatches twice.
+    private var seenRequestIDs: Set<String> = []
+    static let seenRequestIDLimit = 4096
+    /// Requests between enqueue and the end of their unwinding, including audit writes after leaving the queue.
+    private var inFlight = 0
+    /// Whether any request is queued, presented, or still unwinding.
+    var hasActiveRequest: Bool { inFlight > 0 }
     private var stopped = false
     private var timeline: NSWindowController?
-    private var nextPromptTime: TimeInterval = 0
     var cooldownInterval: TimeInterval = 3
+    /// Total lifetime of a request from enqueue; the sheet receives the remainder.
+    var requestTimeout: TimeInterval = 120
+    /// A queued request whose remaining time is shorter than this expires instead of flashing a sheet.
+    var minimumReviewTime: TimeInterval = 10
+    static let perPaneLimit = 8
+    static let appLimit = 64
+    static let finishedHistoryLimit = 256
+    struct RequestRecord {
+        let id: String
+        let pane: String
+        let paneSession: UInt64
+        let enqueued: TimeInterval
+        var state: String
+    }
+    /// A request failure that carries its request ID back to the caller.
+    struct RequestFailure: LocalizedError {
+        let message: String
+        let requestID: String?
+        var errorDescription: String? { message }
+    }
     private(set) var enabled = false
     var onFailure: ((String) -> Void)?
     private(set) var failure: String? { didSet { if let failure { onFailure?(failure) } } }
@@ -60,12 +91,46 @@ import AgentIPC
             enabled = true
         } else {
             enabled = false; server.stop()
-            if pendingLocalRequest { cancelPendingApproval() }
+            cancelPendingApproval(localOnly: true)
         }
     }
     func stop() { stopped = true; cancelPendingApproval(); try? setEnabled(false); collectAll(drain: true); timer?.invalidate(); timer = nil }
-    private func cancelPendingApproval() {
-        if let sheet = pendingSheet, pendingWindow?.attachedSheet === sheet { pendingWindow?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+    private func cancelPendingApproval(localOnly: Bool = false) {
+        for (id, entry) in presented where !localOnly || entry.local { endSheet(id) }
+    }
+    private func endSheet(_ id: String) {
+        guard let entry = presented[id], let sheet = entry.sheet, let window = entry.window, window.attachedSheet === sheet else { return }
+        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+    }
+    /// Pending approvals for one pane: how many, and how long the oldest has waited.
+    func pendingSummary(for sessionID: UInt64) -> (count: Int, oldestWait: TimeInterval)? {
+        guard let queue = queues[sessionID], let first = queue.first, let record = records[first] else { return nil }
+        return (queue.count, max(0, ProcessInfo.processInfo.systemUptime - record.enqueued))
+    }
+    /// Current state of a request this launch received. Any same-user process can ask, so the reply carries no
+    /// command text or fingerprint: a hash of a short command is easy to guess.
+    func status(of requestID: String) -> [String: Any]? {
+        guard let record = records[requestID] else { return nil }
+        var result: [String: Any] = ["request_id": record.id, "state": record.state, "pane": record.pane]
+        if let position = queues[record.paneSession]?.firstIndex(of: record.id) { result["queue_position"] = position }
+        return result
+    }
+    static func isValidRequestID(_ value: String) -> Bool {
+        (1...64).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "._:-".unicodeScalars.contains($0) }
+    }
+    /// Leaves the pane's queue at once, so the next request does not wait behind this one's audit write.
+    private func dequeue(_ id: String, state: String) {
+        guard var record = records[id] else { return }
+        record.state = state; records[id] = record
+        if var queue = queues[record.paneSession] {
+            queue.removeAll { $0 == id }
+            queues[record.paneSession] = queue.isEmpty ? nil : queue
+        }
+    }
+    private func finish(_ id: String, state: String) {
+        dequeue(id, state: state)
+        finishedOrder.append(id)
+        while finishedOrder.count > Self.finishedHistoryLimit { records.removeValue(forKey: finishedOrder.removeFirst()) }
     }
     private func persist(event: String, id: UInt64, provenance: String = "host", fields: [String: Any] = [:]) {
         later(event, session: sessions[id] ?? "unknown", provenance: provenance, fields: ["pane_session_id": id].merging(fields) { _, new in new })
@@ -133,46 +198,136 @@ import AgentIPC
             }
         }
     }
+    /// Ends a request before approval without dispatch. `state` is what `status` reports.
+    private struct QueueEnd: LocalizedError {
+        let message: String
+        let state: String
+        var errorDescription: String? { message }
+    }
+    /// Waits until this request is its pane's oldest and its window can show a sheet. No lease is held while queued,
+    /// so a waiting request never blocks human input. Returns the window that will carry the sheet.
+    private func waitForTurn(id: String, terminal: TerminalView, origin: Origin, deadline: TimeInterval) async throws -> NSWindow {
+        var round = 0
+        while true {
+            try Task.checkCancellation()
+            guard !stopped, origin.isValid(enabled: enabled) else {
+                throw QueueEnd(message: "The caller disconnected or Local Agent Requests stopped before approval. Nothing was dispatched.", state: "cancelled")
+            }
+            let head = queues[terminal.session.id]?.first == id
+            // Enumerating panes is the costly check; a request behind others repeats it about once a second.
+            let checkSource = head || round % 10 == 0
+            round += 1
+            guard !terminal.isShutdown, !checkSource || source().contains(where: { $0 === terminal }) else {
+                throw QueueEnd(message: "Request source or target terminal is no longer available. Nothing was dispatched.", state: "cancelled")
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard deadline - now >= minimumReviewTime else {
+                throw QueueEnd(message: "Approval request expired while queued behind earlier requests for this pane. Nothing was dispatched; do not automatically retry.", state: "expired")
+            }
+            if head, let window = terminal.window {
+                let key = ObjectIdentifier(window)
+                // While another approval is on screen, a new sheet attaches quietly and needs a window the human can see.
+                // An approved command keeps its pane leased until the human reclaims it. The next request waits for
+                // that instead of failing to acquire control; it still expires on its own schedule.
+                if !reservedWindows.contains(key), window.attachedSheet == nil, now >= windowReadyTime[key] ?? 0,
+                   presented.isEmpty || (window.isVisible && !window.isMiniaturized),
+                   (try? terminal.session.shellState()).map({ $0.control?.agent != true }) == true { return window }
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
     /// System intents and socket requests share approval and audit handling.
     /// Siri does not enable the local socket or carry core authorizations.
-    func request(_ command: String, in terminal: TerminalView, origin: Origin) async throws -> [String: Any] {
+    /// Requests for different panes queue independently. Each pane presents only its oldest request, and
+    /// a request's lifetime (120 s by default) counts from enqueue; waiting never extends it.
+    func request(_ command: String, in terminal: TerminalView, origin: Origin, requestID: String? = nil) async throws -> [String: Any] {
         try Task.checkCancellation()
+        if let requestID {
+            guard Self.isValidRequestID(requestID) else {
+                throw RequestFailure(message: "Invalid request_id. Use 1 to 64 letters, digits, '.', '_', ':' or '-'.", requestID: nil)
+            }
+            // Assigned IDs are in `records` too: a caller must not take over one AkiTTY handed out.
+            if seenRequestIDs.contains(requestID) || records[requestID] != nil {
+                let state = records[requestID].map { " (state: \($0.state))" } ?? ""
+                throw RequestFailure(message: "Request \(requestID) was already received in this launch\(state). It was not queued or dispatched again; use status to check it.", requestID: requestID)
+            }
+            guard seenRequestIDs.count < Self.seenRequestIDLimit else {
+                throw RequestFailure(message: "This launch has recorded \(Self.seenRequestIDLimit) caller-chosen request IDs. Omit request_id to let AkiTTY assign one.", requestID: requestID)
+            }
+        }
         guard !stopped, origin.isValid(enabled: enabled), !terminal.isShutdown,
-              source().contains(where: { $0 === terminal }), let window = terminal.window else {
+              source().contains(where: { $0 === terminal }), terminal.window != nil else {
             throw AkittyError.core("Request source or target terminal is no longer available.")
         }
         try AgentCommandHost.validateCommand(command)
-        guard activeRequest == nil else { throw AkittyError.core("Another command request is awaiting approval.") }
-        guard ProcessInfo.processInfo.systemUptime >= nextPromptTime else { throw AkittyError.core("Local requests are rate limited. Wait before requesting again.") }
         guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
-        let id = UUID(); activeRequest = id
-        if case .localProcess = origin { pendingLocalRequest = true }
+        let pane = terminal.session.id
+        guard (queues[pane]?.count ?? 0) < Self.perPaneLimit else {
+            throw AkittyError.core("This pane already has \(Self.perPaneLimit) requests awaiting approval. Request not queued; do not automatically retry.")
+        }
+        guard queues.values.reduce(0, { $0 + $1.count }) < Self.appLimit else {
+            throw AkittyError.core("AkiTTY already has \(Self.appLimit) requests awaiting approval. Request not queued; do not automatically retry.")
+        }
+        let id = requestID ?? UUID().uuidString
+        let enqueued = ProcessInfo.processInfo.systemUptime, deadline = enqueued + requestTimeout
+        let local: Bool
+        if case .localProcess = origin { local = true } else { local = false }
+        if requestID != nil { seenRequestIDs.insert(id) }
+        records[id] = RequestRecord(id: id, pane: paneID(terminal), paneSession: pane, enqueued: enqueued, state: "queued")
+        queues[pane, default: []].append(id)
+        inFlight += 1
         // The cooldown only follows a sheet the human actually saw: a request that failed before display
-        // (a busy shell) must not lock out the immediate retry.
+        // (a busy shell) must not delay the immediate retry.
         var prompted = false
+        var reserved: ObjectIdentifier?
+        var outcome = "failed"
         defer {
-            activeRequest = nil; pendingLocalRequest = false; pendingWindow = nil; pendingSheet = nil
-            if prompted { nextPromptTime = ProcessInfo.processInfo.systemUptime + cooldownInterval }
+            if let reserved {
+                reservedWindows.remove(reserved)
+                if prompted {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    windowReadyTime = windowReadyTime.filter { $0.value > now }
+                    windowReadyTime[reserved] = now + cooldownInterval
+                }
+            }
+            presented.removeValue(forKey: id)
+            finish(id, state: outcome)
+            inFlight -= 1
         }
         startRecording(); register(terminal)
         let eventSession = sessions[terminal.session.id] ?? "unknown"
         do {
             return try await withTaskCancellationHandler {
+                let window = try await waitForTurn(id: id, terminal: terminal, origin: origin, deadline: deadline)
+                let key = ObjectIdentifier(window); reserved = key; reservedWindows.insert(key)
+                records[id]?.state = "awaiting_approval"
                 // Persist intent before acquiring authority; an I/O failure prevents dispatch.
                 try await store.appendDurably(event: "execution_requested", session: eventSession, provenance: "host",
-                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count]) { _, value in value })
+                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "request_id": id, "command_sha256": AgentEventStore.digest(command), "command_bytes": command.utf8.count]) { _, value in value })
                 try Task.checkCancellation()
                 guard !stopped, origin.isValid(enabled: enabled) else { throw AkittyError.core("Request service or caller has stopped.") }
                 let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: origin.actor, command: command) { [weak self] request in
                     // A cancelled intent is not a human denial: throwing releases the lease instead of denying it.
                     if Task.isCancelled { throw CancellationError() }
+                    // No sheet was shown, so this is not a human denial: throwing releases the lease instead.
                     guard let self, !self.stopped, origin.isValid(enabled: self.enabled), !terminal.isShutdown,
-                          terminal.window === window, window.attachedSheet == nil else { return false }
-                    window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+                          terminal.window === window, window.attachedSheet == nil else {
+                        throw AkittyError.core("The approval could not be shown because the caller, pane or window changed. Nothing was dispatched; do not automatically retry.")
+                    }
+                    // Only the first visible approval takes focus; later ones attach quietly and wait for the human.
+                    // Decided here, from live state, so two windows reaching this point together cannot both activate.
+                    let quiet = self.presented.keys.contains(where: { $0 != id })
+                    // A quiet sheet does not bring its window forward, so the window must still be on screen now.
+                    if quiet, !window.isVisible || window.isMiniaturized {
+                        throw AkittyError.core("The approval could not be shown because its window was hidden. Nothing was dispatched; do not automatically retry.")
+                    }
+                    if quiet { NSApp.requestUserAttention(.informationalRequest) }
+                    else { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
                     let alert = AgentCommandHost.approvalAlert(request, callerDescription: origin.explanation)
-                    self.pendingWindow = window; self.pendingSheet = alert.window
+                    self.presented[id] = Presented(window: window, sheet: alert.window, local: local)
                     prompted = true
-                    let accepted = await Self.present(alert, in: window, valid: { [weak self, weak terminal] in
+                    let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+                    let accepted = await Self.present(alert, in: window, timeout: remaining, valid: { [weak self, weak terminal] in
                         guard let self, let terminal else { return false }
                         return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window && window.isVisible
                     })
@@ -180,32 +335,45 @@ import AgentIPC
                     if Task.isCancelled { throw CancellationError() }
                     return accepted && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
                 }
+                outcome = "dispatched"
                 record(terminal, drain: true)
-                guard failure == nil else { throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.") }
+                guard failure == nil else {
+                    outcome = "outcome_unknown"
+                    throw AkittyError.core("Command was dispatched, but event recording failed. Outcome is uncertain; do not retry automatically.")
+                }
                 return ["accepted": receipt.dispatch.accepted, "after_command_id": receipt.dispatch.after_command_id, "event_session": eventSession,
-                    "completion_untrusted": true, "input_remains_leased": true,
+                    "request_id": id, "completion_untrusted": true, "input_remains_leased": true,
                     "next_step": "Review the terminal, then use Reclaim Terminal Control. It does not stop the process."]
             } onCancel: {
-                Task { @MainActor [weak self] in
-                    guard let self, self.activeRequest == id else { return }
-                    self.cancelPendingApproval()
-                }
+                Task { @MainActor [weak self] in self?.endSheet(id) }
             }
         } catch {
             collectAll(drain: true)
-            if error is CancellationError {
+            if let end = error as? QueueEnd {
+                outcome = end.state
+                dequeue(id, state: outcome)
+                do { try await store.appendDurably(event: end.state == "expired" ? "request_expired" : "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
+                catch { failure = error.localizedDescription }
+            } else if error is CancellationError {
+                outcome = "cancelled"
+                dequeue(id, state: outcome)
                 // The intent was cancelled (not denied by a human); record who ended the wait before rethrowing.
-                do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host") }
+                do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
                 catch { failure = error.localizedDescription }
-            }
-            if error.localizedDescription.contains("Dispatch outcome is unknown") {
-                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host") }
+                throw error
+            } else if error.localizedDescription.contains("Dispatch outcome is unknown") {
+                outcome = "outcome_unknown"
+                dequeue(id, state: outcome)
+                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host", fields: ["request_id": id]) }
                 catch { failure = error.localizedDescription }
-            }
-            throw error
+            } else if error.localizedDescription.contains("Command execution denied") {
+                outcome = "denied"
+            } else if outcome != "outcome_unknown" { outcome = "failed" }
+            throw RequestFailure(message: error.localizedDescription, requestID: id)
         }
     }
     func handle(_ data: Data, peer: LocalPeer) async -> Data {
+        var suppliedID: String?
         do {
             guard enabled, peer.connected else { throw AkittyError.core("Local requests are disabled or the caller disconnected.") }
             guard let input = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -223,8 +391,16 @@ import AgentIPC
                      "input_agent_controlled": terminal.snapshot?.control?.agent == true,
                      "execution": "request_requires_human_approval", "ordinary_agent_operations": "observation_only"]
                 }, "next_offset": offset + 16 < panes.count ? offset + 16 : NSNull(), "total_panes": panes.count]
-            } else if operation == "request", Set(input.keys) == ["version", "op", "pane", "command"],
+            } else if operation == "status", Set(input.keys) == ["version", "op", "request_id"], let requestID = input["request_id"] as? String {
+                guard Self.isValidRequestID(requestID) else { throw AkittyError.core("Invalid request_id.") }
+                guard let state = status(of: requestID) else { throw AkittyError.core("Unknown request_id for this AkiTTY launch. Finished requests are kept for the most recent \(Self.finishedHistoryLimit).") }
+                result = state
+            } else if operation == "request", Set(input.keys) == ["version", "op", "pane", "command"] || Set(input.keys) == ["version", "op", "pane", "command", "request_id"],
                       let supplied = input["pane"] as? String, let command = input["command"] as? String {
+                let requestID: String?
+                if input["request_id"] == nil { requestID = nil }
+                else if let value = input["request_id"] as? String { requestID = value; if Self.isValidRequestID(value) { suppliedID = value } }
+                else { throw AkittyError.core("Invalid request_id.") }
                 // An ID copied by hand from older list output can still carry JSON's `\/` escape (issue #26).
                 let pane = supplied.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\\/", with: "/")
                 guard let terminal = panes.first(where: { paneID($0) == pane }) else {
@@ -232,14 +408,16 @@ import AgentIPC
                         ? "Pane \(pane) is no longer open. Run list again and use a current pane value."
                         : "Pane identifier is from another AkiTTY launch or was copied incorrectly. Run list again and use a current pane value.")
                 }
-                result = try await request(command, in: terminal, origin: .localProcess(peer))
-            } else if operation == "request" || operation == "list" {
+                result = try await request(command, in: terminal, origin: .localProcess(peer), requestID: requestID)
+            } else if operation == "request" || operation == "list" || operation == "status" {
                 throw AkittyError.core("Unknown or missing fields for \(operation). See akitty-agent usage.")
             } else { throw AkittyError.core("Unsupported request operation.") }
             return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys, .withoutEscapingSlashes])
         } catch {
             collectAll(drain: true)
-            return (try? JSONSerialization.data(withJSONObject: ["version": 1, "ok": false, "error": error.localizedDescription], options: [.withoutEscapingSlashes])) ?? Data()
+            var envelope: [String: Any] = ["version": 1, "ok": false, "error": error.localizedDescription]
+            if let id = (error as? RequestFailure)?.requestID ?? suppliedID { envelope["request_id"] = id }
+            return (try? JSONSerialization.data(withJSONObject: envelope, options: [.withoutEscapingSlashes])) ?? Data()
         }
     }
     // The injected monotonic clock lets tests cross the deadline without racing AppKit's timer.

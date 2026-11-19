@@ -200,13 +200,18 @@ final class SiriIntentTests: XCTestCase {
             try await waitUntil { window.attachedSheet != nil }
             let sheet = try XCTUnwrap(window.attachedSheet)
             XCTAssertEqual(sheet.defaultButtonCell?.title, "Deny")
-            do { _ = try await requests.request("echo second", in: terminal, origin: .siri); XCTFail("Concurrent request must fail") }
-            catch { XCTAssertTrue(error.localizedDescription.contains("awaiting approval")) }
+            // A second request for the same pane queues behind the first; it is never shown alongside it.
+            let second = Task { try await requests.request("echo second", in: terminal, origin: .siri) }
+            try await waitUntil { requests.pendingSummary(for: terminal.session.id)?.count == 2 }
+            XCTAssertTrue(window.attachedSheet === sheet)
             if outcome == "cancel" { pending.cancel() }
             else if outcome == "stop" { requests.stop() }
             else { window.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
             do { _ = try await pending.value; XCTFail("Denied or cancelled request must fail") }
             catch { if outcome == "cancel" { XCTAssertTrue(error is CancellationError, "cancellation must not be reported as a denial: \(error)") } }
+            second.cancel()
+            do { _ = try await second.value; XCTFail("The queued request must not succeed") } catch {}
+            try await waitUntil { window.attachedSheet == nil && !requests.hasActiveRequest }
             XCTAssertEqual(try terminal.session.snapshot()?.control?.owner, "human")
         }
         let events = String(decoding: try requests.store.export(), as: UTF8.self)
