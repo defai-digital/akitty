@@ -140,6 +140,25 @@ WASM benchmark with this command.
 bash scripts/benchmark.sh --samples 30 --rounds 128 --output build/throughput.json
 ```
 
+### macOS PTY throughput
+
+The signed AkiTTY and cmux apps run the same output through real PTYs.
+Rates are median MiB/s from the first write through the terminal's reply
+to a trailing cursor position request.
+
+| Workload | AkiTTY 1.4.0 | cmux 0.65.2.2 |
+| --- | ---: | ---: |
+| ASCII | 224.0 | 232.8 |
+| ANSI color | 251.7 | 189.3 |
+| CJK and combining text | 222.7 | 156.8 |
+| Long lines | 222.5 | 242.9 |
+
+Each app ran hidden on the same Apple M3 Max with a 98×25 PTY grid and
+scrollback configured off. Each rate uses 27 samples of about 8 MiB.
+The measurement ends at parser completion. The ASCII and long-line
+launch median ranges overlap. [Method and pinned versions](docs/PERFORMANCE.md#macos-pty-throughput)
+· [Raw timings](benchmarks/results/cmux-pty-throughput-2026-11-19.json)
+
 ## Siri and Shortcuts
 
 The current source includes ten built-in App Shortcuts for macOS 27.2. Install

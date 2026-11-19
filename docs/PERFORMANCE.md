@@ -2160,3 +2160,36 @@ The raw record includes every measured duration, pass order, pass-rate ranges,
 state digests, the probe results and artifact fingerprints. The headless
 comparison adapters were built locally outside the product build.
 [Raw reference engine measurements](../benchmarks/results/reference-engine-throughput-2026-11-19.json)
+
+## macOS PTY throughput
+
+On 2026-11-19, the signed arm64 AkiTTY 1.4.0 bundle (build 10400, commit
+`3d7cd93e3056d4dd6ec6499de1b72c1c8cdb015d`) and the signed cmux v0.65.2.2
+release bundle (marketing version 0.65.2, build 113) ran on the same Apple
+M3 Max with macOS 27.2.1. The benchmark verified both download hashes and
+bundle signatures. [AkiTTY release](https://github.com/defai-digital/akitty/releases/tag/v1.4.0)
+· [cmux release](https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2)
+
+Each launch used an isolated home, one hidden terminal and a 98×25 PTY grid.
+Scrollback was configured off. AkiTTY used Menlo 16 pt. cmux used Menlo 12 pt
+with adjusted padding to reach the same grid. The producer set the PTY to
+byte-preserving mode and sent about 8 MiB per sample. It requested grapheme
+mode reset and verified that ASCII, ANSI color and CJK text advanced the
+cursor by the same number of columns in each app.
+
+The timer ran from the first payload write through receipt of the cursor
+position report after a trailing marker. This measures PTY transport,
+terminal processing and the reply path. Screen preparation was outside the
+timer. The harness verified the app was hidden at each workload boundary.
+The three pairs ran in the order AkiTTY/cmux, cmux/AkiTTY, AkiTTY/cmux.
+Both members of each pair used the
+same shuffled workload order. Each launch ran three warmups and nine timed
+samples per workload. Two additional cmux launches stopped before timing
+because windows became visible during setup.
+
+The table in the README divides the payload byte count by the median
+elapsed time across 27 samples. AkiTTY's ANSI color and CJK medians were
+1.33× and 1.42× cmux's, respectively. The per-launch median ranges overlap
+for ASCII and long lines. The raw record includes payload hashes, app
+fingerprints, PTY geometry, cursor-width checks and every timed sample.
+[Raw macOS PTY measurements](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)

@@ -1,0 +1,761 @@
+{
+  "schema": 1,
+  "measured_at": "2026-11-19T07:35:51.527405+00:00",
+  "host": {
+    "cpu": "Apple M3 Max",
+    "macos": "27.2.1",
+    "architecture": "arm64"
+  },
+  "apps": {
+    "akitty": {
+      "version": "1.4.0",
+      "bundle_build": "10400",
+      "bundle_identifier": "com.defai.akitty",
+      "executable_sha256": "731ff3f0abf45664ae23968403c36bf470210dbf4c661d1c3e285e31ae97b109",
+      "release_tag": "v1.4.0",
+      "release_url": "https://github.com/defai-digital/akitty/releases/tag/v1.4.0",
+      "archive_sha256": "5a5d7bf995924e62fe0bb84b564e56aca12b6a2635a1ef9c0600682cbef69bcd",
+      "build_stamp": {
+        "schema": 1,
+        "commit": "3d7cd93e3056d4dd6ec6499de1b72c1c8cdb015d",
+        "dirty": false,
+        "configuration": "release",
+        "version": "1.4.0",
+        "build": "10400",
+        "platform": "macos",
+        "architecture": "arm64"
+      }
+    },
+    "cmux": {
+      "version": "0.65.2",
+      "bundle_build": "113",
+      "bundle_identifier": "com.cmuxterm.app",
+      "executable_sha256": "8bed5ca8db1decfd84bc5b6ba95fbc4625bd9344c9f60700c9c38c01f6a78afd",
+      "release_tag": "v0.65.2.2",
+      "release_url": "https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2",
+      "archive_sha256": "8773e44616fa4e2f0b22f3e6efb9a262817682027dc67b44dc61a3bb23107825"
+    }
+  },
+  "configuration": {
+    "grid": {
+      "cols": 98,
+      "rows": 25
+    },
+    "font": "Menlo 16 pt in AkiTTY, Menlo 12 pt in cmux. cmux padding adjusted to match the PTY grid.",
+    "scrollback": "Configured off in both apps",
+    "visibility": "Fresh instances of the signed macOS app bundles, hidden at each workload boundary",
+    "bytes_target": 8388608,
+    "measured_samples_per_launch_and_workload": 9,
+    "warmups_per_launch_and_workload": 3,
+    "launch_order": [
+      "akitty",
+      "cmux",
+      "cmux",
+      "akitty",
+      "akitty",
+      "cmux"
+    ],
+    "timing": "From the PTY child's first payload write through the terminal's reply to a trailing cursor position request. Clears and probe setup outside the timed interval.",
+    "validation": "Identical payload hashes, matching text-width probes and PTY grid, cursor at row 2 column 1 after every completion marker. Grapheme clustering mode reset requested in both apps."
+  },
+  "harness_sha256": {
+    "launch.py": "aa68f36e536a3bc945782ab3c45490caafc0bd29f580d39f12eb64d3b3475ee3",
+    "child.py": "3456a0dd731f23db2605ca2723400aba8651b2b54e7d9f5139970bf85ecb788a",
+    "measure.py": "e8687db828225d85ac22425772b6c37ac307eb260b118ea1d461a7a87834ba4c",
+    "app-state": "7bee727e7f2989f9b5ff748faab859ac7bdb8fb0073744f5947538f69c767122"
+  },
+  "excluded_launches": [
+    {
+      "attempts": 2,
+      "app": "cmux",
+      "reason": "Windows became visible during startup. Both attempts stopped before timed workloads. The six completed launches form three pairs."
+    }
+  ],
+  "runs": [
+    {
+      "app": "akitty",
+      "order": 1,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            30470541,
+            34228500,
+            32124042,
+            32186667,
+            32573625,
+            33673459,
+            35021959,
+            30249500,
+            31945542
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            38090792,
+            47003750,
+            56481625,
+            54585375,
+            93144000,
+            57351500,
+            35096708,
+            32437000,
+            31155833
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            36218083,
+            35991959,
+            37786667,
+            37660625,
+            35436375,
+            34758250,
+            36241875,
+            34792541,
+            34968125
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            38972542,
+            32455166,
+            31084291,
+            30869167,
+            31779459,
+            31449625,
+            34197625,
+            41015208,
+            32332959
+          ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "order": 2,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            29811250,
+            30292250,
+            27623167,
+            30380167,
+            29807334,
+            34364083,
+            32649708,
+            36177583,
+            35172916
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            34036208,
+            32005375,
+            32138541,
+            32863125,
+            34706125,
+            35538625,
+            32387958,
+            32910625,
+            31248708
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            51023000,
+            52032958,
+            50278792,
+            53629458,
+            54012417,
+            61002875,
+            50294916,
+            51687167,
+            50015167
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            49935709,
+            41363250,
+            41485958,
+            40940000,
+            41038334,
+            41631167,
+            41675917,
+            45762459,
+            40770667
+          ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "order": 3,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            51608500,
+            55948042,
+            52547333,
+            49012125,
+            49925042,
+            49523292,
+            48587667,
+            47781500,
+            47411042
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            42269875,
+            52639208,
+            52882250,
+            50159750,
+            44990708,
+            42884542,
+            41749291,
+            42086000,
+            42038084
+          ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            42610833,
+            46437000,
+            42971291,
+            45214291,
+            32750292,
+            31649709,
+            32907000,
+            40714834,
+            41479583
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            49010500,
+            43596750,
+            33388292,
+            30959500,
+            37611042,
+            43625500,
+            35163209,
+            32927208,
+            37059750
+          ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "order": 4,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            39008791,
+            35098083,
+            34811666,
+            35866541,
+            35388042,
+            36416875,
+            35929375,
+            35933708,
+            35619083
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            30568250,
+            32900917,
+            30207541,
+            28402208,
+            31583583,
+            29246125,
+            29796000,
+            30297667,
+            31785334
+          ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            109686333,
+            46278500,
+            46318334,
+            36591333,
+            40150583,
+            31714750,
+            38897791,
+            38669417,
+            45911875
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            36271500,
+            32686000,
+            37036167,
+            36607583,
+            35136500,
+            34186875,
+            35947041,
+            35332208,
+            37497000
+          ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "order": 5,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            36355458,
+            36218292,
+            37292625,
+            33622583,
+            44489458,
+            36315000,
+            35719250,
+            31976958,
+            34311709
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            61546000,
+            69675458,
+            32231667,
+            32981041,
+            33270000,
+            30278334,
+            29545542,
+            28096500,
+            32425750
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            35619250,
+            35047208,
+            35274875,
+            35488625,
+            36259917,
+            38508000,
+            42318667,
+            38376542,
+            36086500
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            38327792,
+            34334042,
+            34882958,
+            33786708,
+            33287291,
+            33260292,
+            31959834,
+            37108250,
+            41740708
+          ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "order": 6,
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            40645583,
+            37316250,
+            39233708,
+            33844250,
+            40313500,
+            35579917,
+            31667125,
+            31500834,
+            30459625
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            41417666,
+            41436125,
+            42962541,
+            42782083,
+            41979375,
+            43811292,
+            42893792,
+            42395209,
+            44829250
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            48909750,
+            48331750,
+            51837958,
+            54311750,
+            55255792,
+            50527333,
+            52994042,
+            51887208,
+            49153750
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            35830125,
+            30838750,
+            29547209,
+            31840584,
+            31738542,
+            29486375,
+            29959583,
+            34131333,
+            66737250
+          ]
+        }
+      }
+    }
+  ],
+  "workloads": {
+    "ascii": {
+      "payload_bytes": 8388601,
+      "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+      "akitty": {
+        "sample_count": 27,
+        "median_mib_s": 223.968681,
+        "launch_median_mib_s": [
+          248.549914,
+          199.249743,
+          220.882678
+        ]
+      },
+      "cmux": {
+        "sample_count": 27,
+        "median_mib_s": 232.801013,
+        "launch_median_mib_s": [
+          263.329472,
+          192.865809,
+          224.845756
+        ]
+      }
+    },
+    "ansi": {
+      "payload_bytes": 8388576,
+      "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+      "akitty": {
+        "sample_count": 27,
+        "median_mib_s": 251.733973,
+        "launch_median_mib_s": [
+          247.424601,
+          264.045726,
+          246.71656
+        ]
+      },
+      "cmux": {
+        "sample_count": 27,
+        "median_mib_s": 189.25936,
+        "launch_median_mib_s": [
+          192.835597,
+          186.546693,
+          186.993454
+        ]
+      }
+    },
+    "cjk": {
+      "payload_bytes": 8388607,
+      "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+      "akitty": {
+        "sample_count": 27,
+        "median_mib_s": 222.659009,
+        "launch_median_mib_s": [
+          222.271843,
+          223.049082,
+          221.689525
+        ]
+      },
+      "cmux": {
+        "sample_count": 27,
+        "median_mib_s": 156.792016,
+        "launch_median_mib_s": [
+          154.777279,
+          161.54013,
+          154.327048
+        ]
+      }
+    },
+    "long-lines": {
+      "payload_bytes": 8388096,
+      "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+      "akitty": {
+        "sample_count": 27,
+        "median_mib_s": 222.536028,
+        "launch_median_mib_s": [
+          170.188798,
+          222.536028,
+          232.990678
+        ]
+      },
+      "cmux": {
+        "sample_count": 27,
+        "median_mib_s": 242.945339,
+        "launch_median_mib_s": [
+          243.419082,
+          215.854444,
+          252.044083
+        ]
+      }
+    }
+  },
+  "finished_at": "2026-11-19T07:36:38.317581+00:00"
+}
