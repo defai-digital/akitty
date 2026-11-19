@@ -107,33 +107,34 @@ Choose the macOS arm64 ZIP, unzip it, move **Akitty.app** into **Applications**,
 
 ## Performance
 
-AkiTTY's terminal engine (`akitty-vt`) is measured against the official
-`libghostty-vt 1.0.1` library. Both engines receive identical input through the
-same C host, and every sample checks that their final screens agree.
+Headless terminal-engine throughput in MiB/s on an Apple M3 Max with
+macOS 27.2.1. Each engine received the same input in a 120×40 grid with a
+1,000-row scrollback limit.
 
-| Workload | AkiTTY MiB/s | libghostty-vt MiB/s | AkiTTY / libghostty-vt |
-| --- | ---: | ---: | ---: |
-| ASCII | 1,318.7 | 1,250.9 | 1.05x |
-| ANSI color | 343.0 | 267.1 | 1.28x |
-| Unicode | 195.5 | 184.3 | 1.06x |
-| Long lines | 926.5 | 462.4 | 2.00x |
-| Alternate screen | 176.1 | 166.3 | 1.06x |
-| Synchronized screen | 932.3 | 857.3 | 1.09x |
+| Workload | AkiTTY 1.4.0 | libghostty-vt 1.0.1 | libghostty-vt 1.0.2-dev | Alacritty terminal | Kitty 0.50.0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 480.7 | 642.5 | 658.6 | 113.6 | 99.5 |
+| ANSI color | 269.4 | 362.9 | 374.5 | 107.6 | 88.8 |
+| Unicode | 137.7 | 119.5 | 124.6 | — | 83.9 |
+| Long lines | 621.5 | 385.2 | 391.4 | 100.5 | 162.1 |
+| Alternate screen | 144.5 | 139.6 | 145.1 | 80.1 | 10.6 |
+| Synchronized screen | 942.8 | 854.1 | 829.9 | 231.2 | 33.6 |
 
-Higher is better. These were measured on an Apple Silicon Mac with macOS 27.2,
-using a 120x40 grid, no history, 30 samples of 256 rounds, and repeated passes in
-rotated order on 2026-11-18. The first throughput pass after 1.3.26 alone made the
-engine 2.6x faster on ASCII output and 2.5x faster on long lines. In the native app, Metal now draws
-ASCII text from a glyph atlas. With several ASCII panes streaming, that cuts
-CPU use by 23–41% and GPU upload volume by about 73%.
+Each rate is the median of ten rotated passes, with 240 samples per engine and
+workload. Checks compared visible text, cursor position, active screen, retained
+history count and first-column foreground colors. The dash marks Alacritty's
+different cursor advance on the Unicode emoji sequence.
 
-These figures cover engine feed throughput only. They exclude the PTY, font
-shaping, rendering and input latency, so they are not an app-to-app comparison
-with Ghostty or any other terminal. Unicode text in the native app is still drawn
-by the CPU rasterizer. The [performance record](docs/PERFORMANCE.md) has the
-method, every pass and the [raw measurements](benchmarks/results/neon-ascii-chunks-2026-11-18.json).
-The libghostty-vt comparison harness is kept local. To reproduce AkiTTY's own
-Native/WASM benchmark, run:
+Timing covers VT feed and grid updates. Kitty's test API adds a Python call path
+and an input copy. See the [method and pinned versions](docs/PERFORMANCE.md#reference-engine-throughput)
+and [raw timings](benchmarks/results/reference-engine-throughput-2026-11-19.json).
+
+The first AkiTTY engine optimization pass after 1.3.26 improved ASCII
+throughput by 2.6× and long-line throughput by 2.5×.
+In the native app, Metal draws ASCII text from a glyph atlas. With several ASCII
+panes streaming, the atlas reduced CPU use by 23–41% and GPU upload volume by
+about 73%. Unicode text uses the CPU rasterizer. Run AkiTTY's separate native and
+WASM benchmark with this command.
 
 ```sh
 bash scripts/benchmark.sh --samples 30 --rounds 128 --output build/throughput.json
@@ -457,8 +458,7 @@ selection, character counts and cursor-line APIs already exist. Current developm
 adds line navigation, coalesced text notifications, state announcements and keyboard
 focus improvements to the existing Overview and approval sheet. **VoiceOver user
 validation is not complete.** See [accessibility usage and validation](docs/ACCESSIBILITY.md).
-The [engine benchmark](#performance) does not establish full-app performance
-parity, and testing on every supported Mac version is not claimed.
+The [engine benchmark](#performance) covers headless VT throughput on one Mac.
 
 ### Planned work
 

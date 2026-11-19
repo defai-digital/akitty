@@ -2104,5 +2104,59 @@ Against libghostty-vt 1.0.1, rotated, seven passes, history 0
 | ANSI | 343.0 | 267.1 | 0.78x |
 | Alternate screen | 176.1 | 166.3 | 0.94x |
 
-AkiTTY's engine is now at least as fast as libghostty-vt on every workload of this
-suite on this host.
+In that zero-history run, AkiTTY recorded the higher median on each workload.
+
+## Reference engine throughput
+
+On 2026-11-19, five arm64 engine builds processed identical fixtures from
+`benchmarks/workloads.json` on an Apple M3 Max running macOS 27.2.1 (26B131).
+
+- AkiTTY 1.4.0 at `c0e5f9d3f5b18776aeb2da00fe728e5d6fe484da` and
+  `alacritty_terminal` 0.26.1-dev at
+  `aa5d942f46c40184a3f214830ff5f7989f4733a1` used Rust 1.99.1 release builds
+  with thin LTO and one codegen unit. Alacritty used the dependency versions
+  from its source snapshot. [Alacritty source revision](https://github.com/alacritty/alacritty/commit/aa5d942f46c40184a3f214830ff5f7989f4733a1)
+- Ghostty used the official libghostty-vt 1.0.1 XCFramework and a local
+  libghostty-vt 1.0.2-dev build from Ghostty source revision
+  `f3e1f65bb602ac3d441ffdd5f9645bef66a39648`. Both reported ReleaseFast and
+  SIMD. The latter used Zig 0.17.1 targeting baseline ARM64.
+  [Official artifact checksums](https://release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS)
+  · [Ghostty source revision](https://github.com/ghostty-org/ghostty/commit/f3e1f65bb602ac3d441ffdd5f9645bef66a39648)
+- Kitty used the native engine in the signed arm64 macOS bundle for 0.50.0.
+  [Kitty release](https://github.com/kovidgoyal/kitty/releases/tag/v0.50.0)
+
+The AkiTTY, Ghostty and Alacritty adapters share a C timing loop. Kitty's test
+feed times include Python calls and one input copy per feed. The timer covers
+parsing, grid mutations and scrollback growth. Grid creation, teardown and state
+extraction run outside it. PTY transport, font shaping, painting and input
+latency are separate measurements. Each new grid is 120×40 with a 1,000-row
+limit. AkiTTY and Ghostty explicitly enable grapheme clustering. Alacritty and
+Kitty use their native Unicode behavior.
+
+Each fixture repeats its complete UTF-8 pattern as many times as fit in 8 KiB.
+Each sample sums feed time across 32 fresh grids, with four identical feeds
+per grid to measure scrollback growth below the eviction limit. A pass takes
+24 samples after three warmups. The engines rotate through five positions in
+each of two sweeps. The reported rate is the median of the ten pass rates.
+Each pass rate divides the sample byte count by the median elapsed time.
+
+The harness compares the last grid of every sample with AkiTTY. It checks
+visible text with trailing blanks and wide-cell placeholders omitted, cursor
+position, active screen, retained history count and first-column foreground
+colors. Separate probes check RGB color application, entry into the alternate
+screen and cursor advance after successive Unicode clusters. Alacritty advances
+four extra columns at the ZWJ emoji, so its Unicode timing appears only in the
+raw record. The synchronized-screen fixture contains complete frames in each feed.
+
+AkiTTY recorded the highest medians for long lines, synchronized output and
+the matched Unicode workload. The Ghostty builds had higher ASCII and ANSI
+color medians. Pass ranges overlap on several workloads, including alternate
+screen and Unicode. The November 18 comparison above used zero history and
+different batching. This run covered the three reference projects represented
+in the table. Calyx, cmux, iTerm2, Warp, Zellij and Zentty were outside the
+timed set.
+
+The raw record includes every measured duration, pass order, pass-rate ranges,
+state digests, the probe results and artifact fingerprints. The headless
+comparison adapters were built locally outside the product build.
+[Raw reference engine measurements](../benchmarks/results/reference-engine-throughput-2026-11-19.json)
