@@ -28,6 +28,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private(set) var windows: [TerminalWindow] = []
     let intentInstance = UUID().uuidString
     private var eventMenuItem: NSMenuItem?
+    private var requestsMenuItem: NSMenuItem?
     private var windowLayoutsMenu: NSMenu?
     private(set) lazy var agentRequests: AgentRequests = {
         let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
@@ -39,46 +40,19 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         terminal.appEntityIdentifier = EntityIdentifier(for: TerminalEntity.self, identifier: intentID(for: terminal))
     }
     @objc private func toggleAgentRequests(_ sender: NSMenuItem) {
-        do { try agentRequests.setEnabled(!agentRequests.enabled); sender.state = agentRequests.enabled ? .on : .off }
-        catch { NSAlert(error: error).runModal() }
+        do { try setAgentRequests(!agentRequests.enabled) } catch { NSAlert(error: error).runModal() }
+    }
+    /// Turns Local Agent Requests on or off and keeps the menu checkmark in step (Settings uses this too).
+    func setAgentRequests(_ enabled: Bool) throws {
+        defer {
+            requestsMenuItem?.state = agentRequests.enabled ? .on : .off
+            NotificationCenter.default.post(name: .agentRequestsChanged, object: nil)
+        }
+        try agentRequests.setEnabled(enabled)
     }
     @objc private func showAgentTimeline(_ sender: Any?) { agentRequests.showTimeline() }
-    @objc private func configureClaudeCode(_ sender: Any?) { configureHooks(for: .claudeCode) }
-    @objc private func configureCodex(_ sender: Any?) { configureHooks(for: .codex) }
-    /// Adds or removes AkiTTY's entries in the agent's user hooks settings. Other settings and hooks are kept.
-    private func configureHooks(for agent: HookAgent) {
-        let executable = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("akitty-agent").path ?? ""
-        guard FileManager.default.isExecutableFile(atPath: executable) else {
-            NSAlert(error: AkittyError.core("The bundled akitty-agent companion was not found next to AkiTTY.")).runModal(); return
-        }
-        let settings = AgentHookSettings(agent: agent, executable: executable)
-        let name = agent.displayName, file = URL(fileURLWithPath: settings.path).lastPathComponent
-        let reload = agent == .codex
-            ? "After installing, trust the hooks with /hooks in Codex: Codex skips new or changed hooks until they are trusted."
-            : "Restart running Claude Code sessions to load the change."
-        do {
-            let state = try settings.state()
-            let alert = NSAlert()
-            alert.messageText = "\(name) Integration"
-            let status = state == .installed ? "Installed." : state == .partial ? "Partly installed; Install repairs it." : "Not installed."
-            alert.informativeText = """
-                \(status)
-
-                \(name)'s Bash permission prompts in an AkiTTY pane are answered in AkiTTY's approval queue, and the pane shows the reported conversation. \(name) still runs every command itself, under its own sandbox and approval policy. When AkiTTY cannot answer (Local Agent Requests off, the prompt times out, or another tool), \(name) shows its own prompt.
-
-                File: \(settings.path)
-                The first change keeps a copy as \(file).akitty-backup. Remove deletes only AkiTTY's entries. \(reload)\(agent.codexHomeWarning.map { "\n\n" + $0 } ?? "")
-                """
-            alert.addButton(withTitle: state == .installed ? "Reinstall" : "Install")
-            if state != .notInstalled { alert.addButton(withTitle: "Remove") }
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: try settings.install()
-            case .alertSecondButtonReturn where state != .notInstalled: try settings.uninstall()
-            default: break
-            }
-        } catch { NSAlert(error: error).runModal() }
-    }
+    /// Settings → Agents installs, repairs or removes each agent's hooks and shows what is connected.
+    @objc private func showAgentIntegrations(_ sender: Any?) { showSettings(tab: .agents) }
     @objc private func exportAgentEvents(_ sender: Any?) { agentRequests.exportEvents() }
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController { [unowned self] in
@@ -212,6 +186,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
         makeMenu()
         startWorkspaceAutosave()
+        // Only when the person chose it in Settings → Agents; otherwise requests start off, as before.
+        if AgentRequestsLaunchSetting.isOn() {
+            do { try setAgentRequests(true) } catch { NSAlert(error: error).runModal() }
+        }
         do { try configureQuickTerminal(.load()) } catch { NSAlert(error: error).runModal() }
         // Intent/service launches must not create an extra shell. A folder or
         // intent delivered before didFinishLaunching also replaces the default.
@@ -474,9 +452,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let settings = app.addItem(withTitle: "Settings…", action: #selector(self.settings(_:)), keyEquivalent: ","); settings.target = self
         let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
         let requests = app.addItem(withTitle: "Enable Local Agent Requests", action: #selector(toggleAgentRequests(_:)), keyEquivalent: ""); requests.target = self
+        requestsMenuItem = requests
         let timeline = app.addItem(withTitle: "Agent Event Timeline…", action: #selector(showAgentTimeline(_:)), keyEquivalent: ""); timeline.target = self
-        let claude = app.addItem(withTitle: "Claude Code Integration…", action: #selector(configureClaudeCode(_:)), keyEquivalent: ""); claude.target = self
-        let codex = app.addItem(withTitle: "Codex Integration…", action: #selector(configureCodex(_:)), keyEquivalent: ""); codex.target = self
+        let integrations = app.addItem(withTitle: "Agent Integrations…", action: #selector(showAgentIntegrations(_:)), keyEquivalent: ""); integrations.target = self
         eventMenuItem = timeline
         let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

@@ -107,6 +107,23 @@ closed pane, or an identifier from an earlier launch, fails with a message to ru
 `list` again; older builds printed `\/` inside identifiers, which is still accepted. `--socket <path>`
 before the subcommand selects a different local test/instance endpoint.
 
+## Agent integrations
+
+**Settings → Agents** (**Akitty → Agent Integrations…**) lists Claude Code, Codex
+and AX Code. For each it shows where the CLI was found (the inherited PATH, then
+the usual install folders such as `~/.local/bin` and `/opt/homebrew/bin`), the
+version `--version` prints, and what AkiTTY offers: status and conversation
+reports, Bash command approval, and resuming a conversation by ID. A missing CLI
+links to its install instructions. **Install**, **Reinstall** and **Remove**
+change only AkiTTY's hook entries and apply at once. **Connected** shows the
+newest conversation the agent reported from an open pane, which confirms the
+integration works. AX Code has no AkiTTY adapter yet and runs as an ordinary
+terminal program.
+
+**Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
+launch, so integrations work without the menu each time. **Turn On** / **Turn
+Off** changes it for the running app. Every command still needs approval.
+
 ## Claude Code permission prompts
 
 AkiTTY can answer Claude Code's own Bash permission prompts in its approval
@@ -115,7 +132,8 @@ permission rules; AkiTTY returns only allow or deny and never types into the pan
 or takes its input lease. This uses Claude Code's documented `PermissionRequest`,
 `SessionStart` and `SessionEnd` hooks.
 
-1. Choose **Akitty → Claude Code Integration…** and **Install**, or run
+1. In **Settings → Agents** (**Akitty → Agent Integrations…**), choose
+   **Install** under Claude Code, or run
    `akitty-agent claude-hooks install`. This adds three hooks that run
    `akitty-agent claude-hook` to `~/.claude/settings.json`. Enabling twice keeps
    one copy; other settings and hooks stay. The file must be a JSON object whose
@@ -166,7 +184,7 @@ Codex still runs the command under its own sandbox and approval policy, and
 AkiTTY never types into the pane. `apply_patch`, MCP tools and network approvals
 stay with Codex's own prompt.
 
-1. Choose **Akitty → Codex Integration…** and **Install**, or run
+1. In **Settings → Agents**, choose **Install** under Codex, or run
    `akitty-agent codex-hooks install`. This adds the same three hooks, running
    `akitty-agent codex-hook`, to `$CODEX_HOME/hooks.json` (default
    `~/.codex/hooks.json`), with the installer behavior described above; the

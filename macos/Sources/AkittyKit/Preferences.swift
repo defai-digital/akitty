@@ -237,7 +237,7 @@ struct PreferencesDraft {
     }
 }
 
-enum SettingsTab: Hashable { case appearance, profiles, sessions, keyboard, updates }
+enum SettingsTab: Hashable { case appearance, profiles, sessions, keyboard, agents, updates }
 /// Lets the app open Settings on a given tab (Edit Profiles… in the profile menus).
 @MainActor final class SettingsNavigation: ObservableObject { @Published var tab = SettingsTab.appearance }
 
@@ -423,6 +423,8 @@ enum SettingsTab: Hashable { case appearance, profiles, sessions, keyboard, upda
                     }
                 }.formStyle(.grouped)
                     .tabItem { Text("Keyboard") }.tag(SettingsTab.keyboard)
+                AgentIntegrationsView(defaults: defaults)
+                    .tabItem { Text("Agents") }.tag(SettingsTab.agents)
                 Form {
                     Section("Updates") {
                         Toggle("Check for updates automatically", isOn: $state.automaticChecks)

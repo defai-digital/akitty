@@ -17,7 +17,7 @@
 
 ## Claude Code permission prompts in AkiTTY
 
-- **Akitty → Claude Code Integration…** (or `akitty-agent claude-hooks install`)
+- **Settings → Agents** (or `akitty-agent claude-hooks install`)
   adds Claude Code hooks to `~/.claude/settings.json`, keeping other settings and
   hooks; removing deletes only AkiTTY's entries.
 - Claude Code's Bash permission prompts in an AkiTTY pane appear as Allow Once /
@@ -30,7 +30,7 @@
 
 ## Codex permission prompts in AkiTTY
 
-- **Akitty → Codex Integration…** (or `akitty-agent codex-hooks install`) adds
+- **Settings → Agents** (or `akitty-agent codex-hooks install`) adds
   the same hooks to `~/.codex/hooks.json` (`$CODEX_HOME`), keeping other hooks.
   Trust them with `/hooks` in Codex.
 - Codex's Bash permission prompts in an AkiTTY pane appear in the same approval
@@ -38,6 +38,14 @@
   MCP and network approvals stay with Codex.
 - Agent Overview shows Codex's conversation ID, and a restored workspace can
   resume it with `codex resume <id>`.
+
+## Settings → Agents
+
+- A new Agents tab in Settings (**Akitty → Agent Integrations…**) shows each
+  agent CLI's path, version and capabilities, installs or removes its hooks in
+  one click, and shows the newest conversation it reported.
+- **Turn on when AkiTTY starts** (off by default) enables Local Agent Requests
+  at launch.
 
 ## Reopen windows and resume Claude Code and Codex conversations
 

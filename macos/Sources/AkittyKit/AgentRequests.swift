@@ -509,6 +509,14 @@ import AgentIPC
     nonisolated static func isValidAgentSessionID(_ value: String) -> Bool {
         (1...128).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0) }
     }
+    /// The newest conversation `agent` reported in any open pane, e.g. "01a1f59f… in pane 3, 2 min ago".
+    func lastReport(agent: String, now: Date = Date()) -> String? {
+        guard let (pane, session) = agentSessions.filter({ $0.value.agent == agent }).max(by: { $0.value.reported < $1.value.reported }) else { return nil }
+        let id = "\(session.sessionID.prefix(8))\(session.sessionID.count > 8 ? "…" : "")"
+        let age = Int(max(0, now.timeIntervalSince(session.reported)))
+        let when = age < 60 ? "just now" : age < 3600 ? "\(age / 60) min ago" : "\(age / 3600) h ago"
+        return "\(id) in pane \(pane)\(session.ended ? " (ended)" : ""), \(when)"
+    }
     /// Called after each accepted session report, so a saved workspace keeps the newest conversation IDs.
     var onAgentSessionReport: (() -> Void)?
     func report(agent: String, event: String, sessionID: String, in terminal: TerminalView) {
