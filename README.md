@@ -126,20 +126,20 @@ Manage the feature in Settings. [History behavior and storage](docs/ARCHITECTURE
 
 ## Performance
 
-The released macOS apps processed the same four workloads through real PTYs.
-Each rate uses the median elapsed time across 54 samples. Timing runs from the
+Five released macOS apps processed the same four workloads through real PTYs.
+Each rate uses the median elapsed time across 45 samples. Timing runs from the
 first payload write to the terminal's reply to a trailing cursor-position request.
 
-| Workload (median MiB/s) | AkiTTY 1.4.1 | cmux 0.65.2.2 |
-| --- | ---: | ---: |
-| ASCII | 194.8 | 212.5 |
-| ANSI color | 214.8 | 166.3 |
-| CJK and combining text | 212.8 | 152.3 |
-| Long lines | 203.0 | 218.4 |
+| Workload (median MiB/s) | AkiTTY 1.4.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 184.3 | 176.5 | 102.9 | 115.0 | 169.1 |
+| ANSI color | 169.5 | 167.0 | 114.3 | 106.2 | 176.7 |
+| CJK and combining text | 176.0 | 163.7 | 112.8 | 97.2 | 161.2 |
+| Long lines | 183.1 | 166.5 | 99.3 | 112.7 | 182.6 |
 
-The apps ran hidden on the same Apple M3 Max with macOS 27.2.1, a 98×25 PTY
-grid and scrollback configured off. The ranges of per-launch medians overlap
-for ASCII, ANSI color and long lines.
+All five apps ran hidden on the same Apple M3 Max with macOS 27.2.1,
+a 98×25 PTY grid and scrollback limits set to zero. The ranges of per-launch
+medians for AkiTTY, Ghostty and cmux overlap on all four workloads.
 [App benchmark method and raw data](docs/PERFORMANCE.md#macos-pty-throughput)
 
 The engine benchmark feeds bytes directly into the parser and grid. It includes

@@ -1,0 +1,2163 @@
+{
+  "schema": 1,
+  "host": {
+    "cpu": "Apple M3 Max",
+    "macos": "27.2.1",
+    "os_build": "26B131",
+    "architecture": "arm64"
+  },
+  "apps": {
+    "akitty": {
+      "version": "1.4.1",
+      "release_tag": "v1.4.1",
+      "release_url": "https://github.com/defai-digital/akitty/releases/tag/v1.4.1",
+      "bundle_build": "10401",
+      "bundle_identifier": "com.defai.akitty",
+      "signature": "Developer ID",
+      "executable_sha256": "8327c2a0e557877b835baa58961010513f22be0b061effd0081945415ee42ac4",
+      "archive_sha256": "ededf11f5f98df4c93d8df425e6c8908bd9848823a7f37bb4c6caf86c00e0e0a",
+      "archive_url": "https://github.com/defai-digital/akitty/releases/download/v1.4.1/AkiTTY-1.4.1-macOS-arm64.zip",
+      "build_stamp": {
+        "schema": 1,
+        "commit": "27ff1eac3650807bcaa76f1f63bba00988c85e31",
+        "dirty": false,
+        "configuration": "release",
+        "version": "1.4.1",
+        "build": "10401",
+        "platform": "macos",
+        "architecture": "arm64"
+      }
+    },
+    "ghostty": {
+      "version": "1.4.0",
+      "release_tag": "1.4.0",
+      "release_url": "https://ghostty.org/docs/install/release-notes/1-4-0",
+      "bundle_build": "18457",
+      "bundle_identifier": "com.mitchellh.ghostty",
+      "signature": "Developer ID",
+      "executable_sha256": "4b30ac9b049cdf9eb75b6d8c7764856c2b882de97c688dce8a1b80916b55271b",
+      "archive_sha256": "3a02075dbd24318d778426af41dee5507d53ecc4578ede96912ec9ce6d18d3e8",
+      "archive_url": "https://release.files.ghostty.org/1.4.0/Ghostty.dmg"
+    },
+    "alacritty": {
+      "version": "0.17.0",
+      "release_tag": "v0.17.0",
+      "release_url": "https://github.com/alacritty/alacritty/releases/tag/v0.17.0",
+      "bundle_build": "1",
+      "bundle_identifier": "org.alacritty",
+      "signature": "ad hoc",
+      "executable_sha256": "444055799f1211d6adbe9f18ab2660c57155de4f0e88d42458d6ae4fb539dcda",
+      "archive_sha256": "ad8d7de35fb38e43184776cac6dfee05ca325caa0b6639a06a55e54e4b026620",
+      "archive_url": "https://github.com/alacritty/alacritty/releases/download/v0.17.0/Alacritty-v0.17.0.dmg"
+    },
+    "kitty": {
+      "version": "0.51.0",
+      "release_tag": "v0.51.0",
+      "release_url": "https://github.com/kovidgoyal/kitty/releases/tag/v0.51.0",
+      "bundle_build": "0.51.0",
+      "bundle_identifier": "net.kovidgoyal.kitty",
+      "signature": "Developer ID",
+      "executable_sha256": "7c6d4e64aabec5ff85c4cdbcf9832bcc9af9664d443a083a5c9b937b909e91b4",
+      "archive_sha256": "e7d51ec9f1978ff2fee61647b6f7eb59530e06d9bb1af876b00357ca7779638d",
+      "archive_url": "https://github.com/kovidgoyal/kitty/releases/download/v0.51.0/kitty-0.51.0.dmg"
+    },
+    "cmux": {
+      "version": "0.65.2",
+      "release_tag": "v0.65.2.2",
+      "release_url": "https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2",
+      "bundle_build": "113",
+      "bundle_identifier": "com.cmuxterm.app",
+      "signature": "Developer ID",
+      "executable_sha256": "8bed5ca8db1decfd84bc5b6ba95fbc4625bd9344c9f60700c9c38c01f6a78afd",
+      "archive_sha256": "8773e44616fa4e2f0b22f3e6efb9a262817682027dc67b44dc61a3bb23107825"
+    }
+  },
+  "configuration": {
+    "grid": {
+      "cols": 98,
+      "rows": 25
+    },
+    "font": "Menlo",
+    "app_settings": {
+      "akitty": {
+        "font_pt": 16,
+        "scrollback": 0
+      },
+      "cmux": {
+        "font_pt": 12,
+        "padding": [
+          35,
+          147
+        ],
+        "scrollback_limit_bytes": 0,
+        "scrollback_limit_lines": 0,
+        "scrollback_compression": false
+      },
+      "ghostty": {
+        "font_pt": 12,
+        "padding": [
+          8,
+          8
+        ],
+        "configured_window_cells": [
+          98,
+          28
+        ],
+        "scrollback_limit_bytes": 0,
+        "scrollback_limit_lines": 0,
+        "scrollback_compression": false
+      },
+      "alacritty": {
+        "font_pt": 12,
+        "padding": [
+          0,
+          0
+        ],
+        "configured_window_cells": [
+          98,
+          25
+        ],
+        "scrolling_history": 0
+      },
+      "kitty": {
+        "font_pt": 12,
+        "padding": 0,
+        "configured_window_cells": [
+          98,
+          25
+        ],
+        "scrollback_lines": 0,
+        "scrollback_pager_history_size": 0
+      }
+    },
+    "bytes_target": 8388608,
+    "samples_per_launch_and_workload": 9,
+    "warmups_per_launch_and_workload": 3,
+    "app_order_per_round": [
+      [
+        "akitty",
+        "ghostty",
+        "alacritty",
+        "kitty",
+        "cmux"
+      ],
+      [
+        "ghostty",
+        "alacritty",
+        "kitty",
+        "cmux",
+        "akitty"
+      ],
+      [
+        "alacritty",
+        "kitty",
+        "cmux",
+        "akitty",
+        "ghostty"
+      ],
+      [
+        "kitty",
+        "cmux",
+        "akitty",
+        "ghostty",
+        "alacritty"
+      ],
+      [
+        "cmux",
+        "akitty",
+        "ghostty",
+        "alacritty",
+        "kitty"
+      ]
+    ],
+    "workload_seed_per_round": [
+      98625,
+      98626,
+      98627,
+      98628,
+      98629
+    ],
+    "visibility": "Fresh instances with separate home directories. Hidden before timing and checked at each workload boundary.",
+    "timing": "First write of the payload through the cursor position report after a trailing completion marker.",
+    "validation": "Verified arm64 process, 98x25 PTY, matching cursor width and wrap probes, matching payloads, CPR at row 2 column 1 for every sample and warmup.",
+    "grapheme_mode": "Requested DECRST 2027 for all apps. Unsupported modes do not fail qualification if the cursor probes match."
+  },
+  "harness_sha256": {
+    "launch.py": "f9cb15d6eedfed5ca584567c08a30e07e9906f9d7be1eb444403d2643754e550",
+    "launch-initial.py": "83112e3ff545a4d5f6f4ef3a3996228b523cf1e691208974baae444d96bc6951",
+    "launch-wait-complete.py": "fe663c50beb0ec313a8cd5cf15e90b93607970eeb544e82c04fc92e685a567de",
+    "child.py": "ca0ea09a0a4a97df48cabad2ab4c05ef84e2f9848f5e350e853edf0cd3f5754d",
+    "app-state": "7bee727e7f2989f9b5ff748faab859ac7bdb8fb0073744f5947538f69c767122",
+    "measure.py": "8117f08cf1ea970469fbf24490c1cf101d1e861cfc44e924648fcd58815ff22e",
+    "measure-initial.py": "32aed3581fa31f319979bb7d3d43646cb5a3a5a0c40bd4b255e739c14ead19b9"
+  },
+  "runs": [
+    {
+      "app": "akitty",
+      "round": 1,
+      "position": 1,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:40:29.488612+00:00",
+      "completed_at": "2026-11-19T10:40:37.695702+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 45661333, 38853625, 39019917, 43041916, 35485959, 43129292, 40136500, 38090333, 38769334 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 101016333, 75590708, 49189583, 46372292, 105620042, 38470458, 42210791, 46824458, 40765625 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 40074375, 52489250, 37373916, 42388667, 44376875, 40034875, 43094250, 36352458, 38175875 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 40166500, 39981459, 41058834, 46521292, 40983250, 47594125, 47206500, 48561500, 37338667 ]
+        }
+      }
+    },
+    {
+      "app": "ghostty",
+      "round": 1,
+      "position": 2,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:40:37.797366+00:00",
+      "completed_at": "2026-11-19T10:40:46.129702+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 356
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 38906000, 43043209, 37000875, 40245167, 45175166, 46227916, 48305375, 45318166, 48400958 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 48999417, 42039208, 40538334, 49081000, 46867125, 48054084, 52001208, 41791875, 47977042 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 71074084, 67127875, 64123792, 65570041, 60391333, 73651958, 44044000, 48875625, 41662667 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 49954541, 61326542, 50294042, 38383458, 38383250, 43511833, 38195917, 43663625, 40787750 ]
+        }
+      },
+      "configured_window_cells": [
+        98,
+        28
+      ]
+    },
+    {
+      "app": "alacritty",
+      "round": 1,
+      "position": 3,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:40:46.195395+00:00",
+      "completed_at": "2026-11-19T10:40:55.329278+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": null,
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 57024791, 57881958, 58128208, 58799625, 59143833, 59692208, 60303125, 61738417, 60378917 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 66481375, 59944083, 60552625, 64685958, 59045667, 62905792, 67194417, 62337500, 138266791 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 66955292, 66455791, 66616792, 66932000, 67364042, 66605875, 66745292, 67642500, 69918959 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 66866875, 62259375, 62773167, 62293417, 61412708, 61372583, 63399708, 62784667, 60849125 ]
+        }
+      }
+    },
+    {
+      "app": "kitty",
+      "round": 1,
+      "position": 4,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:40:55.403725+00:00",
+      "completed_at": "2026-11-19T10:41:05.233108+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 784,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        8
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 80073375, 66602000, 69221458, 71066166, 74375375, 69139250, 68413875, 69336500, 62179292 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 89577917, 85507875, 86180792, 138352583, 110187792, 148170542, 71000875, 64420750, 54367667 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 80180000, 80300792, 80089166, 80551958, 80468625, 82343500, 79738959, 80808791, 83519750 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 75313042, 80642958, 82349958, 178520542, 146141500, 75235750, 78703000, 79107500, 74859375 ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "round": 1,
+      "position": 5,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:05.345211+00:00",
+      "completed_at": "2026-11-19T10:41:15.338892+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 50398833, 48991917, 55032583, 67351042, 63452667, 69234708, 72240708, 65308708, 53888791 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 44310500, 50706083, 41218583, 43951959, 39063500, 39008708, 47171125, 38598083, 43799500 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 46418375, 48806292, 48634666, 47577292, 48211166, 46632916, 50377958, 48406416, 47020625 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 41556042, 43914625, 53113042, 45279583, 46698500, 45536792, 43821167, 57027917, 54382875 ]
+        }
+      }
+    },
+    {
+      "app": "ghostty",
+      "round": 2,
+      "position": 1,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:15.494438+00:00",
+      "completed_at": "2026-11-19T10:41:24.156608+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 356
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 52572167, 46294042, 66978541, 51249667, 52713542, 56909708, 46240750, 55659000, 67360208 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 58122542, 61881625, 61639125, 66500208, 70030791, 54014458, 47901500, 57154417, 55806708 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 53709541, 56624125, 63141708, 43701583, 51716250, 56613333, 58668459, 49567541, 59271834 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 47287583, 62606167, 60765750, 72794167, 54940834, 64319250, 58942292, 46074917, 61316833 ]
+        }
+      },
+      "configured_window_cells": [
+        98,
+        28
+      ]
+    },
+    {
+      "app": "alacritty",
+      "round": 2,
+      "position": 2,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:24.260330+00:00",
+      "completed_at": "2026-11-19T10:41:35.651120+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": null,
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 74794750, 79164625, 75146958, 70920834, 69406583, 203659666, 334484292, 88196208, 76532375 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 75066542, 69575416, 72499542, 69970708, 75898500, 78616916, 154097333, 64243125, 66431625 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 75047333, 306332958, 128845291, 91006958, 76321625, 106610500, 92920250, 80050917, 84244708 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 330514792, 87593292, 69095792, 94481792, 111341375, 109998084, 113220875, 555885125, 164195750 ]
+        }
+      }
+    },
+    {
+      "app": "kitty",
+      "round": 2,
+      "position": 3,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:35.727048+00:00",
+      "completed_at": "2026-11-19T10:41:47.639509+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 784,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        8
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 96734833, 86942250, 89364042, 123977042, 117818917, 291184834, 244147542, 122750750, 90418750 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 92280667, 87048375, 132367625, 90644541, 87076541, 197518459, 104338583, 117659500, 92808667 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 126709625, 104482125, 102387292, 93363042, 80026000, 90358500, 164648459, 127237209, 108845708 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 278790042, 123099000, 135942458, 104460667, 103933417, 97327334, 85781250, 110846250, 219973708 ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "round": 2,
+      "position": 4,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:47.755682+00:00",
+      "completed_at": "2026-11-19T10:41:57.072021+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 54423834, 49939792, 55702500, 56204375, 60240167, 52571250, 62555167, 57593792, 62037042 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 57994458, 54300667, 59758458, 51853833, 53616500, 47841334, 60281834, 48913625, 47169291 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 53204166, 56836416, 47955875, 47798167, 54435459, 42840750, 56218417, 49508792, 55118209 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 55577625, 51495209, 50225292, 56836083, 42370958, 52152209, 43422791, 52562958, 57204459 ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "round": 2,
+      "position": 5,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:41:57.153282+00:00",
+      "completed_at": "2026-11-19T10:42:06.264587+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 63805209, 111679167, 128010416, 79814708, 61755583, 57966584, 45148500, 53851542, 53038333 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 95846042, 54099417, 52654000, 51131583, 52870042, 58297209, 53812916, 54302750, 53779709 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 105204375, 49653417, 43896583, 271880042, 55271542, 58595625, 51649417, 61242666, 50818292 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 48795334, 62525333, 47827625, 131561292, 220611125, 64002792, 62354083, 64584125, 55294583 ]
+        }
+      }
+    },
+    {
+      "app": "alacritty",
+      "round": 3,
+      "position": 1,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:06.331908+00:00",
+      "completed_at": "2026-11-19T10:42:15.654389+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": null,
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 62008958, 60666042, 60111709, 68448292, 136627875, 65474750, 58763500, 61073916, 62735167 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 64524541, 65206292, 60406167, 63239292, 63318333, 64518875, 64780042, 65929250, 66041167 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 67948625, 68865667, 66245833, 67798375, 66854125, 69911500, 68909750, 154743166, 66099208 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 63378708, 62340208, 58821416, 62440292, 60376875, 59195334, 62160666, 63230292, 64826500 ]
+        }
+      }
+    },
+    {
+      "app": "kitty",
+      "round": 3,
+      "position": 2,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:15.726459+00:00",
+      "completed_at": "2026-11-19T10:42:25.450094+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 784,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        8
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 65408625, 64051166, 71987125, 72316000, 72577208, 72652375, 69465333, 71637333, 72313666 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 75466583, 137018417, 123405583, 72781375, 71438375, 70415166, 71084958, 72715334, 72187334 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 81862000, 81126250, 81232541, 82460333, 81847750, 81121917, 81611833, 80872167, 108065625 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 67290917, 113890916, 121173833, 67179833, 63794375, 66101083, 67096208, 67576209, 72297917 ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "round": 3,
+      "position": 3,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:25.536052+00:00",
+      "completed_at": "2026-11-19T10:42:34.070994+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 38517667, 46041833, 54346292, 52929542, 47312541, 48511541, 51855125, 49592250, 41700292 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 42448542, 42724334, 43701500, 42894000, 43081458, 44823875, 43258625, 42632833, 43835167 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 50128250, 49620000, 48522250, 48580625, 48956584, 49435083, 49161333, 48452375, 47796625 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 34264250, 38548666, 37902167, 35458917, 41630625, 36679625, 37301041, 37394375, 33319792 ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "round": 3,
+      "position": 4,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:34.160601+00:00",
+      "completed_at": "2026-11-19T10:42:42.373808+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 37226791, 42070166, 37017458, 42054834, 35787584, 43411000, 42296833, 39019292, 41864667 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 86438542, 126092958, 57749542, 53819041, 35110917, 44549583, 39310500, 71169917, 97880875 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 35825542, 77263000, 46859458, 37275375, 43137959, 46646291, 39878625, 41621000, 43137583 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 41852375, 42414084, 47047375, 40934917, 43696042, 45874042, 40266750, 42716792, 42231875 ]
+        }
+      }
+    },
+    {
+      "app": "ghostty",
+      "round": 3,
+      "position": 5,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:42.486923+00:00",
+      "completed_at": "2026-11-19T10:42:50.720449+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 356
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 42437417, 45527417, 38141875, 44043792, 37110958, 40321375, 49145166, 37231666, 49758417 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 46653958, 42835875, 48819167, 44391167, 41229916, 45444750, 37141542, 44986500, 40367334 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 40088875, 42132542, 39816000, 41202958, 42448708, 38146417, 44420667, 41990667, 39449583 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 62748917, 61392250, 45816375, 38485500, 39023000, 43608000, 36722958, 45104041, 38042833 ]
+        }
+      },
+      "configured_window_cells": [
+        98,
+        28
+      ]
+    },
+    {
+      "app": "kitty",
+      "round": 4,
+      "position": 1,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:42:50.784273+00:00",
+      "completed_at": "2026-11-19T10:43:00.432549+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 784,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        8
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 88998583, 81422625, 79665125, 84888625, 125170416, 104005208, 83542125, 83390375, 82171917 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 66867417, 71046542, 67440666, 63246042, 66902709, 68528375, 67337333, 67960583, 74262625 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 69564584, 69010416, 107864666, 90431416, 124897500, 91390416, 68337709, 69074708, 69364292 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 72756792, 73394875, 67991000, 72274667, 71019083, 72079417, 74410334, 75918334, 74327083 ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "round": 4,
+      "position": 2,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:00.543771+00:00",
+      "completed_at": "2026-11-19T10:43:09.293108+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 47554625, 52366417, 48564541, 49205625, 52341458, 49547875, 48456250, 58268834, 62295458 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 45004333, 42469625, 49903375, 48982792, 44784291, 38950125, 39111000, 39944583, 40783750 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 35651500, 39423042, 36973166, 34624916, 38911541, 38162167, 35862875, 39309042, 37808416 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 54550250, 51444875, 41648583, 43489500, 44905084, 67502250, 50211375, 42427834, 42949250 ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "round": 4,
+      "position": 3,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:09.370708+00:00",
+      "completed_at": "2026-11-19T10:43:18.471768+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 34251083, 44991417, 38637917, 48584709, 42939958, 69681500, 38181792, 41647541, 45134667 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 60698000, 66464584, 30502792, 32469750, 32423167, 31887333, 35250792, 34002208, 34066750 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 222845625, 697095625, 119882875, 108948041, 80977083, 75895125, 190896917, 94149958, 70023000 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 40248125, 40595834, 37157958, 46097542, 41502667, 39083583, 50731417, 38743292, 41760167 ]
+        }
+      }
+    },
+    {
+      "app": "ghostty",
+      "round": 4,
+      "position": 4,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:18.594050+00:00",
+      "completed_at": "2026-11-19T10:43:26.496256+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 356
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 39885500, 43396791, 40191333, 43135542, 41599208, 40411625, 43080916, 39338750, 42293375 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 41913458, 36106250, 40914250, 36940500, 41458541, 39972791, 35762500, 42891000, 48251875 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 46443834, 45775167, 38700375, 41761959, 43206542, 37589416, 44233833, 37314458, 40666042 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 39836916, 43917791, 56745000, 37853375, 51045250, 69933750, 57454667, 58904208, 65473833 ]
+        }
+      },
+      "configured_window_cells": [
+        98,
+        28
+      ]
+    },
+    {
+      "app": "alacritty",
+      "round": 4,
+      "position": 5,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:26.571121+00:00",
+      "completed_at": "2026-11-19T10:43:36.629902+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": null,
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 69209042, 87078500, 64789500, 68219416, 85453584, 120984708, 140264834, 89962833, 105631750 ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 69947375, 80589542, 77276542, 67964417, 89320000, 83800750, 73582583, 84032042, 128568459 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 76025875, 84525917, 90044208, 84136667, 85537708, 77737834, 67084000, 65371500, 89851000 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 73718333, 100946708, 65329209, 71749625, 87926375, 126513041, 143163500, 107613000, 108370791 ]
+        }
+      }
+    },
+    {
+      "app": "cmux",
+      "round": 5,
+      "position": 1,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:36.696681+00:00",
+      "completed_at": "2026-11-19T10:43:45.877002+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 690,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        7
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 42531541, 41106750, 51613708, 57518125, 54587750, 63277541, 57204000, 58393250, 58603042 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 44383250, 47774583, 43987792, 45155500, 46879416, 44062208, 45471833, 44148208, 46153709 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 39344458, 47281750, 37886416, 44109291, 45526833, 40312917, 45635917, 40572041, 42714666 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 48146458, 49071584, 55119375, 57064708, 59609625, 53329833, 53349834, 55957000, 63034250 ]
+        }
+      }
+    },
+    {
+      "app": "akitty",
+      "round": 5,
+      "position": 2,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:43:45.952380+00:00",
+      "completed_at": "2026-11-19T10:43:54.364537+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 1960,
+        "ypixel": 1150
+      },
+      "cell_pixels_height_width": [
+        46,
+        20
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 47821208, 42592333, 40712625, 47105042, 38593167, 42840375, 42719917, 40067750, 44782167 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 42039791, 141187708, 165367291, 79432250, 54569333, 38631416, 42596375, 41860875, 36884542 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 37158792, 44185458, 43194541, 45024750, 43921625, 41073000, 40067709, 39691084, 40765958 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 101020458, 143231958, 56367792, 48372916, 54756458, 49655167, 51685208, 156145708, 45466541 ]
+        }
+      }
+    },
+    {
+      "app": "ghostty",
+      "round": 5,
+      "position": 3,
+      "attempt": 5,
+      "started_at": "2026-11-19T10:46:51.647625+00:00",
+      "completed_at": "2026-11-19T10:47:00.144563+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 1376,
+        "ypixel": 716
+      },
+      "cell_pixels_height_width": [
+        28,
+        14
+      ],
+      "mode_2027_reply": [
+        2
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 60693375, 66657791, 65278750, 62921625, 63191917, 75831000, 57736333, 69425917, 50868291 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 40596084, 49307959, 48909458, 50464375, 48197375, 45741541, 44292250, 41765000, 46349541 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 49157125, 42348042, 60211208, 45528417, 46288542, 50997292, 46734334, 44014417, 39389875 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 61267083, 63021500, 51094042, 50983000, 64372084, 61523792, 62949833, 60608708, 63725916 ]
+        }
+      },
+      "configured_window_cells": [
+        96,
+        27
+      ]
+    },
+    {
+      "app": "alacritty",
+      "round": 5,
+      "position": 4,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:47:00.226631+00:00",
+      "completed_at": "2026-11-19T10:47:13.822670+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 686,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": null,
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 97378166, 160329458, 204390792, 259381708, 204893167, 333982708, 208397542, 144430334, 301879833 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 98307584, 79393125, 73325791, 80129250, 148248083, 126785292, 74490041, 83734292, 77546500 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 183643292, 190522875, 263037375, 177252750, 197470250, 212630500, 293247666, 186164583, 183729375 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 182656166, 83280792, 80363917, 73788209, 73073667, 76099375, 77313209, 75411000, 69772500 ]
+        }
+      }
+    },
+    {
+      "app": "kitty",
+      "round": 5,
+      "position": 5,
+      "attempt": 1,
+      "started_at": "2026-11-19T10:47:13.887084+00:00",
+      "completed_at": "2026-11-19T10:47:24.144667+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 784,
+        "ypixel": 350
+      },
+      "cell_pixels_height_width": [
+        14,
+        8
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [ 78779625, 75808583, 63815958, 67215375, 60497084, 70119416, 64209875, 63842333, 70229875 ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [ 68176500, 76304667, 130036334, 69999625, 74026375, 71571166, 71666584, 75468042, 70345792 ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [ 67630208, 58002667, 68214542, 61455542, 61192292, 64772375, 68709000, 68240208, 68209958 ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [ 84835292, 78113041, 126139375, 79458583, 82067708, 82455750, 80287417, 83406625, 79576459 ]
+        }
+      }
+    }
+  ],
+  "excluded_launches": [
+    {
+      "app": "ghostty",
+      "round": 5,
+      "position": 3,
+      "attempt": 1,
+      "reason": "Startup grid was 100x26 instead of 98x25. No workloads were timed."
+    },
+    {
+      "app": "ghostty",
+      "round": 5,
+      "position": 3,
+      "attempt": 2,
+      "reason": "Startup grid was 100x26 instead of 98x25. No workloads were timed."
+    },
+    {
+      "app": "ghostty",
+      "round": 5,
+      "position": 3,
+      "attempt": 3,
+      "reason": "Startup grid was 100x26 instead of 98x25. No workloads were timed."
+    },
+    {
+      "app": "ghostty",
+      "round": 5,
+      "position": 3,
+      "attempt": 4,
+      "reason": "Startup grid was 100x26 instead of 98x25. No workloads were timed."
+    }
+  ],
+  "recovered_launches": [
+    {
+      "app": "akitty",
+      "round": 5,
+      "position": 2,
+      "attempt": 1,
+      "reason": "The launcher read the output file before it was closed. Recovered the complete output after checking the completion marker and process identity."
+    }
+  ],
+  "workloads": {
+    "ascii": {
+      "payload_bytes": 8388601,
+      "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+      "apps": {
+        "akitty": {
+          "sample_count": 45,
+          "median_mib_s": 184.284935,
+          "launch_median_mib_s": [
+            205.02333,
+            144.739825,
+            191.09177,
+            73.429437,
+            194.774994
+          ]
+        },
+        "ghostty": {
+          "sample_count": 45,
+          "median_mib_s": 176.529503,
+          "launch_median_mib_s": [
+            177.088299,
+            141.309351,
+            188.51273,
+            191.561735,
+            172.828803
+          ]
+        },
+        "alacritty": {
+          "sample_count": 45,
+          "median_mib_s": 102.909908,
+          "launch_median_mib_s": [
+            135.263356,
+            87.905293,
+            129.01351,
+            95.083316,
+            41.989674
+          ]
+        },
+        "kitty": {
+          "sample_count": 45,
+          "median_mib_s": 115.000951,
+          "launch_median_mib_s": [
+            115.571003,
+            76.568057,
+            111.130891,
+            115.000951,
+            118.290237
+          ]
+        },
+        "cmux": {
+          "sample_count": 45,
+          "median_mib_s": 169.08822,
+          "launch_median_mib_s": [
+            126.078126,
+            150.36404,
+            164.909074,
+            211.592925,
+            187.289146
+          ]
+        }
+      }
+    },
+    "ansi": {
+      "payload_bytes": 8388576,
+      "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+      "apps": {
+        "akitty": {
+          "sample_count": 45,
+          "median_mib_s": 169.467541,
+          "launch_median_mib_s": [
+            194.841614,
+            148.662627,
+            138.528709,
+            197.063804,
+            187.808692
+          ]
+        },
+        "ghostty": {
+          "sample_count": 45,
+          "median_mib_s": 167.008747,
+          "launch_median_mib_s": [
+            183.857331,
+            137.639704,
+            180.215345,
+            140.981046,
+            172.600835
+          ]
+        },
+        "alacritty": {
+          "sample_count": 45,
+          "median_mib_s": 114.333122,
+          "launch_median_mib_s": [
+            128.423995,
+            110.345104,
+            123.983361,
+            79.249434,
+            99.838317
+          ]
+        },
+        "kitty": {
+          "sample_count": 45,
+          "median_mib_s": 106.222897,
+          "launch_median_mib_s": [
+            101.127826,
+            86.198517,
+            110.017641,
+            109.954951,
+            111.62761
+          ]
+        },
+        "cmux": {
+          "sample_count": 45,
+          "median_mib_s": 176.679398,
+          "launch_median_mib_s": [
+            175.681446,
+            149.207231,
+            185.694028,
+            178.152868,
+            177.164896
+          ]
+        }
+      }
+    },
+    "cjk": {
+      "payload_bytes": 8388607,
+      "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+      "apps": {
+        "akitty": {
+          "sample_count": 45,
+          "median_mib_s": 175.953545,
+          "launch_median_mib_s": [
+            199.628791,
+            129.542928,
+            185.453113,
+            186.306634,
+            146.101471
+          ]
+        },
+        "ghostty": {
+          "sample_count": 45,
+          "median_mib_s": 163.680752,
+          "launch_median_mib_s": [
+            124.758671,
+            151.763641,
+            194.160794,
+            192.311331,
+            130.030981
+          ]
+        },
+        "alacritty": {
+          "sample_count": 45,
+          "median_mib_s": 112.801819,
+          "launch_median_mib_s": [
+            119.524279,
+            104.530913,
+            117.735996,
+            91.871117,
+            105.125687
+          ]
+        },
+        "kitty": {
+          "sample_count": 45,
+          "median_mib_s": 97.153984,
+          "launch_median_mib_s": [
+            99.417618,
+            67.900803,
+            98.024989,
+            95.760062,
+            97.480474
+          ]
+        },
+        "cmux": {
+          "sample_count": 45,
+          "median_mib_s": 161.225293,
+          "launch_median_mib_s": [
+            165.936643,
+            142.337657,
+            163.410075,
+            161.459983,
+            145.139509
+          ]
+        }
+      }
+    },
+    "long-lines": {
+      "payload_bytes": 8388096,
+      "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+      "apps": {
+        "akitty": {
+          "sample_count": 45,
+          "median_mib_s": 183.071769,
+          "launch_median_mib_s": [
+            170.840455,
+            127.94033,
+            188.60508,
+            235.264478,
+            187.254852
+          ]
+        },
+        "ghostty": {
+          "sample_count": 45,
+          "median_mib_s": 166.468925,
+          "launch_median_mib_s": [
+            166.736243,
+            131.645075,
+            183.44138,
+            195.518963,
+            126.590743
+          ]
+        },
+        "alacritty": {
+          "sample_count": 45,
+          "median_mib_s": 99.262405,
+          "launch_median_mib_s": [
+            127.166537,
+            71.846712,
+            128.32026,
+            99.262405,
+            39.042355
+          ]
+        },
+        "kitty": {
+          "sample_count": 45,
+          "median_mib_s": 112.667791,
+          "launch_median_mib_s": [
+            92.822444,
+            72.167635,
+            118.879517,
+            118.61555,
+            119.013123
+          ]
+        },
+        "cmux": {
+          "sample_count": 45,
+          "median_mib_s": 182.639339,
+          "launch_median_mib_s": [
+            182.639339,
+            153.387783,
+            214.458136,
+            188.358426,
+            139.841824
+          ]
+        }
+      }
+    }
+  },
+  "measured_at": "2026-11-19T10:40:29.488612+00:00",
+  "finished_at": "2026-11-19T10:47:24.144667+00:00"
+}

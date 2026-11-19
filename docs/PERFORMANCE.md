@@ -2175,36 +2175,56 @@ comparison adapters were built locally outside the product build.
 
 ## macOS PTY throughput
 
-On 2026-11-19, the signed arm64 AkiTTY 1.4.1 bundle (build 10401, commit
-`27ff1eac3650807bcaa76f1f63bba00988c85e31`) and the signed cmux v0.65.2.2
-release bundle (marketing version 0.65.2, build 113) ran on the same Apple
-M3 Max with macOS 27.2.1. The benchmark verified both download hashes and
-bundle signatures. [AkiTTY release](https://github.com/defai-digital/akitty/releases/tag/v1.4.1)
-· [cmux release](https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2)
+On 2026-11-19, five released terminal apps ran as native arm64 processes
+on an Apple M3 Max with macOS 27.2.1 (26B131).
 
-Each launch used an isolated home, one hidden terminal and a 98×25 PTY grid.
-Scrollback was configured off. AkiTTY used Menlo 16 pt. cmux used Menlo 12 pt
-with adjusted padding to reach the same grid. The producer set the PTY to
-byte-preserving mode and sent about 8 MiB per sample. It requested grapheme
-mode reset and verified that ASCII, ANSI color and CJK text advanced the
-cursor by the same number of columns in each app.
+- AkiTTY 1.4.1 used build 10401 at commit `27ff1eac3650807bcaa76f1f63bba00988c85e31`.
+  [AkiTTY release](https://github.com/defai-digital/akitty/releases/tag/v1.4.1)
+- Ghostty 1.4.0 used build 18457. [Ghostty release](https://ghostty.org/docs/install/release-notes/1-4-0)
+- Alacritty 0.17.0 used the upstream ad hoc-signed macOS bundle.
+  [Alacritty release](https://github.com/alacritty/alacritty/releases/tag/v0.17.0)
+- Kitty 0.51.0 used the upstream macOS bundle.
+  [Kitty release](https://github.com/kovidgoyal/kitty/releases/tag/v0.51.0)
+- cmux v0.65.2.2 used marketing version 0.65.2, build 113.
+  [cmux release](https://github.com/manaflow-ai/cmux/releases/tag/v0.65.2.2)
 
-The timer ran from the first payload write through receipt of the cursor
-position report after a trailing marker. This measures PTY transport,
-terminal processing and the reply path. Screen preparation was outside the
-timer. The harness verified the app was hidden at each workload boundary.
-The two sweeps ran three app pairs each, reversing each pair's app order
-in the second sweep. Both members of each pair used the same shuffled
-workload order. Each launch ran three warmups and nine timed samples per
-workload. Two cmux attempts stopped before any workload ran because
-windows became visible during startup. The successful retry hid the app
-again before the first workload and passed the same visibility checks.
+The harness recorded archive and executable hashes, verified bundle
+signatures and checked the running architecture. Each launch used a fresh
+process with an isolated home and a 98×25 PTY. Menlo was set to 16 pt in
+AkiTTY and 12 pt in the other apps. App-specific window sizes and padding
+produced the same character grid. Scrollback limits were set to zero
+using each app's settings.
 
-The table in the README divides the payload byte count by the median
-elapsed time across 54 samples per app and workload. AkiTTY's ANSI color
-and CJK medians were 1.29× and 1.40× cmux's, respectively. The ranges of
-per-launch medians overlap for ASCII, ANSI color and long lines. The raw
-record includes payload hashes, app fingerprints, PTY geometry, cursor-width
-checks and every timed sample.
-[Raw v1.4.1 PTY measurements](../benchmarks/results/cmux-pty-throughput-v1.4.1-2026-11-19.json)
-· [Earlier v1.4.0 measurements](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)
+The producer set the PTY to byte-preserving mode and wrote about 8 MiB per
+sample. This used the same four payloads as the earlier AkiTTY and cmux
+comparison. The timer ran from the first payload write through receipt of
+the cursor position report after a trailing marker. The rate covers PTY
+transport, terminal processing and the reply path. Screen preparation
+and the visibility checks ran outside the timer. All apps were hidden
+before timing and at the boundaries of every workload.
+
+All five apps reported matching cursor positions for the ASCII, RGB,
+CJK with combining text, and long wrapped line probes. The harness
+requested a grapheme-clustering mode reset and recorded the responses.
+Every warmup and timed sample had to end with the cursor at row 2,
+column 1 after the marker.
+
+The five rounds rotated app order so that every app ran once in each
+position. Apps in a round shared the same shuffled workload order. Each
+launch ran three warmups and nine timed samples per workload. The
+[README table](../README.md#performance) divides the payload byte count
+by the median elapsed time across 45 samples per app and workload.
+
+In round five, four Ghostty starts reported a 100×26 PTY at a higher
+display scale and stopped before timing. The successful retry adjusted the
+requested window dimensions to produce a 98×25 PTY. The launcher also
+retried reading one AkiTTY result after validating that the original
+launch wrote its complete output.
+
+The ranges of per-launch medians for AkiTTY, Ghostty and cmux overlap
+on all four workloads. The raw record includes pixel and character
+dimensions, per-launch medians and all sample durations.
+
+[Five-app PTY measurements](../benchmarks/results/macos-pty-throughput-v1.4.1-2026-11-19.json)
+· [Earlier AkiTTY 1.4.1 and cmux comparison](../benchmarks/results/cmux-pty-throughput-v1.4.1-2026-11-19.json)
+· [Earlier AkiTTY 1.4.0 and cmux comparison](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)
