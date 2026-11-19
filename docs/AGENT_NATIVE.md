@@ -153,6 +153,40 @@ a command fingerprint, never the command.
 | Decide | `{"version":1,"op":"decide","agent":"claude-code","tool":"Bash","command":"…","cwd":"…","reason":"…"}`; `cwd`, `reason`, `request_id` optional. Returns `{decision, request_id, executor, akitty_sent_input: false}` with `decision` `allow` or `deny` |
 | Report | `{"version":1,"op":"report","agent":"claude-code","event":"session_start","session_id":"…"}`; `event` is `session_start` or `session_end` |
 
+## Reopen windows and resume agent conversations
+
+**Shell → Window Layouts → Reopen Windows and Agent Conversations at Launch**
+(off by default) saves the open windows, tabs, splits and each pane's folder,
+plus the last conversation ID an agent reported in that pane. AkiTTY saves when
+an agent reports a conversation, every 30 seconds, and when you quit, so a crash
+or forced quit keeps the most recent save. No terminal text, command, prompt or
+approval is saved. Closing the last window while AkiTTY keeps running keeps the
+previous save. **Clear Saved Workspace** removes the save and turns the option
+off, so the next autosave cannot write it back.
+
+At the next launch the windows reopen with fresh shells. Each pane that had a
+conversation shows a line naming it, and Agent Overview marks it
+**(can resume)**. Nothing starts on its own. Choose **Shell → Resume Agent
+Conversation** for the focused pane, or **Resume Conversation** in Agent
+Overview, and AkiTTY clears the line (Ctrl-U) and types `claude --resume <id>`
+at that pane's prompt. The shell must be at an empty, idle integrated prompt
+(nothing typed since it was drawn), and its input under your control. The Shell
+menu item acts only on the pane with keyboard focus.
+Each pane resumes its own ID, so several conversations in the same folder never
+swap, and AkiTTY never picks "the most recent" one.
+
+The resume is shown as **(resumed)** only when Claude Code reports the same
+conversation ID from that pane (Claude Code 2.1.327 keeps the ID when resuming).
+That report needs Claude Code Integration and Local Agent Requests on. Otherwise,
+or if the CLI is missing, the conversation was deleted or the folder moved, Agent
+Overview shows **(resume not confirmed)** after 30 seconds, or as soon as a
+different conversation starts in that pane. The CLI's own output in the pane
+says why, and you can choose Resume again; a later report of the same ID still
+confirms it. Once resumed or never started, a different conversation in the pane
+replaces the offer. Approvals that were waiting, earlier approvals and input
+leases end with the app and are never replayed. Only Claude Code conversations
+can be resumed so far.
+
 ## Local request protocol and trust boundary
 
 The optional [local MCP bridge](MCP.md) exposes these same list/request operations

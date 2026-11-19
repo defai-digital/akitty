@@ -67,11 +67,13 @@ struct AgentOverviewRow: Equatable {
     private let requestsEnabled: () -> Bool
     private let pending: (UInt64) -> (count: Int, oldestWait: TimeInterval)?
     private let agentSession: (UInt64) -> String?
+    private let resume: (TerminalView) throws -> Void
     private let onShow: (TerminalWindow, TerminalView) -> Void
     private(set) var entries: [Entry] = []
     let table: NSTableView = AgentOverviewTable()
     let showButton = NSButton(title: "Show Terminal", target: nil, action: nil)
     let reclaimButton = NSButton(title: "Reclaim Control", target: nil, action: nil)
+    let resumeButton = NSButton(title: "Resume Conversation", target: nil, action: nil)
     private var timer: Timer?
     var refreshTimerActive: Bool { timer?.isValid == true }
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
@@ -81,8 +83,9 @@ struct AgentOverviewRow: Equatable {
 
     init(source: @escaping () -> [TerminalWindow], requestsEnabled: @escaping () -> Bool = { false },
          pending: @escaping (UInt64) -> (count: Int, oldestWait: TimeInterval)? = { _ in nil },
-         agentSession: @escaping (UInt64) -> String? = { _ in nil }, onShow: @escaping (TerminalWindow, TerminalView) -> Void) {
-        self.source = source; self.requestsEnabled = requestsEnabled; self.pending = pending; self.agentSession = agentSession; self.onShow = onShow
+         agentSession: @escaping (UInt64) -> String? = { _ in nil }, resume: @escaping (TerminalView) throws -> Void = { _ in },
+         onShow: @escaping (TerminalWindow, TerminalView) -> Void) {
+        self.source = source; self.requestsEnabled = requestsEnabled; self.pending = pending; self.agentSession = agentSession; self.resume = resume; self.onShow = onShow
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1360, height: 340), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Agent Overview"; window.minSize = NSSize(width: 520, height: 200); window.center()
         window.isReleasedWhenClosed = false
@@ -103,7 +106,9 @@ struct AgentOverviewRow: Equatable {
         showButton.target = self; showButton.action = #selector(showSelected(_:))
         reclaimButton.target = self; reclaimButton.action = #selector(reclaimSelected(_:))
         reclaimButton.setAccessibilityHelp("Revokes the selected agent's input control and unused command approval. Does not stop the running process.")
-        let buttons = NSStackView(views: [note, showButton, reclaimButton]); buttons.orientation = .horizontal; buttons.spacing = 8
+        resumeButton.target = self; resumeButton.action = #selector(resumeSelected(_:))
+        resumeButton.setAccessibilityHelp("Starts the selected pane's restored agent conversation by its ID at the pane's idle shell prompt.")
+        let buttons = NSStackView(views: [note, showButton, reclaimButton, resumeButton]); buttons.orientation = .horizontal; buttons.spacing = 8
         note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let content = NSView()
         for view in [scroll, buttons] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
@@ -115,7 +120,7 @@ struct AgentOverviewRow: Equatable {
         ])
         window.contentView = content
         window.initialFirstResponder = table
-        table.nextKeyView = showButton; showButton.nextKeyView = reclaimButton; reclaimButton.nextKeyView = table
+        table.nextKeyView = showButton; showButton.nextKeyView = reclaimButton; reclaimButton.nextKeyView = resumeButton; resumeButton.nextKeyView = table
         refresh()
     }
     required init?(coder: NSCoder) { nil }
@@ -181,6 +186,13 @@ struct AgentOverviewRow: Equatable {
         onShow(window, terminal)
     }
     /// The same human gesture as Edit → Reclaim Terminal Control. It revokes the lease and any grant; the process keeps running.
+    /// Resumes the selected pane's restored conversation; the pane is shown so the human sees what starts.
+    @objc func resumeSelected(_ sender: Any?) {
+        guard let entry = selectedEntry, let window = entry.window, let terminal = entry.terminal else { return }
+        do { try resume(terminal); onShow(window, terminal) }
+        catch { if let host = self.window { NSAlert(error: error).beginSheetModal(for: host) } }
+        refresh()
+    }
     @objc func reclaimSelected(_ sender: Any?) {
         guard let entry = selectedEntry, entry.row.agentControlled, let terminal = entry.terminal else { return }
         terminal.reclaimAgentControl(sender)

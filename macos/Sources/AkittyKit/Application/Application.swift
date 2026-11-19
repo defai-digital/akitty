@@ -29,7 +29,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     let intentInstance = UUID().uuidString
     private var eventMenuItem: NSMenuItem?
     private var windowLayoutsMenu: NSMenu?
-    private lazy var agentRequests: AgentRequests = {
+    private(set) lazy var agentRequests: AgentRequests = {
         let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
         requests.onFailure = { [weak self] message in self?.eventMenuItem?.title = "Agent Event Timeline (recording warning)…"; self?.eventMenuItem?.toolTip = message }
         return requests
@@ -106,6 +106,67 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         _ = try await agentRequests.request(command, in: terminal, origin: .siri)
     }
     public func applicationWillTerminate(_ notification: Notification) { agentRequests.stop(); quickTerminal.stop() }
+
+    // MARK: Workspace restore
+
+    private var workspaceTimer: Timer?
+    /// Where the workspace and its restore setting live; tests pass their own suite.
+    var workspaceDefaults = UserDefaults.standard
+    /// Saves the open windows and each pane's last reported agent conversation when restore is on. Never text.
+    func saveWorkspace() {
+        guard WorkspaceStore.isEnabled(workspaceDefaults), allowsTabTransfer else { return }
+        let captured = regularWindows.map { $0.captureLayout(conversation: { [weak self] in self?.agentRequests.conversation(for: $0) }) }
+        WorkspaceStore.save(WindowLayout(name: "Workspace", windows: captured), workspaceDefaults)
+    }
+    /// Reopens the saved workspace at launch. Each pane starts a fresh shell; a pane that had an agent conversation
+    /// only offers to resume it. Returns false when restore is off or nothing was saved.
+    func restoreWorkspaceIfEnabled(headless: Bool = false) throws -> Bool {
+        guard WorkspaceStore.isEnabled(workspaceDefaults), var layout = WorkspaceStore.load(workspaceDefaults) else { return false }
+        for window in layout.windows.indices {
+            for tab in layout.windows[window].tabs.indices {
+                for pane in layout.windows[window].tabs[tab].panes.indices {
+                    let saved = layout.windows[window].tabs[tab].panes[pane]
+                    layout.windows[window].tabs[tab].panes[pane].scrollback = saved.agent.map(WorkspaceStore.notice(for:))
+                }
+            }
+        }
+        for saved in layout.windows {
+            let controller = try TerminalWindow.restored(app: self, headless: headless, layout: saved)
+            windows.append(controller)
+            // Pair tab by tab, so a pane that could not be recreated never shifts another pane's conversation onto it.
+            for (item, tab) in zip(controller.tabs.tabViewItems, saved.tabs) {
+                let panes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
+                guard panes.count == tab.panes.count else { continue }
+                for (pane, record) in zip(panes, tab.panes) {
+                    if let conversation = record.agent { agentRequests.offerResume(conversation, in: pane.terminal) }
+                }
+            }
+            controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        }
+        if !launched { openedFolderAtLaunch = true }
+        return true
+    }
+    private func startWorkspaceAutosave() {
+        agentRequests.onAgentSessionReport = { [weak self] in self?.saveWorkspace() }
+        // A crash or forced quit keeps what was saved most recently.
+        workspaceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.saveWorkspace() } }
+    }
+    @objc private func toggleWorkspaceRestore(_ sender: NSMenuItem) {
+        WorkspaceStore.setEnabled(!WorkspaceStore.isEnabled(workspaceDefaults), workspaceDefaults)
+        sender.state = WorkspaceStore.isEnabled(workspaceDefaults) ? .on : .off
+        saveWorkspace()
+    }
+    /// Clearing also turns the option off; otherwise the next autosave would write the workspace straight back.
+    @objc private func clearSavedWorkspace(_ sender: Any?) { WorkspaceStore.setEnabled(false, workspaceDefaults) }
+    /// Resumes the focused pane's restored agent conversation, at the human's request.
+    @objc func resumeAgentConversation(_ sender: Any?) {
+        // Only the pane that has keyboard focus: never a guess at another pane in the tab.
+        guard let terminal = (NSApp.keyWindow?.windowController as? TerminalWindow)?.window?.firstResponder as? TerminalView else {
+            let alert = NSAlert(); alert.messageText = "Click the terminal pane to resume first."
+            alert.informativeText = "Or select the pane in Agent Overview and choose Resume Conversation."; alert.runModal(); return
+        }
+        do { try agentRequests.resume(in: terminal) } catch { NSAlert(error: error).runModal() }
+    }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
     /// Delegates that rebuild the profile submenus each time they open, so they always list the saved profiles.
@@ -122,7 +183,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if agentOverview == nil {
             agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }, requestsEnabled: { [weak self] in self?.agentRequests.enabled == true },
                                                    pending: { [weak self] in self?.agentRequests.pendingSummary(for: $0) },
-                                                   agentSession: { [weak self] in self?.agentRequests.agentSession(for: $0).map(AgentOverviewRow.describe) }) { [weak self] window, terminal in
+                                                   agentSession: { [weak self] in self?.agentRequests.describeConversation(for: $0) },
+                                                   resume: { [weak self] terminal in try self?.agentRequests.resume(in: terminal) }) { [weak self] window, terminal in
                 // A hidden quick terminal is shown through its controller so its hide and focus restore keep working.
                 if window === self?.quickTerminal.terminalWindow, window.window?.isVisible != true {
                     do { try self?.quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
@@ -143,6 +205,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         agentRequests.startRecording()
         updates.onReminderChanged = { [weak self] version in self?.windows.forEach { $0.refreshUpdateReminder(version) } }
         makeMenu()
+        startWorkspaceAutosave()
         do { try configureQuickTerminal(.load()) } catch { NSAlert(error: error).runModal() }
         // Intent/service launches must not create an extra shell. A folder or
         // intent delivered before didFinishLaunching also replaces the default.
@@ -165,7 +228,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// Only an app with no windows gets one, so a Dock reopen that already opened a window adds none.
     func openUntitledWindow(headless: Bool = false) -> Bool {
         guard windows.isEmpty else { return false }
-        do { try createTerminalWindow(headless: headless) } catch { NSAlert(error: error).runModal(); return false }
+        do { if !(try restoreWorkspaceIfEnabled(headless: headless)) { try createTerminalWindow(headless: headless) } } catch { NSAlert(error: error).runModal(); return false }
         return true
     }
     public func application(_ sender: NSApplication, open urls: [URL]) {
@@ -180,7 +243,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     @objc public func newWindow(_ sender: Any?) { newWindow(directory: nil) }
     func createInitialWindowIfNeeded(defaultLaunch: Bool, headless: Bool = false) throws {
-        if !openedFolderAtLaunch && defaultLaunch { try createTerminalWindow(headless: headless) }
+        if !openedFolderAtLaunch && defaultLaunch, !(try restoreWorkspaceIfEnabled(headless: headless)) { try createTerminalWindow(headless: headless) }
     }
     func newWindow(directory: String?) {
         do { _ = try createTerminalWindow(directory: directory) }
@@ -232,6 +295,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     func remove(_ controller: TerminalWindow) { quickTerminal.closed(controller); windows.removeAll { $0 === controller } }
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        saveWorkspace()
         let owner = windows.first(where: { $0.window?.isKeyWindow == true })?.window ?? windows.first?.window
         return requestTermination(terminals: windows.flatMap(\.panes).map(\.terminal), window: owner) { sender.reply(toApplicationShouldTerminate: $0) }
     }
@@ -295,6 +359,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         menu.removeAllItems(); menu.autoenablesItems = false
         let save = menu.addItem(withTitle: "Save Windows as Layout…", action: #selector(saveLayoutFromMenu(_:)), keyEquivalent: "")
         save.target = self; save.isEnabled = !regularWindows.isEmpty
+        let restore = menu.addItem(withTitle: "Reopen Windows and Agent Conversations at Launch", action: #selector(toggleWorkspaceRestore(_:)), keyEquivalent: "")
+        restore.target = self; restore.state = WorkspaceStore.isEnabled(workspaceDefaults) ? .on : .off
+        let clearWorkspace = menu.addItem(withTitle: "Clear Saved Workspace", action: #selector(clearSavedWorkspace(_:)), keyEquivalent: "")
+        clearWorkspace.target = self; clearWorkspace.isEnabled = workspaceDefaults.data(forKey: WorkspaceStore.workspaceKey) != nil
         menu.addItem(.separator())
         let layouts = WindowLayoutStore.load()
         if layouts.isEmpty {
@@ -414,6 +482,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         add(.newWindow,key: "n",to: file); add(.newTab,key: "t",to: file); add(.split,key: "d",to: file); add(.closePane,key: "w",to: file)
         let restart = file.addItem(withTitle: "Restart Terminal", action: #selector(restartTerminal(_:)), keyEquivalent: "r")
         restart.keyEquivalentModifierMask = [.command, .shift]; restart.target = self
+        let resume = file.addItem(withTitle: "Resume Agent Conversation", action: #selector(resumeAgentConversation(_:)), keyEquivalent: ""); resume.target = self
         let layouts = NSMenuItem(title: "Window Layouts", action: nil, keyEquivalent: "")
         let layoutsMenu = NSMenu(title: "Window Layouts"); layoutsMenu.delegate = self
         layouts.submenu = layoutsMenu; file.addItem(layouts); windowLayoutsMenu = layoutsMenu

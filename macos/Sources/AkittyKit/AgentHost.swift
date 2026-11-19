@@ -16,6 +16,8 @@ public struct ControlSummary: Codable, Sendable {
     public let owner: String
     public let agent: Bool
     public let audit_seq: UInt64
+    /// True once the current prompt line was typed into (or a command was sent) since the shell last drew a prompt.
+    public var prompt_edited: Bool? = nil
 }
 
 extension TerminalSession {

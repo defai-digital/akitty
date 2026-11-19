@@ -19,6 +19,8 @@ struct WindowLayout: Codable, Equatable {
         /// The profile the pane was opened with; nil is the Settings defaults. A profile deleted since restores as defaults.
         var profile: UUID?
         var scrollback: String?
+        /// The agent conversation this pane can offer to resume (saved workspace only). Never resumed automatically.
+        var agent: AgentConversation?
     }
     var name: String = ""
     var windows: [Window] = []
@@ -55,13 +57,14 @@ extension WindowLayout.Tab {
     }
 }
 extension WindowLayout.Pane {
-    private enum CodingKeys: String, CodingKey { case directory, profile, scrollback }
+    private enum CodingKeys: String, CodingKey { case directory, profile, scrollback, agent }
     init(from decoder: Decoder) throws {
         self.init()
         let container = try decoder.container(keyedBy: CodingKeys.self)
         directory = try container.decodeIfPresent(String.self, forKey: .directory) ?? directory
         profile = try? container.decodeIfPresent(UUID.self, forKey: .profile)
         scrollback = try? container.decodeIfPresent(String.self, forKey: .scrollback)
+        agent = (try? container.decodeIfPresent(AgentConversation.self, forKey: .agent)).flatMap { $0?.isResumable == true ? $0 : nil }
     }
 }
 

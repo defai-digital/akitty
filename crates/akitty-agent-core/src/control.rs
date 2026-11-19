@@ -94,7 +94,7 @@ impl Control {
     /// (no audit) from one that recorded evidence the host must still see.
     pub fn audit_seq(&self) -> u64 { self.seq }
     pub fn summary(&self) -> Value {
-        json!({"owner":self.lease.as_ref().map(|l|l.1.as_str()).unwrap_or("human"),"agent":self.lease.is_some(),"audit_seq":self.seq})
+        json!({"owner":self.lease.as_ref().map(|l|l.1.as_str()).unwrap_or("human"),"agent":self.lease.is_some(),"audit_seq":self.seq,"prompt_edited":self.dirty})
     }
     pub fn audit(&self, after: u64) -> Value {
         json!({"events":self.events.iter().filter(|e|e.seq>after).collect::<Vec<_>>(),"oldest_seq":self.events.front().map(|e|e.seq),"last_seq":self.seq})
@@ -103,6 +103,13 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn summary_reports_an_edited_prompt() {
+        let mut control = Control::default();
+        assert_eq!(control.summary()["prompt_edited"], json!(false));
+        control.human_input().unwrap();
+        assert_eq!(control.summary()["prompt_edited"], json!(true));
+    }
     #[test]
     fn grants_are_exact_once_expiring_and_revoked_on_reclaim() {
         let mut control = Control::default();

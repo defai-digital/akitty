@@ -280,7 +280,8 @@ See [startup and host contracts](AGENT_WORKFLOWS.md) for the bash login distinct
 `AKITTY_FOLDER_HISTORY=0`, turning off the zsh command-history menu; it has no other effect.
 
 Full and partial snapshots add `shell` (cwd, ready, last_command_id, rejected,
-untrusted=true) and `control` (owner, agent, audit_seq). OSC 7 file URIs are decoded
+untrusted=true) and `control` (owner, agent, audit_seq, prompt_edited: true once the current prompt
+line was typed into or a command was sent, until the shell draws its next prompt). OSC 7 file URIs are decoded
 into absolute paths (max 4096 URI bytes including the scheme and hostname, no
 control characters), for display only;
 the authority is not used to access a remote filesystem. OSC 133 A/B/C/D and OSC

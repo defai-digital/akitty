@@ -26,3 +26,16 @@
 - The pane is identified from the hook's controlling terminal. The core's
   `shell_state` now reports the PTY device (`tty_device`).
 - Agent Overview shows the conversation ID Claude Code reported for each pane.
+
+## Reopen windows and resume Claude Code conversations
+
+- **Shell → Window Layouts → Reopen Windows and Agent Conversations at Launch**
+  (off by default) saves the open windows and each pane's last reported Claude
+  Code conversation ID, never text or commands, and reopens them at launch.
+- A restored pane offers its own conversation. **Shell → Resume Agent
+  Conversation** or **Resume Conversation** in Agent Overview types
+  `claude --resume <id>` at the pane's idle prompt. Agent Overview shows
+  "(resumed)" only after Claude Code reports that same ID from the pane.
+- **Clear Saved Workspace** removes the saved workspace and turns the option off.
+- The core's control summary now reports `prompt_edited`, so Resume refuses a
+  prompt that already holds typed text.

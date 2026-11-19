@@ -169,14 +169,15 @@ import AppKit
     }
     /// Records this window's tabs, panes, split shares and starting folders for a named layout. The shell's
     /// reported directory wins while it still exists; otherwise the folder the pane started with is kept.
-    func captureLayout() -> WindowLayout.Window {
+    /// `conversation` adds each pane's resumable agent conversation; only the saved workspace passes it.
+    func captureLayout(conversation: (TerminalView) -> AgentConversation? = { _ in nil }) -> WindowLayout.Window {
         let selected = tabs.selectedTabViewItem.map { tabs.indexOfTabViewItem($0) } ?? 0
         let captured = tabs.tabViewItems.map { item -> WindowLayout.Tab in
             let panes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
             return WindowLayout.Tab(panes: panes.map { pane in
                 let reported = (try? pane.terminal.session.shellState())?.shell?.cwd
                 let directory = reported.flatMap { Self.existingDirectory($0) ? $0 : nil } ?? pane.terminal.startingDirectory
-                return WindowLayout.Pane(directory: directory, profile: pane.terminal.profileID)
+                return WindowLayout.Pane(directory: directory, profile: pane.terminal.profileID, agent: conversation(pane.terminal))
             }, fractions: fractions(of: panes))
         }
         let frame = window?.frame ?? NSRect(x: 0, y: 0, width: 1000, height: 650)

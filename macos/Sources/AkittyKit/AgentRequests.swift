@@ -79,7 +79,7 @@ import AgentIPC
             self.record(terminal, drain: true)
             self.persist(event: "session_closed", id: id)
             self.cursors.removeValue(forKey: id); self.reports.removeValue(forKey: id); self.sessions.removeValue(forKey: id)
-            self.agentSessions.removeValue(forKey: id)
+            self.agentSessions.removeValue(forKey: id); self.resumeOffers.removeValue(forKey: id)
         }
         persist(event: "session_opened", id: id)
     }
@@ -506,9 +506,11 @@ import AgentIPC
     }
     private(set) var agentSessions: [UInt64: AgentSession] = [:]
     func agentSession(for sessionID: UInt64) -> AgentSession? { agentSessions[sessionID] }
-    static func isValidAgentSessionID(_ value: String) -> Bool {
+    nonisolated static func isValidAgentSessionID(_ value: String) -> Bool {
         (1...128).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0) }
     }
+    /// Called after each accepted session report, so a saved workspace keeps the newest conversation IDs.
+    var onAgentSessionReport: (() -> Void)?
     func report(agent: String, event: String, sessionID: String, in terminal: TerminalView) {
         let pane = terminal.session.id
         if event == "session_end" {
@@ -516,8 +518,100 @@ import AgentIPC
             agentSessions[pane]?.ended = true; agentSessions[pane]?.reported = Date()
         } else {
             agentSessions[pane] = AgentSession(agent: agent, sessionID: sessionID, ended: false, reported: Date())
+            if let offer = resumeOffers[pane] {
+                // Only the conversation the human chose, reported by the same agent in this pane, counts as resumed,
+                // including a late report or one the human started by typing the command themselves.
+                if offer.conversation.agent == agent && offer.conversation.sessionID == sessionID {
+                    if offer.state != .resumed {
+                        resumeOffers[pane]?.state = .resumed
+                        persist(event: "agent_session_resumed", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
+                    }
+                } else if offer.state != .offered && offer.state != .resumed {
+                    // A different conversation started while (or after failing at) resuming: keep the chosen one to retry.
+                    resumeOffers[pane]?.state = .unconfirmed
+                } else { resumeOffers.removeValue(forKey: pane) }
+            }
         }
         persist(event: event == "session_end" ? "agent_session_ended" : "agent_session_reported", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
+        onAgentSessionReport?()
+    }
+
+    // MARK: Resuming a conversation after a restart
+
+    enum ResumeState: Equatable {
+        /// Restored from the saved workspace; nothing has been started.
+        case offered
+        /// The resume command was typed at the human's request; waiting for the agent to report the same ID.
+        case started(TimeInterval)
+        /// The agent reported the same conversation ID in this pane.
+        case resumed
+        /// The agent did not report the conversation in time (missing CLI, deleted conversation, hooks off, …).
+        case unconfirmed
+    }
+    struct ResumeOffer: Equatable {
+        let conversation: AgentConversation
+        var state: ResumeState
+    }
+    private(set) var resumeOffers: [UInt64: ResumeOffer] = [:]
+    /// How long a started resume may take before it is shown as not confirmed.
+    var resumeConfirmationTimeout: TimeInterval = 30
+    /// Types into the pane's PTY; tests replace it because headless panes have none.
+    var typeInput: (TerminalView, String) throws -> Void = { try $0.session.input($1, paste: false) }
+    func resumeOffer(for pane: UInt64) -> ResumeOffer? { resumeOffers[pane] }
+    func offerResume(_ conversation: AgentConversation, in terminal: TerminalView) {
+        guard conversation.isResumable, !terminal.isShutdown else { return }
+        resumeOffers[terminal.session.id] = ResumeOffer(conversation: conversation, state: .offered)
+    }
+    /// The conversation a saved workspace keeps for this pane: the one its agent last reported, or a restored one
+    /// the human has not resumed yet. Nil when there is none AkiTTY can resume.
+    func conversation(for terminal: TerminalView) -> AgentConversation? {
+        let pane = terminal.session.id
+        if let session = agentSessions[pane] {
+            let value = AgentConversation(agent: session.agent, sessionID: session.sessionID, reported: session.reported.timeIntervalSince1970)
+            return value.isResumable ? value : nil
+        }
+        return resumeOffers[pane]?.conversation
+    }
+    func canResume(_ terminal: TerminalView) -> Bool {
+        guard let offer = resumeOffers[terminal.session.id] else { return false }
+        if case .started = offer.state { return false }
+        return offer.state != .resumed
+    }
+    /// The human chose Resume: type the agent's resume command at this pane's idle shell prompt. Never automatic.
+    func resume(in terminal: TerminalView) throws {
+        let pane = terminal.session.id
+        guard let offer = resumeOffers[pane], canResume(terminal), let command = offer.conversation.resumeCommand else {
+            throw AkittyError.core("This pane has no agent conversation to resume.")
+        }
+        guard !terminal.isShutdown, let state = try? terminal.session.shellState(), state.exited != true, state.control?.agent != true,
+              state.shell?.ready == true, state.control?.prompt_edited != true else {
+            throw AkittyError.core("Resume needs this pane's shell at an empty, idle prompt with shell integration, and its input under your control.")
+        }
+        // Ctrl-U first, as approved dispatch does: typeahead must never prefix the resume command.
+        try typeInput(terminal, "\u{15}" + command + "\r")
+        let started = ProcessInfo.processInfo.systemUptime
+        resumeOffers[pane]?.state = .started(started)
+        persist(event: "agent_resume_started", id: pane, fields: ["agent": offer.conversation.agent])
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, self?.resumeConfirmationTimeout ?? 30) * 1_000_000_000))
+            guard let self, self.resumeOffers[pane]?.state == .started(started) else { return }
+            self.resumeOffers[pane]?.state = .unconfirmed
+        }
+    }
+    /// Describes the pane's conversation for Agent Overview, including where a resume stands.
+    func describeConversation(for pane: UInt64) -> String? {
+        if let offer = resumeOffers[pane] {
+            let base = AgentOverviewRow.describe(AgentSession(agent: offer.conversation.agent, sessionID: offer.conversation.sessionID, ended: false, reported: Date()))
+            switch offer.state {
+            case .offered: return base + " (can resume)"
+            case .started: return base + " (resuming…)"
+            case .resumed:
+                if let session = agentSessions[pane], session.sessionID != offer.conversation.sessionID || session.ended { return AgentOverviewRow.describe(session) }
+                return base + " (resumed)"
+            case .unconfirmed: return base + " (resume not confirmed)"
+            }
+        }
+        return agentSessions[pane].map(AgentOverviewRow.describe)
     }
     func handle(_ data: Data, peer: LocalPeer) async -> Data {
         var suppliedID: String?
