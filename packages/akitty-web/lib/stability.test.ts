@@ -127,6 +127,39 @@ describe('terminal lifecycle hygiene', () => {
     } finally { term.dispose(); }
   });
 
+  test('reset from a reflow scroll still announces the new grid', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      term.write('one\r\ntwo\r\nthree');
+      term.scrollToTop();
+      const sizes: Array<{ cols: number; rows: number }> = [];
+      term.onResize(size => sizes.push(size));
+      let resets = 0;
+      term.onScroll(offset => { if (offset === 0 && resets++ === 0) term.reset(); });
+      term.resize(8, 4);
+      expect(resets).toBeGreaterThan(0);
+      expect(sizes).toEqual([{ cols: 8, rows: 4 }]);
+    } finally { term.dispose(); }
+  });
+
+  test('reset from a selection-clear listener still announces the new grid', async () => {
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+    term.open(container);
+    try {
+      term.write('hello');
+      term.selectAll();
+      expect(term.hasSelection()).toBe(true);
+      const sizes: Array<{ cols: number; rows: number }> = [];
+      term.onResize(size => sizes.push(size));
+      let resets = 0;
+      term.onSelectionChange(() => { if (resets++ === 0) term.reset(); });
+      term.resize(12, 6);
+      expect(resets).toBe(1);
+      expect(sizes).toEqual([{ cols: 12, rows: 6 }]);
+    } finally { term.dispose(); }
+  });
+
   test('reset from onResize prevents the old grid from announcing a render', async () => {
     const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
     term.open(container);

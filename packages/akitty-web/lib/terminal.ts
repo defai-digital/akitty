@@ -350,24 +350,32 @@ export class Terminal implements ITerminalCore {
     terminal.resize(cols, rows); this.cols = cols; this.rows = rows; this.revision++;
     try { this.renderer!.resize(cols, rows); }
     catch (error) { this.wasmTerm!.resize(previous.cols, previous.rows); this.cols = previous.cols; this.rows = previous.rows; throw error; }
-    this.settings.cols = cols; this.settings.rows = rows;
+    // Mark the announcement before selection listeners run: a nested reset keeps it pending
+    // (the grid size is unchanged), and a nested resize that completes clears it.
+    this.resizePaintPending = true;
     this.selectionManager?.clearSelection();
-    if (!this.isCurrentTerminal(terminal) || this.cols !== cols || this.rows !== rows) return;
-    this.resizePaintPending = true; this.finishResize();
+    if (this.isOpen && this.resizePaintPending) this.finishResize(terminal);
   }
-  private finishResize(): void {
-    const terminal = this.wasmTerm!, { cols, rows } = this;
-    const isCurrentGrid = (): boolean => this.isCurrentTerminal(terminal) && this.cols === cols && this.rows === rows;
-    this.settings.cols = cols; this.settings.rows = rows;
+  private finishResize(reflowed: AkittyTerminal = this.wasmTerm!): void {
+    this.settings.cols = this.cols; this.settings.rows = this.rows;
     this.linkDetector?.invalidateCache();
     // Reflow can consume history. Clamp before painting and discard any wheel
     // animation whose target belonged to the previous grid.
     this.jumpViewport(this.viewportY);
-    // Scroll listeners can finish another resize or reset the terminal before we paint.
-    if (!this.resizePaintPending || !isCurrentGrid()) return;
-    this.renderer!.render(terminal, true, this.viewportY, this, this.scrollbarOpacity);
+    // Listeners can finish another resize (which announces itself) or reset the terminal,
+    // so read the grid only now.
+    if (!this.isOpen || !this.resizePaintPending) return;
+    const { cols, rows } = this;
+    if (this.wasmTerm !== reflowed) {
+      // A reset replaced the reflowed grid at the same size and paints its own frames, but
+      // the host still has to learn the new size to resize its PTY.
+      this.resizePaintPending = false; this.resizeEmitter.fire({ cols, rows });
+      return;
+    }
+    // A failed paint leaves the announcement pending; an identical resize retries it.
+    this.renderer!.render(reflowed, true, this.viewportY, this, this.scrollbarOpacity);
     this.resizePaintPending = false; this.resizeEmitter.fire({ cols, rows });
-    if (isCurrentGrid()) this.renderEmitter.fire({ start: 0, end: rows - 1 });
+    if (this.isCurrentTerminal(reflowed) && this.cols === cols && this.rows === rows) this.renderEmitter.fire({ start: 0, end: rows - 1 });
   }
   clear(): void { this.write('\x1b[2J\x1b[H'); }
   reset(): void {
@@ -378,7 +386,6 @@ export class Terminal implements ITerminalCore {
     this.wasmTerm = replacement; previous.free();
     this.outputQueue.cancel(new Error('Terminal was reset before queued output completed'));
     this.inputHandler?.reset();
-    this.resizePaintPending = false;
     this.mouseButton = undefined; this.dragging = undefined; this.alternateWheelRemainder = 0;
     this.cancelScrolling(); clearTimeout(this.syncTimer); this.syncTimer = undefined;
     this.viewportY = this.targetViewportY = 0; this.scrollbarOpacity = 0; this.scrollbarVisible = false;
