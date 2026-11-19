@@ -1,4 +1,5 @@
 import AppKit
+import AgentIPC
 import AppIntents
 
 /// Folders requested by an open-documents event: Finder "Open With", a Dock drop, or `open -a Akitty <path>` (how
@@ -42,6 +43,36 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         catch { NSAlert(error: error).runModal() }
     }
     @objc private func showAgentTimeline(_ sender: Any?) { agentRequests.showTimeline() }
+    /// Adds or removes AkiTTY's entries in Claude Code's user settings. Other settings and hooks are kept.
+    @objc private func configureClaudeCode(_ sender: Any?) {
+        let executable = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("akitty-agent").path ?? ""
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            NSAlert(error: AkittyError.core("The bundled akitty-agent companion was not found next to AkiTTY.")).runModal(); return
+        }
+        let settings = ClaudeHookSettings(executable: executable)
+        do {
+            let state = try settings.state()
+            let alert = NSAlert()
+            alert.messageText = "Claude Code Integration"
+            let status = state == .installed ? "Installed." : state == .partial ? "Partly installed; Install repairs it." : "Not installed."
+            alert.informativeText = """
+                \(status)
+
+                Claude Code's Bash permission prompts in an AkiTTY pane are answered in AkiTTY's approval queue, and the pane shows the reported conversation. Claude Code still runs every command itself. When AkiTTY cannot answer (Local Agent Requests off, the prompt times out, or another tool), Claude Code shows its own prompt.
+
+                Settings file: \(settings.path)
+                The first change keeps a copy as settings.json.akitty-backup. Remove deletes only AkiTTY's entries. Restart running Claude Code sessions to load the change.
+                """
+            alert.addButton(withTitle: state == .installed ? "Reinstall" : "Install")
+            if state != .notInstalled { alert.addButton(withTitle: "Remove") }
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: try settings.install()
+            case .alertSecondButtonReturn where state != .notInstalled: try settings.uninstall()
+            default: break
+            }
+        } catch { NSAlert(error: error).runModal() }
+    }
     @objc private func exportAgentEvents(_ sender: Any?) { agentRequests.exportEvents() }
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController { [unowned self] in
@@ -90,7 +121,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc func showAgentOverview(_ sender: Any?) {
         if agentOverview == nil {
             agentOverview = AgentOverviewController(source: { [weak self] in self?.windows ?? [] }, requestsEnabled: { [weak self] in self?.agentRequests.enabled == true },
-                                                   pending: { [weak self] in self?.agentRequests.pendingSummary(for: $0) }) { [weak self] window, terminal in
+                                                   pending: { [weak self] in self?.agentRequests.pendingSummary(for: $0) },
+                                                   agentSession: { [weak self] in self?.agentRequests.agentSession(for: $0).map(AgentOverviewRow.describe) }) { [weak self] window, terminal in
                 // A hidden quick terminal is shown through its controller so its hide and focus restore keep working.
                 if window === self?.quickTerminal.terminalWindow, window.window?.isVisible != true {
                     do { try self?.quickTerminal.toggle() } catch { NSAlert(error: error).runModal() }
@@ -369,6 +401,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
         let requests = app.addItem(withTitle: "Enable Local Agent Requests", action: #selector(toggleAgentRequests(_:)), keyEquivalent: ""); requests.target = self
         let timeline = app.addItem(withTitle: "Agent Event Timeline…", action: #selector(showAgentTimeline(_:)), keyEquivalent: ""); timeline.target = self
+        let claude = app.addItem(withTitle: "Claude Code Integration…", action: #selector(configureClaudeCode(_:)), keyEquivalent: ""); claude.target = self
         eventMenuItem = timeline
         let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

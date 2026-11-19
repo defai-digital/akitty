@@ -1527,3 +1527,28 @@ fn host_theme_recolours_the_session_and_rejects_invalid_colours() {
     call(json!({"op": "theme", "id": t.0}));
     assert_eq!(t.snapshot()["cells"][0][4], 0x080a0d, "an empty theme restores the built-in colours");
 }
+
+#[test]
+fn shell_state_reports_the_pty_device_that_children_inherit() {
+    let headless = Terminal::new(10, 2);
+    assert!(call(json!({"op":"shell_state","id":headless.0}))["tty_device"].is_null());
+    let dir = std::env::temp_dir().join(format!("akitty-tty-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("tty");
+    let id = call(json!({"op":"create","cols":40,"rows":8,"shell":"/bin/sh","cwd":"/tmp"}))["id"].as_u64().unwrap();
+    let device = call(json!({"op":"shell_state","id":id}))["tty_device"].as_u64().expect("PTY session reports its device");
+    // The shell's own controlling terminal is the device the host reports.
+    let command = format!("stat -f %r \"$(tty)\" > '{}'\n", out.display());
+    call(json!({"op":"input","id":id,"text":command}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        seen = std::fs::read_to_string(&out).unwrap_or_default();
+        if seen.ends_with('\n') { break; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    call(json!({"op":"close","id":id}));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(seen.trim().parse::<u64>().ok(), Some(device), "child tty {seen:?}");
+}

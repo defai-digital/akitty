@@ -35,6 +35,9 @@ pub struct Session {
     /// poll on demand instead of a fixed timer. Core-owned; `notify_fd` lends the read end.
     notify: Option<Arc<Wake>>,
     worker: Mutex<Option<JoinHandle<Result<(), String>>>>,
+    /// Device number of the PTY's terminal side. A process whose controlling terminal has this
+    /// number was started inside this pane; the host uses it to bind local requests to their pane.
+    tty_device: Option<u64>,
 }
 /// Nonblocking, close-on-exec pipe used for readiness only, never for payload: a full pipe is
 /// already a pending wake, so signals may drop their byte. The worker owns a self-pipe; a real
@@ -155,6 +158,7 @@ impl Session {
                 wake: None,
                 notify: None,
                 worker: Mutex::new(None),
+                tty_device: None,
             });
         }
         let shell = shell
@@ -174,6 +178,10 @@ impl Session {
             .openpty(pty_size(size, (0, 0)))
             .map_err(|e| e.to_string())?;
         let fd = pty.master.as_raw_fd().ok_or("PTY has no file descriptor")?;
+        let tty_device = pty.master.tty_name().and_then(|path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(path).ok().map(|meta| meta.rdev())
+        });
         // SAFETY: fd is owned by pty.master, which outlives the worker.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
@@ -255,6 +263,7 @@ impl Session {
             wake: Some(wake),
             notify: Some(notify),
             worker: Mutex::new(Some(worker)),
+            tty_device,
         })
     }
     /// Host-side model access. A poisoned lock means a host panic left the state behind, so fail
@@ -378,6 +387,7 @@ impl Session {
         Ok(serde_json::json!({
             "shell": model.shell.summary(), "control": model.control.summary(), "title": model.title,
             "exited": model.exited, "program_status": model.program_status.to_json(),
+            "tty_device": self.tty_device,
         }))
     }
     pub fn command_output(&self, id: u64) -> Result<Value, String> {

@@ -47,6 +47,8 @@ import AgentIPC
         let paneSession: UInt64
         let enqueued: TimeInterval
         var state: String
+        /// A permission decision can pass command requests that wait only for the pane's lease.
+        var decision = false
     }
     /// A request failure that carries its request ID back to the caller.
     struct RequestFailure: LocalizedError {
@@ -77,6 +79,7 @@ import AgentIPC
             self.record(terminal, drain: true)
             self.persist(event: "session_closed", id: id)
             self.cursors.removeValue(forKey: id); self.reports.removeValue(forKey: id); self.sessions.removeValue(forKey: id)
+            self.agentSessions.removeValue(forKey: id)
         }
         persist(event: "session_opened", id: id)
     }
@@ -100,7 +103,7 @@ import AgentIPC
     }
     private func endSheet(_ id: String) {
         guard let entry = presented[id], let sheet = entry.sheet, let window = entry.window, window.attachedSheet === sheet else { return }
-        window.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+        window.endSheet(sheet, returnCode: .abort)
     }
     /// Pending approvals for one pane: how many, and how long the oldest has waited.
     func pendingSummary(for sessionID: UInt64) -> (count: Int, oldestWait: TimeInterval)? {
@@ -206,14 +209,19 @@ import AgentIPC
     }
     /// Waits until this request is its pane's oldest and its window can show a sheet. No lease is held while queued,
     /// so a waiting request never blocks human input. Returns the window that will carry the sheet.
-    private func waitForTurn(id: String, terminal: TerminalView, origin: Origin, deadline: TimeInterval) async throws -> NSWindow {
+    private func waitForTurn(id: String, terminal: TerminalView, origin: Origin, deadline: TimeInterval, requireUnleased: Bool) async throws -> NSWindow {
         var round = 0
         while true {
             try Task.checkCancellation()
             guard !stopped, origin.isValid(enabled: enabled) else {
                 throw QueueEnd(message: "The caller disconnected or Local Agent Requests stopped before approval. Nothing was dispatched.", state: "cancelled")
             }
-            let head = queues[terminal.session.id]?.first == id
+            var head = queues[terminal.session.id]?.first == id
+            // A command request held back only by the pane's lease (an approved command awaiting reclaim) must not
+            // hold back the agent's own permission prompt behind it.
+            if !head, !requireUnleased, records[id]?.decision == true, let queue = queues[terminal.session.id], let index = queue.firstIndex(of: id),
+               queue[..<index].allSatisfy({ records[$0]?.decision == false && records[$0]?.state == "queued" }),
+               (try? terminal.session.shellState())?.control?.agent == true { head = true }
             // Enumerating panes is the costly check; a request behind others repeats it about once a second.
             let checkSource = head || round % 10 == 0
             round += 1
@@ -231,17 +239,13 @@ import AgentIPC
                 // that instead of failing to acquire control; it still expires on its own schedule.
                 if !reservedWindows.contains(key), window.attachedSheet == nil, now >= windowReadyTime[key] ?? 0,
                    presented.isEmpty || (window.isVisible && !window.isMiniaturized),
-                   (try? terminal.session.shellState()).map({ $0.control?.agent != true }) == true { return window }
+                   !requireUnleased || (try? terminal.session.shellState()).map({ $0.control?.agent != true }) == true { return window }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
     }
-    /// System intents and socket requests share approval and audit handling.
-    /// Siri does not enable the local socket or carry core authorizations.
-    /// Requests for different panes queue independently. Each pane presents only its oldest request, and
-    /// a request's lifetime (120 s by default) counts from enqueue; waiting never extends it.
-    func request(_ command: String, in terminal: TerminalView, origin: Origin, requestID: String? = nil) async throws -> [String: Any] {
-        try Task.checkCancellation()
+    /// Checks a request's ID and limits, then queues it for its pane. The caller must balance it with `release`.
+    private func admit(requestID: String?, terminal: TerminalView, origin: Origin) throws -> (id: String, deadline: TimeInterval) {
         if let requestID {
             guard Self.isValidRequestID(requestID) else {
                 throw RequestFailure(message: "Invalid request_id. Use 1 to 64 letters, digits, '.', '_', ':' or '-'.", requestID: nil)
@@ -259,7 +263,6 @@ import AgentIPC
               source().contains(where: { $0 === terminal }), terminal.window != nil else {
             throw AkittyError.core("Request source or target terminal is no longer available.")
         }
-        try AgentCommandHost.validateCommand(command)
         guard failure == nil else { throw AkittyError.core("Event recording failed; restart AkiTTY after restoring event storage.") }
         let pane = terminal.session.id
         guard (queues[pane]?.count ?? 0) < Self.perPaneLimit else {
@@ -269,36 +272,103 @@ import AgentIPC
             throw AkittyError.core("AkiTTY already has \(Self.appLimit) requests awaiting approval. Request not queued; do not automatically retry.")
         }
         let id = requestID ?? UUID().uuidString
-        let enqueued = ProcessInfo.processInfo.systemUptime, deadline = enqueued + requestTimeout
-        let local: Bool
-        if case .localProcess = origin { local = true } else { local = false }
+        let enqueued = ProcessInfo.processInfo.systemUptime
         if requestID != nil { seenRequestIDs.insert(id) }
         records[id] = RequestRecord(id: id, pane: paneID(terminal), paneSession: pane, enqueued: enqueued, state: "queued")
         queues[pane, default: []].append(id)
         inFlight += 1
+        return (id, enqueued + requestTimeout)
+    }
+    /// Ends a request's slot: frees its window (arming the cooldown only after a sheet the human saw) and records its state.
+    private func release(_ id: String, reserved: ObjectIdentifier?, prompted: Bool, outcome: String) {
+        if let reserved {
+            reservedWindows.remove(reserved)
+            if prompted {
+                let now = ProcessInfo.processInfo.systemUptime
+                windowReadyTime = windowReadyTime.filter { $0.value > now }
+                windowReadyTime[reserved] = now + cooldownInterval
+            }
+        }
+        presented.removeValue(forKey: id)
+        finish(id, state: outcome)
+        inFlight -= 1
+    }
+    /// Shows one approval sheet for the request at its pane's head. Throws, rather than returning a denial, when
+    /// no sheet could be shown. Returns the human's answer, or `.unanswered` when the sheet ended any other way.
+    private func showSheet(_ alert: NSAlert, id: String, window: NSWindow, terminal: TerminalView, origin: Origin,
+                           deadline: TimeInterval, onShown: () -> Void) async throws -> Answer {
+        if Task.isCancelled { throw CancellationError() }
+        guard !stopped, origin.isValid(enabled: enabled), !terminal.isShutdown,
+              terminal.window === window, window.attachedSheet == nil else {
+            throw AkittyError.core("The approval could not be shown because the caller, pane or window changed. Nothing was dispatched; do not automatically retry.")
+        }
+        // Only the first visible approval takes focus; later ones attach quietly and wait for the human.
+        // Decided here, from live state, so two windows reaching this point together cannot both activate.
+        let quiet = presented.keys.contains(where: { $0 != id })
+        // A quiet sheet does not bring its window forward, so the window must still be on screen now.
+        if quiet, !window.isVisible || window.isMiniaturized {
+            throw AkittyError.core("The approval could not be shown because its window was hidden. Nothing was dispatched; do not automatically retry.")
+        }
+        if quiet { NSApp.requestUserAttention(.informationalRequest) }
+        else { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        let local: Bool
+        if case .localProcess = origin { local = true } else { local = false }
+        presented[id] = Presented(window: window, sheet: alert.window, local: local)
+        onShown()
+        let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        let answer = await Self.answer(alert, in: window, timeout: remaining, valid: { [weak self, weak terminal] in
+            guard let self, let terminal else { return false }
+            return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window && window.isVisible
+        })
+        // The sheet ended from a hidden window or cancelled intent; never let that read as approval.
+        if Task.isCancelled { throw CancellationError() }
+        guard answer == .allow else { return answer }
+        return !stopped && origin.isValid(enabled: enabled) && !terminal.isShutdown ? .allow : .unanswered
+    }
+    /// Records how a request ended and converts the error for its caller.
+    private func conclude(_ error: Error, id: String, eventSession: String, outcome: inout String) async -> Error {
+        collectAll(drain: true)
+        if let end = error as? QueueEnd {
+            outcome = end.state
+            dequeue(id, state: outcome)
+            do { try await store.appendDurably(event: end.state == "expired" ? "request_expired" : "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
+            catch { failure = error.localizedDescription }
+        } else if error is CancellationError {
+            outcome = "cancelled"
+            dequeue(id, state: outcome)
+            // The intent was cancelled (not denied by a human); record who ended the wait before rethrowing.
+            do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
+            catch { failure = error.localizedDescription }
+            return error
+        } else if error.localizedDescription.contains("Dispatch outcome is unknown") {
+            outcome = "outcome_unknown"
+            dequeue(id, state: outcome)
+            do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host", fields: ["request_id": id]) }
+            catch { failure = error.localizedDescription }
+        } else if error.localizedDescription.contains("Command execution denied") {
+            outcome = "denied"
+        } else if outcome != "outcome_unknown" { outcome = "failed" }
+        return RequestFailure(message: error.localizedDescription, requestID: id)
+    }
+    /// System intents and socket requests share approval and audit handling.
+    /// Siri does not enable the local socket or carry core authorizations.
+    /// Requests for different panes queue independently. Each pane presents only its oldest request, and
+    /// a request's lifetime (120 s by default) counts from enqueue; waiting never extends it.
+    func request(_ command: String, in terminal: TerminalView, origin: Origin, requestID: String? = nil) async throws -> [String: Any] {
+        try Task.checkCancellation()
+        try AgentCommandHost.validateCommand(command)
+        let (id, deadline) = try admit(requestID: requestID, terminal: terminal, origin: origin)
         // The cooldown only follows a sheet the human actually saw: a request that failed before display
         // (a busy shell) must not delay the immediate retry.
         var prompted = false
         var reserved: ObjectIdentifier?
         var outcome = "failed"
-        defer {
-            if let reserved {
-                reservedWindows.remove(reserved)
-                if prompted {
-                    let now = ProcessInfo.processInfo.systemUptime
-                    windowReadyTime = windowReadyTime.filter { $0.value > now }
-                    windowReadyTime[reserved] = now + cooldownInterval
-                }
-            }
-            presented.removeValue(forKey: id)
-            finish(id, state: outcome)
-            inFlight -= 1
-        }
+        defer { release(id, reserved: reserved, prompted: prompted, outcome: outcome) }
         startRecording(); register(terminal)
         let eventSession = sessions[terminal.session.id] ?? "unknown"
         do {
             return try await withTaskCancellationHandler {
-                let window = try await waitForTurn(id: id, terminal: terminal, origin: origin, deadline: deadline)
+                let window = try await waitForTurn(id: id, terminal: terminal, origin: origin, deadline: deadline, requireUnleased: true)
                 let key = ObjectIdentifier(window); reserved = key; reservedWindows.insert(key)
                 records[id]?.state = "awaiting_approval"
                 // Persist intent before acquiring authority; an I/O failure prevents dispatch.
@@ -307,33 +377,11 @@ import AgentIPC
                 try Task.checkCancellation()
                 guard !stopped, origin.isValid(enabled: enabled) else { throw AkittyError.core("Request service or caller has stopped.") }
                 let receipt = try await AgentCommandHost(session: terminal.session).execute(actor: origin.actor, command: command) { [weak self] request in
-                    // A cancelled intent is not a human denial: throwing releases the lease instead of denying it.
-                    if Task.isCancelled { throw CancellationError() }
-                    // No sheet was shown, so this is not a human denial: throwing releases the lease instead.
-                    guard let self, !self.stopped, origin.isValid(enabled: self.enabled), !terminal.isShutdown,
-                          terminal.window === window, window.attachedSheet == nil else {
-                        throw AkittyError.core("The approval could not be shown because the caller, pane or window changed. Nothing was dispatched; do not automatically retry.")
-                    }
-                    // Only the first visible approval takes focus; later ones attach quietly and wait for the human.
-                    // Decided here, from live state, so two windows reaching this point together cannot both activate.
-                    let quiet = self.presented.keys.contains(where: { $0 != id })
-                    // A quiet sheet does not bring its window forward, so the window must still be on screen now.
-                    if quiet, !window.isVisible || window.isMiniaturized {
-                        throw AkittyError.core("The approval could not be shown because its window was hidden. Nothing was dispatched; do not automatically retry.")
-                    }
-                    if quiet { NSApp.requestUserAttention(.informationalRequest) }
-                    else { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+                    // A cancelled intent or an unshown sheet is not a human denial: throwing releases the lease instead.
+                    guard let self else { throw CancellationError() }
                     let alert = AgentCommandHost.approvalAlert(request, callerDescription: origin.explanation)
-                    self.presented[id] = Presented(window: window, sheet: alert.window, local: local)
-                    prompted = true
-                    let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
-                    let accepted = await Self.present(alert, in: window, timeout: remaining, valid: { [weak self, weak terminal] in
-                        guard let self, let terminal else { return false }
-                        return !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown && terminal.window === window && window.isVisible
-                    })
-                    // The sheet ended from a hidden window or cancelled intent; never let that read as approval.
-                    if Task.isCancelled { throw CancellationError() }
-                    return accepted && !self.stopped && origin.isValid(enabled: self.enabled) && !terminal.isShutdown
+                    // Anything but an explicit allow fails closed for a command: nothing is typed.
+                    return try await self.showSheet(alert, id: id, window: window, terminal: terminal, origin: origin, deadline: deadline) { prompted = true } == .allow
                 }
                 outcome = "dispatched"
                 record(terminal, drain: true)
@@ -348,29 +396,128 @@ import AgentIPC
                 Task { @MainActor [weak self] in self?.endSheet(id) }
             }
         } catch {
-            collectAll(drain: true)
-            if let end = error as? QueueEnd {
-                outcome = end.state
-                dequeue(id, state: outcome)
-                do { try await store.appendDurably(event: end.state == "expired" ? "request_expired" : "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
-                catch { failure = error.localizedDescription }
-            } else if error is CancellationError {
-                outcome = "cancelled"
-                dequeue(id, state: outcome)
-                // The intent was cancelled (not denied by a human); record who ended the wait before rethrowing.
-                do { try await store.appendDurably(event: "request_cancelled", session: eventSession, provenance: "host", fields: ["request_id": id]) }
-                catch { failure = error.localizedDescription }
-                throw error
-            } else if error.localizedDescription.contains("Dispatch outcome is unknown") {
-                outcome = "outcome_unknown"
-                dequeue(id, state: outcome)
-                do { try await store.appendDurably(event: "dispatch_outcome_unknown", session: eventSession, provenance: "host", fields: ["request_id": id]) }
-                catch { failure = error.localizedDescription }
-            } else if error.localizedDescription.contains("Command execution denied") {
-                outcome = "denied"
-            } else if outcome != "outcome_unknown" { outcome = "failed" }
-            throw RequestFailure(message: error.localizedDescription, requestID: id)
+            throw await conclude(error, id: id, eventSession: eventSession, outcome: &outcome)
         }
+    }
+
+    // MARK: Agent permission decisions
+
+    /// An agent's own permission prompt, answered in AkiTTY. The agent runs the tool itself; AkiTTY never writes input.
+    struct PermissionRequest {
+        let agent: String
+        let tool: String
+        let command: String
+        let cwd: String?
+        let reason: String?
+    }
+    nonisolated static let agentNames = ["claude-code": "Claude Code"]
+    /// Shell commands shown for a decision may span lines, but no other control or invisible formatting character.
+    static func validateDecisionCommand(_ command: String) throws {
+        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, command.utf8.count <= 4096,
+              !command.unicodeScalars.contains(where: { ($0 != "\n" && $0 != "\t" && CharacterSet.controlCharacters.contains($0)) || $0.properties.generalCategory == .format }) else {
+            throw AkittyError.core("Command must be at most 4096 bytes without control characters other than line breaks and tabs, or invisible formatting characters.")
+        }
+    }
+    static func decisionAlert(_ request: PermissionRequest, pane: UInt64) -> NSAlert {
+        let name = agentNames[request.agent] ?? request.agent
+        let alert = NSAlert(); alert.messageText = "Allow \(name) to run this \(request.tool) command?"
+        let reason = request.reason.map { "\nReason given by \(name): \(ProgramStatusRecord.displayText(String($0.prefix(300))))" } ?? ""
+        alert.informativeText = "Terminal \(pane)\nDirectory reported by \(name): \(request.cwd.map { ProgramStatusRecord.displayText(String($0.prefix(512))) } ?? "unknown")\(reason)"
+        alert.addButton(withTitle: "Allow Once"); alert.addButton(withTitle: "Deny")
+        alert.buttons[0].keyEquivalent = ""
+        alert.window.defaultButtonCell = alert.buttons[1].cell as? NSButtonCell
+        alert.window.initialFirstResponder = alert.buttons[1]
+        alert.buttons[0].setAccessibilityHelp("Answer \(name)'s permission prompt with allow, once. \(name) runs the command itself.")
+        alert.buttons[1].setAccessibilityHelp("Answer \(name)'s permission prompt with deny.")
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 140))
+        text.isEditable = false; text.isSelectable = true; text.isVerticallyResizable = true
+        text.isHorizontallyResizable = false; text.textContainer?.widthTracksTextView = true
+        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular); text.string = request.command
+        text.setAccessibilityLabel("Complete exact command")
+        let scroll = NSScrollView(frame: text.frame); scroll.hasVerticalScroller = true; scroll.documentView = text
+        let note = NSTextField(wrappingLabelWithString: "\(name) asked from a process running in this terminal. \(name) runs the command itself, under its own sandbox and permission settings; AkiTTY only returns your answer and sends no input. The agent's identity, directory and reason are not verified.")
+        let stack = NSStackView(views: [scroll, note]); stack.orientation = .vertical; stack.alignment = .leading
+        scroll.widthAnchor.constraint(equalToConstant: 480).isActive = true; scroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
+        alert.accessoryView = stack
+        return alert
+    }
+    /// Queues an agent's permission prompt behind the pane's other requests and returns the human's answer.
+    /// A timeout, cancellation or unshown sheet is not an answer: it throws, so the agent falls back to its own prompt.
+    func decide(_ request: PermissionRequest, in terminal: TerminalView, origin: Origin, requestID: String? = nil) async throws -> [String: Any] {
+        try Task.checkCancellation()
+        try Self.validateDecisionCommand(request.command)
+        let (id, deadline) = try admit(requestID: requestID, terminal: terminal, origin: origin)
+        records[id]?.decision = true
+        var prompted = false
+        var reserved: ObjectIdentifier?
+        var outcome = "failed"
+        defer { release(id, reserved: reserved, prompted: prompted, outcome: outcome) }
+        startRecording(); register(terminal)
+        let eventSession = sessions[terminal.session.id] ?? "unknown"
+        do {
+            return try await withTaskCancellationHandler {
+                // The agent's pane is busy running the agent, so neither a ready prompt nor a free lease is required.
+                let window = try await waitForTurn(id: id, terminal: terminal, origin: origin, deadline: deadline, requireUnleased: false)
+                let key = ObjectIdentifier(window); reserved = key; reservedWindows.insert(key)
+                records[id]?.state = "awaiting_approval"
+                try await store.appendDurably(event: "permission_requested", session: eventSession, provenance: "host",
+                    fields: origin.fields.merging(["pane_session_id": terminal.session.id, "request_id": id, "agent_reported": request.agent, "tool": request.tool,
+                                                   "command_sha256": AgentEventStore.digest(request.command), "command_bytes": request.command.utf8.count]) { _, value in value })
+                try Task.checkCancellation()
+                let alert = Self.decisionAlert(request, pane: terminal.session.id)
+                let answer = try await showSheet(alert, id: id, window: window, terminal: terminal, origin: origin, deadline: deadline) { prompted = true }
+                // Only a click is an answer. A timeout, or a caller, pane or window that went away, leaves the agent's own prompt.
+                guard answer != .unanswered else {
+                    if ProcessInfo.processInfo.systemUptime >= deadline {
+                        throw QueueEnd(message: "The permission prompt expired without an answer. The agent keeps its own prompt.", state: "expired")
+                    }
+                    throw QueueEnd(message: "The caller disconnected, or the pane or its window went away, before an answer.", state: "cancelled")
+                }
+                let allowed = answer == .allow
+                outcome = allowed ? "allowed" : "denied"
+                do { try await store.appendDurably(event: allowed ? "permission_allowed" : "permission_denied", session: eventSession, provenance: "host", fields: ["request_id": id]) }
+                catch {
+                    // A human Deny stands even if it could not be recorded; an unrecorded Allow fails closed.
+                    failure = error.localizedDescription
+                    if allowed { outcome = "failed"; throw error }
+                }
+                return ["decision": allowed ? "allow" : "deny", "request_id": id, "executor": request.agent, "akitty_sent_input": false]
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.endSheet(id) }
+            }
+        } catch {
+            throw await conclude(error, id: id, eventSession: eventSession, outcome: &outcome)
+        }
+    }
+    /// The pane whose PTY is the caller's controlling terminal. Nil when the caller runs outside every pane.
+    func pane(for peer: LocalPeer) -> TerminalView? {
+        guard let device = peer.controllingTerminal else { return nil }
+        return source().first { !$0.isShutdown && (try? $0.session.shellState())?.tty_device == device }
+    }
+
+    // MARK: Agent session reports
+
+    /// What an agent reported about its conversation in a pane. Unverified: any program in the pane could send it.
+    struct AgentSession: Equatable {
+        let agent: String
+        let sessionID: String
+        var ended: Bool
+        var reported: Date
+    }
+    private(set) var agentSessions: [UInt64: AgentSession] = [:]
+    func agentSession(for sessionID: UInt64) -> AgentSession? { agentSessions[sessionID] }
+    static func isValidAgentSessionID(_ value: String) -> Bool {
+        (1...128).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0) }
+    }
+    func report(agent: String, event: String, sessionID: String, in terminal: TerminalView) {
+        let pane = terminal.session.id
+        if event == "session_end" {
+            guard agentSessions[pane]?.sessionID == sessionID else { return }
+            agentSessions[pane]?.ended = true; agentSessions[pane]?.reported = Date()
+        } else {
+            agentSessions[pane] = AgentSession(agent: agent, sessionID: sessionID, ended: false, reported: Date())
+        }
+        persist(event: event == "session_end" ? "agent_session_ended" : "agent_session_reported", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
     }
     func handle(_ data: Data, peer: LocalPeer) async -> Data {
         var suppliedID: String?
@@ -409,7 +556,26 @@ import AgentIPC
                         : "Pane identifier is from another AkiTTY launch or was copied incorrectly. Run list again and use a current pane value.")
                 }
                 result = try await request(command, in: terminal, origin: .localProcess(peer), requestID: requestID)
-            } else if operation == "request" || operation == "list" || operation == "status" {
+            } else if operation == "decide", Set(input.keys).isSubset(of: ["version", "op", "agent", "tool", "command", "cwd", "reason", "request_id"]),
+                      let agent = input["agent"] as? String, let tool = input["tool"] as? String, let command = input["command"] as? String {
+                guard Self.agentNames[agent] != nil, tool == "Bash" else { throw AkittyError.core("Unsupported agent or tool; the agent keeps its own prompt.") }
+                let cwd = input["cwd"], reason = input["reason"], suppliedRequestID = input["request_id"]
+                guard cwd == nil || cwd is String, reason == nil || reason is String, suppliedRequestID == nil || suppliedRequestID is String else { throw AkittyError.core("Invalid decide fields.") }
+                if let value = suppliedRequestID as? String, Self.isValidRequestID(value) { suppliedID = value }
+                guard let terminal = pane(for: peer) else {
+                    throw AkittyError.core("The caller is not running inside an AkiTTY pane; the agent keeps its own prompt.")
+                }
+                result = try await decide(PermissionRequest(agent: agent, tool: tool, command: command, cwd: cwd as? String, reason: reason as? String),
+                                          in: terminal, origin: .localProcess(peer), requestID: suppliedRequestID as? String)
+            } else if operation == "report", Set(input.keys).isSubset(of: ["version", "op", "agent", "event", "session_id"]),
+                      let agent = input["agent"] as? String, let event = input["event"] as? String, let sessionID = input["session_id"] as? String {
+                guard Self.agentNames[agent] != nil, ["session_start", "session_end"].contains(event), Self.isValidAgentSessionID(sessionID) else {
+                    throw AkittyError.core("Invalid agent report.")
+                }
+                guard let terminal = pane(for: peer) else { throw AkittyError.core("The caller is not running inside an AkiTTY pane.") }
+                report(agent: agent, event: event, sessionID: sessionID, in: terminal)
+                result = ["recorded": true, "pane": paneID(terminal)]
+            } else if ["request", "list", "status", "decide", "report"].contains(operation) {
                 throw AkittyError.core("Unknown or missing fields for \(operation). See akitty-agent usage.")
             } else { throw AkittyError.core("Unsupported request operation.") }
             return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys, .withoutEscapingSlashes])
@@ -420,8 +586,13 @@ import AgentIPC
             return (try? JSONSerialization.data(withJSONObject: envelope, options: [.withoutEscapingSlashes])) ?? Data()
         }
     }
+    /// How an approval sheet ended. Only a click on a button is an answer; AkiTTY's own dismissals end it as `.abort`.
+    enum Answer: Equatable { case allow, deny, unanswered }
     // The injected monotonic clock lets tests cross the deadline without racing AppKit's timer.
     static func present(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, valid: @escaping () -> Bool = { true }) async -> Bool {
+        await answer(alert, in: window, timeout: timeout, now: now, valid: valid) == .allow
+    }
+    static func answer(_ alert: NSAlert, in window: NSWindow, timeout: TimeInterval = 120, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, valid: @escaping () -> Bool = { true }) async -> Answer {
         let deadline = now() + timeout
         return await withCheckedContinuation { continuation in
             // The continuation must resume exactly once. If the window closes underneath the sheet (a shell
@@ -429,21 +600,23 @@ import AgentIPC
             // fallback below the request would hang and the server would answer "busy" until restarted.
             let once = ResumeOnce(continuation)
             var timers: [Timer] = []
-            let finish: (Bool) -> Void = { approved in timers.forEach { $0.invalidate() }; once.resume(approved) }
+            let finish: (Answer) -> Void = { answer in timers.forEach { $0.invalidate() }; once.resume(answer) }
             timers.append(Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak window, weak alert] _ in
                 MainActor.assumeIsolated {
-                    if let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .alertSecondButtonReturn) }
-                    else { finish(false) }
+                    if let alert, window?.attachedSheet === alert.window { window?.endSheet(alert.window, returnCode: .abort) }
+                    else { finish(.unanswered) }
                 }
             })
             timers.append(Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak window, weak alert] _ in
                 MainActor.assumeIsolated {
-                    guard let alert, let window, window.attachedSheet === alert.window else { finish(false); return }
-                    if !valid() { window.endSheet(alert.window, returnCode: .alertSecondButtonReturn) }
+                    guard let alert, let window, window.attachedSheet === alert.window else { finish(.unanswered); return }
+                    if !valid() { window.endSheet(alert.window, returnCode: .abort) }
                 }
             })
-            alert.beginSheetModal(for: window) {
-                finish($0 == .alertFirstButtonReturn && now() < deadline && valid())
+            alert.beginSheetModal(for: window) { code in
+                // A click after the deadline, or once its caller or pane is gone, reaches no one: it is not an answer.
+                guard now() < deadline, valid() else { finish(.unanswered); return }
+                finish(code == .alertFirstButtonReturn ? .allow : code == .alertSecondButtonReturn ? .deny : .unanswered)
             }
             alert.window.makeFirstResponder(alert.buttons[1])
         }
@@ -497,10 +670,10 @@ import AgentIPC
 }
 
 /// Resumes a checked continuation at most once; later calls are ignored. Main-thread only.
-private final class ResumeOnce: @unchecked Sendable {
-    private var continuation: CheckedContinuation<Bool, Never>?
-    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
-    func resume(_ value: Bool) {
+private final class ResumeOnce<Value>: @unchecked Sendable {
+    private var continuation: CheckedContinuation<Value, Never>?
+    init(_ continuation: CheckedContinuation<Value, Never>) { self.continuation = continuation }
+    func resume(_ value: Value) {
         continuation?.resume(returning: value); continuation = nil
     }
 }

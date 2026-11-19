@@ -179,15 +179,39 @@ public struct LocalPeer: @unchecked Sendable {
     public let pid: pid_t
     private let descriptor: Int32
     private let enabled: () -> Bool
+    /// The caller's process start time when it connected, so a later lookup cannot read a recycled PID.
+    private let started: (UInt64, UInt64)?
     fileprivate init(uid: uid_t, pid: pid_t, descriptor: Int32, enabled: @escaping () -> Bool) {
         self.uid = uid; self.pid = pid; self.descriptor = descriptor; self.enabled = enabled
+        started = LocalPeer.info(pid).map { ($0.pbi_start_tvsec, $0.pbi_start_tvusec) }
+    }
+    private static func info(_ pid: pid_t) -> proc_bsdinfo? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_pid == UInt32(pid) else { return nil }
+        return info
     }
     public var connected: Bool {
         guard enabled() else { return false }
         var byte: UInt8 = 0
-        let result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        var result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        for _ in 0..<3 where result < 0 && errno == EINTR { result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT) }
         // Trailing bytes are a second request, not a valid continuation of a single-request connection.
         return result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)
+    }
+    /// Device number of the caller's controlling terminal, or nil when it has none. A process started inside a
+    /// pane inherits that pane's PTY, so this binds a request to its pane without trusting anything it sends.
+    /// Nil unless the process is still the one that connected (same PID and start time) and still holds the connection.
+    public var controllingTerminal: UInt64? {
+        guard let started, connected, let info = LocalPeer.info(pid),
+              info.pbi_start_tvsec == started.0, info.pbi_start_tvusec == started.1 else { return nil }
+        return LocalPeer.device(info)
+    }
+    public static func controllingTerminal(of pid: pid_t) -> UInt64? { info(pid).flatMap(device) }
+    private static func device(_ info: proc_bsdinfo) -> UInt64? {
+        let device = info.e_tdev
+        // NODEV (all bits set) means no controlling terminal.
+        return device == UInt32.max || device == 0 ? nil : UInt64(device)
     }
 }
 
@@ -287,8 +311,9 @@ public final class LocalRequestServer: @unchecked Sendable {
                             var length = socklen_t(MemoryLayout<pid_t>.size)
                             guard getpeereid(client, &uid, &gid) == 0, uid == getuid(),
                                   getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else { throw AgentIPCError.failure("Local caller credentials unavailable or not permitted.") }
-                            let request = try LocalSocket.readFrame(from: client, timeout: 3)
+                            // Identify the caller (including its start time) before waiting for its request bytes.
                             let peer = LocalPeer(uid: uid, pid: pid, descriptor: client, enabled: { [weak self] in self?.isActive(activeGeneration) == true })
+                            let request = try LocalSocket.readFrame(from: client, timeout: 3)
                             guard peer.connected, !Task.isCancelled else { return }
                             // A reply the handler produced is always written, even after stop(): it may report a dispatch.
                             let response = await handler(request, peer)

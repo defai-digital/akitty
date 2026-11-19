@@ -14,3 +14,15 @@
 - `akitty-agent request --id <id>` and the MCP `request_id` argument name a
   request; reusing an ID never runs a command again. `akitty-agent status <id>`
   and the MCP `request_status` tool report its state.
+
+## Claude Code permission prompts in AkiTTY
+
+- **Akitty → Claude Code Integration…** (or `akitty-agent claude-hooks install`)
+  adds Claude Code hooks to `~/.claude/settings.json`, keeping other settings and
+  hooks; removing deletes only AkiTTY's entries.
+- Claude Code's Bash permission prompts in an AkiTTY pane appear as Allow Once /
+  Deny sheets in that pane's approval queue. Claude Code runs the command; AkiTTY
+  sends no input. When AkiTTY cannot answer, Claude Code shows its own prompt.
+- The pane is identified from the hook's controlling terminal. The core's
+  `shell_state` now reports the PTY device (`tty_device`).
+- Agent Overview shows the conversation ID Claude Code reported for each pane.

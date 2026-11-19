@@ -93,7 +93,7 @@ the request's ID; otherwise AkiTTY assigns one. Replies to a request carry
 `request_id` once it is known: the assigned ID, or a valid ID the caller supplied. Reusing an ID in the same launch never queues or dispatches again,
 even after the first request finished. `akitty-agent status <request-id>` reports
 `queued`, `awaiting_approval`, `dispatched`, `denied`, `expired`, `cancelled`,
-`failed` or `outcome_unknown`, with the pane and queue position; it never
+`failed` or `outcome_unknown` (a permission decision ends as `allowed` or `denied`), with the pane and queue position; it never
 returns the command or its fingerprint. `dispatched` means input was queued, not that the command succeeded.
 The most recent 256 finished requests are kept in memory only and end with the
 app; caller-chosen IDs stay reserved for the whole launch even after their status
@@ -106,6 +106,52 @@ to the running app instance and become invalid after restart. A request for a
 closed pane, or an identifier from an earlier launch, fails with a message to run
 `list` again; older builds printed `\/` inside identifiers, which is still accepted. `--socket <path>`
 before the subcommand selects a different local test/instance endpoint.
+
+## Claude Code permission prompts
+
+AkiTTY can answer Claude Code's own Bash permission prompts in its approval
+queue. Claude Code still runs every command itself, under its own sandbox and
+permission rules; AkiTTY returns only allow or deny and never types into the pane
+or takes its input lease. This uses Claude Code's documented `PermissionRequest`,
+`SessionStart` and `SessionEnd` hooks.
+
+1. Choose **Akitty → Claude Code Integration…** and **Install**, or run
+   `akitty-agent claude-hooks install`. This adds three hooks that run
+   `akitty-agent claude-hook` to `~/.claude/settings.json`. Enabling twice keeps
+   one copy; other settings and hooks stay. The file must be a JSON object whose
+   `hooks` entries are lists; anything else is reported and left unchanged. A
+   symlinked file is written through, and its permissions are kept. The file is
+   reformatted with sorted keys, and the edit is not locked against another
+   program writing it at the same moment. The first change saves the original as
+   `settings.json.akitty-backup`. **Remove** (`claude-hooks uninstall`) deletes only
+   AkiTTY's entries; `claude-hooks status` reports `installed`, `partial` or
+   `notInstalled`. `--settings <path>` selects another file. Restart running
+   Claude Code sessions to load the change.
+2. Enable Local Agent Requests. Start Claude Code in an AkiTTY pane.
+3. A Bash permission prompt appears as an **Allow Once** / **Deny** sheet on that
+   pane, queued with the pane's other requests. Deny is default. The command may
+   span lines; the directory and reason are what Claude Code reported.
+
+The pane is found from the hook process's controlling terminal, which it inherits
+from the pane's PTY; the request cannot name a pane. A process outside every pane
+is refused. When AkiTTY cannot answer (requests disabled, AkiTTY not running, a
+non-Bash tool, an empty command, one over 4096 bytes or with control characters
+other than line breaks and tabs, unreadable hook input, a full queue, the
+120-second lifetime expired, or the pane, its window or the caller went away),
+the hook prints nothing and Claude Code shows its own
+prompt. A human **Deny** is final: it is returned to Claude Code as a denial, not
+retried another way. The hook's 150-second timeout exceeds AkiTTY's deadlines.
+
+`SessionStart` reports the conversation ID, which **Agent Overview** shows under
+**Agent session (reported)**, marked ended after `SessionEnd`. Any program in the
+pane could send such a report, so it is labeled unverified. The event timeline
+records `permission_requested`, `permission_allowed` and `permission_denied` with
+a command fingerprint, never the command.
+
+| Request | Fields |
+| --- | --- |
+| Decide | `{"version":1,"op":"decide","agent":"claude-code","tool":"Bash","command":"…","cwd":"…","reason":"…"}`; `cwd`, `reason`, `request_id` optional. Returns `{decision, request_id, executor, akitty_sent_input: false}` with `decision` `allow` or `deny` |
+| Report | `{"version":1,"op":"report","agent":"claude-code","event":"session_start","session_id":"…"}`; `event` is `session_start` or `session_end` |
 
 ## Local request protocol and trust boundary
 

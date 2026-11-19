@@ -336,6 +336,8 @@ public struct ShellState: Codable, Sendable {
     public let title: String?
     public let exited: Bool?
     public let program_status: ProgramStatus?
+    /// The PTY terminal's device number; nil for a headless session.
+    public let tty_device: UInt64?
 }
 
 public struct ShellSummary: Codable, Sendable {
