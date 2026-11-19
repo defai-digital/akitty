@@ -25,6 +25,8 @@ final class AgentResumeTests: XCTestCase {
             XCTAssertNil(AgentConversation(agent: "claude-code", sessionID: id, reported: 0).resumeCommand, id)
         }
         XCTAssertNil(AgentConversation(agent: "other", sessionID: "abc", reported: 0).resumeCommand)
+        XCTAssertEqual(AgentConversation(agent: "ax-code", sessionID: "ses_-e5e0a0370dbffeRG78fg4pj0f", reported: 0).resumeCommand,
+                       "ax-code --session ses_-e5e0a0370dbffeRG78fg4pj0f")
         XCTAssertFalse(AgentConversation(agent: "claude-code", sessionID: "abc", reported: .nan).isResumable)
     }
 

@@ -36,6 +36,13 @@ do {
         }
         exit(0)
     }
+    if args.count == 3, args[0] == "ax-code-report", ["start", "end"].contains(args[1]) {
+        // Started by AkiTTY's AX Code plugin. Never fail AX Code: report briefly and always exit 0 quietly.
+        let request: [String: Any] = ["version": 1, "op": "report", "agent": "ax-code",
+                                      "event": args[1] == "start" ? "session_start" : "session_end", "session_id": args[2]]
+        if let payload = try? JSONSerialization.data(withJSONObject: request) { _ = try? LocalSocket.request(payload, path: path, timeout: 1.5) }
+        exit(0)
+    }
     if args.count >= 2, args[0] == "ax-code-mcp" {
         let usage = "Usage: akitty-agent ax-code-mcp install|uninstall|status [--config path]"
         var configPath = AXCodeMCPSettings.defaultPath
@@ -43,8 +50,8 @@ do {
         let executable = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0]).resolvingSymlinksInPath().path
         let settings = AXCodeMCPSettings(path: configPath, executable: executable)
         switch args[1] {
-        case "install": try settings.install(); print("Added the AkiTTY MCP server to \(configPath). Restart AX Code to load it.")
-        case "uninstall": try settings.uninstall(); print("Removed the AkiTTY MCP server from \(configPath). Other settings were left in place.")
+        case "install": try settings.install(); print("Added the AkiTTY MCP server to \(configPath) and the conversation report plugin at \(settings.pluginPath). Restart AX Code to load them.")
+        case "uninstall": try settings.uninstall(); print("Removed the AkiTTY MCP server from \(configPath) and AkiTTY's plugin. Other settings were left in place.")
         case "status": print("\(try settings.state()) (\(configPath))")
         default: throw AgentIPCError.failure(usage)
         }
@@ -60,7 +67,7 @@ do {
     } else if args.count == 2, args[0] == "status" {
         request["op"] = "status"; request["request_id"] = args[1]
     } else {
-        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request [--id <request-id>] <pane-id> '<exact shell command>' | status <request-id> | mcp | claude-hook | codex-hook | claude-hooks | codex-hooks install|uninstall|status [--settings path] | ax-code-mcp install|uninstall|status [--config path]\nEvery request needs human approval. Reusing a request ID never runs a command again. Normal agent subprocesses are not intercepted.")
+        throw AgentIPCError.failure("Usage: akitty-agent [--socket path] list [offset] | request [--id <request-id>] <pane-id> '<exact shell command>' | status <request-id> | mcp | claude-hook | codex-hook | claude-hooks | codex-hooks install|uninstall|status [--settings path] | ax-code-mcp install|uninstall|status [--config path] | ax-code-report start|end <conversation-id>\nEvery request needs human approval. Reusing a request ID never runs a command again. Normal agent subprocesses are not intercepted.")
     }
     let reply = try LocalSocket.request(JSONSerialization.data(withJSONObject: request), path: path)
     FileHandle.standardOutput.write(reply); FileHandle.standardOutput.write(Data("\n".utf8))

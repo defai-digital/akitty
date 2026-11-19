@@ -63,13 +63,13 @@ final class AgentIntegrationsTests: XCTestCase {
         XCTAssertEqual(byID["claude-code"]?.hooks, .claudeCode)
         XCTAssertEqual(byID["codex"]?.hooks, .codex)
         XCTAssertNil(byID["ax-code"]?.hooks)
-        XCTAssertNotNil(byID["ax-code"]?.unavailableReason)
+        XCTAssertNotNil(byID["ax-code"]?.unavailableReason, "AX Code's own approval prompts stay in AX Code")
         XCTAssertTrue(byID["codex"]?.capabilities.allSatisfy(\.available) == true)
-        // AX Code connects through AkiTTY's MCP server: command requests yes, reports and resume not yet.
+        // AX Code connects through AkiTTY's MCP server and its plugin: command requests, reports and resume.
         XCTAssertEqual(byID["ax-code"]?.usesMCP, true)
-        XCTAssertEqual(byID["ax-code"]?.capabilities.map(\.available), [true, false, false])
-        // Every agent the service accepts has a row, and every row with hooks is an accepted agent.
-        XCTAssertEqual(Set(AgentRequests.agentNames.keys), Set(AgentCLI.all.filter { $0.hooks != nil }.map(\.id)))
+        XCTAssertEqual(byID["ax-code"]?.capabilities.map(\.available), [true, true, true])
+        // Every agent the service accepts has a row, and every row with an integration is an accepted agent.
+        XCTAssertEqual(Set(AgentRequests.agentNames.keys), Set(AgentCLI.all.filter { $0.hooks != nil || $0.usesMCP }.map(\.id)))
         XCTAssertFalse(AgentRequestsLaunchSetting.isOn(UserDefaults(suiteName: "akitty-empty-\(UUID().uuidString)")!), "off by default")
     }
 
@@ -87,11 +87,27 @@ final class AgentIntegrationsTests: XCTestCase {
         let servers = try XCTUnwrap(written["mcp"] as? [String: Any])
         XCTAssertEqual(servers.keys.sorted(), ["akitty", "mine"])
         XCTAssertEqual((servers["akitty"] as? [String: Any])?["command"] as? [String], ["/Applications/Akitty.app/Contents/MacOS/akitty-agent", "mcp"])
+        // The conversation report plugin sits next to the config and starts this companion.
+        XCTAssertEqual(settings.pluginPath, root.appendingPathComponent("ax-code/plugin/akitty.js").path)
+        let plugin = try String(contentsOfFile: settings.pluginPath, encoding: .utf8)
+        XCTAssertTrue(plugin.hasPrefix(AXCodeMCPSettings.pluginMarker))
+        XCTAssertTrue(plugin.contains(#"const [companion] = ["/Applications/Akitty.app/Contents/MacOS/akitty-agent"];"#), plugin)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: settings.pluginPath)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        for banned in ["eval(", "fetch(", "require("] { XCTAssertFalse(plugin.contains(banned), banned) }
         // Another AkiTTY copy's entry is partial and repaired by installing.
         XCTAssertEqual(try AXCodeMCPSettings(path: path, executable: "/Other/Akitty.app/Contents/MacOS/akitty-agent").state(), .partial)
         try settings.uninstall()
         let cleaned = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
         XCTAssertEqual((cleaned["mcp"] as? [String: Any])?.keys.sorted(), ["mine"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: settings.pluginPath), "uninstall removes AkiTTY's plugin")
+        // A plugin/akitty.js the person wrote is never replaced or removed, and nothing else is written either.
+        try Data("export const Mine = async () => ({});\n".utf8).write(to: URL(fileURLWithPath: settings.pluginPath))
+        XCTAssertEqual(try settings.state(), .conflict)
+        XCTAssertThrowsError(try settings.install())
+        try settings.uninstall()
+        XCTAssertEqual(try String(contentsOfFile: settings.pluginPath, encoding: .utf8), "export const Mine = async () => ({});\n")
+        XCTAssertNil((try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])?["mcp"].flatMap { ($0 as? [String: Any])?["akitty"] })
+        try FileManager.default.removeItem(atPath: settings.pluginPath)
         // A server the person named "akitty" themselves is never replaced or removed.
         let own = #"{"mcp":{"akitty":{"type":"local","command":["/usr/local/bin/akitty-agent","mcp"]}}}"#
         try Data(own.utf8).write(to: URL(fileURLWithPath: path))

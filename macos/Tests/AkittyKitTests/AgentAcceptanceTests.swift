@@ -158,6 +158,63 @@ final class AgentAcceptanceTests: XCTestCase {
         XCTAssertEqual(state(service, "C"), "dispatched")
     }
 
+    /// AkiTTY's AX Code plugin, loaded the way AX Code loads it, reports the conversation of the pane it runs in
+    /// through the bundled companion, and a session that AX Code deletes ends the report.
+    @MainActor func testAXCodePluginReportsTheConversationOfItsPane() async throws {
+        _ = NSApplication.shared
+        guard let node = AgentCLI.locate("node", in: AgentCLI.searchPath()) else {
+            throw XCTSkip("Node is needed to load the AX Code plugin")
+        }
+        let root = try directory()
+        var preferences = TerminalPreferences(); preferences.shell = "/bin/zsh"; preferences.directory = root.path; preferences.shellIntegration = false
+        let pane = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
+        let window = window(for: pane)
+        let path = root.appendingPathComponent("s.sock").path
+        let service = AgentRequests(source: { [pane] }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
+        try service.setEnabled(true)
+        defer { service.stop(); pane.shutdown(); window.close() }
+        try await waitUntil { (try pane.session.shellState()).tty_device != nil }
+
+        // A wrapper fixes the socket path, as the default socket would be in the app.
+        let cli = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("akitty-agent").path
+        let wrapper = root.appendingPathComponent("akitty-agent")
+        try Data("#!/bin/sh\nexec '\(cli)' --socket '\(path)' \"$@\"\n".utf8).write(to: wrapper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: wrapper.path)
+        let settings = AXCodeMCPSettings(path: root.appendingPathComponent("ax-code/ax-code.json").path, executable: wrapper.path)
+        try settings.install()
+        let driver = root.appendingPathComponent("drive.mjs")
+        let id = "ses_-e5e0a0370dbffeRG78fg4pj0f"
+        try Data("""
+        const { AkittyConversationReport } = await import(process.argv[2]);
+        const hooks = await AkittyConversationReport();
+        const send = (type, properties) => hooks.event({ event: { type, properties } });
+        // A fork the person continues is reported; a sub-agent that runs while its parent is busy is not.
+        await send("session.created", { info: { id: "ses_fork", parentID: "ses_old" } });
+        await send("session.status", { sessionID: "ses_fork", status: { type: "busy" } });
+        await send("session.status", { sessionID: "ses_fork", status: { type: "idle" } });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await send("session.created", { info: { id: "\(id)" } });
+        await send("session.status", { sessionID: "\(id)", status: { type: "busy" } });
+        await send("session.created", { info: { id: "ses_child", parentID: "\(id)" } });
+        await send("session.status", { sessionID: "ses_child", status: { type: "busy" } });
+        await new Promise((resolve) => setTimeout(resolve, Number(process.argv[3])));
+        if (process.argv[4] === "delete") await send("session.deleted", { info: { id: "\(id)" } });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        """.utf8).write(to: driver)
+        try pane.session.input("'\(node)' '\(driver.path)' 'file://\(settings.pluginPath)' 3000 delete\r", paste: false)
+        try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.sessionID == "ses_fork" }
+        try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.sessionID == id }
+        XCTAssertTrue(service.lastReport(agent: "ax-code")?.hasPrefix("ses_-e5e") == true, service.lastReport(agent: "ax-code") ?? "")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.sessionID, id, "the sub-agent session is never reported")
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, false)
+        try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.ended == true }
+        let events = String(decoding: try service.store.export(), as: UTF8.self)
+        XCTAssertTrue(events.contains("\"agent_reported\":\"ax-code\""), events)
+        XCTAssertFalse(events.contains(id), "conversation IDs stay out of the event timeline")
+    }
+
     /// A program in pane A asks for a command in pane B: it queues on B, and B's sheet names A as the source.
     @MainActor func testRequestFromAnotherPaneQueuesOnTheTargetAndNamesTheSource() async throws {
         _ = NSApplication.shared

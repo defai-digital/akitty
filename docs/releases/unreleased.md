@@ -51,8 +51,11 @@
 
 - **Settings → Agents → AX Code → Install** (or `akitty-agent ax-code-mcp
   install`) adds AkiTTY's MCP server to `~/.config/ax-code/ax-code.json`, leaving
-  the commented `ax-code.jsonc` alone. AX Code's command requests then wait in the
-  approval queue.
+  the commented `ax-code.jsonc` alone, plus a small plugin,
+  `plugin/akitty.js`, that reports the conversation running in each pane. AX
+  Code's command requests then wait in the approval queue, Agent Overview shows
+  its conversation, and a restored pane can resume it with `ax-code --session
+  <id>`.
 - A request for another pane queues on that pane, and its sheet names the pane
   the request came from (found from the caller's terminal) or says it came from
   outside every pane. The timeline records `source_pane_session_id`, or
@@ -66,7 +69,8 @@
   launch.
 - A restored pane offers its own conversation. **Shell → Resume Agent
   Conversation** or **Resume Conversation** in Agent Overview types
-  `claude --resume <id>` or `codex resume <id>` at the pane's idle prompt. Agent
+  `claude --resume <id>`, `codex resume <id>` or `ax-code --session <id>` at the
+  pane's idle prompt. Agent
   Overview shows "(resumed)" only after the agent reports that same ID from the
   pane.
 - **Clear Saved Workspace** removes the saved workspace and turns the option off.

@@ -27,8 +27,9 @@ The companion is bundled with the macOS app; no Node or Python runtime is needed
 
    For AX Code, **Settings → Agents → AX Code → Install** (or
    `akitty-agent ax-code-mcp install`) adds the server to
-   `~/.config/ax-code/ax-code.json` without touching `ax-code.jsonc`. AX Code's
-   shape differs from the example below:
+   `~/.config/ax-code/ax-code.json` without touching `ax-code.jsonc`, plus the
+   conversation report plugin `plugin/akitty.js`. AX Code uses its own
+   server shape, not the `mcpServers` form of other clients:
 
    ```json
    {"mcp": {"akitty": {"type": "local", "command": ["/Applications/Akitty.app/Contents/MacOS/akitty-agent", "mcp"]}}}

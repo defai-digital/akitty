@@ -136,10 +136,17 @@ running `akitty-agent mcp`) to `~/.config/ax-code/ax-code.json`
 merges that plain-JSON file with the commented `ax-code.jsonc` people edit, so
 AkiTTY never rewrites the commented file; a server named `akitty` that AkiTTY did
 not add is never replaced or removed. AX Code then asks for commands through the
-MCP `request_command` tool, and each waits in the approval queue. AX Code does not report
-its conversation to AkiTTY yet, so its status and resume by ID wait for an AX
-Code release that does. AX Code 7.31.2 connects to the server
-(`ax-code mcp list` shows `akitty connected`).
+MCP `request_command` tool, and each waits in the approval queue. **Install**
+also writes a small AX Code plugin, `~/.config/ax-code/plugin/akitty.js`, whose
+`event` hook starts `akitty-agent ax-code-report start|end <id>` when a
+conversation is created or becomes busy, is deleted, or AX Code exits. A fork you
+continue is reported; a sub-agent session, which runs while its parent is busy,
+is not. The companion finds the pane from its terminal, as
+for hooks. A `plugin/akitty.js` AkiTTY did not write is never replaced or
+removed. AX Code has no permission hook, so its own approval prompts stay in
+AX Code. AX Code 7.31.2 connects to the server (`ax-code mcp list` shows `akitty
+connected`) and loads the plugin, which reported start and end for a real
+`ax-code run`.
 
 **Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
 launch, so integrations work without the menu each time. **Turn On** / **Turn
@@ -256,9 +263,9 @@ different conversation starts in that pane. The CLI's own output in the pane
 says why, and you can choose Resume again; a later report of the same ID still
 confirms it. Once resumed or never started, a different conversation in the pane
 replaces the offer. Approvals that were waiting, earlier approvals and input
-leases end with the app and are never replayed. Conversations of two agents
-can be resumed: Claude Code with `claude --resume <id>` and Codex with
-`codex resume <id>`.
+leases end with the app and are never replayed. Conversations of three agents
+can be resumed: Claude Code with `claude --resume <id>`, Codex with
+`codex resume <id>`, and AX Code with `ax-code --session <id>`.
 
 ## Local request protocol and trust boundary
 

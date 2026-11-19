@@ -442,7 +442,7 @@ import AgentIPC
         let cwd: String?
         let reason: String?
     }
-    nonisolated static let agentNames = ["claude-code": "Claude Code", "codex": "Codex"]
+    nonisolated static let agentNames = ["claude-code": "Claude Code", "codex": "Codex", "ax-code": "AX Code"]
     /// Shell commands shown for a decision may span lines, but no other control or invisible formatting character.
     static func validateDecisionCommand(_ command: String) throws {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, command.utf8.count <= 4096,
@@ -692,7 +692,8 @@ import AgentIPC
                 result = try await request(command, in: terminal, origin: .localProcess(peer), requestID: requestID, source: source(for: peer))
             } else if operation == "decide", Set(input.keys).isSubset(of: ["version", "op", "agent", "tool", "command", "cwd", "reason", "request_id"]),
                       let agent = input["agent"] as? String, let tool = input["tool"] as? String, let command = input["command"] as? String {
-                guard Self.agentNames[agent] != nil, tool == "Bash" else { throw AkittyError.core("Unsupported agent or tool; the agent keeps its own prompt.") }
+                // Only agents with a permission hook ask for decisions; AX Code reports and requests, but never decides.
+                guard HookAgent(rawValue: agent) != nil, tool == "Bash" else { throw AkittyError.core("Unsupported agent or tool; the agent keeps its own prompt.") }
                 let cwd = input["cwd"], reason = input["reason"], suppliedRequestID = input["request_id"]
                 guard cwd == nil || cwd is String, reason == nil || reason is String, suppliedRequestID == nil || suppliedRequestID is String else { throw AkittyError.core("Invalid decide fields.") }
                 if let value = suppliedRequestID as? String, Self.isValidRequestID(value) { suppliedID = value }
