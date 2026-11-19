@@ -17,11 +17,13 @@ public enum CoreBridge {
         let buffer = bytes.withUnsafeBytes { raw in
             akitty_request_v1(raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
         }
-        defer { akitty_buffer_free_v1(buffer) }
         guard let pointer = buffer.data, buffer.len > 0, buffer.len <= 8 * 1_048_576 else {
+            akitty_buffer_free_v1(buffer)
             throw AkittyError.core("Invalid core response")
         }
-        return Data(bytes: pointer, count: buffer.len)
+        return Data(bytesNoCopy: pointer, count: buffer.len, deallocator: .custom { _, _ in
+            akitty_buffer_free_v1(buffer)
+        })
     }
     public static func call(_ request: [String: Any]) throws -> Data {
         let data = try raw(request)
@@ -450,6 +452,10 @@ public struct Snapshot: Codable, Sendable {
         }
         return low
     }
+    func cells(in row: Int) -> [Cell] {
+        let start = Self.cellIndex(cells, row: row), end = Self.cellIndex(cells, row: row + 1)
+        return Array(cells[start..<end])
+    }
     func cells(in rows: Set<Int>) -> [Cell] {
         var selected: [Cell] = []
         for row in rows.sorted() {
@@ -467,38 +473,37 @@ public struct Snapshot: Codable, Sendable {
         let shift = partial.shift ?? 0
         guard partial.shift == nil || (1..<rows).contains(shift) else { return nil }
         var result = partial
-        var newLines = lines, held = cells
-        let changed = Set(dirty)
+        var newLines = lines
+        let held = cells, changed = Set(dirty)
         if shift > 0 {
             // A scrolled partial moved the held screen up, so its bottom `shift` rows have no source and
             // must be replaced: anything less would paint the update onto the wrong rows.
             guard (rows - shift..<rows).allSatisfy(changed.contains) else { return nil }
             newLines.removeFirst(shift)
             newLines.append(contentsOf: Array(repeating: String(repeating: " ", count: cols), count: shift))
-            held = held.compactMap { cell in
-                guard cell.row >= shift else { return nil }
-                var moved = cell
-                moved.row -= shift
-                return moved
-            }
         }
         for (slot, row) in dirty.enumerated() { newLines[row] = partial.lines[slot] }
-        // Copy unchanged spans in bulk instead of testing a Set and advancing two
-        // iterators for every retained cell. Metadata-only updates share the array.
+        // Relocate and merge in one pass: unchanged spans retain their order, and each
+        // surviving cell is copied into the final array only once.
         var merged = held
         if !changed.isEmpty {
             merged = []
-            merged.reserveCapacity(held.count + partial.cells.count)
-            var kept = 0
+            var kept = Self.cellIndex(held, row: shift)
+            merged.reserveCapacity(held.count - kept + partial.cells.count)
+            func appendHeld(until end: Int) {
+                if shift == 0 { merged.append(contentsOf: held[kept..<end]) }
+                else { for var cell in held[kept..<end] { cell.row -= shift; merged.append(cell) } }
+                kept = end
+            }
             for row in changed.sorted() {
-                let start = Self.cellIndex(held, row: row)
-                merged.append(contentsOf: held[kept..<start])
+                let sourceRow = row + shift
+                appendHeld(until: Self.cellIndex(held, row: sourceRow))
                 let incomingStart = Self.cellIndex(partial.cells, row: row)
                 let incomingEnd = Self.cellIndex(partial.cells, row: row + 1)
                 merged.append(contentsOf: partial.cells[incomingStart..<incomingEnd])
-                kept = Self.cellIndex(held, row: row + 1)
+                kept = Self.cellIndex(held, row: sourceRow + 1)
             }
-            merged.append(contentsOf: held[kept...])
+            appendHeld(until: held.count)
         }
         result.cells = merged
         result.lines = newLines

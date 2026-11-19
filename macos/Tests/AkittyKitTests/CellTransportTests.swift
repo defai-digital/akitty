@@ -70,6 +70,22 @@ final class CellTransportTests: XCTestCase {
         _ = try session.call("find", ["text": "link"])
     }
 
+    func testBinaryReplySlicesOutliveTheirOwner() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "A"])
+        var data: Data? = try CoreBridge.raw(["op": "snapshot", "id": session.id, "compact": true, "cells": "binary"])
+        let separator = try XCTUnwrap(data!.firstIndex(of: 0))
+        let head = data![..<separator], block = data![data!.index(after: separator)...]
+        data = nil
+        let reply = try XCTUnwrap((try? JSONSerialization.jsonObject(with: head)) as? [String: Any])
+        let payload = try XCTUnwrap(reply["data"] as? [String: Any])
+        let meta = try XCTUnwrap(payload["cells_binary"] as? [String: Any])
+        let count = try XCTUnwrap(meta["count"] as? Int)
+        let cells = try CellBlock.decode(block, count: count)
+        XCTAssertEqual(cells.map(\.text), ["A"])
+    }
+
     /// One-shot events travel in the JSON head of a binary reply and must reach the caller exactly once, including on
     /// a cell at the engine's combining-mark cap (the longest cell text the block has to carry).
     func testBinarySnapshotDeliversOneShotBellOnce() throws {

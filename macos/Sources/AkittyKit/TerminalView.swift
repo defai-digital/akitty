@@ -33,8 +33,8 @@ struct RenderReuse: Equatable {
         // Image layers retain the full repaint fallback until their scrolls are qualified.
         let cpuDamage = cpuCurrent ? (layered && scroll > 0 ? nil : damage) : nil
         let cpuScroll = cpuCurrent && !layered ? scroll : 0
-        // The composer keeps whole rows rather than a scrolled bitmap, so a scroll re-encodes every row.
-        let textDamage = textEligible && previousText && scroll == 0 ? damage : nil
+        // The composer can translate retained rows on an exact pixel scroll and rebuild only damaged rows.
+        let textDamage = textEligible && previousText ? damage : nil
         return RenderReuse(cpuDamage: cpuDamage, textDamage: textDamage, cpuScroll: cpuScroll)
     }
 }
@@ -543,23 +543,26 @@ struct RenderReuse: Equatable {
         let layered = presenter != nil && !(snapshot.images ?? []).isEmpty
         // The atlas path covers what the CPU rasterizer would otherwise repaint wholesale: no images, no IME,
         // plain single-scalar ASCII, integral geometry. Everything else keeps the software reference path.
-        let textEligible = presenter != nil && !layered
-            && TextEligibility.fallback(snapshot: snapshot, composition: marked, size: size, scale: scale, cell: cells,
-                                        fontName: fontName, fontSize: fontSize) == nil
+        let textGeometry = presenter != nil && !layered
+            && TextEligibility.unsupportedContent(snapshot, composition: marked) == nil
+            ? TextEligibility.geometry(size: size, scale: scale, cell: cells, fontName: fontName, fontSize: fontSize,
+                                       cols: snapshot.cols, rows: snapshot.rows)
+            : nil
         let plan = RenderReuse.plan(damage: pendingDamage, scroll: gridDamage.scroll, layered: layered,
-                                    textEligible: textEligible, previousLayered: lastLayered,
+                                    textEligible: textGeometry != nil, previousLayered: lastLayered,
                                     previousText: lastTextFramed)
         lastLayered = layered
-        let damage = plan.cpuDamage, textDamage = plan.textDamage, scroll = plan.cpuScroll
+        let damage = plan.cpuDamage, textDamage = plan.textDamage, scroll = plan.cpuScroll, textScroll = gridDamage.scroll
         let rasterizer = self.rasterizer, composer = textComposer, images = layered ? [:] : imageStore.images, appearance = renderAppearance
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
         let reuse = presenter != nil
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
         rasterQueue.async { [weak self] in
-            if textEligible, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
-                                                          fontName: fontName, fontSize: fontSize, cell: cells,
-                                                          cjkFontName: cjkFontName, appearance: appearance, deferPublication: true) {
+            if let textGeometry, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
+                                                               fontName: fontName, fontSize: fontSize, cell: cells,
+                                                               cjkFontName: cjkFontName, appearance: appearance, deferPublication: true,
+                                                               prevalidated: textGeometry, scroll: textScroll) {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.rasterInFlight = false

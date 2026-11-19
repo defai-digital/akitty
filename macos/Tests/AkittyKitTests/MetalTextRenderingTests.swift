@@ -354,8 +354,8 @@ final class MetalTextRenderingTests: XCTestCase {
         // Steady atlas frames stay incremental on both sides.
         XCTAssertEqual(plan([3], 0, previousText: true).textDamage, [3])
         XCTAssertNil(plan([3], 0, previousText: true).cpuDamage, "the CPU bitmap is stale after an atlas frame")
-        // A scroll re-encodes every atlas row and forbids a bitmap row move.
-        XCTAssertNil(plan([3], 2, previousText: true).textDamage)
+        // An atlas scroll keeps final-coordinate damage for selective re-encoding and forbids a bitmap row move.
+        XCTAssertEqual(plan([3], 2, previousText: true).textDamage, [3])
         XCTAssertNil(plan([3], 2, previousText: true).cpuDamage)
         XCTAssertEqual(plan([3], 2, previousText: true).cpuScroll, 0)
         // Layered frames repaint fully on a scroll and after a path change.
@@ -401,6 +401,182 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: size,
                                       scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                       appearance: .standard), "a CJK frame must not be silently drawn as blanks")
+    }
+
+    @MainActor func testScrollTranslatesRowsAndMatchesFullEncoding() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let source = (0..<rows).map { "row \($0) ascii" }
+        let shifted = Array(source.dropFirst(2)) + ["new ten", "new eleven"]
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) },
+                                       cursor: ["row": 4, "col": 2, "visible": true])
+            let initialFrame = try XCTUnwrap(composer.compose(snapshot: initial, damage: nil, size: size, scale: scale,
+                                                               fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                               appearance: .standard))
+            try presenter.updateText(initialFrame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let next = try snapshot(cells: shifted.enumerated().flatMap { line($0.offset, $0.element) },
+                                    cursor: ["row": 3, "col": 1, "visible": true])
+            let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [10, 11], size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard, scroll: 2))
+            XCTAssertEqual(composer.translatedRowCount, rows - 4, "scale \(scale)")
+            XCTAssertEqual(composer.reencodedRowCount, 4, "two exposed and two cursor rows at scale \(scale)")
+            XCTAssertEqual(frame.dirtyRows, Array(0..<rows), "every moved row uploads")
+            try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let actual = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
+
+            let reference = TextComposer()
+            let full = try XCTUnwrap(reference.compose(snapshot: next, damage: nil, size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard))
+            try presenter.updateText(full, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let expected = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
+            XCTAssertEqual(actual, expected, "scale \(scale) matches a full atlas encode")
+            let cpu = try GridRasterizer.make(snapshot: next, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            XCTAssertLessThanOrEqual(compare(cpu, actual).max, 2, "scale \(scale) matches the CPU rasterizer")
+        }
+    }
+
+    func testScrollWithUnsafeBaselineRoundingFallsBackToFullEncoding() throws {
+        let oddCell = CGSize(width: 8, height: 12), oddSize = CGSize(width: size.width, height: 157.0 / 3)
+        let geometry = TextGeometry(cols: cols, rows: rows, cell: oddCell, scale: 3, size: oddSize,
+                                    width: 1008, height: 157, descent: 7.0 / 3, phaseX: 0, phaseY: 0)
+        let delta = oddCell.height * 3
+        XCTAssertFalse((0..<rows - 1).allSatisfy {
+            geometry.deviceOriginY(row: $0 + 1) - delta == geometry.deviceOriginY(row: $0)
+        }, "this geometry must exercise the rounding guard")
+        let composer = TextComposer()
+        let source = (0..<rows).map { "row \($0)" }
+        let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+        _ = try XCTUnwrap(composer.compose(snapshot: initial, damage: nil, size: oddSize, scale: 3,
+                                           fontName: "Menlo", fontSize: 13, cell: oddCell, cjkFontName: "",
+                                           appearance: .standard, prevalidated: geometry))
+        let shifted = Array(source.dropFirst()) + ["last"]
+        let next = try snapshot(cells: shifted.enumerated().flatMap { line($0.offset, $0.element) })
+        let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [rows - 1], size: oddSize, scale: 3,
+                                                   fontName: "Menlo", fontSize: 13, cell: oddCell, cjkFontName: "",
+                                                   appearance: .standard, prevalidated: geometry, scroll: 1))
+        XCTAssertEqual(composer.translatedRowCount, 0)
+        XCTAssertEqual(composer.reencodedRowCount, rows)
+        XCTAssertEqual(frame.dirtyRows, Array(0..<rows))
+    }
+
+    /// A scroll frame can be refused partway through its re-encode, after translating rows and replacing
+    /// some of them. The next frame must re-encode every row from the snapshot, not trust the retained rows.
+    @MainActor func testScrollRefusedMidBuildRecoversWithAFullReencode() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        func stormCell(_ key: Int, row: Int, col: Int) -> [Any] {
+            wire(row, col, text: String(UnicodeScalar(UInt8(65 + key % 8))),
+                 Style(fg: [key % 251, (key / 251) % 251, (key / 63_001) % 251]))
+        }
+        for frame in 0..<8 {
+            let cells = (0..<(rows * cols)).map { stormCell(frame * rows * cols + $0, row: $0 / cols, col: $0 % cols) }
+            let storm = try XCTUnwrap(composer.compose(snapshot: try snapshot(cells: cells), damage: nil, size: size,
+                                                       scale: 1, fontName: "Menlo", fontSize: 13, cell: cell,
+                                                       cjkFontName: "", appearance: .standard))
+            try presenter.updateText(storm, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
+        }
+        XCTAssertEqual(composer.atlasEntries, 8 * rows * cols, "the storm leaves the atlas just under its cap")
+        // Six damaged rows plus the exposed bottom row need more fresh masks than the remaining headroom;
+        // the first rows fit, so the cap is hit partway through the re-encode, not before it starts.
+        func coloured(_ row: Int) -> [[Any]] {
+            (0..<cols).map { col in
+                let key = row * cols + col
+                return wire(row, col, text: String(UnicodeScalar(UInt8(65 + key % 8))),
+                            Style(fg: [key % 251, (key / 251) % 251, 255]))
+            }
+        }
+        let source = (0..<rows).map { "row \($0) ascii" }
+        let refusedCells = (0..<6).flatMap(coloured)
+            + (6..<rows - 1).flatMap { line($0, source[$0 + 1]) }
+            + coloured(rows - 1)
+        let refused = try snapshot(cells: refusedCells)
+        XCTAssertNil(composer.compose(snapshot: refused, damage: Set(0..<6), size: size, scale: 1,
+                                      fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                      appearance: .standard, scroll: 1), "the over-capacity scroll frame is refused")
+        // Recovery re-encodes a scroll whose every mask the storm already cached: no row may keep the
+        // refused attempt's translated or half-replaced instances.
+        let recoveryCells = (0..<(rows - 1)).flatMap { row in
+            (0..<cols).map { stormCell(7 * rows * cols + (row + 1) * cols + $0, row: row, col: $0) }
+        } + (0..<cols).map { stormCell(6 * rows * cols + $0, row: rows - 1, col: $0) }
+        let next = try snapshot(cells: recoveryCells)
+        let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [rows - 1], size: size, scale: 1,
+                                                   fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                   appearance: .standard, scroll: 1))
+        XCTAssertFalse(frame.resetAtlas, "cached masks recover without an atlas reset")
+        XCTAssertEqual(frame.dirtyRows, Array(0..<rows), "recovery cannot certify partial row damage")
+        XCTAssertEqual(composer.translatedRowCount, 0)
+        XCTAssertEqual(composer.reencodedRowCount, rows)
+        XCTAssertFalse(frame.uploads.isEmpty, "the refused attempt's unpublished masks still reach the GPU")
+        try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
+        let actual = try presenter.renderOffscreen(width: bitmapSize(1).width, height: bitmapSize(1).height)
+        let reference = TextComposer()
+        let full = try XCTUnwrap(reference.compose(snapshot: next, damage: nil, size: size, scale: 1,
+                                                   fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                   appearance: .standard))
+        try presenter.updateText(full, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
+        let expected = try presenter.renderOffscreen(width: bitmapSize(1).width, height: bitmapSize(1).height)
+        XCTAssertEqual(actual, expected, "the recovered scroll frame matches a fresh full encode")
+    }
+
+    @MainActor func testDiscardedScrollRecoversWithoutApplyingItsShiftTwice() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer(), grid = GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2)
+        let source = (0..<rows).map { "row \($0)" }
+        let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+        try presenter.updateText(try XCTUnwrap(compose(initial, composer: composer, damage: nil)), grid: grid)
+        let discardedLines = Array(source.dropFirst()) + ["discarded"]
+        let discarded = try snapshot(cells: discardedLines.enumerated().flatMap { line($0.offset, $0.element) })
+        _ = try XCTUnwrap(composer.compose(snapshot: discarded, damage: [rows - 1], size: size, scale: 2,
+                                           fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                           appearance: .standard, deferPublication: true, scroll: 1))
+        let finalLines = Array(source.dropFirst(2)) + ["penultimate", "final"]
+        let final = try snapshot(cells: finalLines.enumerated().flatMap { line($0.offset, $0.element) })
+        let recovered = try XCTUnwrap(composer.compose(snapshot: final, damage: [rows - 1], size: size, scale: 2,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard, scroll: 1))
+        XCTAssertEqual(composer.translatedRowCount, 0, "recovery cannot translate the already-discarded shift")
+        XCTAssertEqual(composer.reencodedRowCount, rows)
+        XCTAssertEqual(recovered.dirtyRows, Array(0..<rows))
+        XCTAssertFalse(recovered.uploads.isEmpty, "the discarded frame's new mask remains queued")
+        try presenter.updateText(recovered, grid: grid)
+        let actual = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        let full = try XCTUnwrap(compose(final, composer: TextComposer(), damage: nil))
+        try presenter.updateText(full, grid: grid)
+        let expected = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        XCTAssertEqual(actual, expected)
+    }
+
+    @MainActor func testScrollWhileFrameIsInFlightPublishesACompleteReplacement() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer(), grid = GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2)
+        let source = (0..<rows).map { "row \($0)" }
+        let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+        try presenter.updateText(try XCTUnwrap(compose(initial, composer: composer, damage: nil)), grid: grid)
+        let held = try presenter.holdFrameInFlight()
+        defer { held.release(); held.command.waitUntilCompleted() }
+        let shifted = Array(source.dropFirst(2)) + ["new ten", "new eleven"]
+        let next = try snapshot(cells: shifted.enumerated().flatMap { line($0.offset, $0.element) })
+        let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [10, 11], size: size, scale: 2,
+                                                   fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                   appearance: .standard, scroll: 2))
+        try presenter.updateText(frame, grid: grid)
+        XCTAssertEqual(frame.dirtyRows, Array(0..<rows))
+        XCTAssertEqual(presenter.textFullUploads, 1)
+        held.release(); held.command.waitUntilCompleted()
+        waitUntilIdle(presenter)
+        let actual = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        let full = try XCTUnwrap(compose(next, composer: TextComposer(), damage: nil))
+        try presenter.updateText(full, grid: grid)
+        let expected = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        XCTAssertEqual(actual, expected)
     }
 
     // MARK: Atlas retention and bounds

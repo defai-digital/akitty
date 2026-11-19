@@ -36,7 +36,13 @@ build_native() {
         cargo "$@"
     fi
 }
-if [[ $config == release ]]; then build_native build --locked --release; else build_native build --locked; fi
+if [[ $config == release ]]; then
+    # Multiple crate types disable Cargo's LTO. Emit the static core alone so it
+    # actually receives ThinLTO; its akitty-vt dependency is built as a normal rlib.
+    build_native rustc --locked --release -p akitty-core --lib --crate-type staticlib
+else
+    build_native build --locked
+fi
 export AKITTY_RUST_LIB_DIR="$native_library_root/$config"
 swift build --package-path macos --configuration "$config" -Xswiftc -debug-prefix-map -Xswiftc "$PWD=/akitty"
 bin=$(swift build --package-path macos --configuration "$config" --show-bin-path)

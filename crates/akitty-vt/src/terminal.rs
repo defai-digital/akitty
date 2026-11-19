@@ -939,9 +939,8 @@ impl Terminal {
                     let bytes = &text.as_bytes()[..count];
                     let cells = &mut row.cells[pos.col..pos.col + count];
                     if side_data {
-                        // One reference bump per cell instead of one allocation.
                         for (cell, &byte) in cells.iter_mut().zip(bytes) {
-                            *cell = template.written_column(char::from(byte));
+                            template.overwrite(cell, char::from(byte), 1, true);
                         }
                         row.mark_heap();
                     } else if heap_free {
@@ -1149,7 +1148,7 @@ impl Terminal {
                     }
                 }
             } else {
-                row.cells[col] = template.cell(ch, width as u8, true);
+                template.overwrite(&mut row.cells[col], ch, width as u8, true);
                 if width == 2 {
                     let spacer = row.cells[col].spacer();
                     row.cells[col + 1] = spacer;
@@ -1306,7 +1305,7 @@ impl Terminal {
         }
         let template = self.style_template();
         let row = &mut self.screen_mut().rows[pos.row];
-        row.cells[pos.col] = template.cell(ch, width as u8, true);
+        template.overwrite(&mut row.cells[pos.col], ch, width as u8, true);
         if width == 2 {
             let spacer = row.cells[pos.col].spacer();
             row.cells[pos.col + 1] = spacer;

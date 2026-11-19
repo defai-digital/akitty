@@ -10,7 +10,9 @@ if [[ $output != /* ]]; then output="$PWD/$output"; fi
 mkdir -p "$(dirname "$output")"
 source scripts/rust-toolchain.sh
 export MACOSX_DEPLOYMENT_TARGET=27.2
-cargo build --release --locked >&2
+# Match the release app's single-crate-type ThinLTO build instead of disabling it
+# by emitting the core's staticlib and rlib together.
+cargo rustc --release --locked -p akitty-core --lib --crate-type staticlib >&2
 export AKITTY_RUST_LIB_DIR="$PWD/target/release"
 swift test --package-path macos -c release --filter '^$' >&2
 native_bin=$(swift build --package-path macos -c release --show-bin-path)

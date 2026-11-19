@@ -4,7 +4,7 @@ import Foundation
 
 /// One quad of a GPU text frame. `uv.zw` of zero makes the quad a solid fill; otherwise it samples the glyph
 /// atlas and multiplies the coverage by `rgba`. Colours are device-RGB, premultiplied in the fragment shader.
-struct TextInstance {
+struct TextInstance: Equatable {
     var destX: Float, destY: Float, destW: Float, destH: Float
     var u: Float, v: Float, uw: Float, uh: Float
     var r: Float, g: Float, b: Float, a: Float
@@ -52,7 +52,11 @@ struct TextGeometry: Equatable {
     /// Top-down device-pixel position of the cell's text baseline.
     func deviceOrigin(_ item: Cell) -> CGPoint {
         let rect = box(item)
-        return CGPoint(x: floor(rect.minX * scale), y: floor(CGFloat(height) - (rect.minY + baseline) * scale))
+        return CGPoint(x: floor(rect.minX * scale), y: deviceOriginY(row: item.row))
+    }
+    func deviceOriginY(row: Int) -> CGFloat {
+        let y = gridTop - CGFloat(row + 1) * cell.height
+        return floor(CGFloat(height) - (y + baseline) * scale)
     }
 }
 
@@ -249,6 +253,8 @@ final class TextComposer: @unchecked Sendable {
     private(set) var isSuspended = false
     private(set) var atlasEntries = 0
     private(set) var atlasResets = 0
+    private(set) var translatedRowCount = 0
+    private(set) var reencodedRowCount = 0
 
     /// Drops retained rows and masks; the next frame is a full rebuild. Called when the pane leaves its window.
     func releaseFrames() {
@@ -261,12 +267,16 @@ final class TextComposer: @unchecked Sendable {
     /// Builds one frame, or nil when the atlas cannot represent it (the caller then keeps the CPU rasterizer).
     /// Callers that hand off asynchronously defer publication and acknowledge only a successful upload.
     func compose(snapshot: Snapshot, damage: Set<Int>?, size: CGSize, scale: CGFloat, fontName: String, fontSize: CGFloat,
-                 cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false) -> TextFrame? {
+                 cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false,
+                 prevalidated geometry: TextGeometry? = nil, scroll: Int = 0) -> TextFrame? {
         var damage = damage
-        guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil,
-              let geometry = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
-                                                      fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows)
-        else { return nil }
+        let geometry = if let geometry { geometry } else {
+            TextEligibility.unsupportedContent(snapshot, composition: "") == nil
+                ? TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
+                                           fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows)
+                : nil
+        }
+        guard let geometry else { return nil }
         let wanted = Layout(width: geometry.width, height: geometry.height, scale: scale, fontName: fontName,
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
                             rows: snapshot.rows, descent: geometry.descent)
@@ -288,7 +298,7 @@ final class TextComposer: @unchecked Sendable {
         }
         recoveryPending = true
         var result = build(snapshot: snapshot, damage: damage, geometry: geometry, appearance: appearance,
-                           resetAtlas: resetAtlas)
+                           resetAtlas: resetAtlas, scroll: scroll)
         if result == nil, atlas.exhausted {
             // The atlas filled: recreate it and re-encode everything, up to the per-epoch budget.
             guard rebuilds < Self.maxRebuildsPerEpoch else {
@@ -299,7 +309,7 @@ final class TextComposer: @unchecked Sendable {
             rows = Array(repeating: [], count: snapshot.rows)
             resetAtlas = true
             resetPending = true
-            result = build(snapshot: snapshot, damage: nil, geometry: geometry, appearance: appearance, resetAtlas: true)
+            result = build(snapshot: snapshot, damage: nil, geometry: geometry, appearance: appearance, resetAtlas: true, scroll: 0)
         }
         guard let result else {
             recoveryPending = true; atlasEntries = atlas.count; atlasResets = atlas.resets; return nil
@@ -328,9 +338,47 @@ final class TextComposer: @unchecked Sendable {
     }
 
     private func build(snapshot: Snapshot, damage: Set<Int>?, geometry: TextGeometry, appearance: RenderAppearance,
-                       resetAtlas: Bool) -> (rows: [Int], content: [[TextInstance]])? {
+                       resetAtlas: Bool, scroll: Int) -> (rows: [Int], content: [[TextInstance]])? {
+        translatedRowCount = 0; reencodedRowCount = 0
+        if !resetAtlas, scroll > 0, scroll < snapshot.rows, damage != nil {
+            let delta = CGFloat(scroll) * geometry.cell.height * geometry.scale
+            // The baseline is floored after several floating-point operations. Integral
+            // geometry alone does not prove that a translated row matches a fresh encode.
+            // The integral delta also moves cell-fill tops by whole pixels, so fills blit exactly.
+            let exact = delta.isFinite && delta > 0 && delta.rounded() == delta
+                && (0..<snapshot.rows - scroll).allSatisfy { row in
+                    geometry.deviceOriginY(row: row + scroll) - delta == geometry.deviceOriginY(row: row)
+                }
+            if exact {
+                let shiftedCursorRow = lastCursorRow.flatMap { $0 >= scroll ? $0 - scroll : nil }
+                var rebuild = damage ?? []
+                rebuild.formUnion(snapshot.rows - scroll..<snapshot.rows)
+                if let last = shiftedCursorRow { rebuild.insert(last) }
+                if snapshot.cursor.visible { rebuild.insert(snapshot.cursor.row) }
+                let ordered = rebuild.filter { (0..<snapshot.rows).contains($0) }.sorted()
+                // Rows about to be re-encoded skip translation: their instances are replaced anyway.
+                var translated = 0
+                for row in 0..<snapshot.rows - scroll where !rebuild.contains(row) {
+                    var moved = rows[row + scroll]
+                    for index in moved.indices { moved[index].destY -= Float(delta) }
+                    rows[row] = moved
+                    translated += 1
+                }
+                for row in ordered {
+                    let cells = snapshot.cells(in: row)
+                    guard let instances = instances(row: row, cells: cells, geometry: geometry, appearance: appearance,
+                                                    cursor: snapshot.cursor) else { return nil }
+                    rows[row] = instances
+                }
+                lastCursorRow = snapshot.cursor.visible ? snapshot.cursor.row : nil
+                translatedRowCount = translated; reencodedRowCount = ordered.count
+                // Every destination row moved or was exposed, so every row needs an
+                // upload even though only `ordered` rows were re-encoded.
+                return (Array(0..<snapshot.rows), rows)
+            }
+        }
         var dirty: [Int]
-        if resetAtlas || damage == nil {
+        if resetAtlas || damage == nil || scroll != 0 {
             dirty = Array(0..<snapshot.rows)
         } else {
             var set = damage ?? []
@@ -343,12 +391,13 @@ final class TextComposer: @unchecked Sendable {
         var content: [[TextInstance]] = []
         content.reserveCapacity(dirty.count)
         for row in dirty {
-            let cells = snapshot.cells(in: [row])
+            let cells = snapshot.cells(in: row)
             guard let instances = instances(row: row, cells: cells, geometry: geometry, appearance: appearance,
                                             cursor: snapshot.cursor) else { return nil }
             content.append(instances)
         }
         for (index, row) in dirty.enumerated() where row < rows.count { rows[row] = content[index] }
+        reencodedRowCount = dirty.count
         return (dirty, content)
     }
 

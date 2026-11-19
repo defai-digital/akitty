@@ -659,6 +659,28 @@ impl CellStyle {
         }
         Cell { ch, packed, extras: self.extras.clone() }
     }
+    /// Overwrite a cell, avoiding a reference-count increment/decrement pair when it
+    /// already shares this exact template record. A marked cell has detached its record,
+    /// so pointer identity also certifies that no combining marks are being retained.
+    #[inline]
+    pub(crate) fn overwrite(&self, target: &mut Cell, ch: char, width: u8, written: bool) {
+        let shared = match (&target.extras, &self.extras) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            _ => false,
+        };
+        if shared {
+            debug_assert!(target.combining().is_empty());
+            target.ch = ch;
+            let mut packed = (self.packed & !(WIDTH_MASK | WRITTEN))
+                | (u32::from(width & 3) << WIDTH_SHIFT);
+            if written {
+                packed |= WRITTEN;
+            }
+            target.packed = packed;
+        } else {
+            *target = self.cell(ch, width, written);
+        }
+    }
     /// Whether cells of this presentation own a side record (link or rare style).
     #[inline]
     pub(crate) fn has_side_data(&self) -> bool {
@@ -689,15 +711,6 @@ impl CellStyle {
             base | (2 << WIDTH_SHIFT) | WRITTEN,
             base,
         ])
-    }
-    /// A written single-column cell of this presentation, sharing the side record.
-    #[inline]
-    pub(crate) fn written_column(&self, ch: char) -> Cell {
-        let packed = self.packed_written_column();
-        match &self.extras {
-            Some(record) => Cell { ch, packed, extras: Some(Arc::clone(record)) },
-            None => Cell { ch, packed, extras: None },
-        }
     }
 }
 
@@ -874,6 +887,25 @@ mod tests {
         assert_eq!(marked.style(), style);
         assert!(second.combining().is_empty());
         assert_eq!(first.combining(), &[] as &[char]);
+    }
+
+    #[test]
+    fn same_template_overwrite_reuses_the_record_but_drops_detached_marks() {
+        let link = Arc::new(Link { id: 11, uri: "https://example.test/reused".into() });
+        let template = CellStyle::new(&Style { fg: Color::rgb(10, 20, 30), ..Style::default() }, Some(&link));
+        let mut cell = template.cell('a', 1, true);
+        let record = cell.extras.clone().expect("style record");
+        let count = Arc::strong_count(&record);
+        template.overwrite(&mut cell, 'b', 1, true);
+        assert_eq!(Arc::strong_count(&record), count, "same-record overwrite must not churn the count");
+        assert_eq!(cell, template.cell('b', 1, true));
+        assert!(Arc::ptr_eq(cell.extras.as_ref().unwrap(), &record));
+
+        assert!(cell.push_combining('\u{301}'), "detaching a mark is allowed");
+        assert!(!Arc::ptr_eq(cell.extras.as_ref().unwrap(), &record));
+        template.overwrite(&mut cell, 'c', 1, true);
+        assert_eq!(cell, template.cell('c', 1, true));
+        assert!(cell.combining().is_empty(), "the template never carries old marks");
     }
 
     #[test]
