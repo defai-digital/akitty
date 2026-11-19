@@ -2148,6 +2148,19 @@ screen and cursor advance after successive Unicode clusters. Alacritty advances
 four extra columns at the ZWJ emoji, so its Unicode timing appears only in the
 raw record. The synchronized-screen fixture contains complete frames in each feed.
 
+Headless feed throughput in MiB/s, using the median of the ten pass rates.
+
+| Workload | AkiTTY 1.4.0 | libghostty-vt 1.0.1 | libghostty-vt 1.0.2-dev | Alacritty terminal | Kitty 0.50.0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ASCII | 480.7 | 642.5 | 658.6 | 113.6 | 99.5 |
+| ANSI color | 269.4 | 362.9 | 374.5 | 107.6 | 88.8 |
+| Unicode | 137.7 | 119.5 | 124.6 | — | 83.9 |
+| Long lines | 621.5 | 385.2 | 391.4 | 100.5 | 162.1 |
+| Alternate screen | 144.5 | 139.6 | 145.1 | 80.1 | 10.6 |
+| Synchronized screen | 942.8 | 854.1 | 829.9 | 231.2 | 33.6 |
+
+The dash marks the Alacritty Unicode case described above.
+
 AkiTTY recorded the highest medians for long lines, synchronized output and
 the matched Unicode workload. The Ghostty builds had higher ASCII and ANSI
 color medians. Pass ranges overlap on several workloads, including alternate
