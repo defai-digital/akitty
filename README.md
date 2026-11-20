@@ -138,27 +138,27 @@ Manage the feature in Settings. [History behavior and storage](docs/ARCHITECTURE
 
 ## Performance
 
-This published benchmark used AkiTTY 1.4.1 and four other macOS apps.
-Each rate uses the median elapsed time across 45 real PTY samples. Timing runs
-from the first payload write to the terminal's reply to a trailing cursor-position
-request.
+AkiTTY 2.1.1 was measured on 2026-11-20. The other four columns use the
+2026-11-19 comparison. Each rate uses the median elapsed time across 45 real
+PTY samples, from the first payload write through the terminal's reply to a
+trailing cursor-position request.
 
-<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s. On ASCII, ANSI color, CJK and combining text, and long lines, AkiTTY 1.4.1, Ghostty 1.4.0 and cmux 0.65.2.2 sit between 161 and 185. Alacritty 0.17.0 and Kitty 0.51.0 sit between 97 and 115.">
+<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s across four workloads. AkiTTY 2.1.1 was measured on November 20. Ghostty, Alacritty, Kitty and cmux were measured on November 19. The exact rates follow in the table.">
 
-| Workload (median MiB/s) | AkiTTY 1.4.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
+| Workload (median MiB/s) | AkiTTY 2.1.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| ASCII | 184.3 | 176.5 | 102.9 | 115.0 | 169.1 |
-| ANSI color | 169.5 | 167.0 | 114.3 | 106.2 | 176.7 |
-| CJK and combining text | 176.0 | 163.7 | 112.8 | 97.2 | 161.2 |
-| Long lines | 183.1 | 166.5 | 99.3 | 112.7 | 182.6 |
+| ASCII | 180.9 | 176.5 | 102.9 | 115.0 | 169.1 |
+| ANSI color | 183.4 | 167.0 | 114.3 | 106.2 | 176.7 |
+| CJK and combining text | 194.3 | 163.7 | 112.8 | 97.2 | 161.2 |
+| Long lines | 191.1 | 166.5 | 99.3 | 112.7 | 182.6 |
 
-All five apps ran hidden on the same Apple M3 Max with macOS 27.2.1,
-a 98×25 PTY grid and scrollback limits set to zero. The ranges of per-launch
-medians for AkiTTY, Ghostty and cmux overlap on all four workloads.
+Both sessions used the same Apple M3 Max with macOS 27.2.1, hidden apps,
+a 98×25 PTY grid and scrollback limits set to zero.
 [App benchmark method and raw data](docs/PERFORMANCE.md#macos-pty-throughput)
 
-The engine benchmark feeds bytes directly into the parser and grid. It includes
-AkiTTY, libghostty-vt, Alacritty and Kitty. [Headless engine results](docs/PERFORMANCE.md#reference-engine-throughput)
+The headless engine benchmark feeds bytes directly into the parser and grid.
+It includes AkiTTY 1.4.1, libghostty-vt, Alacritty and Kitty.
+[Headless engine results](docs/PERFORMANCE.md#reference-engine-throughput)
 
 ## Siri and Shortcuts
 

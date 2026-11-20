@@ -2176,6 +2176,27 @@ comparison adapters were built locally outside the product build.
 
 ## macOS PTY throughput
 
+### AkiTTY 2.1.1 rerun
+
+On 2026-11-20, the released AkiTTY 2.1.1 arm64 app (build 20101, commit
+`e15aa9e317735def8e1cd29c0e83721ef6054412`) ran on the same Apple M3 Max
+with macOS 27.2.1 (26B131). The harness verified the release archive and
+executable hashes, code signature and Gatekeeper assessment.
+
+Five fresh launches used Menlo 16 pt, a 98×25 PTY, scrollback set to zero
+and the same payloads, workload order per launch and cursor probes as
+the earlier AkiTTY run. Each launch ran hidden, with three warmups and
+nine timed writes per workload. All 180 timed writes met the measurement
+checks. The rates use the median time across 45 samples per workload.
+
+The README uses these four AkiTTY rates alongside the four comparator
+columns from the November 19 session. The AkiTTY per-launch median ranges
+for 2.1.1 and 1.4.1 overlap on all four workloads.
+[Raw AkiTTY 2.1.1 timings](../benchmarks/results/macos-pty-throughput-v2.1.1-2026-11-20.json)
+· [AkiTTY 2.1.1 release](https://github.com/defai-digital/akitty/releases/tag/v2.1.1)
+
+### 2026-11-19 five-app comparison
+
 On 2026-11-19, five released terminal apps ran as native arm64 processes
 on an Apple M3 Max with macOS 27.2.1 (26B131).
 
@@ -2213,8 +2234,8 @@ column 1 after the marker.
 The five rounds rotated app order so that every app ran once in each
 position. Apps in a round shared the same shuffled workload order. Each
 launch ran three warmups and nine timed samples per workload. The
-[README table](../README.md#performance) divides the payload byte count
-by the median elapsed time across 45 samples per app and workload.
+reported rate divides the payload byte count by the median elapsed time
+across 45 samples per app and workload.
 
 In round five, four Ghostty starts reported a 100×26 PTY at a higher
 display scale and stopped before timing. The successful retry adjusted the
