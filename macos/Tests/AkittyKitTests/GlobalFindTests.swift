@@ -146,6 +146,26 @@ final class GlobalFindTests: XCTestCase {
         XCTAssertEqual(finder.statusText, "Showing 100 matches. More matches were not listed.")
     }
 
+    @MainActor func testReopeningWithAnExistingQueryYieldsBetweenHistoryChunks() async throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        let finder = GlobalFindController(app: app)
+        defer { finder.window?.close(); cleanUp(app) }
+        let window = try app.createTerminalWindow(headless: true)
+        let terminal = try XCTUnwrap(window.active)
+        try feed(terminal, "REOPEN-MARKER\r\n" + String(repeating: "filler\r\n", count: 300))
+        finder.searchNow("REOPEN-MARKER")
+        XCTAssertEqual(finder.statusText, "1 match")
+
+        finder.show(anchor: window)
+        XCTAssertEqual(finder.statusText, "Searching…")
+        for _ in 0..<100 where finder.statusText == "Searching…" {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(finder.statusText, "1 match")
+        XCTAssertEqual(finder.hits.first?.sessionID, terminal.session.id)
+    }
+
     @MainActor func testSplitPaneActivationFocusesThatPane() throws {
         _ = NSApplication.shared
         let app = AkittyApplication()

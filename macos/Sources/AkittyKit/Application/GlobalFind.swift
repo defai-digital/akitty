@@ -114,14 +114,18 @@ struct GlobalFindHit: Equatable {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(field)
-        searchNow(field.stringValue)
+        beginSearch(stepped: true)
     }
 
-    /// Synchronous search used by tests and by the scope control. A keystroke uses `schedule` instead.
+    /// Synchronous search used by tests.
     func searchNow(_ query: String) {
         if field.stringValue != query { field.stringValue = query }
+        beginSearch(stepped: false)
+    }
+
+    private func beginSearch(stepped: Bool) {
         generation += 1
-        run(query, token: generation, stepped: false)
+        run(field.stringValue, token: generation, stepped: stepped)
     }
 
     func controlTextDidChange(_ obj: Notification) { schedule() }
@@ -191,7 +195,7 @@ struct GlobalFindHit: Equatable {
 
     @objc private func scopeChanged() {
         scope = scopeControl.selectedSegment == 0 ? .window : .all
-        searchNow(field.stringValue)
+        beginSearch(stepped: true)
     }
     @objc private func openSelected() {
         guard generation == shownToken, rows.indices.contains(table.selectedRow), case .hit(let hit) = rows[table.selectedRow] else { return }
