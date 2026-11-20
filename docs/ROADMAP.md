@@ -88,29 +88,46 @@ equivalence and protocol behavior, and pass `scripts/verify.sh` plus app smoke
 checks. Performance claims need measurements; stability claims need stress-test
 evidence. The owned engine provides independent maintenance; integration improvements still require their own tests.
 
-### Known wide-cell and grapheme defects (reproduced, not yet fixed)
+### Known wide-cell and grapheme limitations
 
-Found by an external review pass and reproduced against the shared engine. Two related defects were
-fixed and are covered by tests: `wrap_padding` was asserted over a last column that held visible
-text, so selection trimmed a character the user could see — either because a wide glyph wrapped over
-a column the cursor was parked on, or because text was written or shifted into the padding column
-afterwards. `Row::trailing_padding()` is now the single answer to "is the last column blank padding",
-and selection, reflow and the WASM export that browser copy reads all ask it instead of reading the
-raw flag, so the three cannot disagree about a row. A wide glyph also only marks an unwritten last
-column as padding in the first place. A grapheme that widens in insert mode now shifts following
-cells, including when it wraps onto a populated row. Remaining items:
+Found by an external review pass and reproduced against the shared engine. Three were fixed and are
+covered by tests. `wrap_padding` was asserted over a last column that held visible text, so selection
+trimmed a character the user could see — either because a wide glyph wrapped over a column the cursor
+was parked on, or because text was written or shifted into the padding column afterwards.
+`Row::trailing_padding()` is now the single answer to "is the last column blank padding", and
+selection, reflow and the WASM export that browser copy reads all ask it instead of reading the raw
+flag, so the three cannot disagree about a row. A wide glyph also only marks an unwritten last column
+as padding in the first place. A grapheme that widens in insert mode now shifts following cells,
+including when it wraps onto a populated row. A runtime change of the preferred languages now
+invalidates both font caches on the same frame: `GlyphFonts.cascadeKey()` summarises the resolved CJK
+cascade order, and both `GridRasterizer.Layout` and `TextComposer.Layout` key on it, so neither path
+can keep stale masks while the other rebuilds and switch a codepoint between regional Han shapes.
 
-- **A one-column resize permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to 1x4 and
-  back to 4x4. Reflow stores the clamped width in the cell and reuses it on later resizes, so `界`
-  stays one column wide and `B` lands in column 3 instead of column 4.
-- **Runtime locale changes can desync the two text paths.** `GridRasterizer.Layout` includes the
-  appearance, but neither layout carries `Locale.preferredLanguages` or the resolved CJK font
-  availability. If the preferred languages change while the app runs, an appearance change — or an
-  image appearing, which builds fresh layer passes — rebuilds the rasterizer's CJK cascade while the
-  composer keeps its old masks, so one codepoint can switch between regional Han shapes between
-  frames. Cosmetic, and not confirmed to be reachable on macOS 27. The cheap correct fix is to read
-  the languages once per frame on the main thread and put them in *both* layouts; adding them to only
-  one just reverses which side goes stale.
+One limitation remains that is inherent to the grid rather than a defect:
+
+- **A resize to exactly one column permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to
+  1x4 and back to 4x4: `界` returns one column wide and `B` lands in column 3. Measured round trips
+  through two and three columns restore the pair exactly, so this is specific to `cols == 1`, where a
+  two-column cell cannot be represented at all — reflow clamps with `width.min(cols)` and stores the
+  result, and the grid invariant forbids a width-2 cell in a one-column row. Recovering the intrinsic
+  width from the base character would be wrong for emoji and ZWJ clusters, whose stored width comes
+  from cluster analysis rather than `ch.width()`. Left as-is: a real fix needs per-cell width history,
+  and the only trigger is a one-column terminal.
+
+One gap of the same shape as the language-desync fix is still open, and is deliberately not closed
+here:
+
+- **Font installation changes are invisible to both layouts.** `GlyphFonts.cascadeFont` drops a
+  preferred face that `GlyphFonts.installed` reports missing and prepends the user's CJK font only when
+  it is installed, but neither result is part of either `Layout`, and `cjkFontName` is the *requested*
+  name, which does not change when Font Book enables or disables that face. So enabling or disabling a
+  font at runtime, followed by a theme change or an image appearing (which builds fresh layer passes),
+  can still refresh one path's faces and not the other's. Cosmetic, and it needs a rarer trigger than a
+  language change. The correct fix is a generation counter bumped on
+  `kCTFontManagerRegisteredFontsChangedNotification`, carried in both layouts — but it must live outside
+  `GlyphFonts`, which is documented as pure helpers with no observable state, and be owned where the
+  notification can be observed safely (the view, passed into both render calls). Adding a notification
+  observer and a lock to a pure helper type to close a cosmetic gap is the wrong trade.
 
 An external review also proposed relaxing the rasterizer's conservative scroll rule, which repaints
 every row containing non-ASCII text instead of reusing the retained bitmap. Removing the rule fails

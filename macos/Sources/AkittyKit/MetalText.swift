@@ -465,6 +465,9 @@ final class TextComposer: @unchecked Sendable {
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat
         var cell: CGSize, cols: Int, rows: Int, descent: CGFloat, xHeight: CGFloat
+        /// Resolved CJK cascade preference; see `GlyphFonts.cascadeKey`. The rasterizer keys on the same
+        /// value so a runtime language change rebuilds both font caches on the same frame.
+        var cascadeKey: String
     }
     /// Colours named by truecolor output are unbounded, exactly as in the rasterizer; convert each once.
     private static let maxColors = 4096
@@ -531,7 +534,8 @@ final class TextComposer: @unchecked Sendable {
         guard let geometry else { eligibleContentRows = nil; return nil }
         let wanted = Layout(width: geometry.width, height: geometry.height, scale: scale, fontName: fontName,
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
-                            rows: snapshot.rows, descent: geometry.descent, xHeight: geometry.xHeight)
+                            rows: snapshot.rows, descent: geometry.descent, xHeight: geometry.xHeight,
+                            cascadeKey: GlyphFonts.cascadeKey())
         let signature = Epoch(layout: wanted, appearance: appearance)
         let changesEpoch = epoch != signature
         let changesLayout = layout != wanted || base == nil || rows.count != snapshot.rows

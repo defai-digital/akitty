@@ -45,6 +45,25 @@ final class GlyphFontsTests: XCTestCase {
         }
     }
 
+    /// Both text paths key their cached fonts on this one string, so it has to determine the entire
+    /// cascade order: two language lists sharing a key must produce an identical order, or one path
+    /// can rebuild its fonts while the other keeps stale masks.
+    func testCascadeKeySummarisesTheWholePreferenceOrder() {
+        let samples = [["ja"], ["ko"], ["zh-Hans"], ["zh-Hant"], ["zh-Hant-TW"], ["zh-HK"],
+                       ["en-US"], [], ["fr-FR", "de-DE"], ["en-US", "ja", "zh-Hans"]]
+        for languages in samples {
+            let key = GlyphFonts.cascadeKey(languages: languages)
+            let order = GlyphFonts.preferredCJKFontNames(languages: languages)
+            XCTAssertEqual(key, order.first ?? "", "the key is the leading face for \(languages)")
+            for other in samples where GlyphFonts.cascadeKey(languages: other) == key {
+                XCTAssertEqual(GlyphFonts.preferredCJKFontNames(languages: other), order,
+                               "\(other) shares the key \(key) with \(languages), so it must order identically")
+            }
+        }
+        XCTAssertNotEqual(GlyphFonts.cascadeKey(languages: ["ja"]), GlyphFonts.cascadeKey(languages: ["zh-Hans"]),
+                          "different regional preferences must not share a key")
+    }
+
     func testInstalledAcceptsMenloAndRejectsUnknownNames() {
         XCTAssertTrue(GlyphFonts.installed("Menlo"))
         XCTAssertFalse(GlyphFonts.installed("No Such Font 12345"))
