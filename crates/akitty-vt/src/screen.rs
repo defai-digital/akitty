@@ -201,6 +201,16 @@ impl Row {
             .rposition(Cell::occupied)
             .map_or(0, |i| i + 1)
     }
+    /// Whether the last column is blank padding left by a wide glyph that wrapped, rather than content.
+    /// `wrap_padding` records what that column held at wrap time, so a later write into it — or a resize
+    /// that crops a different column into it — leaves the flag stale. Selection, reflow and the WASM
+    /// export must all ask this instead of reading the flag, or they disagree about the same row and one
+    /// of them drops a character the user can see.
+    pub fn trailing_padding(&self) -> bool {
+        self.wrapped
+            && self.wrap_padding
+            && self.cells.last().is_some_and(|cell| !cell.written())
+    }
     pub fn text(&self) -> String {
         self.cells
             .iter()
@@ -808,7 +818,7 @@ impl Screen {
         {
             let start = if index == a.row { a.col } else { 0 };
             let end = if index == b.row { b.col + 1 } else { self.cols };
-            let content_end = end.min(self.cols - usize::from(row.wrapped && row.wrap_padding));
+            let content_end = end.min(self.cols - usize::from(row.trailing_padding()));
             let mut text = String::new();
             for (col, cell) in row.cells.iter().enumerate() {
                 let overlap = col < content_end && col + usize::from(cell.width()) > start;
@@ -865,7 +875,7 @@ impl Screen {
                     logical_id = row.id;
                 }
                 let mut used = if row.wrapped {
-                    old_cols - usize::from(row.wrap_padding)
+                    old_cols - usize::from(row.trailing_padding())
                 } else {
                     row.used()
                 };

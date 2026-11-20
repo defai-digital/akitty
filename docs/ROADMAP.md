@@ -90,19 +90,15 @@ evidence. The owned engine provides independent maintenance; integration improve
 
 ### Known wide-cell and grapheme defects (reproduced, not yet fixed)
 
-Found by an external review pass and reproduced against the shared engine. Each needs its own fix and
-regression test; the reproductions are recorded here so they are not lost. They are deliberately not
-fixed alongside the two repaired defects above, because the correct repair depends on settling the
-`wrap_padding` / `written` invariant first and a wrong fix would regress selection or reflow.
+Found by an external review pass and reproduced against the shared engine. Two related defects were
+fixed and are covered by tests: `wrap_padding` was asserted over a last column that held visible
+text, so selection trimmed a character the user could see — either because a wide glyph wrapped over
+a column the cursor was parked on, or because text was written or shifted into the padding column
+afterwards. `Row::trailing_padding()` is now the single answer to "is the last column blank padding",
+and selection, reflow and the WASM export that browser copy reads all ask it instead of reading the
+raw flag, so the three cannot disagree about a row. A wide glyph also only marks an unwritten last
+column as padding in the first place. The remaining items each need their own fix and regression test:
 
-- **Overwriting wide-wrap padding loses a visible character.** At 4x3 feed `abc界`, then
-  `ESC[1;4HX`, then widen to 8x3. The row shows `abcX` before the resize but reflows to `abc界`.
-  Writing into the padding column leaves `wrap_padding` set, so reflow and text selection both trim
-  the last column and drop the `X`. ICH triggers the same by shifting a character into the padding
-  column, and the mis-trim also survives scrolling into history.
-- **A non-reflow resize can mark a real character as padding.** At 4x3 on the alternate screen feed
-  `ESC[?1049habc界`, then narrow to 3x3. The fourth column is cropped but `wrap_padding` survives, so
-  selection copies `ab界` instead of `abc界`.
 - **A one-column resize permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to 1x4 and
   back to 4x4. Reflow stores the clamped width in the cell and reuses it on later resizes, so `界`
   stays one column wide and `B` lands in column 3 instead of column 4.
@@ -118,6 +114,16 @@ fixed alongside the two repaired defects above, because the correct repair depen
   frames. Cosmetic, and not confirmed to be reachable on macOS 27. The cheap correct fix is to read
   the languages once per frame on the main thread and put them in *both* layouts; adding them to only
   one just reverses which side goes stale.
+
+An external review also proposed relaxing the rasterizer's conservative scroll rule, which repaints
+every row containing non-ASCII text instead of reusing the retained bitmap. Removing the rule fails
+pixel equivalence at 2x and 3x, so italic and stroked decorations genuinely do round differently per
+row. A narrowed variant that keeps those dirty did pass an extended font, size and scale matrix, but
+it was not adopted: since wide CJK moved to the Metal atlas, only mixed-emoji, decorated and
+post-suspension frames still reach this path, and bitmap scroll still pays a full-window move and
+texture upload per frame. `GridRasterizer` is the pixel-exact reference for the whole renderer test
+stack, so it is not worth trading that for a shrinking fallback. An earlier, more ambitious version of
+the same idea was measured and rejected; see "Rejected Unicode scroll experiment" above.
 
 ## 2. Shell integration (implemented in 1.1.0; qualification continues)
 

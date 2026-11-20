@@ -1272,7 +1272,11 @@ impl Terminal {
         if self.screen().cursor.pending_wrap || self.cursor().col + width > self.cols() {
             if self.modes.wrap {
                 let row = self.cursor().row;
-                self.screen_mut().rows[row].wrap_padding = !self.screen().cursor.pending_wrap;
+                // The last column is padding only when it holds nothing. A wide glyph wrapping while the
+                // cursor sits on an already-written last column leaves that text visible, and claiming the
+                // column as padding would drop it from selection and from a wrapped-row join.
+                let empty = !self.screen().rows[row].cells[self.cols() - 1].written();
+                self.screen_mut().rows[row].wrap_padding = !self.screen().cursor.pending_wrap && empty;
                 self.screen_mut().rows[row].wrapped = true;
                 self.screen_mut().cursor.position.col = 0;
                 self.linefeed(emit);
@@ -3469,6 +3473,62 @@ mod tests {
         assert_eq!(term.screen().rows[0].cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(),
                    [('界', 2), (' ', 0), (' ', 1), (' ', 1)],
                    "the untouched pair keeps its own spacer");
+    }
+
+    #[test]
+    fn writing_into_wrap_padding_keeps_the_character_through_reflow() {
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, "abc界".as_bytes());
+        // 界 does not fit in the fourth column, so it wraps and that column becomes wrap padding.
+        assert_eq!(term.screen().rows[0].text(), "abc ");
+        assert!(term.screen().rows[0].wrap_padding);
+        feed(&mut term, b"\x1b[1;4HX");
+        assert_eq!(term.screen().rows[0].text(), "abcX", "the padding column now holds a visible character");
+        assert!(!term.screen().rows[0].trailing_padding(), "a written last column is not padding");
+        // Move the cursor off the row: reflow widens the span it copies for the cursor's own row, so
+        // leaving it parked on the written column would hide a dropped character.
+        feed(&mut term, b"\x1b[2;3H");
+        term.resize(8, 3, |_| {}).unwrap();
+        assert_eq!(term.screen().rows[0].text().trim_end(), "abcX界",
+                   "reflow must not drop a character written into the padding column");
+    }
+
+    #[test]
+    fn selection_includes_a_character_written_into_wrap_padding() {
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, "abc界".as_bytes());
+        feed(&mut term, b"\x1b[1;4HX");
+        assert!(!term.screen().rows[0].trailing_padding(), "a written last column is not padding");
+        term.screen_mut().select(Position { row: 0, col: 0 }, Position { row: 0, col: 3 });
+        assert_eq!(term.screen().selection_text(), "abcX",
+                   "the padding column holds a visible character, so copying must include it");
+    }
+
+    #[test]
+    fn a_wide_wrap_over_existing_text_does_not_hide_that_text() {
+        // The cursor can sit on a written last column without a pending wrap, so the column the wrap
+        // calls padding may already hold visible text. Selection must not trim it.
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, b"abcd");
+        feed(&mut term, b"\x1b[1;4H");
+        feed(&mut term, "界".as_bytes());
+        assert_eq!(term.screen().rows[0].text(), "abcd", "the wrapped glyph leaves the row's text intact");
+        term.screen_mut().select(Position { row: 0, col: 0 }, Position { row: 0, col: 3 });
+        assert_eq!(term.screen().selection_text(), "abcd", "a written last column is content, not padding");
+    }
+
+    #[test]
+    fn a_non_reflow_resize_does_not_leave_a_real_character_marked_as_padding() {
+        let mut term = Terminal::new(4, 3, 10).unwrap();
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, "abc界".as_bytes());
+        // Narrowing crops the padding column but keeps the flag; the new last column holds a real 'c'.
+        term.resize(3, 3, |_| {}).unwrap();
+        assert_eq!(term.screen().rows[0].text(), "abc");
+        // The stored flag survives the crop; the predicate must not, or the 'c' is trimmed.
+        assert!(!term.screen().rows[0].trailing_padding(), "a cropped row's new last column is content");
+        term.screen_mut().select(Position { row: 0, col: 0 }, Position { row: 0, col: 2 });
+        assert_eq!(term.screen().selection_text(), "abc", "cropping must not mark a real character as padding");
     }
 
     #[test]
