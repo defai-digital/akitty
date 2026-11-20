@@ -4,17 +4,20 @@
 
 **A native macOS terminal for working with AI coding agents.**
 
-Run Claude Code, Codex, OpenCode, or your usual shell. See what participating
-agents report across your panes, review the commands they ask AkiTTY to run,
-and take back terminal input when you need it.
+See what agents report across your panes, review their queued requests, and
+take back terminal input when you need it. Set up Claude Code, Codex or AX Code
+in Settings, and reopen saved windows with conversation IDs ready to resume.
 
 **Apple Silicon · macOS 27.2+ · MIT licensed**
 
 [Install](#quick-start) · [Try the agent workflow](#try-the-agent-workflow) ·
 [Performance](#performance) · [Agent integration](#works-with-your-ai-agents) ·
-[Release notes](docs/releases/2.0.0.md)
+[What's new in 2.0.0](docs/releases/2.0.0.md)
 
 ## Quick start
+
+The latest stable release is **AkiTTY 2.0.0**.
+[Download for Apple Silicon](https://github.com/defai-digital/akitty/releases/tag/v2.0.0)
 
 ```sh
 curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
@@ -39,14 +42,15 @@ to `/Applications`. [Latest release](https://github.com/defai-digital/akitty/rel
 
 ## Try the agent workflow
 
-Open **Settings → Agents** to set up Claude Code, Codex or AX Code.
-AkiTTY queues requests across panes and can reopen a saved workspace with
-conversation IDs ready to resume. [Agent setup and workspace restore](docs/AGENT_NATIVE.md)
+Open **Akitty → Agent Integrations…** to set up Claude Code, Codex or AX Code.
+Turn on **Local Agent Requests** when you want those integrations to connect.
+[Agent setup](docs/AGENT_NATIVE.md#agent-integrations)
 
 - **Observe.** Open **Window → Agent Overview (⌥⌘A)** to see agent-reported
   activity and input ownership across windows, tabs, splits and the quick terminal.
-- **Approve.** Enable local agent requests to review the exact command and target
-  pane in a native approval sheet. **Deny** is the default.
+- **Approve.** Review the exact command and target pane in a native sheet.
+  Requests can wait in multiple panes, and Agent Overview shows each queue.
+  **Deny** is the default.
 - **Reclaim.** Use **Edit → Reclaim Terminal Control** or **Reclaim Control** in
   Agent Overview to take back input and revoke unused approvals. A command
   already running continues until it exits or you interrupt it.
@@ -54,6 +58,7 @@ conversation IDs ready to resume. [Agent setup and workspace restore](docs/AGENT
   request metadata, or choose **Export Agent Events…** to export JSONL.
 
 Approval applies to explicit requests through AkiTTY's opt-in local interface.
+Supported Bash permission prompts from Claude Code and Codex share the queue.
 Ordinary subprocesses and file operations use the agent's and OS's permissions.
 Program status shows what the program reports. An accepted request receipt
 confirms that input was queued. Inspect the terminal to check the command result.
@@ -101,7 +106,10 @@ retention. [Native agent guide](docs/AGENT_NATIVE.md) · [Approval demo](docs/AG
 
 - **Workspaces.** Native tabs, windows and vertical splits. Drag tabs between
   windows with their live shells and scrollback. Save named layouts and reopen
-  them with fresh shells and optional saved scrollback.
+  them with fresh shells and optional saved scrollback. Enable **Reopen Windows
+  and Agent Conversations at Launch** to reopen the last saved workspace and
+  resume an agent conversation on request.
+  [Workspace restore](docs/AGENT_NATIVE.md#reopen-windows-and-resume-agent-conversations)
 - **Per-profile settings.** Save a font, theme, shell, starting directory and
   scrollback settings together. Open a folder from Finder or with
   `open -a Akitty /path/to/folder`.
@@ -130,9 +138,10 @@ Manage the feature in Settings. [History behavior and storage](docs/ARCHITECTURE
 
 ## Performance
 
-Five released macOS apps processed the same four workloads through real PTYs.
-Each rate uses the median elapsed time across 45 samples. Timing runs from the
-first payload write to the terminal's reply to a trailing cursor-position request.
+This published benchmark used AkiTTY 1.4.1 and four other macOS apps.
+Each rate uses the median elapsed time across 45 real PTY samples. Timing runs
+from the first payload write to the terminal's reply to a trailing cursor-position
+request.
 
 | Workload (median MiB/s) | AkiTTY 1.4.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -161,11 +170,13 @@ exact command and pane. Actions require local device authentication.
 
 ## Works with your AI agents
 
-Use your existing command-line agent in its usual shell. An agent or adapter
-can opt in to AkiTTY workflows through these interfaces.
+Use your existing command-line agent in its usual shell. **Settings → Agents**
+installs hooks for Claude Code and Codex or configures MCP and conversation
+reporting for AX Code. [Integration setup and permissions](docs/AGENT_NATIVE.md#agent-integrations)
 
 | Goal | Integration |
 | --- | --- |
+| Review supported Bash permission prompts | Install the [Claude Code](docs/AGENT_NATIVE.md#claude-code-permission-prompts) or [Codex](docs/AGENT_NATIVE.md#codex-permission-prompts) hooks. The agent runs the command under its own policy. |
 | Report activity or progress | Emit OSC 7501 program status. [Program reporting](docs/AGENT_NATIVE.md#observe-programs) |
 | Show tab sprites or pane status | Emit OSC 771 through the [TypeScript/JavaScript SDK](packages/akitty-sdk/README.md). |
 | Request a command in a native pane | Use the bundled `akitty-agent` client. [Local request interface](docs/AGENT_NATIVE.md#request-a-command-from-a-local-agent) |
@@ -212,7 +223,7 @@ integration, quick terminal behavior and VoiceOver validation.
 ## Build and run
 
 Source version **2.0.0** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
-Rust 1.99.1 and Node 22+. See the contributor guide for the repository layout
+Rust 1.99.1 and Node 22.18+. See the contributor guide for the repository layout
 and focused development commands. [Contributing](CONTRIBUTING.md)
 
 ```sh

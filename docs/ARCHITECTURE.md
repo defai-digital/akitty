@@ -14,11 +14,13 @@ focus, navigation, and validation. These controls govern input through AkiTTY's 
 boundary, not operating-system process permissions. See [host workflows](AGENT_WORKFLOWS.md)
 and [accessibility](ACCESSIBILITY.md).
 
-Native agent development adds a separate bounded OSC 7501 record model, an opt-in
-same-user request-only Unix socket, the bundled `akitty-agent` client, and a private
-bounded event store. The app retains command approval authority; no ABI control
-operations are exposed over IPC. Requests queue exact terminal input, not verified
-process execution. See [native agent contracts and scope](AGENT_NATIVE.md).
+The native app uses a bounded OSC 7501 record model, an opt-in same-user
+Unix socket, the bundled `akitty-agent` client, and a private bounded event store.
+AkiTTY 2.0.0 shares one per-pane approval queue across local command requests,
+Siri and Shortcuts, and supported Claude Code and Codex permission prompts.
+The app owns the approval decision. Approved command requests queue exact
+terminal input, and the hook integrations return an allow or deny decision to
+the agent. [Native agent contracts and scope](AGENT_NATIVE.md)
 
 | Component | Technology |
 | --- | --- |
@@ -218,8 +220,9 @@ fallback still composites images in the CPU bitmap.
 Settings covers appearance (font, a separate CJK font, theme and cursor), named
 profiles, sessions (silent mode, paste and OSC 52 confirmation, shell integration,
 zsh command history, shell, starting directory and scrollback), keyboard behavior
-(quick terminal, Option-as-Alt and program status) and update checks. Preferences
-remain in local UserDefaults.
+(quick terminal, Option-as-Alt and program status) and update checks. **Agents**
+shows the installed CLIs, configures their integrations, and controls whether
+Local Agent Requests starts with the app. Preferences remain in local UserDefaults.
 The tab bar follows native macOS tabs (as Ghostty uses): tabs share the bar's width
 equally, each has a close button (confirming when a process is running), drags to
 reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and shows
@@ -289,6 +292,12 @@ consuming snapshot events. A layout's saved text shares a 128 KiB budget. Restor
 strips terminal controls and places the plain text in the model before the new PTY
 starts, with markers between the saved text and fresh output. Commands are never
 replayed. **Remove Stored Scrollback** keeps the saved geometry and folders.
+
+The separate **Reopen Windows and Agent Conversations at Launch** option stores
+a bounded layout and reported conversation IDs in local UserDefaults. Each
+restored pane opens a fresh shell. The user can ask AkiTTY to type that pane's
+resume command at an empty, idle integrated prompt. A matching report from the
+agent confirms the resume. [Workspace restore](AGENT_NATIVE.md#reopen-windows-and-resume-agent-conversations)
 
 ## zsh command history
 

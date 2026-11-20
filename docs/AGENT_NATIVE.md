@@ -1,8 +1,10 @@
 # Native agent workflows
 
-Introduced in 1.3.0, these native workflows make program
-activity visible and input ownership explicit. Supported execution requests
-remain subject to human approval. No AX product or cloud account is required.
+AkiTTY 2.0.0 queues requests across panes, integrates with Claude Code,
+Codex and AX Code, and can reopen a workspace with reported conversation IDs.
+Local command requests and supported permission prompts require human approval.
+The local workflow works with an ordinary shell and the bundled companion.
+[Release notes](releases/2.0.0.md)
 
 ## Responsibilities and scope
 
@@ -125,12 +127,11 @@ before the subcommand selects a different local test/instance endpoint.
 **Settings → Agents** (**Akitty → Agent Integrations…**) lists Claude Code, Codex
 and AX Code. For each it shows where the CLI was found (the inherited PATH, then
 the usual install folders such as `~/.local/bin` and `/opt/homebrew/bin`), the
-version `--version` prints, and what AkiTTY offers: status and conversation
-reports, Bash command approval, and resuming a conversation by ID. A missing CLI
-links to its install instructions. **Install**, **Reinstall** and **Remove**
-change only AkiTTY's hook entries and apply at once. **Connected** shows the
-newest conversation the agent reported from an open pane, which confirms the
-integration works. For AX Code, **Install** adds AkiTTY's MCP server (`akitty`,
+version `--version` prints, and the workflows available for that agent. A missing
+CLI links to its install instructions. **Install**, **Reinstall** and **Remove**
+change AkiTTY's entries and apply at once. **Connected** shows the newest
+conversation that agent reported from an open pane. For AX Code, **Install**
+adds AkiTTY's MCP server (`akitty`,
 running `akitty-agent mcp`) to `~/.config/ax-code/ax-code.json`
 (`$XDG_CONFIG_HOME/ax-code`), or run `akitty-agent ax-code-mcp install`. AX Code
 merges that plain-JSON file with the commented `ax-code.jsonc` people edit, so
@@ -150,7 +151,7 @@ connected`) and loads the plugin, which reported start and end for a real
 
 **Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
 launch, so integrations work without the menu each time. **Turn On** / **Turn
-Off** changes it for the running app. Every command still needs approval.
+Off** changes it for the running app. Each request still needs its own approval.
 
 ## Claude Code permission prompts
 
@@ -202,7 +203,7 @@ a command fingerprint, never the command.
 | Decide | `{"version":1,"op":"decide","agent":"claude-code","tool":"Bash","command":"…","cwd":"…","reason":"…"}`; `cwd`, `reason`, `request_id` optional. Returns `{decision, request_id, executor, akitty_sent_input: false}` with `decision` `allow` or `deny` |
 | Report | `{"version":1,"op":"report","agent":"claude-code","event":"session_start","session_id":"…"}`; `event` is `session_start` or `session_end` |
 
-`agent` is `claude-code` or `codex`.
+`decide` accepts `claude-code` and `codex`. `report` also accepts `ax-code`.
 
 ## Codex permission prompts
 
@@ -269,7 +270,7 @@ can be resumed: Claude Code with `claude --resume <id>`, Codex with
 
 ## Local request protocol and trust boundary
 
-The optional [local MCP bridge](MCP.md) exposes these same list/request operations
+The optional [local MCP bridge](MCP.md) exposes list, request and status operations
 through `akitty-agent mcp`. It adds no native authority, output access, or automatic
 retry. Pending approval is abandoned when the MCP call is canceled or stdin closes.
 

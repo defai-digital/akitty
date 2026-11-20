@@ -1,8 +1,8 @@
 # Compatibility and qualification
 
-This matrix describes the current source tree, not a six-product ranking or certification.
+This matrix records AkiTTY 2.0.0 behavior and its qualification limits.
 The canonical [verification gate](../scripts/verify.sh) runs the required automated suites.
-Refer to a release tag and its successful CI run when assessing a published binary.
+[Release notes](releases/2.0.0.md)
 
 | Capability | Evidence | Qualification boundary |
 | --- | --- | --- |
@@ -16,8 +16,9 @@ Refer to a release tag and its successful CI run when assessing a published bina
 | Kitty graphics | Native conformance/graphics tests and [optional external clients](../crates/akitty-core/tests/real_tools.rs) | Bounded implementation with explicit limits. Missing optional clients are skipped and do not establish compatibility. |
 | Vim, Neovim, tmux and SSH workflows | Protocol fixtures cover constituent behaviors | No complete application/version/platform qualification matrix is claimed. Record actual versions and observed workflows before marking these qualified. |
 | Local command request, approval, denial and reclaim | [Native request tests](../macos/Tests/AkittyKitTests/AgentRequestTests.swift), [reproducible demo](AGENT_DEMO.md) | The receipt establishes queued input. Shell/program reports are untrusted; the demo checks one separate expected file effect. Ordinary agent subprocesses are outside this path. |
+| Agent integration and approval queues | [Queue acceptance tests](../macos/Tests/AkittyKitTests/AgentAcceptanceTests.swift), [agent integration tests](../macos/Tests/AkittyKitTests/AgentIntegrationsTests.swift), [MCP bridge](MCP.md) | Local requests share per-pane queues. Claude Code and Codex supply supported Bash permission prompts. AX Code uses MCP and a conversation-reporting plugin. Live agent testing requires the respective installed CLIs. |
 | Program identity/status and event timeline | OSC 7501/771 and local recorder tests; [native contract](AGENT_NATIVE.md) | Program labels are self-reported. Retained event metadata is bounded, locally editable and incomplete. |
-| Session continuity | Quick-terminal toggle and lifecycle tests; [window-layout tests](../macos/Tests/AkittyKitTests/WindowLayoutTests.swift) | Hiding the quick terminal retains its live PTY. Named layouts save windows, tabs, splits and each pane's starting folder. An unchecked Include recent scrollback option stores up to 200 lines / 16 KiB of plain text per pane (128 KiB per layout) locally; Remove Stored Scrollback removes that text while keeping the layout. Restored text is searchable and copyable above a fresh shell, separated by markers. Processes are new. The opt-in Reopen Windows and Agent Conversations at Launch option ([resume tests](../macos/Tests/AkittyKitTests/AgentResumeTests.swift)) restores windows and offers each pane's reported Claude Code or Codex conversation for a human-started `claude --resume <id>` or `codex resume <id>`; running shell processes are not restored. Remote reattachment and a persistent PTY server remain unimplemented. |
+| Session continuity | Quick-terminal toggle and lifecycle tests; [window-layout tests](../macos/Tests/AkittyKitTests/WindowLayoutTests.swift) | Hiding the quick terminal retains its live PTY. Named layouts save windows, tabs, splits and each pane's starting folder. An unchecked Include recent scrollback option stores up to 200 lines / 16 KiB of plain text per pane (128 KiB per layout) locally; Remove Stored Scrollback removes that text while keeping the layout. Restored text is searchable and copyable above a fresh shell, separated by markers. Processes are new. The opt-in Reopen Windows and Agent Conversations at Launch option ([resume tests](../macos/Tests/AkittyKitTests/AgentResumeTests.swift)) opens fresh shells and offers each pane's reported Claude Code, Codex or AX Code conversation for a user-started resume. Remote reattachment and a persistent PTY server remain unimplemented. |
 | Parser/grid/reflow performance | [Native/WASM benchmark](../benchmarks/README.md) with raw samples and state equivalence | Excludes PTY, font rendering, key-to-paint latency, idle power and long-term memory behavior. No competitor ranking is inferred. |
 
 ## Recording an external qualification

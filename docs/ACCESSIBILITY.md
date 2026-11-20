@@ -1,11 +1,11 @@
 # Accessibility in AkiTTY
 
-AkiTTY 1.3.22's native macOS app exposes terminal text, selected text and ranges,
+AkiTTY 2.0.0 exposes terminal text, selected text and ranges,
 UTF-16 character counts, line and index queries, range reads and the cursor's row
 through AppKit accessibility. Tabs have accessible labels and selection actions.
 Agent Overview lists panes across windows, tabs, splits and the quick terminal,
-including when hidden. **VoiceOver user validation is not complete.** The behavior
-below is in the current source. A published download may be older; check its notes.
+including when hidden. **VoiceOver user validation remains in progress.**
+[Release notes](releases/2.0.0.md)
 
 ## Agent Overview
 
@@ -19,16 +19,26 @@ The **Control (host)** column describes enforced input ownership. **Program repo
 (unverified)** and **Shell directory (unverified)** are information supplied by terminal
 programs. They do not authenticate an agent or prove that work succeeded.
 
+**Approvals (host)** shows the pane's waiting count and oldest request.
+**Agent session (reported)** shows the reported conversation or the state of
+an offered resume. **Resume Conversation** applies to the selected pane.
+
 **Reclaim Control** returns terminal input to you and revokes unused approvals.
 It does not stop a running process. You can then interrupt that process normally.
 
 ## Command approval
 
-A trusted embedding host can request an approval sheet. It exposes the actor,
-terminal, exact command and shell-reported directory as text. **Deny** is the default
-button and receives initial keyboard focus; **Run Command** requires deliberate
-activation. The sheet explains that the directory is unverified and reclaiming input
-does not terminate commands. No approval capability is added to WebMCP.
+The native command approval sheet exposes the source, target pane, exact
+command and shell-reported directory as text. **Deny** is the default and
+receives initial keyboard focus. **Run Command** requires deliberate activation.
+Supported Bash permission prompts from Claude Code and Codex use
+**Allow Once** and **Deny** and identify the agent that will run the command.
+
+## Agents settings
+
+Open **Akitty → Agent Integrations…** to find CLI status, integration controls
+and the **Turn on when AkiTTY starts** switch. The switch has an explicit
+accessible name and defaults to off.
 
 ## Terminal reading
 
@@ -45,9 +55,10 @@ not generate announcements. Assistive technology controls how notifications are 
 ## Validation status
 
 Automated checks cover Overview membership and selection, accessible cell identity,
-Unicode line reads and invalid indices, state-transition messages, and the approval
-sheet's command context and default. These checks establish API behavior, not what
-a person hears from VoiceOver.
+Unicode line reads and invalid indices, state-transition messages, and command and
+permission sheet labels. The Agents settings audit exercises the system accessibility
+tree when the test process has macOS Accessibility permission. Manual VoiceOver
+sessions cover the spoken behavior.
 
 Keyboard/VoiceOver sessions still need to validate reading order, focus restoration,
 tabs and split panes, Settings, exact command pronunciation, selection, scrollback,

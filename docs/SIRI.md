@@ -13,13 +13,12 @@ upgrading the OS is not part of the macOS 27.2 setup.
 AkiTTY includes ten App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. System language, region, device support, and
-Siri settings affect discovery and speech recognition. These ten actions are in
-source 1.3.22. A published download may be older; check its notes and
-[unreleased changes](releases/unreleased.md).
+Siri settings affect discovery and speech recognition. The ten actions ship in
+[AkiTTY 2.0.0](releases/2.0.0.md).
 
 ## Get started on macOS 27.2
 
-1. Install a build containing this integration and open **Akitty.app** once.
+1. Install AkiTTY 2.0.0 and open **Akitty.app** once.
    When building from source, use `bash scripts/build-app.sh debug` and open
    `build/Akitty.app`. The packaging script includes the required metadata;
    launching a standalone executable from `swift build` is not the setup path.
@@ -76,9 +75,11 @@ output and command history are not needed for a discovery report.
 Request Command always requires approval of the exact command and target in
 AkiTTY. Deny is the default. It uses the same command validation, integrated
 shell readiness check, input lease, one-shot authorization, bounded approval
-lifetime, and event recording as local agent requests. Concurrent requests are
-rejected. Cancellation before approval, a closed target, or a stopped request
-service prevents approval. Commands run with the shell's existing OS permissions.
+lifetime, and event recording as local agent requests. Requests share the
+[per-pane approval queue](AGENT_NATIVE.md#several-agents-at-once) and expire
+120 seconds after enqueueing. Cancellation before approval, a closed target,
+or a stopped request service prevents approval. Commands run with the shell's
+existing OS permissions.
 
 Siri and Shortcuts requests do not enable the local request socket. The
 **Enable Local Agent Requests** setting continues to apply to socket clients.

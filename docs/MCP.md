@@ -12,8 +12,9 @@ read-only WebMCP adapter is separate and does not expose native macOS panes.
 
 ## Setup
 
-Use AkiTTY 1.3.21 or later. AkiTTY 1.3.20 and earlier do not include this feature.
-The companion is bundled with the macOS app; no Node or Python runtime is needed.
+AkiTTY 2.0.0 bundles the MCP companion with the macOS app. The examples use
+its approval queue, request IDs and request status.
+[Release notes](releases/2.0.0.md)
 
 1. Launch AkiTTY and choose **Akitty → Enable Local Agent Requests**. This grant
    is off again on every app launch unless you turn on **Turn on when AkiTTY

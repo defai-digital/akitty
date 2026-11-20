@@ -1,6 +1,7 @@
 # AkiTTY implementation roadmap
 
-This roadmap distinguishes the 1.3.0 implementation baseline and remaining qualification.
+This roadmap records shipped behavior through [AkiTTY 2.0.0](releases/2.0.0.md)
+and the remaining qualification and feature work.
 Native and Web now share the independently authored `akitty-vt` Rust engine.
 The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses
 WASM and a reauthored Canvas frontend. Neither builds an upstream terminal engine.
@@ -203,12 +204,12 @@ denial/disconnect/timeout/reclaim regressions; a real PTY command with an observ
 filesystem effect; bounded private recording with loss markers; and the canonical
 verification gate plus a built-app smoke. Published binaries are separate evidence.
 
-The optional [local MCP approval bridge](MCP.md) exposes the same native request
-contract through two tools, with Grok/Muse configuration examples. Output reading
-and UTCP remain deferred. Next work should validate user demand for visible
-approved dispatch, then define optional command policy/evidence adapters. Existing ax-trust
-LLM policies do not automatically authorize shell commands. Complete orchestration,
-cloud execution, remote multiplexing and verifiable result attestation are deferred.
+Version 2.0.0 adds per-pane approval queues, request IDs and request status,
+Claude Code and Codex hooks for supported Bash permission prompts, and AX Code
+setup through Settings → Agents. The [local MCP approval bridge](MCP.md)
+exposes `list_panes`, `request_command` and `request_status`. Output reading,
+UTCP, optional policy and evidence adapters, cloud execution, remote multiplexing,
+and result attestation remain follow-up areas.
 
 ## 6. Workspace usability
 
@@ -218,18 +219,20 @@ The existing panes and PTYs move together. Escape and app deactivation cancel th
 transfers and transfers during dialogs or termination are disabled. Regression tests cover split
 identity, control leases, callbacks, focus, cancellation and a real shell retaining its environment.
 
-The next feature candidates, in proposed order, are:
+Version 2.0.0 also ships opt-in workspace reopening with fresh shells and
+per-pane conversation resume for Claude Code, Codex and AX Code.
+[Workspace restore and resume](AGENT_NATIVE.md#reopen-windows-and-resume-agent-conversations)
+
+### Feature candidates
 
 1. Attention navigation in the existing Agent Overview: unread state, filters and jump to the next waiting pane.
-2. Global text search across tabs and windows, with bounded results and direct pane navigation.
+2. [Global text search across tabs and windows](https://github.com/defai-digital/akitty/issues/51), with bounded results and direct pane navigation.
 3. Command navigation and output inspection using the existing bounded shell observations. Agent output-read
    access would require its own explicit permission and retention contract.
-4. Opt-in app-restart layout recovery with corrupt-state preservation and clear fresh-process labels.
-   Live-process continuation requires a separate persistent PTY design.
+4. Further workspace recovery for corrupt layout data. Live-process continuation
+   requires a separate persistent PTY design.
 5. Project/worktree launch presets that open a task's tabs, folder and profile together.
 6. Diff preview and selected review-feedback handoff to an agent.
-
-These candidates are a learning backlog; only tab movement is included in this implementation.
 
 ## Outside the current roadmap
 
