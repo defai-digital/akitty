@@ -143,6 +143,8 @@ Each rate uses the median elapsed time across 45 real PTY samples. Timing runs
 from the first payload write to the terminal's reply to a trailing cursor-position
 request.
 
+<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s. On ASCII, ANSI color, CJK and combining text, and long lines, AkiTTY 1.4.1, Ghostty 1.4.0 and cmux 0.65.2.2 sit between 161 and 185. Alacritty 0.17.0 and Kitty 0.51.0 sit between 97 and 115.">
+
 | Workload (median MiB/s) | AkiTTY 1.4.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | ASCII | 184.3 | 176.5 | 102.9 | 115.0 | 169.1 |
