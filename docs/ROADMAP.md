@@ -53,6 +53,12 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   windows use 0.10% CPU and about 34 context switches a second, eight use 0.21% and about 63, with almost
   no idle wakeups; hiding the app changes neither. Each pane adds about eight switches a second, which
   matches the PTY worker's 250 ms idle poll for a silent child exit.
+- The Metal text path draws wide (two-column) monochrome single-scalar cells from the glyph atlas, so
+  CJK ideographs, kana, hangul and fullwidth forms no longer force a whole-frame CPU raster. Colour
+  emoji, ZWJ and regional-indicator clusters, combining sequences, wide geometric glyphs and
+  decorations on wide cells still fall back: the atlas stores alpha coverage only, so colour glyphs
+  need a separate RGBA tile pass. Eligibility is per frame, so one emoji left on screen keeps that
+  frame on the CPU path, and a repertoire larger than the atlas stands down to it after two rebuilds.
 - Engine cells are 40 bytes (packed colours, boxed combining marks, one shared
   hyperlink record per OSC 8 target), so grid and scrollback memory halved and the
   64 MiB history cap retains twice as many rows. Printable ASCII bypasses the parser

@@ -706,7 +706,20 @@ final class GridRasterizer: @unchecked Sendable {
     }
     /// Lines take their colour from the context at draw time, so the key is colour-free: truecolor gradient output
     /// (one colour per cell) reuses one entry per character instead of flushing the whole cache every few frames.
-    private struct GlyphKey: Hashable { var style: UInt8, text: String }
+    /// Hashed and compared by UTF-8 code unit rather than by `String`: Swift string equality is canonical,
+    /// so a CJK compatibility ideograph (U+FA10) would otherwise collide with its unified form (U+585A) and
+    /// draw the wrong glyph. The atlas keys its fitted masks by scalar for the same reason. UTF-8 is a Swift
+    /// string's native encoding, so this iterates without transcoding.
+    private struct GlyphKey: Hashable {
+        var style: UInt8, text: String
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(style)
+            for unit in text.utf8 { hasher.combine(unit) }
+        }
+        static func == (left: Self, right: Self) -> Bool {
+            left.style == right.style && left.text.utf8.elementsEqual(right.text.utf8)
+        }
+    }
     static let margin: CGFloat = 8
     private static let colorFromContext = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
     private static let maxGlyphs = 8192

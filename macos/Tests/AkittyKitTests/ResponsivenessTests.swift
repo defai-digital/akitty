@@ -160,7 +160,9 @@ final class ResponsivenessTests: XCTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertTrue(terminal.lastTextFramed, "the warm-up must present an atlas frame")
-        _ = try terminal.session.call("feed", ["text": "\u{1b}[1;1H漢"])
+        // An emoji cluster stays on the CPU reference path even after the IME mark is cleared, which a
+        // fitted wide CJK scalar no longer does.
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[1;1H👨\u{200D}👩\u{200D}👧"])
         let previous = terminal.snapshot
         let next = try terminal.session.snapshot(since: previous?.revision, base: previous)
         var reentered = false, completedAfterReentry = false
@@ -181,7 +183,7 @@ final class ResponsivenessTests: XCTestCase {
         }
         XCTAssertTrue(reentered)
         XCTAssertTrue(completedAfterReentry, "the reentrant frame must also complete")
-        XCTAssertFalse(terminal.lastTextFramed, "CJK remains on the CPU reference path")
+        XCTAssertFalse(terminal.lastTextFramed, "an emoji cluster remains on the CPU reference path")
     }
 
     @MainActor func testRasterStartedObserverCannotGiveItsDamageToTheOlderFrame() async throws {
@@ -204,15 +206,16 @@ final class ResponsivenessTests: XCTestCase {
         let initial = terminal.snapshot
         _ = try terminal.session.call("feed", ["text": "\u{1b}[1;1Hx"])
         let ascii = try terminal.session.snapshot(since: initial?.revision, base: initial)
-        _ = try terminal.session.call("feed", ["text": "\u{1b}[6;1H漢"])
-        let cjk = try terminal.session.snapshot(since: ascii?.revision, base: ascii)
+        // An emoji cluster keeps the nested frame on the CPU reference path; a fitted wide CJK scalar no longer does.
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[6;1H👨\u{200D}👩\u{200D}👧"])
+        let cluster = try terminal.session.snapshot(since: ascii?.revision, base: ascii)
         var applied = false, completed = false
         terminal.onNativeFrameEvent = { event in
             if case .rasterStarted(let revision) = event, revision == ascii?.revision, !applied {
                 applied = true
-                terminal.applySnapshot(.success(cjk))
+                terminal.applySnapshot(.success(cluster))
             }
-            if case .handedOff(let revision) = event, revision == cjk?.revision { completed = true }
+            if case .handedOff(let revision) = event, revision == cluster?.revision { completed = true }
         }
         terminal.applySnapshot(.success(ascii))
         let start = Date()
@@ -220,8 +223,8 @@ final class ResponsivenessTests: XCTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertTrue(applied)
-        XCTAssertTrue(completed, "the nested CJK snapshot must retain its own damage and complete")
-        XCTAssertFalse(terminal.lastTextFramed, "the final CJK frame must use the CPU reference path")
+        XCTAssertTrue(completed, "the nested cluster snapshot must retain its own damage and complete")
+        XCTAssertFalse(terminal.lastTextFramed, "the final emoji cluster frame must use the CPU reference path")
     }
 
     // A snapshot as the core sends it: only the fields a full frame carries, so this decodes exactly like a live one.

@@ -7,7 +7,7 @@ import CryptoKit
 /// Explicitly opt-in: opens a window and drives real PTYs and the normal snapshot/raster/Metal path.
 /// Reports synthetic Enter/scroll dispatch to GPU completion. Presentation timestamp availability is separate.
 @MainActor final class NativePipelineProbe {
-    static let allScenes = ["single-typing", "single-unicode-typing", "single-narrow-typing", "single-decorated-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll", "four-ascii-burst", "four-unicode-burst", "four-box-typing", "four-box-burst"]
+    static let allScenes = ["single-typing", "single-unicode-typing", "single-narrow-typing", "single-decorated-typing", "single-cjk-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll", "four-ascii-burst", "four-unicode-burst", "four-box-typing", "four-box-burst"]
 
     @MainActor private final class Trace {
         weak var terminal: TerminalView?
@@ -114,6 +114,9 @@ import CryptoKit
                 var program = "/usr/bin/awk '{printf \"%s\\r\\n\", $0; fflush()}'"
                 if condition.contains("decorated") { program = "/usr/bin/awk '{printf \"%s \\033[4méñßα\\033[0m →Ⅲ\\r\\n\", $0; fflush()}'" }
                 else if condition.contains("narrow") { program = "/usr/bin/awk '{printf \"%s éñßαλ€ →Ⅲ\\r\\n\", $0; fflush()}'" }
+                // Renderer-stable CJK: wide ideographs, hangul and fullwidth forms in three foreground
+                // colours, with no emoji, combining mark or cluster that would force the CPU path.
+                else if condition.contains("cjk") { program = "/usr/bin/awk '{printf \"%s \\033[38;2;90;180;240m漢字日本語\\033[0m\\033[38;2;240;180;90m中文한글\\033[0m、。「」ＡＢ\\r\\n\", $0; fflush()}'" }
                 else if condition.contains("unicode") { program = "/usr/bin/awk '{printf \"%s 漢字 emoji 😀\\r\\n\", $0; fflush()}'" }
                 else if condition.contains("box") { program = "/usr/bin/awk '{printf \"%s █▓▒░ ⠿⠋⠙⠸\\r\\n\", $0; fflush()}'" }
                 if pane > 0 {
@@ -128,6 +131,7 @@ import CryptoKit
                     program = "'\(node.replacingOccurrences(of: "'", with: "'\\''"))' -e '\(js.replacingOccurrences(of: "'", with: "'\\''"))'"
                 }
                 let seedText = condition.contains("narrow") || condition.contains("decorated") ? "seed éñßαλ€ →Ⅲ"
+                    : condition.contains("cjk") ? "seed 漢字日本語"
                     : condition.contains("unicode") ? "seed 漢字 emoji 😀"
                     : condition.contains("box") ? "seed █▓▒░ ⠿⠋⠙⠸" : "seed ASCII"
                 let seed = pane == 0 ? "i=0; while [ $i -lt 100 ]; do printf '\(seedText) line %s\\r\\n' $i; i=$((i+1)); done; " : ""

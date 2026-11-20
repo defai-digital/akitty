@@ -2443,3 +2443,130 @@ checks, and 485 Swift tests with seven opt-in skips. Chromium and WebKit browser
 Firefox profile-folder startup issue triggered its configured skip. These native runs establish renderer and host
 component improvements only. Physical key-to-photon latency, multi-day memory plateaus, real sleep/wake reliability
 and broad external terminal comparisons remain separate qualification work.
+
+## Wide-cell CJK atlas
+
+### Change
+
+Eligibility is per frame and all-or-nothing, so before this pass a single wide cell anywhere on screen
+sent the whole frame to the CPU rasterizer. That made CJK the dominant remaining cost: the mixed
+CJK/emoji scene measured 15.67% process CPU against 4.77-5.03% for the scenes the atlas could serve,
+and uploaded a full-window bitmap every frame.
+
+1. **Wide monochrome single-scalar cells are atlas-eligible.** A two-column cell is fitted into a box
+   twice as wide and centred in it, mirroring the `centre: item.columns == 2` the CPU rasterizer passes
+   to `GlyphFonts.placement`. Ideographs, kana, hangul and fullwidth punctuation and forms now draw from
+   the atlas. Width is decided *before* the geometric and printable-ASCII tests: a wide box, block or
+   braille scalar must stay on the CPU path because its `CellGlyphs` tile is one column wide and the
+   instance would stretch it across two.
+2. **Decorations on wide cells stay on the CPU path.** A wide decoration quad spans two columns and
+   overdraws the spacer — a blend the atlas has not been qualified for. This is checked before the
+   blank-text return, because an SGR-8 invisible wide lead carries no glyph but still carries its
+   underline or strikethrough.
+3. **Glyph keys are canonical-equivalence safe.** Swift compares and hashes strings canonically, so
+   `"\u{FA10}" == "\u{585A}"` is true while CoreText draws different ink for each. The atlas mask key
+   and the CoreText analysis key now carry the scalar, and the CPU rasterizer's `GlyphKey` hashes and
+   compares by UTF-16 code unit, so both paths resolve the same glyph. Fitted mask keys also carry the
+   column count, since one column left-aligns and may shrink the ink while two columns centre it at
+   full size. Colour stays in the key: measured on this machine, alpha coverage depends on the
+   foreground colour at 1x (worst 125/255 across colours) and 2x (worst 142/255), and is independent
+   only at 3x.
+4. **The analysis cache freezes instead of bricking.** At its cap it stops taking new residents rather
+   than refusing the glyph — which pinned every later unseen glyph to the software rasterizer for the
+   rest of the epoch, reachable with a CJK repertoire — or clearing itself, which oscillates once the
+   working set exceeds the cap.
+5. **Suspension recovers on probation.** After `suspensionRetryFrames` (600) refused frames a suspended
+   composer is allowed one rebuild, so a repertoire that outgrew the atlas and then shrank recovers on
+   its own instead of waiting for a resize, font or theme change. A truecolor storm still costs at most
+   one wasted rebuild per interval, and the interval counts from the moment of standing down.
+6. **Geometry refuses a cell too large for the atlas**, so an oversized cell cannot grow the atlas and
+   burn a rebuild before allocation fails.
+7. **A renderer-stable CJK scene** (`single-cjk-typing`): ideographs, hangul and fullwidth punctuation
+   and forms in three truecolor foregrounds, with no emoji, combining mark or cluster.
+
+Colour emoji are unchanged and structurally out of reach: the atlas stores alpha coverage only, so a
+colour glyph needs a second RGBA tile page, a shader change and cluster-based rather than cell-based
+composition. That is a separate pass.
+
+### Measurements
+
+Measured locally on Apple M3 Max / macOS 27.2.1 at revision `d0d97f2` plus these changes, using the
+pinned project toolchain and a release probe. Each scene used 30 measured inputs after three warmups.
+As before, these compare two renderer modes of the same candidate binary, not a before/after against
+the unmodified parent. The software column forces the CPU rasterizer through
+`AKITTY_NATIVE_PROBE_FORCE_SOFTWARE=1` and is a fair proxy for what a CJK frame cost before this
+change, because such a frame took that same whole-frame CPU path; its terminal phase is successful
+raster completion, so it is not comparable with Metal GPU completion or presentation. CPU is process
+user-plus-system percentage and excludes producer children and WindowServer.
+
+| Scene | Metal CPU | Software CPU | CPU reduction | Metal terminal p50/p95 ms | Software terminal p50/p95 ms | Metal presentation p50/p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain ASCII typing | 4.55% | 16.32% | 72.1% | 7.36 / 10.95 | 9.93 / 11.64 | 27.27 / 43.05 |
+| Narrow non-ASCII typing | 5.15% | 18.45% | 72.1% | 7.52 / 11.98 | 11.64 / 12.30 | 30.51 / 44.70 |
+| Single-underline narrow text | 4.98% | 19.04% | 73.9% | 6.39 / 11.02 | 11.86 / 13.08 | 27.22 / 42.58 |
+| Wide CJK typing | 4.92% | 18.49% | 73.4% | 6.52 / 10.68 | 12.47 / 13.83 | 28.20 / 39.03 |
+| Mixed CJK/emoji typing | 15.07% | 17.24% | 12.6% | 13.40 / 15.02 | 11.76 / 12.97 | 33.81 / 48.22 |
+
+Wide CJK typing joins the atlas regime: 4.92% against 4.55-5.15% for the scenes the atlas already
+served, and 73.4% below its own software control. All four atlas scenes recorded 30 changed snapshots
+and 30 raster builds for 30 measured inputs and uploaded only GPU text instance rows (42,831,360 bytes
+for the window), where the CPU-fallback mixed scene uploaded 587,520,000 bytes of bitmap. Mixed
+CJK/emoji is unchanged at 15.07% and 12.6%, which is run-to-run noise rather than a gain: one colour
+glyph on screen still refuses the frame. Presentation values in this run sit above the previous
+record's for every scene, including the ASCII control, so they carry run-to-run machine variation and
+support no latency claim. These are synthetic input-to-callback measurements, not physical
+key-to-photon latency.
+
+Capacity is the remaining constraint, and it is measured rather than assumed. At an 8x18 pt cell a wide
+mask is at most 36x40 device pixels at 2x and 52x58 at 3x, so the 4 MiB R8 texture holds roughly 2,600
+wide entries at 2x and 1,300 at 3x after shelf waste — the texture area binds before the 4,096 entry
+cap at both, and only at 1x does the cap bind first. Because colour is part of the key, a screen using
+three foregrounds needs three times the entries. A static screen fits comfortably; scrolling a log
+whose repertoire exceeds capacity exhausts the atlas, spends its two rebuilds and stands down — now
+recovering on probation once the repertoire shrinks. Long CJK log scrolling at 3x with many colours is
+therefore expected to spend time on the CPU path, which is what it did before this pass.
+
+Raw records:
+
+- [`native-wide-cjk-atlas-2026-11-20.json`](../benchmarks/results/native-wide-cjk-atlas-2026-11-20.json)
+- [`native-wide-cjk-software-control-2026-11-20.json`](../benchmarks/results/native-wide-cjk-software-control-2026-11-20.json)
+
+### Correctness and stability qualification
+
+The load-bearing invariant is that the composer may iterate raw cells instead of `GlyphClusters.merge`
+output. It holds because every cluster joiner is itself ineligible: joining needs a ZWJ-terminated lead
+or a regional-indicator pair, and `fittedScalar` refuses ZWJ, regional indicators, variation selectors,
+skin-tone modifiers, tag characters, emoji-presentation scalars and combining or format categories. A
+wide cell that passes the filter is therefore its own `Drawn` with `columns == 2`, and its spacer is a
+separate blank `Drawn` that both paths skip. A debug assert now checks exactly this — that merge is the
+identity and that `item.columns == (cell.wide ? 2 : 1)` — on every eligible frame, so relaxing
+eligibility without re-auditing merge fails loudly.
+
+The core side was verified against source and against the shared engine: `Cell::spacer()` writes a
+blank, clears the width field and inherits the lead's presentation; the emitter appends no text for a
+zero-width cell, sets the wide attribute only for width 2, and never omits a spacer (the blank-cell
+omission requires width 1); box, block and braille scalars are single-column because the core treats
+East Asian Ambiguous as 1; a width-2 lead cannot land in the final column; and a real headless session
+confirms the lead-plus-blank-spacer shape.
+
+Pixel equivalence against `GridRasterizer` holds at 1x, 2x and 3x within the existing 2/255 worst-channel
+tolerance for ideographs, hangul, fullwidth punctuation and forms, ink below the baseline, an
+ideographic space whose ink is empty, narrow text directly beside a wide cell, ambiguous-width scalars
+marked wide, all four font faces and three foreground colours. A separate case runs a 36 pt face in an
+8x18 cell so the ink must shrink, exercising the two-column scale factor, the overflow slides and the
+mask clamp that a 13 pt face never reaches. Wide fills, selection and search highlights are
+byte-identical, since solid quads carry no antialiasing. The contract is the established tolerance, not
+bit equality: the atlas rasterises into a transparent mask-sized context while the CPU draws onto an
+already-painted frame, and that destination difference leaves a small residual today for narrow fitted
+text as well.
+
+Also covered: one and two columns of the same scalar produce distinct entries in both insertion orders;
+canonically equivalent ideographs produce different coverage rather than sharing a mask; a full
+analysis cache still analyses a later glyph; a damaged row of wide cells re-encodes only that row and
+matches a full encode of the same snapshot; a static CJK screen uploads nothing and allocates exactly
+one mask per glyph after warmup; a ZWJ-led frame is refused without growing the atlas; unsupported
+column counts are rejected rather than clamped; and suspension recovers within one probation interval.
+
+Colour emoji, ZWJ and regional-indicator clusters, combining sequences, wide geometric glyphs,
+decorations on wide cells and fractional geometry all still fall back without changing atlas entries or
+reset counts.

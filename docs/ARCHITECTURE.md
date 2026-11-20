@@ -116,9 +116,11 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
-  Frames of plain single-scalar ASCII, geometric cell glyphs, fitted narrow monochrome single-scalar text, and
-  single underline/strikethrough decorations can be drawn from a glyph atlas when they contain no images, IME text,
-  wide cells, multi-scalar or color glyphs, complex underline styles, or fractional geometry (`MetalText.swift`).
+  Frames of plain single-scalar ASCII, geometric cell glyphs, fitted monochrome single-scalar text in one or two
+  columns, and single underline/strikethrough decorations on narrow cells can be drawn from a glyph atlas when they
+  contain no images, IME text, wide geometric glyphs, decorations on wide cells, multi-scalar or color glyphs,
+  complex underline styles, or fractional geometry (`MetalText.swift`). A two-column cell is fitted into a box twice
+  as wide and centred in it, exactly as the CPU rasterizer places it.
   Each distinct font glyph is rasterised once by CoreText into one bounded coverage texture and uploaded only when
   new, and the GPU composites per-row instance buffers of cell fills, glyph quads, decoration strips and cursor
   quads. Box, block and braille scalars reuse the same `CellGlyphs` geometry to make colour-independent coverage
@@ -128,11 +130,19 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
   only with that cache. Atlas rebuilds are rationed per font/scale/grid/theme epoch, and a frame needing more masks
   than an empty atlas holds is refused, so an adversarial colour workload degrades to the software rasterizer
-  instead of churning masks every frame. Because macOS text smoothing depends on the text colour, font masks are
-  keyed by style, text and foreground colour; geometric and decoration masks omit style and colour. Fitted text masks
-  are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
-  reproduce pixel-for-pixel (wide cells, multi-scalar or color glyph clusters, complex underline styles, IME
-  composition, Kitty images, backing scales outside 1x-3x) keeps the software rasterizer unchanged. A successful full
+  instead of churning masks every frame. Standing down is not permanent: after a fixed number of refused frames the
+  composer is allowed one probation rebuild, so a repertoire that outgrew the atlas and then shrank recovers without
+  a resize, font or theme change, while a sustained storm still pays at most one wasted rebuild per interval. Because macOS text smoothing depends on the text colour at 1x and 2x, font
+  masks are keyed by style, scalar, column count and foreground colour; geometric and decoration masks omit style and
+  colour. Keying by scalar rather than by text matters for CJK: Swift compares strings by canonical equivalence, so a
+  compatibility ideograph (U+FA10) equals and hashes like its unified form (U+585A) while CoreText draws different
+  ink for each. The CoreText line analysis behind a fitted mask is cached separately and keyed by style and text
+  alone, since it does not depend on the column count; a full analysis cache is dropped and rebuilt rather than
+  refused, so a large CJK repertoire cannot pin the path to the software rasterizer for the rest of the epoch.
+  Fitted text masks are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
+  reproduce pixel-for-pixel (wide geometric glyphs, decorations on wide cells, multi-scalar or color glyph clusters,
+  complex underline styles, IME composition, Kitty images, backing scales outside 1x-3x) keeps the software
+  rasterizer unchanged. A successful full
   content scan certifies
   atlas eligibility; a no-scroll incremental frame rechecks only its damaged rows, while scrolling, unknown damage,
   layout changes, fallback recovery and resource release require a fresh full scan. Snapshot damage is merged before

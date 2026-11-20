@@ -59,6 +59,247 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
+    /// Wide CJK at every validated backing scale. At 13 pt in an 8x18 cell an ideograph's ink already fits
+    /// its two-column box, so this covers placement at scale 1; the shrinking case is a separate test.
+    @MainActor func testWideCjkFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        // Ideographs, hangul, fullwidth punctuation and forms, ink below the baseline, dense strokes, an
+        // ideographic space whose ink is empty, narrow text directly beside a wide cell, all four faces, and
+        // ambiguous-width scalars the core marked wide.
+        let cells = wideLine(0, "漢字日本語") + wideLine(1, "中文한글", Style(fg: [240, 180, 90]))
+            + wideLine(2, "、。「」＿") + wideLine(3, "ＡＢ", Style(bold: true)) + wideLine(4, "鬱龘")
+            + line(5, "a") + wideCell(5, 1, text: "中") + line(5, "b", col: 3)
+            + wideCell(6, 0, text: "\u{3000}") + line(6, "ascii", col: 4)
+            + wideLine(7, "斜体", Style(italic: true)) + wideLine(8, "太字", Style(bold: true))
+            + wideLine(9, "粗斜", Style(bold: true, italic: true))
+            + wideCell(10, 0, text: "→") + wideCell(10, 4, text: "★")
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            let painted = paintedPixels(cpu)
+            XCTAssertGreaterThan(painted, 1000, "\(scale)x wide CJK CPU reference painted \(painted) pixels")
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x wide CJK max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.95, "\(scale)x wide CJK identical pixels \(result.exact)")
+            XCTAssertFalse(composer.isSuspended, "\(scale)x wide CJK must not exhaust the atlas")
+        }
+    }
+
+    /// A face larger than its cell forces `placement` to shrink the ink, which exercises the two-column
+    /// scale factor, the overflow slides and the mask clamp that a 13 pt face never reaches.
+    @MainActor func testWideGlyphsThatMustShrinkToFitTwoColumnsMatchTheCpuRasterizer() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let snapshot = try snapshot(cells: wideLine(0, "鬱龘龜") + wideLine(1, "漢字", Style(fg: [240, 180, 90])))
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo",
+                                              fontSize: 36, cellSize: cell, composition: "")
+            presenter.clearColor = MetalPresenter.clearColor(for: RenderAppearance.standard.backgroundColor)
+            let frame = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "",
+                                                       appearance: .standard), "\(scale)x shrunk wide glyph must compose")
+            try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let (width, height) = bitmapSize(scale)
+            let gpu = try presenter.renderOffscreen(width: width, height: height)
+            XCTAssertGreaterThan(paintedPixels(cpu), 0, "\(scale)x shrink CPU reference painted glyphs")
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x shrunk wide glyph max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.90, "\(scale)x shrunk wide glyph identical pixels \(result.exact)")
+        }
+    }
+
+    /// A damaged row of wide cells must re-encode only that row and still produce exactly what a full
+    /// encode of the same snapshot produces; wide masks are twice the area, so packing regressions and
+    /// stale two-column UVs surface here first.
+    @MainActor func testOnlyDirtyRowsWithWideCellsAreReEncoded() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        let base = (0..<rows).map { wideLine($0, "漢字日本語") }
+        _ = try render(try snapshot(cells: base.flatMap { $0 }), scale: 2, presenter: presenter, composer: composer)
+        var mutated = base
+        mutated[3] = wideLine(3, "中文한글")
+        let changed = try snapshot(cells: mutated.flatMap { $0 })
+        let frame = try XCTUnwrap(compose(changed, composer: composer, damage: [3]))
+        XCTAssertEqual(frame.dirtyRows, [3], "only the damaged row is re-encoded")
+        let full = try XCTUnwrap(compose(changed, composer: TextComposer(), damage: nil))
+        XCTAssertEqual(frame.content, [full.content[3]],
+                       "the re-encoded wide row matches the same row from a full encode")
+    }
+
+    /// A column count other than one or two would write a mask of the wrong width into a real slot, so it
+    /// is rejected rather than clamped.
+    func testFittedEntryRejectsAColumnCountThatIsNotOneOrTwo() throws {
+        let atlas = GlyphAtlas()
+        let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo",
+                                                              fontSize: 13, cols: cols, rows: rows))
+        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil), han = try XCTUnwrap("漢".unicodeScalars.first)
+        for columns in [-1, 0, 3, 4] {
+            XCTAssertNil(atlas.fittedEntry(style: 0, scalar: han, columns: columns,
+                                           fg: [218, 226, 239], face: face, geometry: geometry),
+                         "\(columns) columns is not a terminal width")
+        }
+        XCTAssertEqual(atlas.count, 0, "a rejected column count must not grow the atlas")
+    }
+
+    /// A wide lead and its spacer paint solid quads only, so there is no antialiasing to tolerate: the lead's
+    /// two-column fill and the spacer's one-column repaint must land byte-identically on both paths.
+    @MainActor func testWideCellFillsAndSelectionAreByteIdentical() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        // Blank wide cells carry no glyph, isolating the fill, selection and search passes.
+        let cells = wideCell(0, 0, text: " ", Style(selected: true))
+            + wideCell(1, 0, text: " ", Style(bg: [40, 60, 90]))
+            + wideCell(2, 0, text: " ", Style(search: true, activeSearch: true))
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            XCTAssertEqual(compare(cpu, gpu).max, 0, "\(scale)x wide fills and selection must be byte-identical")
+        }
+    }
+
+    /// One column left-aligns a glyph and shrinks ink wider than the cell; two columns centre it at full
+    /// size. The masks therefore differ, and aliasing them would render the wrong shape after a width change.
+    func testWideAndNarrowRenderingsOfTheSameScalarAreSeparateAtlasEntries() throws {
+        let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo",
+                                                              fontSize: 13, cols: cols, rows: rows))
+        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+        let fg: [UInt8] = [218, 226, 239], han = try XCTUnwrap("漢".unicodeScalars.first)
+        for wideFirst in [false, true] {
+            let atlas = GlyphAtlas()
+            var narrow: GlyphAtlas.Entry?, wide: GlyphAtlas.Entry?
+            for columns in wideFirst ? [2, 1] : [1, 2] {
+                guard case .entry(let entry)? = atlas.fittedEntry(style: 0, scalar: han, columns: columns,
+                                                                  fg: fg, face: face, geometry: geometry) else {
+                    return XCTFail("漢 must be fitted at \(columns) column(s)")
+                }
+                if columns == 2 { wide = entry } else { narrow = entry }
+            }
+            let narrowEntry = try XCTUnwrap(narrow), wideEntry = try XCTUnwrap(wide)
+            XCTAssertFalse(narrowEntry.u == wideEntry.u && narrowEntry.v == wideEntry.v,
+                           "column count must key the mask regardless of insertion order")
+            XCTAssertGreaterThan(wideEntry.width, narrowEntry.width, "a two-column mask covers a wider box")
+            XCTAssertEqual(atlas.count, 2)
+            assertDisjoint(atlas.pending, entries: 2)
+        }
+    }
+
+    /// Swift compares strings by canonical equivalence, so a CJK compatibility ideograph equals and hashes
+    /// like its unified form while CoreText draws different ink for each. Keying masks by scalar keeps them apart.
+    func testCanonicallyEquivalentIdeographsDoNotShareAnAtlasEntry() throws {
+        XCTAssertEqual("\u{FA10}", "\u{585A}", "the compatibility form is the same Swift String as the unified one")
+        let atlas = GlyphAtlas()
+        let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo",
+                                                              fontSize: 13, cols: cols, rows: rows))
+        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+        let fg: [UInt8] = [218, 226, 239]
+        let compatibility = try XCTUnwrap("\u{FA10}".unicodeScalars.first)
+        let unified = try XCTUnwrap("\u{585A}".unicodeScalars.first)
+        guard case .entry? = atlas.fittedEntry(style: 0, scalar: compatibility, columns: 2,
+                                               fg: fg, face: face, geometry: geometry) else {
+            return XCTFail("U+FA10 must be fitted")
+        }
+        guard case .entry? = atlas.fittedEntry(style: 0, scalar: unified, columns: 2,
+                                               fg: fg, face: face, geometry: geometry) else {
+            return XCTFail("U+585A must be fitted")
+        }
+        XCTAssertEqual(atlas.count, 2, "equivalent strings must not share one mask")
+        assertDisjoint(atlas.pending, entries: 2)
+        // Two entries are not enough on their own: if the analysis cache aliased them, both would hold the
+        // first codepoint's glyph. The coverage itself has to differ.
+        let uploads = atlas.pending
+        XCTAssertEqual(uploads.count, 2)
+        XCTAssertNotEqual(uploads[0].coverage, uploads[1].coverage,
+                          "each codepoint must rasterise its own glyph, not the cached equivalent's")
+    }
+
+    /// A full analysis cache stops taking new residents instead of refusing the glyph or evicting the hot
+    /// set. Refusing would pin every later unseen glyph to the software rasterizer for the rest of the
+    /// epoch, and clearing would oscillate once the repertoire exceeds the cap.
+    func testAFullAnalysisCacheStillFitsLaterGlyphs() throws {
+        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+        let probe = try XCTUnwrap("漢".unicodeScalars.first)
+        XCTAssertTrue(GlyphAtlas().canFit(style: 0, scalar: probe, face: face),
+                      "the probe glyph is fittable when cold")
+        let atlas = GlyphAtlas()
+        // Distinct ideographs below the probe's codepoint, so filling the cache never warms the probe.
+        for offset in 0..<(GlyphAtlas.maxEntries + 16) {
+            let scalar = try XCTUnwrap(Unicode.Scalar(0x4E00 + UInt32(offset)))
+            _ = atlas.canFit(style: 0, scalar: scalar, face: face)
+        }
+        XCTAssertTrue(atlas.canFit(style: 0, scalar: probe, face: face),
+                      "a full analysis cache must still analyse a later glyph")
+    }
+
+    /// The composer iterates raw cells, so a wide cell the CPU would absorb into a preceding cluster must
+    /// never reach it. Absorption needs a ZWJ or regional-indicator lead, and every such lead is itself
+    /// ineligible — that is the property keeping the two paths in agreement, so both halves are asserted.
+    func testAClusterLeadRefusesTheFrameEvenWhenTheWideFollowerIsFittable() throws {
+        let composer = TextComposer()
+        _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "x")), composer: composer, damage: nil))
+        let entries = composer.atlasEntries, resets = composer.atlasResets
+        XCTAssertNotNil(compose(try snapshot(cells: wideCell(0, 0, text: "中")), composer: TextComposer(), damage: nil),
+                        "a lone wide scalar is drawable on its own")
+        let absorbed = [wire(0, 0, text: "a\u{200D}"), wire(0, 1, text: "中", Style(wide: true)), wire(0, 2, text: "")]
+        XCTAssertNil(compose(try snapshot(cells: absorbed), composer: composer, damage: nil),
+                     "a ZWJ lead makes the whole frame ineligible, follower included")
+        XCTAssertEqual(composer.atlasEntries, entries, "a refused frame must not grow the atlas")
+        XCTAssertEqual(composer.atlasResets, resets)
+    }
+
+    /// The core emits a wide lead plus a blank spacer that inherits the lead's presentation. That shape is
+    /// what makes the composer's raw-cell iteration safe, so it is checked against the real core.
+    func testRealCoreWideCellsArriveAsALeadAndBlankSpacer() throws {
+        let session = try TerminalSession(cols: 20, rows: 4, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}[1;1H\u{1b}[44m中文\u{1b}[0m"])
+        let cells = try XCTUnwrap(try session.snapshot()).cells
+        for text in ["中", "文"] {
+            let lead = try XCTUnwrap(cells.first { $0.text == text }, "the core reports \(text)")
+            XCTAssertTrue(lead.wide, "\(text) is two columns wide")
+            let spacer = try XCTUnwrap(cells.first { $0.row == lead.row && $0.col == lead.col + 1 },
+                                       "\(text) is followed by its spacer")
+            XCTAssertEqual(spacer.text, "", "the spacer carries no glyph")
+            XCTAssertFalse(spacer.wide, "the spacer is not itself wide")
+            XCTAssertEqual(spacer.bg, lead.bg, "the spacer inherits the lead's background")
+        }
+    }
+
+    /// A screen of CJK at rest must cost nothing after its first frame: a reset or upload per frame would be
+    /// worse than the software rasterizer it replaced.
+    func testAStableCjkScreenNeverThrashesTheAtlas() throws {
+        let composer = TextComposer()
+        let columns = Array(stride(from: 0, to: cols - 1, by: 2))
+        var cells: [[Any]] = [], scalar: UInt32 = 0x4E00
+        for row in 0..<rows {
+            for column in columns {
+                cells += wideCell(row, column, text: String(try XCTUnwrap(Unicode.Scalar(scalar))))
+                scalar += 1
+            }
+        }
+        let snapshot = try snapshot(cells: cells)
+        let first = try XCTUnwrap(compose(snapshot, composer: composer, damage: nil))
+        XCTAssertGreaterThan(first.uploads.count, 0, "the first frame rasterises the screen")
+        XCTAssertFalse(composer.isSuspended, "one screen of CJK fits the atlas")
+        let entries = composer.atlasEntries, resets = composer.atlasResets
+        XCTAssertEqual(entries, columns.count * rows, "one mask per distinct glyph and none for the spacers")
+        for _ in 0..<20 {
+            let again = try XCTUnwrap(compose(snapshot, composer: composer, damage: Set(0..<rows)))
+            XCTAssertTrue(again.uploads.isEmpty, "a static CJK screen uploads nothing once warm")
+            XCTAssertFalse(again.resetAtlas)
+            XCTAssertEqual(composer.atlasEntries, entries)
+            XCTAssertEqual(composer.atlasResets, resets)
+        }
+    }
+
     func testColorAndClusterContentFallsBackWithoutGrowingTheAtlas() throws {
         let composer = TextComposer()
         _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "x")), composer: composer, damage: nil))
@@ -489,7 +730,7 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(try fallback([wire(0, 0, text: "█")]), "block geometry is eligible")
         XCTAssertNil(try fallback([wire(0, 0, text: "⠀")]), "blank braille is eligible without an atlas tile")
         XCTAssertNil(try fallback(line(0, "│")), "box geometry is eligible")
-        XCTAssertEqual(try fallback(line(0, "漢字", Style(wide: true))), .wideCell, "wide CJK keeps the software path")
+        XCTAssertNil(try fallback(line(0, "漢字", Style(wide: true))), "wide CJK is fitted into a two-column box")
         XCTAssertEqual(try fallback([wire(0, 0, text: "e\u{0301}")]), .nonASCII, "combining text keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "👨‍👩‍👧")]), .nonASCII, "emoji keeps the software path")
         XCTAssertNil(try fallback([wire(0, 0, text: "│")]), "box drawing uses geometric coverage, not a font glyph")
@@ -497,8 +738,24 @@ final class MetalTextRenderingTests: XCTestCase {
             XCTAssertEqual(try fallback(line(0, "und", Style(underline: true, underlineStyle: style))), .decoratedCell,
                            "underline style \(style) keeps the CPU path")
         }
-        XCTAssertEqual(try fallback([wire(0, 0, text: "中", Style(wide: true))]), .wideCell, "wide cells keep the CPU path")
+        XCTAssertNil(try fallback([wire(0, 0, text: "中", Style(wide: true))]), "a wide scalar is fitted like a narrow one")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "中", Style(underline: true, wide: true))]), .wideCell,
+                       "a wide decoration stays on the CPU path until it is separately qualified")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "中", Style(strike: true, wide: true))]), .wideCell,
+                       "a wide strikethrough stays on the CPU path")
+        // SGR-8 hides the glyph but keeps the decoration, so the blank-text return must not run first.
+        XCTAssertEqual(try fallback([wire(0, 0, text: " ", Style(underline: true, wide: true))]), .wideCell,
+                       "an invisible wide lead still carries its underline")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "", Style(strike: true, wide: true))]), .wideCell,
+                       "an invisible wide lead still carries its strikethrough")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "中\u{0301}", Style(wide: true))]), .wideCell,
+                       "a combining mark on a wide base stays on the CPU path")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "A", Style(wide: true))]), .wideCell,
+                       "a wide cell holding printable ASCII stays on the CPU path")
+        // Width is decided before the geometric test: a wide box glyph would rasterise a one-column
+        // tile that the instance then stretches across two columns.
         XCTAssertEqual(try fallback([wire(0, 0, text: "█", Style(wide: true))]), .wideCell, "wide geometry keeps the CPU path")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "😀", Style(wide: true))]), .wideCell, "wide emoji keeps the CPU path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "│", Style(underline: true, underlineStyle: 2))]), .decoratedCell,
                        "decorated geometry keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), composition: "ab"), .composition, "IME composition keeps the CPU path")
@@ -515,9 +772,9 @@ final class MetalTextRenderingTests: XCTestCase {
                        "a fractional bitmap width")
         // Composition also refuses at the composer, which is the only caller that can drop cells.
         let composer = TextComposer()
-        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字", Style(wide: true))), damage: nil, size: size,
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: [wire(0, 0, text: "👨‍👩‍👧")]), damage: nil, size: size,
                                       scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
-                                      appearance: .standard), "a CJK frame must not be silently drawn as blanks")
+                                      appearance: .standard), "an emoji cluster must not be silently drawn as blanks")
     }
 
     func testPrevalidatedGeometryCannotBypassContentEligibility() throws {
@@ -545,8 +802,9 @@ final class MetalTextRenderingTests: XCTestCase {
 
     func testDirtyUnsupportedCellsInvalidateEligibilityAndFullDamageRecovers() throws {
         let unsupported = [
-            line(3, "漢字", Style(wide: true)), [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")],
-            [wire(3, 0, text: "中", Style(wide: true))], line(3, "und", Style(underline: true, underlineStyle: 2)),
+            [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")], [wire(3, 0, text: "😀")],
+            [wire(3, 0, text: "中", Style(underline: true, wide: true))],
+            line(3, "und", Style(underline: true, underlineStyle: 2)),
             line(3, "gone", Style(underline: true, underlineStyle: 5)),
         ]
         let source = (0..<rows).map { "row \($0)" }
@@ -570,7 +828,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let source = (0..<rows).map { "row \($0)" }
         let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
-        let shifted = try snapshot(cells: (1..<rows).flatMap { line($0 - 1, $0 == 1 ? "漢字" : source[$0], $0 == 1 ? Style(wide: true) : Style()) }
+        let shifted = try snapshot(cells: (1..<rows).flatMap { line($0 - 1, $0 == 1 ? "e\u{0301}" : source[$0]) }
             + line(rows - 1, "new"))
         XCTAssertNil(composer.compose(snapshot: shifted, damage: [rows - 1], size: size, scale: 2,
                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
@@ -587,9 +845,9 @@ final class MetalTextRenderingTests: XCTestCase {
         let composer = TextComposer()
         let initial = try snapshot(cells: line(0, "plain"))
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
-        let unsupported = try snapshot(cells: line(0, "漢字", Style(wide: true)), images: [placement(id: 1)])
+        let unsupported = try snapshot(cells: [wire(0, 0, text: "👨‍👩‍👧")], images: [placement(id: 1)])
         XCTAssertNil(compose(unsupported, composer: composer, damage: []), "images take the layered path first")
-        let withoutImages = try snapshot(cells: line(0, "漢字", Style(wide: true)))
+        let withoutImages = try snapshot(cells: [wire(0, 0, text: "👨‍👩‍👧")])
         XCTAssertNil(compose(withoutImages, composer: composer, damage: []),
                      "the next content check cannot reuse eligibility from before the image frame")
         XCTAssertEqual(composer.eligibilityScannedRows, 1)
@@ -852,7 +1110,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let initial = try snapshot(cells: line(0, "layout"))
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
         let resets = composer.atlasResets
-        let unsupported = try snapshot(cells: [wire(0, 0, text: "漢", Style(wide: true))])
+        let unsupported = try snapshot(cells: [wire(0, 0, text: "👨‍👩‍👧", Style(wide: true))])
         XCTAssertNil(composer.compose(snapshot: unsupported, damage: [0], size: size, scale: 2,
                                       fontName: "Courier New", fontSize: 13, cell: cell,
                                       cjkFontName: "", appearance: .standard))
@@ -986,7 +1244,7 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(composer.atlasEntries, entries)
         XCTAssertEqual(composer.atlasResets, resets)
         let otherSize = CGSize(width: size.width + 8, height: size.height)
-        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字", Style(wide: true))), damage: nil, size: otherSize, scale: 3,
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: [wire(0, 0, text: "👨‍👩‍👧")]), damage: nil, size: otherSize, scale: 3,
                                       fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "",
                                       appearance: .standard))
         XCTAssertTrue(composer.isSuspended, "unsupported content at another layout cannot re-arm the atlas")
@@ -1000,13 +1258,45 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(composer.atlasResets, resets)
     }
 
+    /// Standing down must not be permanent for the epoch: a repertoire that outgrew the atlas and then
+    /// shrinks has to recover on its own, without a resize, font or theme change to re-arm it.
+    func testSuspensionRecoversOnProbationAfterTheRetryInterval() throws {
+        let composer = TextComposer()
+        // Spend the rebuild budget the same way the exhaustion test does.
+        for frame in 0..<14 {
+            var cells: [[Any]] = []
+            for row in 0..<rows {
+                for col in 0..<cols {
+                    let key = frame * rows * cols + row * cols + col
+                    let fg = [key % 251, (key / 251) % 251, (key / 63_001) % 251]
+                    cells.append(wire(row, col, text: String(UnicodeScalar(UInt8(65 + key % 8))), Style(fg: fg)))
+                }
+            }
+            _ = composer.compose(snapshot: try snapshot(cells: cells), damage: nil, size: size, scale: 3,
+                                 fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "", appearance: .standard)
+        }
+        XCTAssertTrue(composer.isSuspended, "the rebuild budget stands the composer down")
+        let small = try snapshot(cells: line(0, "ascii"))
+        func composeSmall() -> TextFrame? {
+            composer.compose(snapshot: small, damage: nil, size: size, scale: 3, fontName: "Menlo",
+                             fontSize: 36, cell: cell, cjkFontName: "", appearance: .standard)
+        }
+        XCTAssertNil(composeSmall(), "a suspended composer must not retry on the very next frame")
+        XCTAssertTrue(composer.isSuspended)
+        // The frame the retry lands on depends on how many refusals the stand-down itself took, so only the
+        // bound is asserted: within one probation interval the atlas path must come back on its own.
+        for _ in 0..<TextComposer.suspensionRetryFrames { _ = composeSmall() }
+        XCTAssertFalse(composer.isSuspended, "a shrunken repertoire recovers without a layout change")
+        XCTAssertNotNil(composeSmall(), "the recovered composer draws from the atlas again")
+    }
+
     @MainActor func testRejectedFontLayoutDoesNotCorruptTheActiveRenderer() throws {
         let presenter: MetalPresenter
         do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
         let composer = TextComposer()
         let menlo = try snapshot(cells: line(0, "x"))
         _ = try render(menlo, scale: 2, presenter: presenter, composer: composer)
-        let rejected = try snapshot(cells: [wire(0, 0, text: "é"), wire(0, 1, text: "漢", Style(wide: true))])
+        let rejected = try snapshot(cells: [wire(0, 0, text: "é"), wire(0, 1, text: "👨‍👩‍👧")])
         XCTAssertNil(composer.compose(snapshot: rejected, damage: nil,
                                       size: size, scale: 2, fontName: "Courier New", fontSize: 13, cell: cell,
                                       cjkFontName: "", appearance: .standard),
@@ -1227,6 +1517,19 @@ final class MetalTextRenderingTests: XCTestCase {
     /// A string laid out one grapheme per column, as a real snapshot carries it.
     private func line(_ row: Int, _ text: String, col: Int = 0, _ style: Style = Style()) -> [[Any]] {
         text.enumerated().map { offset, character in wire(row, col + offset, text: String(character), style) }
+    }
+
+    /// A wide cell in the form the core actually emits it: a two-column lead plus a blank spacer that
+    /// inherits the lead's presentation. `line` would instead mark both halves as carrying text, which
+    /// the core never produces and which would hide spacer-specific bugs.
+    private func wideCell(_ row: Int, _ col: Int, text: String, _ style: Style = Style()) -> [[Any]] {
+        var lead = style; lead.wide = true
+        return [wire(row, col, text: text, lead), wire(row, col + 1, text: "", style)]
+    }
+
+    /// One wide cell per character, laid out two columns apart.
+    private func wideLine(_ row: Int, _ text: String, col: Int = 0, _ style: Style = Style()) -> [[Any]] {
+        text.enumerated().flatMap { offset, character in wideCell(row, col + offset * 2, text: String(character), style) }
     }
 
     private func snapshot(cells: [[Any]] = [], images: [ImagePlacement] = [], cols: Int? = nil, rows: Int? = nil,
