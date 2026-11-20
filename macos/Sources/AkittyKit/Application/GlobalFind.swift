@@ -224,8 +224,8 @@ struct GlobalFindHit: Equatable {
     }
     private func walk(_ query: String, token: Int, panes: [Target], index: Int, found: [GlobalFindHit], capped: Bool, stepped: Bool) {
         guard generation == token else { return }
-        if index >= panes.count || found.count >= Self.totalLimit {
-            apply(token, hits: found, capped: capped || index < panes.count, query: query, closedWindow: false)
+        if index >= panes.count || (found.count == Self.totalLimit && capped) {
+            apply(token, hits: found, capped: capped, query: query, closedWindow: false)
             return
         }
         let room = min(Self.perPaneLimit, Self.totalLimit - found.count)
@@ -257,10 +257,10 @@ struct GlobalFindHit: Equatable {
             let room = limit - found.count
             let nextCursor: ScanCursor?
             if room <= 0 {
-                guard let cursor = before else { done(found, false); return }
-                let probe = chunk(target, query: query, limit: 1, before: cursor)
+                // A full list still needs evidence of an omitted hit, even in a pane not yet scanned.
+                let probe = chunk(target, query: query, limit: 1, before: before)
                 if !probe.hits.isEmpty || probe.capped { done(found, true); return }
-                guard let next = probe.next, next != cursor else { done(found, false); return }
+                guard let next = probe.next, before != .some(next) else { done(found, false); return }
                 nextCursor = next
             } else {
                 let page = chunk(target, query: query, limit: room, before: before)

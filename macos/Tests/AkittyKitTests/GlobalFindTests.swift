@@ -123,6 +123,29 @@ final class GlobalFindTests: XCTestCase {
         XCTAssertTrue(finder.statusText.contains("More matches were not listed."))
     }
 
+    @MainActor func testFullResultListOnlyReportsOverflowWhenAnotherMatchExists() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication()
+        defer { cleanUp(app) }
+        let window = try app.createTerminalWindow(headless: true)
+        for _ in 0..<4 {
+            try feed(try XCTUnwrap(window.active), String(repeating: "LIMIT-HIT\r\n", count: 25))
+            try window.newTab()
+        }
+        let extra = try XCTUnwrap(window.active)
+        window.tabs.selectTabViewItem(at: 0)
+        let finder = GlobalFindController(app: app)
+        finder.anchor = window
+        finder.searchNow("LIMIT-HIT")
+        XCTAssertEqual(finder.hits.count, 100)
+        XCTAssertEqual(finder.statusText, "100 matches")
+
+        try feed(extra, "LIMIT-HIT\r\n")
+        finder.searchNow("LIMIT-HIT")
+        XCTAssertEqual(finder.hits.count, 100)
+        XCTAssertEqual(finder.statusText, "Showing 100 matches. More matches were not listed.")
+    }
+
     @MainActor func testSplitPaneActivationFocusesThatPane() throws {
         _ = NSApplication.shared
         let app = AkittyApplication()
