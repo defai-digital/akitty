@@ -217,6 +217,7 @@ integration, quick terminal behavior and VoiceOver validation.
 | Command palette | ⇧⌘P |
 | Agent Overview | ⌥⌘A |
 | Find in scrollback | ⌘F |
+| Find in all terminals | ⌥⌘F |
 | Find next / previous | ⌘G / ⇧⌘G |
 | Increase / decrease / reset font size | ⌘+ / ⌘− / ⌘0 |
 

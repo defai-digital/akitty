@@ -3,7 +3,7 @@ import JavaScriptCore
 
 public enum NativeCommand: String, CaseIterable, Codable {
     case newWindow = "new-window", newTab = "new-tab", split, closePane = "close-pane"
-    case copy, paste, find, findNext = "find-next", findPrevious = "find-previous"
+    case copy, paste, find, findNext = "find-next", findPrevious = "find-previous", findAll = "find-all"
     case fontIncrease = "font-increase", fontDecrease = "font-decrease", fontReset = "font-reset"
     case agentOverview = "agent-overview"
     public var title: String {
@@ -17,6 +17,7 @@ public enum NativeCommand: String, CaseIterable, Codable {
         case .find: return "Find in Scrollback"
         case .findNext: return "Find Next"
         case .findPrevious: return "Find Previous"
+        case .findAll: return "Find in All Terminals"
         case .fontIncrease: return "Increase Font Size"
         case .fontDecrease: return "Decrease Font Size"
         case .fontReset: return "Reset Font Size"

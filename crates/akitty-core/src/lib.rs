@@ -104,6 +104,32 @@ enum Request {
         #[serde(default)]
         clear: bool,
     },
+    /// Newest literal hits in the open scrollback. Does not move the viewport or set a find mark.
+    FindMatches {
+        id: u64,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        /// Row already scanned. Pair with `before_generation`. Absent scans from the bottom.
+        #[serde(default)]
+        before_row_id: Option<u64>,
+        #[serde(default)]
+        before_generation: Option<u64>,
+        /// Rows to read this call, 1..=512. Absent means 256.
+        #[serde(default)]
+        max_lines: Option<usize>,
+    },
+    /// Highlight one listed hit. A row that has left scrollback, or whose generation changed, is `expired` and is not scrolled to.
+    FindReveal {
+        id: u64,
+        #[serde(default)]
+        text: String,
+        row_id: u64,
+        generation: u64,
+        col: usize,
+        end_col: usize,
+    },
     /// Replace the session chrome document. `clear` removes it. This entry
     /// applies even when program chrome is off.
     Chrome {
@@ -295,6 +321,8 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 | Request::CellSize { id, .. }
                 | Request::Select { id, .. }
                 | Request::Find { id, .. }
+                | Request::FindMatches { id, .. }
+                | Request::FindReveal { id, .. }
                 | Request::Chrome { id, .. }
                 | Request::ProgramChrome { id, .. }
                 | Request::Theme { id, .. }
@@ -309,7 +337,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
             drop(registry);
             // Reads must not wake the host: a snapshot that signalled would make its poller poll again forever.
             let mutating = !matches!(request, Request::ShellState { .. } | Request::RecentText { .. } | Request::CommandHistory { .. }
-                | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. });
+                | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. } | Request::FindMatches { .. });
             let result = match request {
                 Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
                 Request::ControlRelease { lease, .. } => session.control_release(Some(lease)),
@@ -366,6 +394,17 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                     ..
                 } => session.select(start_row, start_col, end_row, end_col),
                 Request::Find { text, direction, clear, .. } => session.find(&text, direction.as_deref(), clear),
+                Request::FindMatches { text, limit, before_row_id, before_generation, max_lines, .. } => {
+                    let before = match (before_row_id, before_generation) {
+                        (None, None) => None,
+                        (Some(row_id), Some(generation)) => Some((row_id, generation)),
+                        _ => return Err("find cursor needs a row id and a generation".into()),
+                    };
+                    session.find_matches(&text, limit.unwrap_or(32), before, max_lines.unwrap_or(256))
+                }
+                Request::FindReveal { text, row_id, generation, col, end_col, .. } => {
+                    session.find_reveal(&text, row_id, generation, col, end_col)
+                }
                 Request::Chrome { clear, status, mark, progress, sprite, .. } => {
                     session.set_chrome(chrome::ChromeInput { clear, status, mark, progress, sprite: sprite.map(|value| *value) })?;
                     Ok(json!({}))
