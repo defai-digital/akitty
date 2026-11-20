@@ -703,6 +703,9 @@ final class GridRasterizer: @unchecked Sendable {
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat, cell: CGSize, cols: Int, rows: Int
         var appearance: RenderAppearance
+        /// Resolved CJK cascade preference; see `GlyphFonts.cascadeKey`. The text composer keys on the same
+        /// value so a runtime language change rebuilds both font caches on the same frame.
+        var cascadeKey: String
     }
     /// Lines take their colour from the context at draw time, so the key is colour-free: truecolor gradient output
     /// (one colour per cell) reuses one entry per character instead of flushing the whole cache every few frames.
@@ -775,7 +778,7 @@ final class GridRasterizer: @unchecked Sendable {
         guard width <= 16384, height <= 16384, width * height <= 33_554_432 else {
             throw AkittyError.core("Terminal bitmap exceeds rendering limits")
         }
-        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows, appearance: appearance)
+        let wanted = Layout(width: width, height: height, scale: scale, fontName: fontName, cjkFontName: cjkFontName, fontSize: fontSize, cell: cellSize, cols: snapshot.cols, rows: snapshot.rows, appearance: appearance, cascadeKey: GlyphFonts.cascadeKey())
         // Only the all-in-one bitmap draws images, so only it must repaint fully around them.
         let hasImages = layer == .all && !(snapshot.images ?? []).isEmpty
         var rows = damage

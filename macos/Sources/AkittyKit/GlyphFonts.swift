@@ -14,6 +14,18 @@ enum GlyphFonts {
         return cjkOrder.filter { $0 == first } + cjkOrder.filter { $0 != first }
     }
 
+    /// The one value that decides cascade order, suitable as a layout cache key. `preferredCJKFontNames`
+    /// partitions `cjkOrder` around its first match, so two language lists with the same first CJK match
+    /// produce the same order and this string is a complete summary of them.
+    ///
+    /// Both the rasterizer and the text composer must key their cached fonts on it. Otherwise a runtime
+    /// language change rebuilds one side's CJK cascade — on a theme change, or when an image appears and
+    /// fresh layer passes are built — while the other keeps its old masks, and the same codepoint switches
+    /// between regional Han shapes from one frame to the next.
+    static func cascadeKey(languages: [String] = Locale.preferredLanguages) -> String {
+        preferredCJKFontNames(languages: languages).first ?? ""
+    }
+
     /// A language tag maps to a face by script, not by exact tag: `zh-HK` needs HK, `zh-Hant-TW` needs TC.
     private static func font(forLanguage tag: String) -> String? {
         let tag = tag.lowercased()
