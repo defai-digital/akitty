@@ -1,0 +1,642 @@
+{
+  "schema": 1,
+  "host": {
+    "cpu": "Apple M3 Max",
+    "macos": "27.2.1",
+    "os_build": "26B131",
+    "architecture": "arm64"
+  },
+  "app": {
+    "version": "2.1.1",
+    "bundle_build": "20101",
+    "bundle_identifier": "com.defai.akitty",
+    "build_stamp": {
+      "schema": 1,
+      "commit": "e15aa9e317735def8e1cd29c0e83721ef6054412",
+      "dirty": false,
+      "configuration": "release",
+      "version": "2.1.1",
+      "build": "20101",
+      "platform": "macos",
+      "architecture": "arm64"
+    },
+    "executable_sha256": "4b1e45b3f6d67209e81377275a3cc66aa9b77b8ee73f7795fdf330be1ee13cfd",
+    "archive_sha256": "95849d2816c9bed3574ed94e8a280da6c2702d29241d88563b685f49eb024ef4",
+    "archive_url": "https://download.automatosx.com/akitty/releases/download/v2.1.1/AkiTTY-2.1.1-macOS-arm64.zip"
+  },
+  "historical_payload_and_comparator_record": "benchmarks/results/macos-pty-throughput-v1.4.1-2026-11-19.json",
+  "configuration": {
+    "grid": {
+      "cols": 98,
+      "rows": 25
+    },
+    "font": "Menlo",
+    "app_settings": {
+      "font_pt": 16,
+      "scrollback": 0
+    },
+    "bytes_target": 8388608,
+    "samples_per_launch_and_workload": 9,
+    "warmups_per_launch_and_workload": 3,
+    "workload_seed_per_launch": [
+      98625,
+      98626,
+      98627,
+      98628,
+      98629
+    ],
+    "visibility": "Fresh instances with separate home directories. Hidden before timing and checked at each workload boundary.",
+    "timing": "First write of the payload through the cursor position report after a trailing completion marker.",
+    "validation": "Verified arm64 process, matching PTY grid, cursor width and wrap probes, identical payloads to the earlier five-app run, CPR row 2 column 1 for every sample and warmup."
+  },
+  "harness_sha256": {
+    "launch.py": "f9cb15d6eedfed5ca584567c08a30e07e9906f9d7be1eb444403d2643754e550",
+    "child.py": "ca0ea09a0a4a97df48cabad2ab4c05ef84e2f9848f5e350e853edf0cd3f5754d",
+    "app-state": "7bee727e7f2989f9b5ff748faab859ac7bdb8fb0073744f5947538f69c767122",
+    "measure.py": "e661fed05efe3d9dd7bca1f879109d4010de65f4af233132a853b1bd6f218765"
+  },
+  "runs": [
+    {
+      "launch": 1,
+      "attempt": 1,
+      "started_at": "2026-11-20T10:27:03.755674+00:00",
+      "completed_at": "2026-11-20T10:27:12.549715+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "long-lines",
+        "cjk",
+        "ansi"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            73855791,
+            84348333,
+            144293833,
+            37070541,
+            41016625,
+            40969625,
+            38239375,
+            43623000,
+            37553375
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            42363833,
+            41532666,
+            42805250,
+            42428833,
+            36680584,
+            39080041,
+            39500625,
+            41301000,
+            35920958
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            38134834,
+            38365833,
+            40315791,
+            40968250,
+            36420083,
+            45535958,
+            35621084,
+            43248458,
+            34151959
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            166366083,
+            120615333,
+            134180750,
+            173675375,
+            62205542,
+            41826750,
+            34295542,
+            47027875,
+            33987333
+          ]
+        }
+      }
+    },
+    {
+      "launch": 2,
+      "attempt": 1,
+      "started_at": "2026-11-20T10:27:12.598472+00:00",
+      "completed_at": "2026-11-20T10:27:20.666289+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "ansi",
+        "ascii",
+        "long-lines"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            40016833,
+            41757000,
+            37568292,
+            43431583,
+            36144375,
+            44894417,
+            33520000,
+            43075708,
+            40138792
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            35471959,
+            42327833,
+            39474000,
+            194082125,
+            100218625,
+            35833833,
+            48210375,
+            34256875,
+            44177375
+          ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            74866291,
+            140914500,
+            51787084,
+            44908500,
+            39553375,
+            37162166,
+            41023708,
+            37489833,
+            146347500
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            43714333,
+            37910958,
+            37264250,
+            40205458,
+            38863291,
+            44385833,
+            34737500,
+            44695000,
+            37806166
+          ]
+        }
+      }
+    },
+    {
+      "launch": 3,
+      "attempt": 1,
+      "started_at": "2026-11-20T10:27:20.719953+00:00",
+      "completed_at": "2026-11-20T10:27:28.886834+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "ascii",
+        "ansi",
+        "cjk",
+        "long-lines"
+      ],
+      "timings": {
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            49901709,
+            40403417,
+            42379083,
+            39812583,
+            43319625,
+            44676000,
+            44094375,
+            47102625,
+            44324666
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            47400083,
+            34896166,
+            49275834,
+            41707041,
+            48431084,
+            38622416,
+            46119208,
+            41975125,
+            45102458
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            39036292,
+            46315375,
+            42530084,
+            40039000,
+            49551500,
+            40139959,
+            48626291,
+            44485459,
+            216595291
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            65471333,
+            40122250,
+            48404208,
+            51389667,
+            53884708,
+            46910084,
+            50181875,
+            40052667,
+            45885708
+          ]
+        }
+      }
+    },
+    {
+      "launch": 4,
+      "attempt": 1,
+      "started_at": "2026-11-20T10:27:28.943886+00:00",
+      "completed_at": "2026-11-20T10:27:38.074929+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "cjk",
+        "long-lines",
+        "ascii",
+        "ansi"
+      ],
+      "timings": {
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            42700000,
+            37356084,
+            41460500,
+            37301792,
+            41164708,
+            43432542,
+            35961292,
+            45270708,
+            34374291
+          ]
+        },
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            41869709,
+            33619542,
+            46320417,
+            35863500,
+            47534583,
+            40699792,
+            465410333,
+            450075500,
+            49246542
+          ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            62646292,
+            44226083,
+            47177458,
+            37850167,
+            49903875,
+            98631208,
+            64497625,
+            46000584,
+            46906833
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            46805875,
+            75898083,
+            39441916,
+            66712959,
+            83058708,
+            43619125,
+            40624417,
+            49012209,
+            306815375
+          ]
+        }
+      }
+    },
+    {
+      "launch": 5,
+      "attempt": 1,
+      "started_at": "2026-11-20T10:27:38.159244+00:00",
+      "completed_at": "2026-11-20T10:27:46.231566+00:00",
+      "pty_geometry": {
+        "rows": 25,
+        "cols": 98,
+        "xpixel": 980,
+        "ypixel": 575
+      },
+      "cell_pixels_height_width": [
+        23,
+        10
+      ],
+      "mode_2027_reply": [
+        0
+      ],
+      "width_probes": {
+        "ascii": [
+          1,
+          66
+        ],
+        "ansi": [
+          1,
+          49
+        ],
+        "cjk": [
+          1,
+          36
+        ],
+        "long-lines": [
+          6,
+          25
+        ]
+      },
+      "workload_order": [
+        "long-lines",
+        "ansi",
+        "ascii",
+        "cjk"
+      ],
+      "timings": {
+        "long-lines": {
+          "bytes": 8388096,
+          "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+          "elapsed_ns": [
+            51842125,
+            44495042,
+            39447292,
+            39885500,
+            37404000,
+            45723125,
+            32660750,
+            43418500,
+            39619833
+          ]
+        },
+        "ansi": {
+          "bytes": 8388576,
+          "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+          "elapsed_ns": [
+            45498250,
+            36463666,
+            42248792,
+            36594959,
+            37736166,
+            41859125,
+            37456666,
+            43200583,
+            34348625
+          ]
+        },
+        "ascii": {
+          "bytes": 8388601,
+          "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+          "elapsed_ns": [
+            208490750,
+            153233625,
+            36921959,
+            43624458,
+            39813458,
+            42005000,
+            40423000,
+            33801042,
+            46631000
+          ]
+        },
+        "cjk": {
+          "bytes": 8388607,
+          "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+          "elapsed_ns": [
+            35418167,
+            49890250,
+            34373750,
+            45787750,
+            35407916,
+            44396584,
+            130024208,
+            55213375,
+            55375625
+          ]
+        }
+      }
+    }
+  ],
+  "excluded_launches": [],
+  "workloads": {
+    "ascii": {
+      "payload_bytes": 8388601,
+      "payload_sha256": "26b092780fc8d92f6c12b18417e94ae1521b730e5ca3aa71f276ea698431df21",
+      "sample_count": 45,
+      "median_mib_s": 180.888579,
+      "launch_median_mib_s": [
+        195.042701,
+        178.139847,
+        181.428886,
+        169.572369,
+        190.453359
+      ]
+    },
+    "ansi": {
+      "payload_bytes": 8388576,
+      "payload_sha256": "963255804094c5d974b2a344fbfd68d9777730dad21f54b52cc14323783c3afb",
+      "sample_count": 45,
+      "median_mib_s": 183.405089,
+      "launch_median_mib_s": [
+        128.605414,
+        189.000214,
+        177.373248,
+        163.224014,
+        211.997411
+      ]
+    },
+    "cjk": {
+      "payload_bytes": 8388607,
+      "payload_sha256": "9cf72663b3cfe2b6bb8ad16c090b8efeed90d9959540d277661e02fa3702b1a5",
+      "sample_count": 45,
+      "median_mib_s": 194.341207,
+      "launch_median_mib_s": [
+        208.518841,
+        199.308416,
+        179.834023,
+        194.341207,
+        174.7192
+      ]
+    },
+    "long-lines": {
+      "payload_bytes": 8388096,
+      "payload_sha256": "8a0605cb9a2d3702745d7a5b5f993cf4afa7ff35a5b7f71e289b25fa65230280",
+      "sample_count": 45,
+      "median_mib_s": 191.057256,
+      "launch_median_mib_s": [
+        193.688088,
+        205.837218,
+        165.264799,
+        172.699475,
+        200.561901
+      ]
+    }
+  },
+  "measured_at": "2026-11-20T10:27:03.755674+00:00",
+  "finished_at": "2026-11-20T10:27:46.231566+00:00"
+}
