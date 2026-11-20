@@ -98,12 +98,14 @@ final class AgentAccessibilityAuditTests: XCTestCase {
             var value: AnyObject?
             return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
         }
-        guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement],
-              let window = windows.first(where: { attribute($0, kAXTitleAttribute) as? String == title }) else { return nil }
+        let windows = (attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []) + (attribute(app, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+        guard let window = windows.first(where: { attribute($0, kAXTitleAttribute) as? String == title }) else { return nil }
         var result: [Element] = []
         func visit(_ element: AXUIElement, depth: Int) {
             guard depth < 40, result.count < 2000 else { return }
             let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            // The system scroll bar's arrow and page parts are AppKit's, and VoiceOver names them by their subrole.
+            if role == kAXScrollBarRole as String { return }
             let label = [kAXDescriptionAttribute, kAXTitleAttribute].compactMap { attribute(element, $0) as? String }.first { !$0.isEmpty } ?? ""
             let value = attribute(element, kAXValueAttribute).map { "\($0)" } ?? ""
             result.append(Element(role: role, label: label, value: value, help: attribute(element, kAXHelpAttribute) as? String ?? ""))
@@ -117,7 +119,11 @@ final class AgentAccessibilityAuditTests: XCTestCase {
         guard AXIsProcessTrusted() else {
             throw XCTSkip("Needs the Accessibility permission (System Settings → Privacy & Security → Accessibility) for the app running the tests")
         }
-        _ = NSApplication.shared
+        let previousPolicy = NSApplication.shared.activationPolicy()
+        NSApplication.shared.setActivationPolicy(.accessory)
+        // AppKit serves the system accessibility API only once the app has finished launching.
+        NSApplication.shared.finishLaunching()
+        defer { NSApplication.shared.setActivationPolicy(previousPolicy) }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "akitty-a11y-\(UUID().uuidString)"))
         let title = "Agents audit \(UUID().uuidString.prefix(6))"
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 1100), styleMask: [.titled], backing: .buffered, defer: false)

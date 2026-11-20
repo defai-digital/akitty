@@ -142,7 +142,9 @@ enum AgentRequestsLaunchSetting {
     var body: some View {
         Form {
             Section("Local Agent Requests") {
+                // A grouped Form shows the title beside the switch as separate text, so name the switch itself.
                 Toggle("Turn on when AkiTTY starts", isOn: $requestsAtLaunch)
+                    .accessibilityLabel("Turn on when AkiTTY starts")
                     .onChange(of: requestsAtLaunch) { _, value in defaults.set(value, forKey: AgentRequestsLaunchSetting.key) }
                 HStack {
                     Text(requestsOn ? "On now." : "Off now.").foregroundStyle(.secondary)
