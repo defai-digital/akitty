@@ -100,9 +100,13 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     var hasTextResources: Bool { textAtlas != nil || textInstances != nil }
     var onFailure: ((String) -> Void)?
     var frameRevision: UInt64 = 0
-    var onCompleted: (@MainActor @Sendable (UInt64, Double) -> Void)?
-    var onPresented: (@MainActor @Sendable (UInt64, Double) -> Void)?
-    var onUpload: ((Int, Bool) -> Void)?
+    private var drawID: UInt64 = 0
+    func startFrame(revision: UInt64) { frameRevision = revision }
+    var onDrawStarted: (@MainActor @Sendable (UInt64, UInt64, Double) -> Void)?
+    var onCommitted: (@MainActor @Sendable (UInt64, UInt64, Double) -> Void)?
+    var onCompleted: (@MainActor @Sendable (UInt64, UInt64, Double) -> Void)?
+    var onPresented: (@MainActor @Sendable (UInt64, UInt64, Double) -> Void)?
+    var onUpload: ((Int, Bool, NativeUploadResource) -> Void)?
     init(forceFailure: Bool = false, forceShaderFailure: Bool = false) throws {
         guard !forceFailure, let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw AkittyError.core("Metal device unavailable") }
         self.device = device
@@ -275,9 +279,9 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         mode = .text
         view.needsDisplay = true
     }
-    /// Instances a row may hold: one fill per column, one glyph per column and the four cursor bands. One
-    /// definition, so the composer's worst case and the presenter's buffer size cannot drift apart.
-    static func textRowCapacity(cols: Int) -> Int { max(8, cols * 2 + 4) }
+    /// Instances a row may hold: one fill, glyph, underline and strike per column, plus four cursor bands.
+    /// One definition, so the composer's worst case and the presenter's buffer size cannot drift apart.
+    static func textRowCapacity(cols: Int) -> Int { max(8, cols * 4 + 4) }
 
     /// A buffer no frame can read yet: the CPU mirror is copied into it whole, so a busy GPU never sees a
     /// half-updated revision. Retired buffers are reused only after the frame that owned them completed.
@@ -323,6 +327,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             textAtlas?.replace(region: MTLRegionMake2D(upload.x, upload.y, upload.width, upload.height), mipmapLevel: 0,
                                withBytes: upload.coverage, bytesPerRow: upload.width)
             textAtlasUploads += 1
+            onUpload?(upload.coverage.count, false, .atlasMask)
         }
         guard textShadow.count * stride >= length else { return }
         // Stage into the CPU mirror first. Every row bound is an invariant, not a truncation: silently dropping
@@ -346,6 +351,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
                 return
             }
             let base = buffer.contents()
+            var uploadedRows = 0
             for (index, row) in frame.dirtyRows.enumerated() where row >= 0 && row < textRows {
                 let offset = row * textRowCapacity * stride
                 let items = frame.content[index]
@@ -355,8 +361,9 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
                 if items.count < textRowCapacity {
                     memset(base + offset + items.count * stride, 0, (textRowCapacity - items.count) * stride)
                 }
-                textRowUploads += 1
+                textRowUploads += 1; uploadedRows += 1
             }
+            if uploadedRows > 0 { onUpload?(uploadedRows * capacity * stride, needsBuffer, .textRows) }
             return
         }
         // A frame still reads the current buffer: publish a complete replacement instead of editing it.
@@ -365,6 +372,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         if !needsBuffer, let current = textInstances { retireText(current) }
         textInstances = next
         textFullUploads += 1
+        onUpload?(length, true, .textRows)
     }
     /// A single R8 texture holds every mask, so the GPU never allocates a texture per glyph or per cell.
     static func makeAtlasTexture(device: MTLDevice) -> MTLTexture? {
@@ -416,14 +424,14 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
                 current.replace(region: MTLRegionMake2D(0, damage.lowerBound, bitmap.width, damage.count), mipmapLevel: 0,
                                 withBytes: data + damage.lowerBound * bitmap.bytesPerRow, bytesPerRow: bitmap.bytesPerRow)
             }
-            onUpload?(damage.count * bitmap.width * 4, false)
+            onUpload?(damage.count * bitmap.width * 4, false, .bitmap)
             return current
         }
         // A frame still owns the current texture (or the size changed): give this one a free, fully uploaded texture.
         let next = try makeTexture(width: bitmap.width, height: bitmap.height)
         if let current { retire(current) }
         next.replace(region: MTLRegionMake2D(0, 0, bitmap.width, bitmap.height), mipmapLevel: 0, withBytes: data, bytesPerRow: bitmap.bytesPerRow)
-        onUpload?(bitmap.width * bitmap.height * 4, true)
+        onUpload?(bitmap.width * bitmap.height * 4, true, .bitmap)
         return next
     }
     /// The theme background; layered frames clear to it, so it must match what the CPU bitmaps fill.
@@ -463,32 +471,38 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             if let binding = imageTextures[placement.id], binding.texture.width == entry.width, binding.texture.height == entry.height, pending.count == 0 {
                 bgra.withUnsafeBytes { binding.texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
                 imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: binding.texture)
+                onUpload?(entry.width * entry.height * 4, false, .imageTexture)
                 continue
             }
             guard let texture = try? makeTexture(width: entry.width, height: entry.height) else { imageTextures[placement.id] = nil; continue }
             if let old = imageTextures[placement.id]?.texture { retire(old) }
             bgra.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: entry.width * 4) }
             imageTextures[placement.id] = ImageBinding(generation: placement.gen, texture: texture)
+            onUpload?(entry.width * entry.height * 4, true, .imageTexture)
         }
         imageTextures = imageTextures.filter { wanted.contains($0.key) }
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
         guard mode != .none else { return }
+        let revision = frameRevision
         // Occluded windows legitimately have no drawable; no frame was submitted.
         guard let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor else { return }
         guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { onFailure?("Metal command allocation failed"); return }
+        drawID &+= 1
+        let frame = drawID
+        onDrawStarted?(revision, frame, CACurrentMediaTime())
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = clearColor
         encode(encoder, width: drawable.texture.width, height: drawable.texture.height)
         encoder.endEncoding()
         pending.add(1)
-        let pending = self.pending, onCompleted = self.onCompleted, revision = frameRevision
+        let pending = self.pending, onCompleted = self.onCompleted
         command.addCompletedHandler { [weak self] completed in
             pending.add(-1)
             if completed.status == .completed, let onCompleted {
                 let time = CACurrentMediaTime()
-                DispatchQueue.main.async { onCompleted(revision, time) }
+                DispatchQueue.main.async { onCompleted(revision, frame, time) }
             }
             if completed.status == .error {
                 let message = completed.error?.localizedDescription ?? "GPU command failed"
@@ -496,13 +510,14 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             }
         }
         if let onPresented {
-            let revision = frameRevision
             drawable.addPresentedHandler { displayed in
                 let time = displayed.presentedTime
-                DispatchQueue.main.async { onPresented(revision, time) }
+                DispatchQueue.main.async { onPresented(revision, frame, time) }
             }
         }
+        let commitTime = CACurrentMediaTime()
         command.present(drawable); command.commit()
+        onCommitted?(revision, frame, commitTime)
     }
     private func encode(_ encoder: MTLRenderCommandEncoder, width: Int, height: Int) {
         switch mode {
@@ -943,11 +958,7 @@ final class GridRasterizer: @unchecked Sendable {
             let box = rect(cell)
             let lineColor = color(cell.ucolor ?? cell.fg)
             if cell.underline { Self.underline(context, style: cell.ustyle ?? 1, rect: box, baseline: box.minY + baseline, color: lineColor) }
-            if cell.strike == true {
-                context.setStrokeColor(color(cell.fg)); context.setLineWidth(1); context.setLineDash(phase: 0, lengths: [])
-                let y = box.minY + baseline + CTFontGetXHeight(base) / 2
-                context.move(to: CGPoint(x: box.minX, y: y)); context.addLine(to: CGPoint(x: box.maxX, y: y)); context.strokePath()
-            }
+            if cell.strike == true { Self.strike(context, rect: box, baseline: box.minY + baseline, xHeight: CTFontGetXHeight(base), color: color(cell.fg)) }
         }
         drawImages { $0.z >= 0 }
         if layer != .background, snapshot.cursor.visible, rows == nil || rows!.contains(cursorRow) {
@@ -1020,6 +1031,12 @@ final class GridRasterizer: @unchecked Sendable {
             context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y))
         }
         context.strokePath()
+    }
+    static func strike(_ context: CGContext, rect: CGRect, baseline: CGFloat, xHeight: CGFloat, color: CGColor) {
+        context.saveGState(); defer { context.restoreGState() }
+        context.setStrokeColor(color); context.setLineWidth(1); context.setLineDash(phase: 0, lengths: [])
+        let y = baseline + xHeight / 2
+        context.move(to: CGPoint(x: rect.minX, y: y)); context.addLine(to: CGPoint(x: rect.maxX, y: y)); context.strokePath()
     }
     /// The glyphs of a single-run line, with their ink bounds relative to the line origin; nil for anything else.
     private static func run(of line: CTLine) -> Run? {

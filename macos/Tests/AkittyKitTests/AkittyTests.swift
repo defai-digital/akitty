@@ -1107,9 +1107,8 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(URL(fileURLWithPath: reported).resolvingSymlinksInPath(), directory.resolvingSymlinksInPath())
     }
 
-    /// Text output and typing, not only graphics, switch to display-rate polling, so an echo or a scrolling
-    /// screen is shown on the next frame instead of waiting up to 1 s for the safety timer.
-    @MainActor func testOutputAndTypingPollAtDisplayRate() async throws {
+    /// Headless output retains display-rate polling; a live PTY gets its echo through the core wake pipe instead.
+    @MainActor func testHeadlessOutputPollsAtDisplayRateButLivePTYUsesCoreWake() async throws {
         _ = NSApplication.shared
         func hosted(_ view: TerminalView) -> NSWindow {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
@@ -1131,11 +1130,15 @@ final class AkittyTests: XCTestCase {
         defer { shell.shutdown() }
         let shellWindow = hosted(shell)
         defer { shellWindow.close() }
-        // Wait until the shell has settled, so only the keystroke can restart fast polling.
         for _ in 0..<300 where shell.pollsAtDisplayRate || shell.snapshot == nil { try await Task.sleep(nanoseconds: 10_000_000) }
-        try XCTSkipIf(shell.pollsAtDisplayRate, "shell kept printing; cannot isolate the keystroke")
-        shell.send("x")
-        XCTAssertTrue(shell.pollsAtDisplayRate, "accepted input polls at display rate at once")
+        try XCTSkipIf(!shell.hasCoreWakeSource, "live PTY has no notification descriptor")
+        try XCTSkipIf(shell.pollsAtDisplayRate, "shell kept printing; cannot isolate the core wake")
+        shell.send("printf 'WAKE_DRIVEN_OUTPUT\\n'\r")
+        XCTAssertFalse(shell.pollsAtDisplayRate, "a live PTY must not start redundant display-rate polling")
+        for _ in 0..<50 where shell.snapshot?.text.contains("WAKE_DRIVEN_OUTPUT") != true { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(shell.snapshot?.text.contains("WAKE_DRIVEN_OUTPUT") == true,
+                      "the notification pipe must deliver output before the 1 s safety timer")
+        XCTAssertFalse(shell.pollsAtDisplayRate)
     }
 
     @MainActor func testAViewWhoseWindowGoesAwayMidAnimationIsReleased() async throws {

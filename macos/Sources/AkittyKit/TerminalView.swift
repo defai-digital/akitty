@@ -9,9 +9,15 @@ import os
 private let hiddenPollInterval: Double = 0.25
 
 /// Opt-in observations for the native pipeline probe; no terminal contents are recorded.
+enum NativeUploadResource: String { case bitmap, atlasMask, textRows, imageTexture }
+/// A frame terminates on the path that produced it: the CPU bitmap path reports `rasterCompleted`,
+/// while atlas and layered frames have no CPU terminal and end at `gpuCompleted`. The probe picks
+/// one per renderer mode, so it never mixes the two semantics in a comparison.
 enum NativeFrameEvent {
-    case snapshotStarted, snapshotFinished(UInt64?), rasterStarted(UInt64), rasterReady(UInt64)
-    case uploaded(bytes: Int, full: Bool), handedOff(UInt64), gpuCompleted(UInt64, Double), presented(UInt64, Double)
+    case snapshotStarted, snapshotFinished(UInt64?), rasterStarted(UInt64), rasterReady(UInt64), rasterCompleted(UInt64)
+    case uploaded(bytes: Int, full: Bool, resource: NativeUploadResource), handedOff(UInt64)
+    case drawStarted(revision: UInt64, frame: UInt64, time: Double), commandCommitted(revision: UInt64, frame: UInt64, time: Double)
+    case gpuCompleted(revision: UInt64, frame: UInt64, time: Double), presented(revision: UInt64, frame: UInt64, time: Double)
 }
 
 /// Which retained renderer state a frame may trust. The CPU bitmap is only current while the CPU path drew the
@@ -57,10 +63,15 @@ struct RenderReuse: Equatable {
     /// Internal observation sink, normally nil. The probe owns bounded samples and persistence.
     var onNativeFrameEvent: ((NativeFrameEvent) -> Void)? {
         didSet {
-            guard onNativeFrameEvent != nil else { presenter?.onPresented = nil; presenter?.onCompleted = nil; presenter?.onUpload = nil; return }
-            presenter?.onCompleted = { [weak self] revision, time in self?.onNativeFrameEvent?(.gpuCompleted(revision, time)) }
-            presenter?.onPresented = { [weak self] revision, time in self?.onNativeFrameEvent?(.presented(revision, time)) }
-            presenter?.onUpload = { [weak self] bytes, full in self?.onNativeFrameEvent?(.uploaded(bytes: bytes, full: full)) }
+            guard onNativeFrameEvent != nil else {
+                presenter?.onDrawStarted = nil; presenter?.onCommitted = nil; presenter?.onPresented = nil
+                presenter?.onCompleted = nil; presenter?.onUpload = nil; return
+            }
+            presenter?.onDrawStarted = { [weak self] revision, frame, time in self?.onNativeFrameEvent?(.drawStarted(revision: revision, frame: frame, time: time)) }
+            presenter?.onCommitted = { [weak self] revision, frame, time in self?.onNativeFrameEvent?(.commandCommitted(revision: revision, frame: frame, time: time)) }
+            presenter?.onCompleted = { [weak self] revision, frame, time in self?.onNativeFrameEvent?(.gpuCompleted(revision: revision, frame: frame, time: time)) }
+            presenter?.onPresented = { [weak self] revision, frame, time in self?.onNativeFrameEvent?(.presented(revision: revision, frame: frame, time: time)) }
+            presenter?.onUpload = { [weak self] bytes, full, resource in self?.onNativeFrameEvent?(.uploaded(bytes: bytes, full: full, resource: resource)) }
         }
     }
     private var bitmap: CGContext?
@@ -111,8 +122,9 @@ struct RenderReuse: Equatable {
     private var accessibilityValueTimer: Timer?
     /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
-    /// Uptime seconds of the last changed snapshot or local input. Output, typing and graphics alike keep the
-    /// display-rate poll going for a second, so an echoed keystroke or a scrolling screen never waits for the safety tick.
+    private var renderingWasVisible = false
+    /// Uptime seconds of the last changed snapshot or local input. Headless sessions use this to poll for a
+    /// following frame; live PTYs already wake through their notification pipe.
     private var lastChange: Double = 0
     private var composition = Composition()
     private var tracking: NSTrackingArea?
@@ -217,6 +229,7 @@ struct RenderReuse: Equatable {
         startWakeSource()
         // Un-occluding or un-hiding must not wait for the safety tick.
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didHideNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSApplication.didUnhideNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didMiniaturizeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didDeminiaturizeNotification, object: nil)
@@ -270,20 +283,24 @@ struct RenderReuse: Equatable {
         // The display link belongs to the view's display, so it is dropped with the window.
         if window == nil {
             stopRefreshLink()
-            // A background tab's pane keeps no window-sized pixels; it repaints in full when it is shown again.
-            pendingDamage = nil; bitmap = nil; presenter?.releaseTextures()
-            let rasterizer = self.rasterizer, composer = textComposer
-            lastTextFramed = false
-            rasterQueue.async { rasterizer.releaseFrames(); composer.releaseFrames() }
+            releaseRetainedFrames()
+            renderingWasVisible = false
         } else { updatePolling() }
         resizeTerminal(); poll(); showClipboardRequest()
         // A pane whose snapshot did not change (the poll answers "unchanged") still gets its bitmap back here.
         if window != nil { redraw() }
     }
+    private func releaseRetainedFrames() {
+        // In-flight commands retain their Metal resources; queued raster work checks visibility before publishing again.
+        pendingDamage = nil; bitmap = nil; presenter?.releaseTextures()
+        lastTextFramed = false; lastLayered = false
+        let rasterizer = self.rasterizer, composer = textComposer
+        rasterQueue.async { rasterizer.releaseFrames(); composer.releaseFrames() }
+    }
     public override func layout() { super.layout(); presenter?.view.frame = bounds; resizeTerminal(); redraw() }
     // A deselected NSTabView tab leaves the window (see viewDidMoveToWindow); these cover views hidden in place.
     public override func viewDidHide() { super.viewDidHide(); updatePolling() }
-    public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll() }
+    public override func viewDidUnhide() { super.viewDidUnhide(); updatePolling(); poll(); redraw() }
     /// App un-hide or window occlusion change: resume the display link and refresh at once.
     @objc private func windowKeyChanged(_ note: Notification) {
         guard !stopped, let window, note.object as? NSWindow === window, window.firstResponder === self else { return }
@@ -300,7 +317,7 @@ struct RenderReuse: Equatable {
         guard !stopped else { return }
         if let changed = note.object as? NSWindow, changed !== window { return }
         updatePolling()
-        if paneVisible { poll() }
+        if paneVisible { poll(); redraw() }
     }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
@@ -317,13 +334,17 @@ struct RenderReuse: Equatable {
         do { _ = try session.call("resize", ["cols": cols, "rows": rows]); lastGrid = (cols, rows) }
         catch { show(error) }
     }
-    /// Display-rate polling pays off only while an animation runs or a frame changed within the last second.
-    nonisolated static func wantsFastPolling(animating: Bool, changedAt: Double, now: Double) -> Bool {
+    /// Live PTYs poll on core wakes. The display link remains necessary for animation ticks and headless sessions.
+    nonisolated static func wantsFastPolling(animating: Bool, hasWakeSource: Bool, changedAt: Double, now: Double) -> Bool {
         if animating { return true }
-        return now - changedAt < 1
+        return !hasWakeSource && now - changedAt < 1
     }
     private func updatePolling() {
-        setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, changedAt: lastChange, now: ProcessInfo.processInfo.systemUptime))
+        let visible = paneVisible
+        if renderingWasVisible && !visible { releaseRetainedFrames() }
+        renderingWasVisible = visible
+        setFastPolling(Self.wantsFastPolling(animating: snapshot?.animating == true, hasWakeSource: wakeSource != nil,
+                                            changedAt: lastChange, now: ProcessInfo.processInfo.systemUptime))
     }
     /// The link is only created for a pane that is actually on screen; the safety timer keeps polling otherwise.
     private func setFastPolling(_ fast: Bool) {
@@ -338,6 +359,7 @@ struct RenderReuse: Equatable {
     }
     /// Whether the display link is active; automatic snapshots may still be coalesced.
     var pollsAtDisplayRate: Bool { refreshLink?.isPaused == false }
+    var hasCoreWakeSource: Bool { wakeSource != nil }
     private func stopRefreshLink() { refreshLink?.invalidate(); refreshLink = nil }
     /// A pane nobody can see (background tab, hidden or occluded window) still needs exit, bell and title
     /// updates; it just does not need a snapshot per display refresh.
@@ -520,13 +542,13 @@ struct RenderReuse: Equatable {
     }
     private func redraw(imageOnly: Bool = false) {
         guard let snapshot, bounds.width > 0, bounds.height > 0, !stopped else { return }
-        // A pane in a background tab is out of the window: skip the raster work and remember that the
-        // whole grid needs drawing. Moving back into the window lays the view out, which redraws it.
-        guard window != nil else { pendingDamage = nil; return }
+        // Hidden panes still apply snapshot side effects, but retain no pixels and do no raster work.
+        // Visibility restoration redraws the latest snapshot in full.
+        guard paneVisible else { pendingDamage = nil; return }
         // An image-only frame goes straight to the GPU: new placements and textures, redraw, no text work.
         if imageOnly, let presenter, presenter.layered, !(snapshot.images ?? []).isEmpty, pendingDamage == [], !rasterInFlight {
             do {
-                presenter.frameRevision = snapshot.revision
+                presenter.startFrame(revision: snapshot.revision)
                 try presenter.updateImages(placements: snapshot.images ?? [], pixels: imageStore.entries,
                                            grid: GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cellSize, scale: window?.backingScaleFactor ?? 2))
                 onNativeFrameEvent?(.handedOff(snapshot.revision))
@@ -567,9 +589,9 @@ struct RenderReuse: Equatable {
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                     guard !self.stopped else { return }
                     guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
-                    if size == self.bounds.size, self.window != nil, let presenter = self.presenter {
+                    if size == self.bounds.size, self.paneVisible, let presenter = self.presenter {
                         do {
-                            presenter.frameRevision = snapshot.revision
+                            presenter.startFrame(revision: snapshot.revision)
                             try presenter.updateText(frame, grid: grid)
                             self.rasterQueue.async { composer.acknowledgePublication() }
                             self.lastTextFramed = true
@@ -594,8 +616,8 @@ struct RenderReuse: Equatable {
                     do {
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
-                        if size == self.bounds.size, self.window != nil, let presenter = self.presenter {
-                            presenter.frameRevision = snapshot.revision
+                        if size == self.bounds.size, self.paneVisible, let presenter = self.presenter {
+                            presenter.startFrame(revision: snapshot.revision)
                             try presenter.updateLayers(background: frame.background, foreground: frame.foreground, damage: frame.damage, grid: grid,
                                                        placements: self.snapshot?.images ?? snapshot.images ?? [], pixels: self.imageStore.entries)
                             self.lastTextFramed = false
@@ -616,17 +638,18 @@ struct RenderReuse: Equatable {
                 guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
                 do {
                     let frame = try result.get()
-                    if size == self.bounds.size, self.window != nil {
+                    if size == self.bounds.size, self.paneVisible {
                         self.bitmap = frame.context
                         self.lastTextFramed = false
                         if let presenter = self.presenter {
                             do {
-                                presenter.frameRevision = snapshot.revision
+                                presenter.startFrame(revision: snapshot.revision)
                                 try presenter.update(bitmap: frame.context, damage: frame.damage)
                                 self.onNativeFrameEvent?(.handedOff(snapshot.revision))
                             } catch { self.renderFailed(error.localizedDescription) }
                         }
                         self.needsDisplay = true
+                        self.onNativeFrameEvent?(.rasterCompleted(snapshot.revision))
                     } else { self.pendingDamage = nil }
                 } catch { self.pendingDamage = nil; self.renderFailed(error.localizedDescription) }
                 if self.rasterPending { self.redraw() }
@@ -666,7 +689,7 @@ struct RenderReuse: Equatable {
         lastLocalInteraction = ProcessInfo.processInfo.systemUptime
         let session = self.session
         write { try session.input(text, paste: paste) }
-        // The echo arrives within milliseconds; poll at the display rate to show it on the next frame.
+        // A live PTY wake brings the echo; headless sessions retain recent-change display polling.
         lastChange = ProcessInfo.processInfo.systemUptime
         updatePolling()
     }

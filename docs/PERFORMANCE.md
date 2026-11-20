@@ -2364,3 +2364,82 @@ process CPU excludes producer children and WindowServer.
 The canonical `scripts/verify.sh` gate passed, including 474 Swift tests with six opt-in skips and 715 web tests with
 two skips. Chromium and WebKit passed 30 browser tests; the existing local Firefox profile-folder startup failure
 triggered its configured skip. Installer, release-tooling, ABI, provenance, commit-message and public-file checks passed.
+
+
+## Host notification, visibility lifecycle, and fitted/decoration atlas
+
+A November 20 pass targeted remaining host overhead, renderer coverage and benchmark attribution rather than
+further VT parser micro-optimization. No ABI operation, request/response field, or schema semantic changed.
+
+1. **Conditional input revision/wake.** Accepted input now returns whether it changed host-visible state. It bumps
+   the revision and notifies the host only when input snaps the viewport back from scrollback or marks a previously
+   clean prompt dirty; repeated typing no longer produces a no-op snapshot wake. Blocked input records audit evidence,
+   invalidates the snapshot revision, and notifies the host; validation and transport failures do not add a spurious
+   host wake.
+2. **Notification-first live polling.** A live PTY pane with a valid `notify_fd` no longer starts display-rate polling
+   merely because output or typing recently occurred. The display link remains available for animation ticks and
+   sessions without a notification descriptor, while the 1 Hz safety timer still recovers a missed wake.
+3. **Hidden-pane raster suspension.** Background-tab, hidden, occluded and minimized panes stop rasterizing. The
+   transition releases retained window-sized bitmap/Metal resources, sets unknown damage, and prevents late raster
+   completions from re-retaining pixels. Restoring visibility redraws the latest snapshot in full.
+4. **Schema-4 native probe attribution.** Metal draw-start, commit, GPU-completion and presentation events carry the
+   terminal revision plus a monotonic submitted-draw ID. Draw phases must match the exact GPU frame; presentation
+   remains independently correlated. Forced-software controls use successful software raster completion—not
+   `rasterReady`—as their terminal phase and carry only the snapshot revision. The probe records renderer-stable
+   ASCII, narrow-Unicode, decorated and mixed-Unicode scenes, rechecks renderer health after the measured interval,
+   and classifies logical upload payload by resource.
+5. **Fitted narrow text and single-decoration atlas.** The Metal text path now supports narrow, standalone,
+   monochrome single-scalar non-ASCII text, single underlines, and strikethrough. Fitted masks use the same
+   CoreText font, line, placement and clipping rules as the CPU rasterizer; single decorations are rendered from
+   color-independent coverage strips using the same CPU stroke routines. Color-font results, wide cells, multi-scalar
+   or emoji clusters, combining/ZWJ/regional-indicator text, complex underline styles, IME, images and fractional
+   geometry still fail closed to the software reference without polluting atlas counters.
+
+### Measurements
+
+Measured locally on Apple M3 Max / macOS 27.2.1 at pre-commit revision `a6e528c` using the pinned project toolchain.
+Each scene used 30 measured inputs after three warmups. These runs compare two renderer modes of the same candidate
+binary; they are not a before/after comparison against the unmodified parent. The Metal column is the normal GPU text
+path. The software column forces the CPU rasterizer through `AKITTY_NATIVE_PROBE_FORCE_SOFTWARE=1`; its terminal phase
+is successful raster completion, so it is not comparable with Metal GPU completion or presentation. CPU is process
+user-plus-system percentage and excludes producer children and WindowServer.
+
+| Scene | Metal CPU | Software CPU | CPU reduction | Metal terminal p50/p95 ms | Software terminal p50/p95 ms | Metal presentation p50/p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain ASCII typing | 5.03% | 18.31% | 72.5% | 8.19 / 11.25 | 10.86 / 11.78 | 22.31 / 31.70 |
+| Narrow non-ASCII typing | 4.89% | 18.75% | 73.9% | 7.36 / 10.39 | 11.87 / 13.03 | 21.55 / 24.60 |
+| Single-underline narrow text | 4.77% | 18.78% | 74.6% | 6.46 / 10.70 | 11.83 / 12.76 | 21.89 / 28.96 |
+| Mixed CJK/emoji typing | 15.67% | 17.74% | 11.7% | 13.80 / 14.73 | 10.29 / 13.31 | 30.01 / 35.41 |
+
+All four Metal scenes recorded 30 changed snapshots and 30 raster builds for their 30 measured inputs. The narrow and
+decorated scenes uploaded only GPU text instance rows, while mixed CJK/emoji remained on the bitmap path and uploaded
+approximately 588 MB of logical resource-update payload for the measured window. These are synthetic
+input-to-callback measurements, not physical key-to-photon latency. For historical context only, the older
+rejected-scroll record used a different scene seed, 60 inputs and an earlier binary; it recorded 814 snapshot builds,
+including 716 unchanged, for its single-typing scene.
+
+Raw records:
+
+- [`native-fitted-decoration-atlas-2026-11-20.json`](../benchmarks/results/native-fitted-decoration-atlas-2026-11-20.json)
+- [`native-fitted-decoration-software-control-2026-11-20.json`](../benchmarks/results/native-fitted-decoration-software-control-2026-11-20.json)
+
+### Correctness and stability qualification
+
+The atlas additions are protected by pixel-equivalence comparisons against `GridRasterizer` at 1x, 2x and 3x for
+accented Latin/Greek/symbol text, blank NBSP, descenders, fitted glyphs, single underline/strikethrough, custom
+underline colour, geometry, cursor overlap and scrolled rows. The worst channel difference remains within the existing
+2/255 tolerance. Unsupported color-font, emoji, regional-indicator, ZWJ, combining and complex-decoration content
+must fall back without changing atlas entries or resets.
+
+The Rust lifecycle stress now samples descriptors, threads and RSS after repeated concurrent PTY creation, resize,
+output, expiry, exit and cleanup; resources must settle. The Swift lifecycle stress now runs the same repeated
+open/close path against real Metal as well as software, including hide/restore raster suspension. An opt-in manual
+sleep/wake test is provided through `AKITTY_SLEEP_WAKE_MANUAL=1`; ordinary CI skips it because automated system sleep
+requires host-level authorization and physical wake validation.
+
+The canonical `scripts/verify.sh` gate passed locally after these changes, including the native trace regressions,
+Rust workspace tests/clippy, TypeScript, ABI, WASM provenance, release tooling, installer, public-file and commit-message
+checks, and 485 Swift tests with seven opt-in skips. Chromium and WebKit browser tests passed; the existing local
+Firefox profile-folder startup issue triggered its configured skip. These native runs establish renderer and host
+component improvements only. Physical key-to-photon latency, multi-day memory plateaus, real sleep/wake reliability
+and broad external terminal comparisons remain separate qualification work.

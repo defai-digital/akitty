@@ -33,7 +33,7 @@ struct TextGeometry: Equatable {
     let scale: CGFloat
     let size: CGSize
     let width: Int, height: Int
-    let descent: CGFloat
+    let descent: CGFloat, xHeight: CGFloat
     /// Fractional device-pixel offset of a cell's left edge and of its baseline.
     let phaseX: CGFloat, phaseY: CGFloat
     var baseline: CGFloat { descent + 2 }
@@ -68,12 +68,27 @@ enum TextEligibility {
     }
     static func unsupportedCell(_ cell: Cell) -> TextFallback? {
         if cell.wide { return .wideCell }
-        if cell.underline || cell.strike == true { return .decoratedCell }
+        if cell.underline && (cell.ustyle ?? 1) != 1 { return .decoratedCell }
         let text = cell.text
         if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { return nil }
         if text.isEmpty { return nil }
         if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { return nil }
+        if fittedScalar(cell) != nil { return nil }
         return .nonASCII
+    }
+    /// One narrow, standalone scalar that can be fitted into its cell without merging with a neighbour.
+    static func fittedScalar(_ cell: Cell) -> Unicode.Scalar? {
+        guard !cell.wide, !cell.underline || (cell.ustyle ?? 1) == 1,
+              cell.text.unicodeScalars.count == 1, let scalar = cell.text.unicodeScalars.first,
+              cell.text.utf8.count > 1, !CellGlyphs.handles(scalar) else { return nil }
+        let value = scalar.value
+        if value <= 0x1f || (0x7f...0x9f).contains(value) || (0x1f1e6...0x1f1ff).contains(value)
+            || value == 0x200d || (0xfe00...0xfe0f).contains(value) || (0xe0100...0xe01ef).contains(value)
+            || (0x1f3fb...0x1f3ff).contains(value) || scalar.properties.isEmojiPresentation { return nil }
+        switch scalar.properties.generalCategory {
+        case .nonspacingMark, .enclosingMark, .spacingMark, .format: return nil
+        default: return scalar
+        }
     }
     /// Content the atlas cannot draw identically. Kept separate from geometry so the routing decision is a
     /// pure snapshot scan that costs one pass over the cells the frame already carries.
@@ -87,20 +102,21 @@ enum TextEligibility {
     /// The grid geometry the GPU path can place exactly: integral margins, cells and bitmap in device pixels,
     /// and a backing scale the mask rasteriser has been validated at. Fractional scales keep the CPU path.
     static func geometry(size: CGSize, scale: CGFloat, cell: CGSize, fontName: String, fontSize: CGFloat,
-                         cols: Int, rows: Int, descent cachedDescent: CGFloat? = nil) -> TextGeometry? {
+                         cols: Int, rows: Int, descent cachedDescent: CGFloat? = nil, xHeight cachedXHeight: CGFloat? = nil) -> TextGeometry? {
         guard scale.isFinite, scale == scale.rounded(), (1...3).contains(scale), size.width > 0, size.height > 0 else { return nil }
         func integral(_ value: CGFloat) -> Bool { value.isFinite && value == value.rounded() }
         guard integral(GridRasterizer.margin * scale), integral(cell.width * scale), integral(cell.height * scale),
               integral(size.width * scale), integral(size.height * scale) else { return nil }
-        let descent = cachedDescent ?? CTFontGetDescent(CTFontCreateWithName(fontName as CFString, fontSize, nil))
-        guard descent.isFinite, descent >= 0 else { return nil }
+        let font = cachedDescent == nil || cachedXHeight == nil ? CTFontCreateWithName(fontName as CFString, fontSize, nil) : nil
+        let descent = cachedDescent ?? CTFontGetDescent(font!), xHeight = cachedXHeight ?? CTFontGetXHeight(font!)
+        guard descent.isFinite, descent >= 0, xHeight.isFinite, xHeight >= 0 else { return nil }
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         let baseline = descent + 2
         let originX = GridRasterizer.margin * scale
         let originY = CGFloat(height) - (size.height - GridRasterizer.margin - cell.height + baseline) * scale
         func fraction(_ value: CGFloat) -> CGFloat { value - floor(value) }
         return TextGeometry(cols: cols, rows: rows, cell: cell, scale: scale, size: size, width: width, height: height,
-                            descent: descent, phaseX: fraction(originX), phaseY: fraction(originY))
+                            descent: descent, xHeight: xHeight, phaseX: fraction(originX), phaseY: fraction(originY))
     }
     static func fallback(snapshot: Snapshot, composition: String, size: CGSize, scale: CGFloat, cell: CGSize,
                          fontName: String, fontSize: CGFloat) -> TextFallback? {
@@ -137,8 +153,15 @@ final class GlyphAtlas: @unchecked Sendable {
         /// Quad origin relative to the cell's floored device origin.
         let dx: Int, dy: Int
     }
+    enum Fitted { case blank, entry(Entry) }
+    enum Decoration { case underline, strike }
+    private struct LineKey: Hashable { let style: UInt8, text: String }
+    private struct FittedLine { let line: CTLine, ink: CGRect }
+    private enum FittedAnalysis { case unsupported, blank, monochrome(FittedLine) }
     private enum Key: Hashable {
         case text(style: UInt8, text: String, fg: UInt32)
+        case fitted(style: UInt8, text: String, fg: UInt32)
+        case decoration(Decoration)
         case cell(scalar: UInt32, width: Int, height: Int, scale: Int)
     }
 
@@ -151,6 +174,7 @@ final class GlyphAtlas: @unchecked Sendable {
     private static let colorFromContext = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
 
     private var entries: [Key: Entry] = [:]
+    private var analyses: [LineKey: FittedAnalysis] = [:]
     private var shelfTop = 0, shelfBottom = 0, cursorX = 0
     private(set) var resets = 0
     /// The last lookup ran out of atlas space; the caller resets and retries.
@@ -166,6 +190,9 @@ final class GlyphAtlas: @unchecked Sendable {
         shelfTop = 0; shelfBottom = 0; cursorX = 0
         resets += 1; exhausted = false
     }
+    func resetAnalysis() { analyses.removeAll(keepingCapacity: true) }
+    func clearExhausted() { exhausted = false }
+
     /// Coverage for one glyph in one colour, rasterising it the first time it is seen.
     func entry(style: UInt8, text: String, fg: [UInt8], face: CTFont, geometry: TextGeometry) -> Entry? {
         guard fg.count == 3 else { return nil }
@@ -174,6 +201,26 @@ final class GlyphAtlas: @unchecked Sendable {
         guard entries.count < Self.maxEntries else { exhausted = true; return nil }
         guard let mask = Self.rasterize(text: text, face: face, fg: fg, geometry: geometry) else { return nil }
         return insert(mask, key: key)
+    }
+
+    func canFit(style: UInt8, text: String, face: CTFont) -> Bool {
+        switch fittedAnalysis(style: style, text: text, face: face) {
+        case .blank, .monochrome: return true
+        case nil, .unsupported: return false
+        }
+    }
+    func fittedEntry(style: UInt8, text: String, fg: [UInt8], face: CTFont, geometry: TextGeometry) -> Fitted? {
+        switch fittedAnalysis(style: style, text: text, face: face) {
+        case nil, .unsupported: return nil
+        case .blank: return .blank
+        case .monochrome(let fitted):
+            guard fg.count == 3 else { return nil }
+            let key = Key.fitted(style: style, text: text, fg: UInt32(fg[0]) << 16 | UInt32(fg[1]) << 8 | UInt32(fg[2]))
+            if let cached = entries[key] { return .entry(cached) }
+            guard entries.count < Self.maxEntries else { exhausted = true; return nil }
+            guard let mask = Self.rasterizeFitted(line: fitted.line, ink: fitted.ink, fg: fg, geometry: geometry) else { return nil }
+            return insert(mask, key: key).map { .entry($0) }
+        }
     }
 
     /// Geometric glyphs need no font, style or colour key: the same white coverage is tinted by each instance.
@@ -185,6 +232,14 @@ final class GlyphAtlas: @unchecked Sendable {
         if let cached = entries[key] { return cached }
         guard entries.count < Self.maxEntries else { exhausted = true; return nil }
         guard let mask = Self.rasterize(scalar: scalar, width: width, height: height, geometry: geometry) else { return nil }
+        return insert(mask, key: key)
+    }
+
+    func decorationEntry(_ kind: Decoration, geometry: TextGeometry) -> Entry? {
+        let key = Key.decoration(kind)
+        if let cached = entries[key] { return cached }
+        guard entries.count < Self.maxEntries else { exhausted = true; return nil }
+        guard let mask = Self.rasterizeDecoration(kind, geometry: geometry) else { return nil }
         return insert(mask, key: key)
     }
 
@@ -212,7 +267,96 @@ final class GlyphAtlas: @unchecked Sendable {
         return (x, top)
     }
 
+    private static func rasterizeDecoration(_ kind: Decoration, geometry: TextGeometry) -> Mask? {
+        let backing = geometry.scale
+        let height = max(1, Int((geometry.cell.height * backing).rounded()))
+        let rect = CGRect(x: (3 / backing - geometry.cell.width) / 2, y: 0, width: geometry.cell.width, height: geometry.cell.height)
+        var pixels = [UInt8](repeating: 0, count: 3 * height * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: 3, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: 12, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            context.scaleBy(x: backing, y: backing)
+            let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+            switch kind {
+            case .underline: GridRasterizer.underline(context, style: 1, rect: rect, baseline: geometry.baseline, color: white)
+            case .strike: GridRasterizer.strike(context, rect: rect, baseline: geometry.baseline, xHeight: geometry.xHeight, color: white)
+            }
+            return true
+        }
+        guard drawn else { return nil }
+        var coverage = [UInt8](repeating: 0, count: 3 * height)
+        for index in 0..<(3 * height) { coverage[index] = pixels[index * 4 + 3] }
+        return Mask(width: 3, height: height, dx: 0, dy: 0, coverage: coverage)
+    }
+
+    private func fittedAnalysis(style: UInt8, text: String, face: CTFont) -> FittedAnalysis? {
+        let key = LineKey(style: style, text: text)
+        if let cached = analyses[key] { return cached }
+        guard analyses.count < Self.maxEntries else { return nil }
+        let attributes: [NSAttributedString.Key: Any] = [.font: face, Self.colorFromContext: true, .ligature: 0]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        let result: FittedAnalysis
+        guard CTLineGetGlyphCount(line) > 0, let runs = CTLineGetGlyphRuns(line) as? [CTRun], !runs.isEmpty else {
+            result = .unsupported; analyses[key] = result; return result
+        }
+        var monochrome = true
+        for run in runs {
+            guard let raw = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] else { monochrome = false; break }
+            let font = raw as! CTFont
+            if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) { monochrome = false; break }
+        }
+        guard monochrome else { result = .unsupported; analyses[key] = result; return result }
+        let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        if ink.isNull {
+            result = .unsupported
+        } else if ink.isEmpty {
+            result = .blank
+        } else {
+            result = .monochrome(FittedLine(line: line, ink: ink))
+        }
+        analyses[key] = result
+        return result
+    }
+
     private struct Mask { let width: Int, height: Int; let dx: Int, dy: Int; let coverage: [UInt8] }
+
+    /// A narrow non-ASCII line fitted into its cell exactly as GridRasterizer fits it, then cropped to that cell.
+    private static func rasterizeFitted(line: CTLine, ink: CGRect, fg: [UInt8], geometry: TextGeometry) -> Mask? {
+        let localBox = CGRect(origin: .zero, size: geometry.cell)
+        let place = GlyphFonts.placement(ink: ink, box: localBox, baseline: geometry.baseline, centre: false)
+        let ink = ink.standardized
+        let placed = CGRect(x: place.origin.x + place.scale * ink.minX, y: place.origin.y + place.scale * ink.minY,
+                            width: place.scale * ink.width, height: place.scale * ink.height)
+        guard placed.minX.isFinite, placed.minY.isFinite, placed.width.isFinite, placed.height.isFinite, !placed.isEmpty else { return nil }
+        let backing = geometry.scale
+        let cellW = Int((geometry.cell.width * backing).rounded()), cellH = Int((geometry.cell.height * backing).rounded())
+        let dx = max(0, Int(floor(placed.minX * backing)) - pad)
+        let maxX = min(cellW, Int(ceil(placed.maxX * backing)) + pad)
+        let dy = max(0, Int(floor(CGFloat(cellH) - placed.maxY * backing)) - pad)
+        let maxY = min(cellH, Int(ceil(CGFloat(cellH) - placed.minY * backing)) + pad)
+        let width = maxX - dx, height = maxY - dy
+        guard width > 0, height > 0, width <= cellW, height <= cellH else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            context.scaleBy(x: backing, y: backing)
+            context.translateBy(x: -CGFloat(dx) / backing, y: -CGFloat(cellH - dy - height) / backing)
+            context.clip(to: localBox)
+            context.translateBy(x: place.origin.x, y: place.origin.y)
+            context.scaleBy(x: place.scale, y: place.scale)
+            context.setFillColor(CGColor(red: CGFloat(fg[0]) / 255, green: CGFloat(fg[1]) / 255, blue: CGFloat(fg[2]) / 255, alpha: 1))
+            context.textPosition = .zero
+            CTLineDraw(line, context)
+            return true
+        }
+        guard drawn else { return nil }
+        var coverage = [UInt8](repeating: 0, count: width * height)
+        for index in 0..<(width * height) { coverage[index] = pixels[index * 4 + 3] }
+        return Mask(width: width, height: height, dx: dx, dy: dy, coverage: coverage)
+    }
 
     /// Rasterises one line at the exact device position the CPU path draws it, so an integer-offset blit of
     /// this coverage is the same pixels.
@@ -274,7 +418,7 @@ final class GlyphAtlas: @unchecked Sendable {
 final class TextComposer: @unchecked Sendable {
     private struct Layout: Equatable {
         var width: Int, height: Int, scale: CGFloat, fontName: String, cjkFontName: String, fontSize: CGFloat
-        var cell: CGSize, cols: Int, rows: Int, descent: CGFloat
+        var cell: CGSize, cols: Int, rows: Int, descent: CGFloat, xHeight: CGFloat
     }
     /// Colours named by truecolor output are unbounded, exactly as in the rasterizer; convert each once.
     private static let maxColors = 4096
@@ -314,7 +458,7 @@ final class TextComposer: @unchecked Sendable {
         eligibleContentRows = nil; eligibilityScannedRows = 0
         epoch = nil; rebuilds = 0; isSuspended = false
         resetPending = false; recoveryPending = false
-        atlas.reset(); atlasEntries = 0; atlasResets = atlas.resets
+        atlas.reset(); atlas.resetAnalysis(); atlasEntries = 0; atlasResets = atlas.resets
     }
 
     /// Builds one frame, or nil when the atlas cannot represent it (the caller then keeps the CPU rasterizer).
@@ -326,28 +470,32 @@ final class TextComposer: @unchecked Sendable {
         guard TextEligibility.unsupportedFrame(snapshot, composition: "") == nil else {
             eligibleContentRows = nil; return nil
         }
-        let cachedDescent = layout.flatMap { $0.fontName == fontName && $0.fontSize == fontSize ? $0.descent : nil }
+        let cachedMetrics = layout.flatMap { $0.fontName == fontName && $0.fontSize == fontSize ? ($0.descent, $0.xHeight) : nil }
         let geometry = if let geometry { geometry } else {
             TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
-                                     fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows, descent: cachedDescent)
+                                     fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows,
+                                     descent: cachedMetrics?.0, xHeight: cachedMetrics?.1)
         }
         guard let geometry else { eligibleContentRows = nil; return nil }
         let wanted = Layout(width: geometry.width, height: geometry.height, scale: scale, fontName: fontName,
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
-                            rows: snapshot.rows, descent: geometry.descent)
+                            rows: snapshot.rows, descent: geometry.descent, xHeight: geometry.xHeight)
         let signature = Epoch(layout: wanted, appearance: appearance)
         let changesEpoch = epoch != signature
         let changesLayout = layout != wanted || base == nil || rows.count != snapshot.rows
         if isSuspended && !changesEpoch { eligibleContentRows = nil; return nil }
         if changesEpoch || changesLayout || recoveryPending { damage = nil }
-        // A CPU-only frame must leave the last atlas and its rebuild budget intact.
-        guard contentEligible(snapshot: snapshot, damage: damage, scroll: scroll) else { return nil }
+        // Validate with the candidate fonts before committing to a new atlas or rebuild budget.
+        let fontSet = changesLayout ? Self.makeFonts(fontName: fontName, fontSize: fontSize, cjkFontName: cjkFontName) : nil
+        let analysisAtlas = changesLayout ? GlyphAtlas() : atlas
+        guard contentEligible(snapshot: snapshot, damage: damage, scroll: scroll,
+                              faces: fontSet?.faces ?? faces, analysisAtlas: analysisAtlas) else { return nil }
         if changesEpoch { epoch = signature; rebuilds = 0; isSuspended = false }
         var resetAtlas = resetPending
-        if changesLayout {
+        if let fontSet {
             // A new font, size, scale or grid invalidates every UV and every row.
+            applyFonts(fontSet)
             layout = wanted
-            rebuildFonts(fontName: fontName, fontSize: fontSize, cjkFontName: cjkFontName)
             atlas.reset()
             rows = Array(repeating: [], count: snapshot.rows)
             lastCursorRow = nil
@@ -355,6 +503,7 @@ final class TextComposer: @unchecked Sendable {
             resetPending = true
         }
         recoveryPending = true
+        atlas.clearExhausted()
         var result = build(snapshot: snapshot, damage: damage, geometry: geometry, appearance: appearance,
                            resetAtlas: resetAtlas, scroll: scroll)
         if result == nil, atlas.exhausted {
@@ -379,32 +528,38 @@ final class TextComposer: @unchecked Sendable {
         return frame
     }
 
-    private func contentEligible(snapshot: Snapshot, damage: Set<Int>?, scroll: Int) -> Bool {
+    private func unsupportedContentCell(_ cell: Cell, faces: [CTFont], analysisAtlas: GlyphAtlas) -> TextFallback? {
+        if let reason = TextEligibility.unsupportedCell(cell) { return reason }
+        guard TextEligibility.fittedScalar(cell) != nil else { return nil }
+        let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))
+        guard let face = faces[safe: Int(style)], analysisAtlas.canFit(style: style, text: cell.text, face: face) else { return .nonASCII }
+        return nil
+    }
+
+    private func contentEligible(snapshot: Snapshot, damage: Set<Int>?, scroll: Int, faces: [CTFont], analysisAtlas: GlyphAtlas) -> Bool {
         eligibilityScannedRows = 0
         if scroll == 0, eligibleContentRows == snapshot.rows, let damage {
             for row in damage.sorted() where (0..<snapshot.rows).contains(row) {
                 eligibilityScannedRows += 1
-                if snapshot.cells(in: row).contains(where: { TextEligibility.unsupportedCell($0) != nil }) {
+                if snapshot.cells(in: row).contains(where: { unsupportedContentCell($0, faces: faces, analysisAtlas: analysisAtlas) != nil }) {
                     eligibleContentRows = nil
                     return false
                 }
             }
         } else {
             eligibleContentRows = nil
-            guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else {
-                for cell in snapshot.cells {
-                    if TextEligibility.unsupportedCell(cell) != nil {
-                        eligibilityScannedRows = min(snapshot.rows, max(1, cell.row + 1)); break
-                    }
+            for cell in snapshot.cells {
+                if unsupportedContentCell(cell, faces: faces, analysisAtlas: analysisAtlas) != nil {
+                    eligibilityScannedRows = min(snapshot.rows, max(1, cell.row + 1))
+                    return false
                 }
-                return false
             }
             eligibilityScannedRows = snapshot.rows
             eligibleContentRows = snapshot.rows
         }
         #if DEBUG
         // The release fast path relies on core damage. Check that contract against the original full scan in tests.
-        assert(TextEligibility.unsupportedContent(snapshot, composition: "") == nil)
+        for cell in snapshot.cells { assert(unsupportedContentCell(cell, faces: faces, analysisAtlas: analysisAtlas) == nil) }
         #endif
         return true
     }
@@ -414,15 +569,23 @@ final class TextComposer: @unchecked Sendable {
         resetPending = false; recoveryPending = false
     }
 
-    private func rebuildFonts(fontName: String, fontSize: CGFloat, cjkFontName: String) {
+    private struct FontSet { let base: CTFont, faces: [CTFont] }
+
+    private static func makeFonts(fontName: String, fontSize: CGFloat, cjkFontName: String) -> FontSet {
         let font = CTFontCreateWithName(fontName as CFString, fontSize, nil)
-        base = font
         let languages = Locale.preferredLanguages
-        faces = [font,
-                 CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .boldTrait, .boldTrait) ?? font,
-                 CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .italicTrait, .italicTrait) ?? font,
-                 CTFontCreateCopyWithSymbolicTraits(font, 0, nil, [.boldTrait, .italicTrait], [.boldTrait, .italicTrait]) ?? font]
+        let faces = [font,
+                     CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .boldTrait, .boldTrait) ?? font,
+                     CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .italicTrait, .italicTrait) ?? font,
+                     CTFontCreateCopyWithSymbolicTraits(font, 0, nil, [.boldTrait, .italicTrait], [.boldTrait, .italicTrait]) ?? font]
             .map { GlyphFonts.cascadeFont(base: $0, cjkFontName: cjkFontName, languages: languages) }
+        return FontSet(base: font, faces: faces)
+    }
+
+    private func applyFonts(_ fonts: FontSet) {
+        base = fonts.base
+        faces = fonts.faces
+        atlas.resetAnalysis()
     }
 
     private func build(snapshot: Snapshot, damage: Set<Int>?, geometry: TextGeometry, appearance: RenderAppearance,
@@ -504,7 +667,7 @@ final class TextComposer: @unchecked Sendable {
     private func instances(row: Int, cells: [Cell], geometry: TextGeometry, appearance: RenderAppearance,
                            cursor: Cursor) -> [TextInstance]? {
         var instances: [TextInstance] = []
-        instances.reserveCapacity(cells.count * 2 + 4)
+        instances.reserveCapacity(cells.count * 4 + 4)
         for cell in cells {
             let selected = cell.selected, search = cell.search
             guard selected || search || cell.bg != appearance.background else { continue }
@@ -533,6 +696,25 @@ final class TextComposer: @unchecked Sendable {
                                               r: color.0, g: color.1, b: color.2))
                 continue
             }
+            if TextEligibility.fittedScalar(cell) != nil {
+                let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)), fg = cell.fg
+                guard let face = faces[safe: Int(style)],
+                      let fitted = atlas.fittedEntry(style: style, text: text, fg: fg, face: face, geometry: geometry) else { return nil }
+                if case .blank = fitted { continue }
+                guard case .entry(let entry) = fitted else { return nil }
+                let box = geometry.deviceBox(geometry.box(cell))
+                let quadX = Float(box.minX) + Float(entry.dx), quadY = Float(box.minY) + Float(entry.dy)
+                let quadW = Float(entry.width), quadH = Float(entry.height)
+                let left = max(quadX, Float(box.minX)), top = max(quadY, Float(box.minY))
+                let right = min(quadX + quadW, Float(box.maxX)), bottom = min(quadY + quadH, Float(box.maxY))
+                guard right > left, bottom > top else { continue }
+                let tile = Float(GlyphAtlas.textureSize), color = deviceColor(fg)
+                instances.append(TextInstance(destX: left, destY: top, destW: right - left, destH: bottom - top,
+                                              u: entry.u + (left - quadX) / tile, v: entry.v + (top - quadY) / tile,
+                                              uw: (right - left) / tile, uh: (bottom - top) / tile,
+                                              r: color.0, g: color.1, b: color.2))
+                continue
+            }
             let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))
             let fg = cell.fg
             guard fg.count == 3, let face = faces[safe: Int(style)],
@@ -552,6 +734,18 @@ final class TextComposer: @unchecked Sendable {
                                           u: entry.u + (left - quadX) / tile, v: entry.v + (top - quadY) / tile,
                                           uw: (right - left) / tile, uh: (bottom - top) / tile,
                                           r: color.0, g: color.1, b: color.2))
+        }
+        func decoration(_ kind: GlyphAtlas.Decoration, _ cell: Cell, colorBytes: [UInt8]) -> Bool {
+            guard let entry = atlas.decorationEntry(kind, geometry: geometry), entry.width == 3 else { return false }
+            let box = geometry.deviceBox(geometry.box(cell)), tile = Float(GlyphAtlas.textureSize), color = deviceColor(colorBytes)
+            instances.append(TextInstance(destX: Float(box.minX), destY: Float(box.minY), destW: Float(box.width), destH: Float(box.height),
+                                          u: entry.u + 1.25 / tile, v: entry.v, uw: 0.5 / tile, uh: Float(entry.height) / tile,
+                                          r: color.0, g: color.1, b: color.2))
+            return true
+        }
+        for cell in cells {
+            if cell.underline, !decoration(.underline, cell, colorBytes: cell.ucolor ?? cell.fg) { return nil }
+            if cell.strike == true, !decoration(.strike, cell, colorBytes: cell.fg) { return nil }
         }
         guard cursor.visible, cursor.row == row else { return instances }
         appendCursor(to: &instances, cursor: cursor, geometry: geometry, appearance: appearance)

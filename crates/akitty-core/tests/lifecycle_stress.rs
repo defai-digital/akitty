@@ -23,6 +23,35 @@ fn descriptors() -> usize {
     // SAFETY: F_GETFD only queries descriptor validity; it does not change ownership.
     (0..4096).filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0).count()
 }
+unsafe extern "C" {
+    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+}
+
+// The `mach2` crate is not an Akitty dependency; this test uses the existing libc Mach bindings.
+#[allow(deprecated)]
+fn task_resources() -> Option<(usize, usize)> {
+    // SAFETY: task_info writes at most info_count mach_task_basic_info integers into `info`. task_threads
+    // allocates a thread-port array that this function releases and deallocates. Both inspect the current task.
+    unsafe {
+        let task = libc::mach_task_self_;
+        let mut info: libc::mach_task_basic_info = std::mem::zeroed();
+        let mut info_count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        if libc::task_info(task, libc::MACH_TASK_BASIC_INFO, &mut info as *mut _ as libc::task_info_t, &mut info_count) != libc::KERN_SUCCESS {
+            return None;
+        }
+        let rss = info.resident_size as usize;
+        let mut ports: *mut libc::thread_act_t = std::ptr::null_mut();
+        let mut port_count = 0;
+        if libc::task_threads(task, &mut ports, &mut port_count) != libc::KERN_SUCCESS {
+            return None;
+        }
+        for index in 0..port_count {
+            mach_port_deallocate(task, *ports.add(index as usize));
+        }
+        libc::vm_deallocate(task, ports as libc::vm_address_t, port_count as usize * std::mem::size_of::<libc::thread_act_t>());
+        Some((rss, port_count as usize))
+    }
+}
 fn wait_for(mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !check() {
@@ -37,6 +66,7 @@ fn concurrent_pty_resize_output_expiry_exit_and_cleanup_settle() {
     assert!((1..=1000).contains(&rounds));
     // Include first-use reaper initialization in the resource bound.
     let baseline = descriptors();
+    let (baseline_rss, baseline_threads) = task_resources().expect("Mach task resource sampling is required");
     for round in 0..rounds {
         let sessions: Vec<_> = (0..8).map(|_| Session::new()).collect();
         let mut pids = Vec::new();
@@ -82,6 +112,11 @@ fn concurrent_pty_resize_output_expiry_exit_and_cleanup_settle() {
             (unsafe { libc::kill(*pid, 0) }) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         }));
         wait_for(|| descriptors() <= baseline + 2);
-        eprintln!("round {round}: 8 children reaped; descriptors {} (baseline {baseline})", descriptors());
+        let rss_bound = baseline_rss + 64 * 1024 * 1024;
+        wait_for(|| {
+            task_resources().is_some_and(|(rss, threads)| threads <= baseline_threads + 2 && rss <= rss_bound)
+        });
+        let (rss, threads) = task_resources().expect("Mach task resource sampling is required");
+        eprintln!("round {round}: 8 children reaped; descriptors {} (baseline {baseline}); threads {threads} (baseline {baseline_threads}); rss {rss} (baseline {baseline_rss})", descriptors());
     }
 }

@@ -39,6 +39,76 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
+    @MainActor func testFittedMonochromeFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(0, "éñßαλ€") + line(1, "ⅢℓΊ→", Style(fg: [240, 180, 90]))
+            + line(2, "ÉÅÇ∫", Style(bold: true)) + line(3, "é", Style(italic: true))
+            + line(4, "\u{00a0}") + line(5, "漢", Style(bold: true, italic: true))
+            + line(6, "⎛∫Ⅲℓ")
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            XCTAssertGreaterThan(paintedPixels(cpu), 0, "\(scale)x fitted CPU reference painted glyphs")
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x fitted max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.90, "\(scale)x fitted identical pixels \(result.exact)")
+        }
+    }
+
+    func testColorAndClusterContentFallsBackWithoutGrowingTheAtlas() throws {
+        let composer = TextComposer()
+        _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "x")), composer: composer, damage: nil))
+        let entries = composer.atlasEntries, resets = composer.atlasResets
+        for text in ["😀", "🇺", "\u{200d}", "e\u{0301}"] {
+            XCTAssertNil(compose(try snapshot(cells: line(0, text)), composer: composer, damage: nil), text)
+            XCTAssertEqual(composer.atlasEntries, entries, text)
+            XCTAssertEqual(composer.atlasResets, resets, text)
+        }
+        let color = TextComposer()
+        XCTAssertNil(color.compose(snapshot: try snapshot(cells: line(0, "⚠")), damage: nil, size: size, scale: 2,
+                                   fontName: "Apple Color Emoji", fontSize: 13, cell: cell, cjkFontName: "", appearance: .standard),
+                     "a resolved color font cannot use the single-channel atlas")
+        XCTAssertEqual(color.atlasEntries, 0)
+    }
+
+    @MainActor func testSingleUnderlineAndStrikeMatchTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(0, "gjpqy", Style(underline: true, underlineColor: [240, 80, 80]))
+            + line(1, "éⅢ", Style(underline: true))
+            + line(2, "strike", Style(strike: true, underlineColor: [90, 200, 90]))
+            + line(3, "both", Style(underline: true, strike: true))
+            + line(4, "│█", Style(underline: true))
+            + [wire(5, 0, text: "", Style(underline: true)), wire(5, 1, text: " ", Style(strike: true)),
+               wire(5, 2, text: "\u{2800}", Style(underline: true))]
+        let snapshot = try snapshot(cells: cells, cursor: ["row": 0, "col": 0, "visible": true])
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x decorated max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.90, "\(scale)x decorated identical pixels \(result.exact)")
+        }
+    }
+
+    func testComplexUnderlineStylesRemainOnTheCpuPathWithoutGrowingTheAtlas() throws {
+        let composer = TextComposer()
+        _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "x")), composer: composer, damage: nil))
+        let entries = composer.atlasEntries, resets = composer.atlasResets
+        for style in UInt8(2)...5 {
+            let cells = line(0, "x", Style(underline: true, underlineStyle: style))
+            XCTAssertNil(compose(try snapshot(cells: cells), composer: composer, damage: nil), "style \(style)")
+            XCTAssertEqual(composer.atlasEntries, entries, "style \(style)")
+            XCTAssertEqual(composer.atlasResets, resets, "style \(style)")
+        }
+    }
+
     /// Box and block geometry is cached as colour-independent coverage, including junctions and complementary halves.
     @MainActor func testGeometricFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
         let presenter: MetalPresenter
@@ -227,15 +297,15 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
-    /// The composer's per-row bound is the presenter's buffer stride: a worst-case row (a fill and a glyph in
-    /// every column, plus all four cursor bands) must fit without truncation.
+    /// The composer's per-row bound is the presenter's buffer stride: a fill, glyph, underline and strike in
+    /// every column, plus all four cursor bands, must fit without truncation.
     @MainActor func testAWorstCaseRowFitsTheInstanceCapacity() throws {
         let presenter: MetalPresenter
         do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
         let capacity = MetalPresenter.textRowCapacity(cols: cols)
         var cells: [[Any]] = []
         for col in 0..<cols {
-            cells.append(wire(0, col, text: "X", Style(bg: [30, 30, 30], selected: col % 2 == 0)))
+            cells.append(wire(0, col, text: "X", Style(bg: [30, 30, 30], selected: col % 2 == 0, underline: true, strike: true)))
         }
         let snapshot = try snapshot(cells: cells, cursor: ["row": 0, "col": cols - 1, "visible": true])
         let frame = try XCTUnwrap(compose(snapshot, composer: TextComposer(), damage: nil))
@@ -245,7 +315,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let overflowing = TextFrame(rows: 1, dirtyRows: [0],
                                     content: [Array(repeating: .zero, count: capacity + 1)],
                                     uploads: [], resetAtlas: true)
-        XCTAssertThrowsError(try presenter.updateText(overflowing, grid: GridGeometry(cols: 1, rows: 1, cell: cell, scale: 2)),
+        XCTAssertThrowsError(try presenter.updateText(overflowing, grid: GridGeometry(cols: cols, rows: 1, cell: cell, scale: 2)),
                              "a row that does not fit must fail over, never drop instances")
     }
 
@@ -419,15 +489,17 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(try fallback([wire(0, 0, text: "█")]), "block geometry is eligible")
         XCTAssertNil(try fallback([wire(0, 0, text: "⠀")]), "blank braille is eligible without an atlas tile")
         XCTAssertNil(try fallback(line(0, "│")), "box geometry is eligible")
-        XCTAssertEqual(try fallback(line(0, "漢字")), .nonASCII, "CJK keeps the software path")
+        XCTAssertEqual(try fallback(line(0, "漢字", Style(wide: true))), .wideCell, "wide CJK keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "e\u{0301}")]), .nonASCII, "combining text keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "👨‍👩‍👧")]), .nonASCII, "emoji keeps the software path")
         XCTAssertNil(try fallback([wire(0, 0, text: "│")]), "box drawing uses geometric coverage, not a font glyph")
-        XCTAssertEqual(try fallback(line(0, "und", Style(underline: true))), .decoratedCell, "underlines keep the CPU path")
-        XCTAssertEqual(try fallback(line(0, "gone", Style(strike: true))), .decoratedCell, "strikethrough keeps the CPU path")
+        for style in UInt8(2)...5 {
+            XCTAssertEqual(try fallback(line(0, "und", Style(underline: true, underlineStyle: style))), .decoratedCell,
+                           "underline style \(style) keeps the CPU path")
+        }
         XCTAssertEqual(try fallback([wire(0, 0, text: "中", Style(wide: true))]), .wideCell, "wide cells keep the CPU path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "█", Style(wide: true))]), .wideCell, "wide geometry keeps the CPU path")
-        XCTAssertEqual(try fallback([wire(0, 0, text: "│", Style(underline: true))]), .decoratedCell,
+        XCTAssertEqual(try fallback([wire(0, 0, text: "│", Style(underline: true, underlineStyle: 2))]), .decoratedCell,
                        "decorated geometry keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), composition: "ab"), .composition, "IME composition keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), images: [placement(id: 1)]), .images,
@@ -443,13 +515,13 @@ final class MetalTextRenderingTests: XCTestCase {
                        "a fractional bitmap width")
         // Composition also refuses at the composer, which is the only caller that can drop cells.
         let composer = TextComposer()
-        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: size,
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字", Style(wide: true))), damage: nil, size: size,
                                       scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                       appearance: .standard), "a CJK frame must not be silently drawn as blanks")
     }
 
     func testPrevalidatedGeometryCannotBypassContentEligibility() throws {
-        let unsupported = try snapshot(cells: line(0, "漢字") + [wire(1, 0, text: "e\u{0301}")])
+        let unsupported = try snapshot(cells: line(0, "漢字", Style(wide: true)) + [wire(1, 0, text: "e\u{0301}")])
         let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo", fontSize: 13,
                                                               cols: cols, rows: rows))
         XCTAssertNil(TextComposer().compose(snapshot: unsupported, damage: nil, size: size, scale: 2,
@@ -473,9 +545,9 @@ final class MetalTextRenderingTests: XCTestCase {
 
     func testDirtyUnsupportedCellsInvalidateEligibilityAndFullDamageRecovers() throws {
         let unsupported = [
-            line(3, "漢字"), [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")],
-            [wire(3, 0, text: "中", Style(wide: true))], line(3, "und", Style(underline: true)),
-            line(3, "gone", Style(strike: true)),
+            line(3, "漢字", Style(wide: true)), [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")],
+            [wire(3, 0, text: "中", Style(wide: true))], line(3, "und", Style(underline: true, underlineStyle: 2)),
+            line(3, "gone", Style(underline: true, underlineStyle: 5)),
         ]
         let source = (0..<rows).map { "row \($0)" }
         for changedRow in unsupported {
@@ -498,7 +570,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let source = (0..<rows).map { "row \($0)" }
         let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
-        let shifted = try snapshot(cells: (1..<rows).flatMap { line($0 - 1, $0 == 1 ? "漢字" : source[$0]) }
+        let shifted = try snapshot(cells: (1..<rows).flatMap { line($0 - 1, $0 == 1 ? "漢字" : source[$0], $0 == 1 ? Style(wide: true) : Style()) }
             + line(rows - 1, "new"))
         XCTAssertNil(composer.compose(snapshot: shifted, damage: [rows - 1], size: size, scale: 2,
                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
@@ -515,23 +587,25 @@ final class MetalTextRenderingTests: XCTestCase {
         let composer = TextComposer()
         let initial = try snapshot(cells: line(0, "plain"))
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
-        let unsupported = try snapshot(cells: line(0, "漢字"), images: [placement(id: 1)])
+        let unsupported = try snapshot(cells: line(0, "漢字", Style(wide: true)), images: [placement(id: 1)])
         XCTAssertNil(compose(unsupported, composer: composer, damage: []), "images take the layered path first")
-        let withoutImages = try snapshot(cells: line(0, "漢字"))
+        let withoutImages = try snapshot(cells: line(0, "漢字", Style(wide: true)))
         XCTAssertNil(compose(withoutImages, composer: composer, damage: []),
                      "the next content check cannot reuse eligibility from before the image frame")
         XCTAssertEqual(composer.eligibilityScannedRows, 1)
     }
 
-    func testCachedDescentMatchesFreshGeometry() throws {
+    func testCachedFontMetricsMatchFreshGeometry() throws {
         for fontName in ["Menlo", "Courier New"] {
             for fontSize in [CGFloat(13), 17.25] {
-                let descent = CTFontGetDescent(CTFontCreateWithName(fontName as CFString, fontSize, nil))
+                let font = CTFontCreateWithName(fontName as CFString, fontSize, nil)
+                let descent = CTFontGetDescent(font), xHeight = CTFontGetXHeight(font)
                 for scale in [CGFloat(1), 2, 3] {
                     let fresh = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
                                                          fontSize: fontSize, cols: cols, rows: rows)
                     let cached = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
-                                                          fontSize: fontSize, cols: cols, rows: rows, descent: descent)
+                                                          fontSize: fontSize, cols: cols, rows: rows,
+                                                          descent: descent, xHeight: xHeight)
                     XCTAssertEqual(cached, fresh, "\(fontName) \(fontSize) @\(scale)x")
                 }
             }
@@ -541,8 +615,8 @@ final class MetalTextRenderingTests: XCTestCase {
     @MainActor func testScrollTranslatesRowsAndMatchesFullEncoding() throws {
         let presenter: MetalPresenter
         do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
-        let source = (0..<rows).map { "row \($0) ascii" }
-        let shifted = Array(source.dropFirst(2)) + ["new ten", "new eleven"]
+        let source = (0..<rows).map { $0 % 3 == 0 ? "row \($0) éⅢ∫" : "row \($0) ascii" }
+        let shifted = Array(source.dropFirst(2)) + ["new é ten", "new ∫ eleven"]
         for scale: CGFloat in [1, 2, 3] {
             let composer = TextComposer()
             let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) },
@@ -579,7 +653,7 @@ final class MetalTextRenderingTests: XCTestCase {
     func testScrollWithUnsafeBaselineRoundingFallsBackToFullEncoding() throws {
         let oddCell = CGSize(width: 8, height: 12), oddSize = CGSize(width: size.width, height: 157.0 / 3)
         let geometry = TextGeometry(cols: cols, rows: rows, cell: oddCell, scale: 3, size: oddSize,
-                                    width: 1008, height: 157, descent: 7.0 / 3, phaseX: 0, phaseY: 0)
+                                    width: 1008, height: 157, descent: 7.0 / 3, xHeight: 8.0 / 3, phaseX: 0, phaseY: 0)
         let delta = oddCell.height * 3
         XCTAssertFalse((0..<rows - 1).allSatisfy {
             geometry.deviceOriginY(row: $0 + 1) - delta == geometry.deviceOriginY(row: $0)
@@ -904,13 +978,105 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(frames.last!, "a suspended composer refuses frames instead of rebuilding every time")
         XCTAssertGreaterThan(composer.atlasResets, 1, "the rebuild budget was spent before standing down")
         XCTAssertLessThanOrEqual(composer.atlasEntries, GlyphAtlas.maxEntries)
-        let resets = composer.atlasResets
+        let entries = composer.atlasEntries, resets = composer.atlasResets
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "a")), damage: nil, size: size, scale: 3,
+                                      fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "", appearance: .standard),
+                     "a suspended composer cannot resume in the same epoch")
+        XCTAssertTrue(composer.isSuspended)
+        XCTAssertEqual(composer.atlasEntries, entries)
+        XCTAssertEqual(composer.atlasResets, resets)
         let otherSize = CGSize(width: size.width + 8, height: size.height)
-        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: otherSize, scale: 3,
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字", Style(wide: true))), damage: nil, size: otherSize, scale: 3,
                                       fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "",
                                       appearance: .standard))
         XCTAssertTrue(composer.isSuspended, "unsupported content at another layout cannot re-arm the atlas")
         XCTAssertEqual(composer.atlasResets, resets, "content refusal happens before a suspended layout reset")
+        let colorEntries = composer.atlasEntries
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "x⚠")), damage: nil, size: otherSize, scale: 3,
+                                      fontName: "Apple Color Emoji", fontSize: 36, cell: cell, cjkFontName: "",
+                                      appearance: .standard))
+        XCTAssertTrue(composer.isSuspended, "a color-font layout cannot unsuspend the composer")
+        XCTAssertEqual(composer.atlasEntries, colorEntries)
+        XCTAssertEqual(composer.atlasResets, resets)
+    }
+
+    @MainActor func testRejectedFontLayoutDoesNotCorruptTheActiveRenderer() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        let menlo = try snapshot(cells: line(0, "x"))
+        _ = try render(menlo, scale: 2, presenter: presenter, composer: composer)
+        let rejected = try snapshot(cells: [wire(0, 0, text: "é"), wire(0, 1, text: "漢", Style(wide: true))])
+        XCTAssertNil(composer.compose(snapshot: rejected, damage: nil,
+                                      size: size, scale: 2, fontName: "Courier New", fontSize: 13, cell: cell,
+                                      cjkFontName: "", appearance: .standard),
+                     "a rejected layout must fall back")
+        let returnedSnapshot = try snapshot(cells: line(0, "yé"))
+        let returned = try XCTUnwrap(compose(returnedSnapshot, composer: composer, damage: nil))
+        try presenter.updateText(returned, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
+        let gpu = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        let cpu = try GridRasterizer.make(snapshot: returnedSnapshot, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                          cellSize: cell, composition: "")
+        XCTAssertLessThanOrEqual(compare(cpu, gpu).max, 2, "the active Menlo renderer must survive a rejected font change")
+    }
+
+    func testColorFontRefusalDoesNotGrowAtlasOrUnsuspend() throws {
+        let composer = TextComposer()
+        let cells = line(0, "x⚠")
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: cells), damage: nil, size: size, scale: 2,
+                                      fontName: "Apple Color Emoji", fontSize: 13, cell: cell, cjkFontName: "",
+                                      appearance: .standard))
+        XCTAssertEqual(composer.atlasEntries, 0)
+        XCTAssertEqual(composer.atlasResets, 0)
+        XCTAssertFalse(composer.isSuspended)
+    }
+
+    func testDecorationMasksAreColorIndependent() throws {
+        let composer = TextComposer()
+        let first = try XCTUnwrap(compose(try snapshot(cells: [wire(0, 0, text: "", Style(underline: true)),
+                                                               wire(0, 1, text: "", Style(strike: true))]),
+                                          composer: composer, damage: nil))
+        XCTAssertFalse(first.uploads.isEmpty)
+        let second = try XCTUnwrap(compose(try snapshot(cells: [wire(0, 0, text: "", Style(fg: [255, 0, 0], underline: true, underlineColor: [0, 255, 0])),
+                                                                wire(0, 1, text: "", Style(fg: [0, 0, 255], strike: true))]),
+                                           composer: composer, damage: [0]))
+        XCTAssertTrue(second.uploads.isEmpty, "colour changes reuse the two colour-independent decoration masks")
+    }
+
+    @MainActor func testScrollTranslatesDecoratedRowsAndMatchesFullEncoding() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let style = Style(underline: true, strike: true)
+        let source = (0..<rows).map { "éⅢ \($0)" }
+        let shifted = Array(source.dropFirst(2)) + ["new é ten", "new ∫ eleven"]
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element, style) },
+                                       cursor: ["row": 4, "col": 2, "visible": true])
+            try presenter.updateText(try XCTUnwrap(composer.compose(snapshot: initial, damage: nil, size: size, scale: scale,
+                                                                    fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                                    appearance: .standard)),
+                                     grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let next = try snapshot(cells: shifted.enumerated().flatMap { line($0.offset, $0.element, style) },
+                                    cursor: ["row": 3, "col": 1, "visible": true])
+            let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [10, 11], size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard, scroll: 2))
+            XCTAssertEqual(composer.translatedRowCount, rows - 4, "scale \(scale)")
+            XCTAssertEqual(composer.reencodedRowCount, 4, "two exposed and two cursor rows at scale \(scale)")
+            try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let actual = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
+            let reference = TextComposer()
+            let full = try XCTUnwrap(reference.compose(snapshot: next, damage: nil, size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard))
+            try presenter.updateText(full, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            XCTAssertEqual(actual, try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height),
+                           "scale \(scale) decorated scroll matches full encoding")
+            let cpu = try GridRasterizer.make(snapshot: next, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            XCTAssertLessThanOrEqual(compare(cpu, actual).max, 2, "scale \(scale) decorated scroll matches the CPU rasterizer")
+        }
     }
 
     /// Leaving the window drops the atlas texture and the instance buffer.
@@ -1044,15 +1210,19 @@ final class MetalTextRenderingTests: XCTestCase {
         var fg: [Int] = [218, 226, 239]
         var bg: [Int] = [8, 10, 13]
         var selected = false, underline = false, strike = false, bold = false, italic = false
+        var underlineStyle: UInt8? = nil, underlineColor: [Int]? = nil
         var search = false, activeSearch = false, wide = false
     }
     /// One cell in the wire form: `[row, col, text, fg, bg, attrs]`. Attrs bits are 1 bold, 2 italic,
     /// 4 underline, 8 selected, 16 wide, 32 strike, 64 search, 128 active search.
     private func wire(_ row: Int, _ col: Int, text: String = "", _ style: Style = Style()) -> [Any] {
-        let attrs = (style.bold ? 1 : 0) | (style.italic ? 2 : 0) | (style.underline ? 4 | 1 << 8 : 0) | (style.selected ? 8 : 0)
+        let attrs = (style.bold ? 1 : 0) | (style.italic ? 2 : 0)
+            | (style.underline ? 4 | Int(style.underlineStyle ?? 1) << 8 : 0) | (style.selected ? 8 : 0)
             | (style.wide ? 16 : 0) | (style.strike ? 32 : 0) | (style.search ? 64 : 0) | (style.activeSearch ? 128 : 0)
-        return [row, col, text, style.fg[0] << 16 | style.fg[1] << 8 | style.fg[2],
-                style.bg[0] << 16 | style.bg[1] << 8 | style.bg[2], attrs]
+        var result: [Any] = [row, col, text, style.fg[0] << 16 | style.fg[1] << 8 | style.fg[2],
+                             style.bg[0] << 16 | style.bg[1] << 8 | style.bg[2], attrs]
+        if let color = style.underlineColor { result.append(color[0] << 16 | color[1] << 8 | color[2]) }
+        return result
     }
     /// A string laid out one grapheme per column, as a real snapshot carries it.
     private func line(_ row: Int, _ text: String, col: Int = 0, _ style: Style = Style()) -> [[Any]] {

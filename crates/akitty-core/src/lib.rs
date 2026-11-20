@@ -336,8 +336,10 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             // Reads must not wake the host: a snapshot that signalled would make its poller poll again forever.
-            let mutating = !matches!(request, Request::ShellState { .. } | Request::RecentText { .. } | Request::CommandHistory { .. }
-                | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. } | Request::FindMatches { .. });
+            // Input is excluded too because it wakes conditionally from inside its own arm.
+            let wakes_host = !matches!(request, Request::ShellState { .. } | Request::RecentText { .. } | Request::CommandHistory { .. }
+                | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. } | Request::FindMatches { .. }
+                | Request::Input { .. } | Request::InputBytes { .. });
             let result = match request {
                 Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
                 Request::ControlRelease { lease, .. } => session.control_release(Some(lease)),
@@ -366,10 +368,13 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                     });
                 }
                 Request::Input { text, paste, .. } => {
-                    session.input(text, paste.unwrap_or(false))?;
+                    if session.input(text, paste.unwrap_or(false))? { session.notify_host(); }
                     Ok(json!({}))
                 }
-                Request::InputBytes { bytes, .. } => { session.input_bytes(bytes)?; Ok(json!({})) }
+                Request::InputBytes { bytes, .. } => {
+                    if session.input_bytes(bytes)? { session.notify_host(); }
+                    Ok(json!({}))
+                }
                 Request::Feed { text, .. } => {
                     session.feed(text.as_bytes())?;
                     Ok(json!({}))
@@ -425,7 +430,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 Request::NotifyFd { .. } => session.notify_fd(),
                 _ => unreachable!(),
             };
-            if mutating { session.notify_host(); }
+            if wakes_host { session.notify_host(); }
             result
         }
     };

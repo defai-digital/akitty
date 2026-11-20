@@ -107,6 +107,47 @@ import XCTest
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(polls, beforeShutdown, "late deadlines must not poll a closed session")
     }
+    func testHiddenPaneAppliesSnapshotsWithoutRasterAndRestoresRendering() async throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: true, forceSoftware: true, forceShaderFailure: false, initial: TerminalPreferences())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 240), styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false; window.contentView = terminal
+        defer { terminal.shutdown(); window.close() }
+        var rasters = 0
+        terminal.onNativeFrameEvent = { if case .rasterStarted = $0 { rasters += 1 } }
+        _ = try terminal.session.call("feed", ["text": "BEFORE_HIDE"])
+        terminal.poll()
+        var deadline = Date().addingTimeInterval(2)
+        while (terminal.snapshot?.text.contains("BEFORE_HIDE") != true || rasters == 0), Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(terminal.snapshot?.text.contains("BEFORE_HIDE") == true); XCTAssertGreaterThan(rasters, 0)
+
+        terminal.isHidden = true
+        XCTAssertTrue(terminal.isHidden, "the integration setup must really hide the pane")
+        let hiddenRasterCount = rasters
+        _ = try terminal.session.call("feed", ["text": "\r\nHIDDEN_UPDATE"])
+        terminal.poll()
+        deadline = Date().addingTimeInterval(2)
+        while terminal.snapshot?.text.contains("HIDDEN_UPDATE") != true, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(terminal.snapshot?.text.contains("HIDDEN_UPDATE") == true)
+        XCTAssertEqual(rasters, hiddenRasterCount, "a hidden pane must not rasterize hidden frames")
+        XCTAssertNil(terminal.gridDamage.rows, "the next visible frame needs full damage")
+
+        terminal.isHidden = false
+        _ = try terminal.session.call("feed", ["text": "\r\nVISIBLE_AGAIN"])
+        terminal.poll()
+        deadline = Date().addingTimeInterval(2)
+        while (terminal.snapshot?.text.contains("VISIBLE_AGAIN") != true || rasters == hiddenRasterCount), Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(terminal.snapshot?.text.contains("VISIBLE_AGAIN") == true)
+        XCTAssertGreaterThan(rasters, hiddenRasterCount, "restoration must render the latest snapshot")
+    }
+
     func testNativePolicyKeepsHiddenCadenceAndBypassesForFocusOrInteraction() {
         XCTAssertEqual(TerminalView.refreshInterval(visible: false, focused: true, recentInput: true), 0.25)
         XCTAssertEqual(TerminalView.refreshInterval(visible: true, focused: true, recentInput: false), 0)

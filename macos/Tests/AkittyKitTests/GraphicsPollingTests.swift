@@ -51,11 +51,15 @@ final class GraphicsPollingTests: XCTestCase {
 
     // MARK: Polling decision
 
-    func testWantsFastPollingFollowsAnimationsAndRecentFrameChanges() {
-        XCTAssertTrue(TerminalView.wantsFastPolling(animating: true, changedAt: 0, now: 500))
-        XCTAssertTrue(TerminalView.wantsFastPolling(animating: false, changedAt: 100, now: 100.5), "a fresh frame still polls at display rate")
-        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 100, now: 101), "idle for a second falls back to the safety timer")
-        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, changedAt: 0, now: 10), "nothing ever changed")
+    func testWantsFastPollingFollowsAnimationsAndHeadlessFrames() {
+        XCTAssertTrue(TerminalView.wantsFastPolling(animating: true, hasWakeSource: true, changedAt: 0, now: 500))
+        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, hasWakeSource: true, changedAt: 100, now: 100.5),
+                       "a live PTY already wakes through its notification pipe")
+        XCTAssertTrue(TerminalView.wantsFastPolling(animating: false, hasWakeSource: false, changedAt: 100, now: 100.5),
+                      "a fresh headless frame still polls at display rate")
+        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, hasWakeSource: false, changedAt: 100, now: 101),
+                       "an idle headless session falls back to the safety timer")
+        XCTAssertFalse(TerminalView.wantsFastPolling(animating: false, hasWakeSource: false, changedAt: 0, now: 10))
     }
 
     // MARK: Point to cell

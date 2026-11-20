@@ -18,8 +18,10 @@ Implemented foundation: local engine ownership, synchronized-output timeout reco
 PTY read diagnostics, required repeated concurrent PTY/pane cleanup checks, and
 real-browser canvas/input/lifecycle tests. Run a longer PTY soak with
 `AKITTY_STRESS_ROUNDS=100 cargo test --locked -p akitty-core --test lifecycle_stress -- --nocapture`.
-This exercises 800 sessions. It does not establish multi-day reliability, memory
-plateaus, sleep/wake behavior or complete terminal conformance.
+This exercises 800 sessions and checks that descriptors, threads and RSS settle.
+It does not establish multi-day reliability or complete terminal conformance.
+`AKITTY_SLEEP_WAKE_MANUAL=1 swift test --package-path macos --filter AkittyKitTests.SleepWakeTests`
+performs an opt-in manual system sleep/wake qualification; it skips in normal CI.
 
 
 Establish repeatable baselines before changing hot paths. Priorities are:
@@ -38,13 +40,15 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   up to 250 ms when idle, coalesces queued resizes and applies up to 256 KiB per pass.
   A separate reader thread owns every read through a fixed ring of four 64 KiB slots,
   so parsing overlaps reading and the host is woken once per applied batch.
-- The PTY worker signals a host-notification pipe whenever it advances the model, so an
+- Accepted input signals the host only when it snaps the viewport back from scrollback or
+  marks an unedited prompt dirty; repeated typing does not produce a no-op snapshot/wake.
+  The PTY worker signals a host-notification pipe whenever it advances the model, so an
   idle pane no longer polls on a 30 Hz timer; a 1 Hz safety tick backstops a missed wake.
   A timed chrome status or progress also wakes the host when it expires, so it clears on time.
-  Hidden panes (background tabs, occluded windows, a hidden app) coalesce wakeups to 4 Hz
-  and the view polls again when shown. A pane in a background tab releases its window-sized
-  bitmaps and Metal textures and repaints in full when selected again. Minimized-window
-  rasterization remains to measure.
+  Hidden panes (background tabs, occluded windows, minimized windows, a hidden app) coalesce
+  wakeups to 4 Hz and the view polls again when shown. A pane in a background tab, or one that
+  becomes hidden, occluded, or minimized, releases its window-sized bitmaps and Metal textures,
+  stops rasterizing, and repaints in full when it becomes visible again.
   Measured idle on an Apple M5 Max Mac (macOS 27.2, release build, idle zsh, 60 s `top` samples): four
   windows use 0.10% CPU and about 34 context switches a second, eight use 0.21% and about 63, with almost
   no idle wakeups; hiding the app changes neither. Each pane adds about eight switches a second, which

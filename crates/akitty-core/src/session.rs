@@ -415,7 +415,7 @@ impl Session {
         let notify = self.notify.as_ref().ok_or("headless session has no notification pipe")?;
         Ok(json!({"fd": notify.read_fd()}))
     }
-    pub fn input(&self, text: String, paste: bool) -> Result<(), String> {
+    pub fn input(&self, text: String, paste: bool) -> Result<bool, String> {
         if text.len() > 65536 {
             return Err("input exceeds 64 KiB".into());
         }
@@ -432,18 +432,27 @@ impl Session {
         drop(model);
         self.input_bytes(bytes)
     }
-    pub fn input_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
+    /// Returns whether input changed host-visible state; output advances the model independently in the worker.
+    pub fn input_bytes(&self, bytes: Vec<u8>) -> Result<bool, String> {
         if bytes.len() > 65548 { return Err("input exceeds 64 KiB plus paste delimiters".into()); }
         let mut model = self.state()?;
         if model.exited || self.stop.load(Ordering::SeqCst) { return Err("shell has exited".into()); }
         let previous_dirty = model.control.dirty;
-        model.control.human_input()?;
+        let previous_offset = model.term.screen().offset;
+        if let Err(error) = model.control.human_input() {
+            // A blocked keystroke records audit evidence the host must observe.
+            model.revision += 1;
+            drop(model);
+            self.notify_host();
+            return Err(error);
+        }
         // Zero bytes never reach the PTY, so the prompt was not edited: keep it authorizable
         // instead of leaving the dirty flag set by human_input behind.
-        if bytes.is_empty() { model.control.dirty = previous_dirty; return self.enqueue_input(bytes); }
+        if bytes.is_empty() { model.control.dirty = previous_dirty; return self.enqueue_input(bytes).map(|()| false); }
         if let Err(error) = self.enqueue_input(bytes) { model.control.dirty = previous_dirty; return Err(error); }
-        model.term.screen_mut().offset = 0; model.revision += 1;
-        Ok(())
+        let changed = previous_offset != 0 || !previous_dirty;
+        if changed { model.term.screen_mut().offset = 0; model.revision += 1; }
+        Ok(changed)
     }
     fn enqueue_input(&self, bytes: Vec<u8>) -> Result<(), String> {
         let sender = self
@@ -2163,22 +2172,39 @@ mod tests {
     }
 
     #[test]
-    fn input_bumps_the_revision_once_on_success_and_never_on_rejection() {
+    fn input_invalidates_only_new_host_visible_state() {
         let mut session = Session::new(20, 3, None, None, true, 5000, None).unwrap();
-        let (tx, _rx) = mpsc::sync_channel(4);
+        let (tx, _rx) = mpsc::sync_channel(16);
         session.commands = Some(tx);
         let before = lock_model(&session.model).revision;
-        session.input_bytes(b"x".to_vec()).unwrap();
-        assert_eq!(lock_model(&session.model).revision, before + 1, "one accepted input is one revision");
-        // An agent lease blocks human typing; the failed attempt must not invalidate snapshots.
+        assert!(session.input_bytes(b"x".to_vec()).unwrap(), "the first prompt edit is visible");
+        assert_eq!(lock_model(&session.model).revision, before + 1);
+        let before = lock_model(&session.model).revision;
+        assert!(!session.input_bytes(b"y".to_vec()).unwrap(), "an already dirty prompt needs no input snapshot");
+        assert_eq!(lock_model(&session.model).revision, before);
+        // Snap back from history even after the prompt was marked dirty.
+        lock_model(&session.model).term.screen_mut().offset = 1;
+        let before = lock_model(&session.model).revision;
+        assert!(session.input_bytes(b"z".to_vec()).unwrap(), "leaving scrollback is visible");
+        assert_eq!(lock_model(&session.model).revision, before + 1);
+        assert_eq!(lock_model(&session.model).term.screen().offset, 0);
+        // An agent lease blocks human typing, but the recorded audit event is host-visible.
         let lease = session.control_acquire("agent".into()).unwrap()["lease"].as_u64().unwrap();
         let before = lock_model(&session.model).revision;
         assert!(session.input_bytes(b"y".to_vec()).is_err());
-        assert_eq!(lock_model(&session.model).revision, before);
+        assert_eq!(lock_model(&session.model).revision, before + 1, "blocked input must publish its audit event");
         session.control_release(Some(lease)).unwrap();
         // Empty input never reaches the PTY and changes nothing, so it earns no revision either.
         let before = lock_model(&session.model).revision;
-        session.input_bytes(Vec::new()).unwrap();
+        assert!(!session.input_bytes(Vec::new()).unwrap());
+        assert_eq!(lock_model(&session.model).revision, before);
+        // Paste only wraps delimiters around the same bytes, so it must report the delegate's verdict.
+        lock_model(&session.model).control.dirty = false;
+        let before = lock_model(&session.model).revision;
+        assert!(session.input("p".into(), true).unwrap(), "a paste that edits the prompt is visible");
+        assert_eq!(lock_model(&session.model).revision, before + 1);
+        let before = lock_model(&session.model).revision;
+        assert!(!session.input("q".into(), true).unwrap(), "a second paste adds no host-visible state");
         assert_eq!(lock_model(&session.model).revision, before);
     }
 

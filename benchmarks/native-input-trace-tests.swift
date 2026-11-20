@@ -42,6 +42,54 @@ import Foundation
         trace.receive(.gpu, revision: 12, time: 12.001)
         precondition(trace.samples[3].presentationMS == nil, "missing presentation must remain missing, never become zero latency")
 
+        var phased = NativeInputTrace()
+        phased.begin(base: 40, time: 20)
+        phased.identify(revision: 41)
+        phased.receive(.drawStart, revision: 41, frame: 900, time: 20.001)
+        phased.receive(.commit, revision: 41, frame: 900, time: 20.0015)
+        phased.receive(.drawStart, revision: 42, frame: 901, time: 20.0025)
+        phased.receive(.gpu, revision: 42, frame: 901, time: 20.003)
+        precondition(phased.samples[0].drawStart?.frame == 901 && phased.samples[0].commit == nil,
+                     "phases must belong to the selected later frame, not another revision")
+        phased.receive(.gpu, revision: 41, frame: 900, time: 20.002)
+        precondition(phased.samples[0].drawStart?.frame == 900 && phased.samples[0].commit?.frame == 900,
+                     "an earlier GPU completion must replace phases with its own exact frame")
+        precondition(abs(phased.samples[0].drawStartMS! - 1) < 0.00001)
+        precondition(abs(phased.samples[0].commitMS! - 1.5) < 0.00001)
+
+        var sameRevision = NativeInputTrace()
+        sameRevision.begin(base: 50, time: 40)
+        sameRevision.identify(revision: 51)
+        sameRevision.receive(.drawStart, revision: 51, frame: 700, time: 40.001)
+        sameRevision.receive(.drawStart, revision: 51, frame: 701, time: 40.002)
+        sameRevision.receive(.commit, revision: 51, frame: 701, time: 40.0025)
+        sameRevision.receive(.gpu, revision: 51, frame: 701, time: 40.003)
+        precondition(sameRevision.samples[0].drawStart?.frame == 701 && sameRevision.samples[0].commit?.frame == 701,
+                     "two submitted draws for one revision are distinguished by frame ID")
+        precondition(sameRevision.samples[0].drawStartMS! <= sameRevision.samples[0].commitMS! && sameRevision.samples[0].commitMS! <= sameRevision.samples[0].gpuMS!,
+                     "draw, commit and GPU phases remain ordered")
+
+        var software = NativeInputTrace()
+        software.begin(base: 60, time: 50)
+        software.identify(revision: 61)
+        software.receive(.softwareTerminal, revision: 61, time: 50.004)
+        precondition(software.samples[0].isTerminated && software.samples[0].gpu == nil,
+                     "software raster completion terminates without being recorded as GPU")
+        software.begin(base: 61, time: 50.1)
+        precondition(software.samples.count == 2)
+
+        var retained = NativeInputTrace()
+        for value in 0..<40 {
+            let revision = UInt64(value + 1), time = 30 + Double(value)
+            precondition(retained.begin(base: revision - 1, time: time))
+            retained.identify(revision: revision)
+            retained.receive(.drawStart, revision: revision, frame: revision + 100, time: time + 0.001)
+            retained.receive(.commit, revision: revision, frame: revision + 100, time: time + 0.002)
+            retained.receive(.gpu, revision: revision, frame: revision + 100, time: time + 0.003)
+        }
+        precondition(retained.samples[0].drawStart != nil && retained.samples[0].commit != nil,
+                     "bounded callback history must not erase an early sample's matched phases")
+
         var bounded = NativeInputTrace()
         bounded.begin(base: 0, time: 1)
         for revision in 1...40 { bounded.receive(.gpu, revision: UInt64(revision), time: 1 + Double(revision)) }

@@ -103,8 +103,11 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   and fractional geometry retain the full repaint path. Metal receives the moved pixel rows as well.
   Automatic refreshes of visible unfocused panes coalesce at 30 Hz, retaining one trailing update. Focused panes,
   recent local input and grid resizing bypass this pacing; explicit scroll/selection refreshes remain immediate.
-  Hidden panes retain their 4 Hz cadence. Focus/visibility changes re-evaluate the pending deadline, and shutdown
-  invalidates it before closing the session.
+  Hidden panes retain their 4 Hz cadence. Live PTY panes are driven primarily by the core notification pipe, while
+  the display link remains active for animation ticks and sessions without a notification descriptor. Panes that
+  become hidden, occluded, minimized, or detached stop rasterizing, release window-sized bitmap/texture retention,
+  and force a full repaint when they become visible again. Focus/visibility changes re-evaluate the pending deadline,
+  and shutdown invalidates it before closing the session.
   The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
   frames are always full.
   Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
@@ -113,20 +116,24 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
-  Frames of plain single-scalar ASCII and geometric cell glyphs with no images, IME text, decorations, wide cells
-  or fractional geometry can instead be drawn from a glyph atlas (`MetalText.swift`): each distinct font glyph is
-  rasterised once by CoreText into one bounded coverage texture and uploaded only when new, and the GPU composites
-  per-row instance buffers of cell fills, glyph quads and cursor quads. Box, block and braille scalars reuse the
-  same `CellGlyphs` geometry to make colour-independent coverage tiles. Only the rows the core marked dirty are
+  Frames of plain single-scalar ASCII, geometric cell glyphs, fitted narrow monochrome single-scalar text, and
+  single underline/strikethrough decorations can be drawn from a glyph atlas when they contain no images, IME text,
+  wide cells, multi-scalar or color glyphs, complex underline styles, or fractional geometry (`MetalText.swift`).
+  Each distinct font glyph is rasterised once by CoreText into one bounded coverage texture and uploaded only when
+  new, and the GPU composites per-row instance buffers of cell fills, glyph quads, decoration strips and cursor
+  quads. Box, block and braille scalars reuse the same `CellGlyphs` geometry to make colour-independent coverage
+  tiles. Only the rows the core marked dirty are
   re-encoded and uploaded; while a frame is still on the GPU the upload publishes a complete replacement buffer
   from a bounded pool instead of rewriting the one it may read, so a frame never samples a half-updated revision.
   The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
   only with that cache. Atlas rebuilds are rationed per font/scale/grid/theme epoch, and a frame needing more masks
   than an empty atlas holds is refused, so an adversarial colour workload degrades to the software rasterizer
   instead of churning masks every frame. Because macOS text smoothing depends on the text colour, font masks are
-  keyed by style, text and foreground colour; geometric masks omit style and colour. Content the atlas does not
-  reproduce pixel-for-pixel (other non-ASCII text, wide cells, underlines and strike, IME composition, Kitty images,
-  backing scales outside 1x-3x) keeps the software rasterizer unchanged. A successful full content scan certifies
+  keyed by style, text and foreground colour; geometric and decoration masks omit style and colour. Fitted text masks
+  are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
+  reproduce pixel-for-pixel (wide cells, multi-scalar or color glyph clusters, complex underline styles, IME
+  composition, Kitty images, backing scales outside 1x-3x) keeps the software rasterizer unchanged. A successful full
+  content scan certifies
   atlas eligibility; a no-scroll incremental frame rechecks only its damaged rows, while scrolling, unknown damage,
   layout changes, fallback recovery and resource release require a fresh full scan. Snapshot damage is merged before
   any host callback can request a redraw, and CPU bitmap completion invalidates atlas reuse before frame observers run,

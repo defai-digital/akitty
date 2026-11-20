@@ -46,6 +46,7 @@ native_node=$(command -v node)
 open -n -W --stdout "$stage/stdout.log" --stderr "$stage/stderr.log" \
   --env "AKITTY_NATIVE_PROBE_SCENES=${AKITTY_NATIVE_PROBE_SCENES:-}" \
   --env "AKITTY_NATIVE_PROBE_PROFILE=${AKITTY_NATIVE_PROBE_PROFILE:-}" \
+  --env "AKITTY_NATIVE_PROBE_FORCE_SOFTWARE=${AKITTY_NATIVE_PROBE_FORCE_SOFTWARE:-}" \
   --env "AKITTY_NATIVE_PROBE_NODE=$native_node" --env "AKITTY_NATIVE_PROBE_SAMPLES=${2:-60}" --env "AKITTY_NATIVE_PROBE_OUTPUT=$output" "$app"
 cat "$stage/stdout.log" "$stage/stderr.log" >&2
 [[ -f $output ]] || { echo 'Probe returned without a measurement.' >&2; exit 1; }

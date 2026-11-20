@@ -76,6 +76,12 @@ fn drain_readable(fd: i32) {
         }
     }
 }
+fn drain_until_quiet(fd: i32, quiet: Duration) {
+    loop {
+        drain_readable(fd);
+        if !wait_readable(fd, quiet) { return; }
+    }
+}
 
 #[test]
 fn notify_pipe_reports_output_and_exit_without_leaking() {
@@ -144,6 +150,37 @@ fn host_changes_wake_the_host_but_reads_do_not() {
     drain_readable(fd);
     session.command("control_release", json!({"lease":lease}));
     assert!(wait_readable(fd, Duration::from_millis(500)), "a release did not wake the host");
+}
+
+#[test]
+fn repeated_input_without_new_host_state_stays_quiet() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    session.command("input", json!({"text":"PS1=; stty -echo; printf 'ECHO_OFF\\n'\r"}));
+    wait_for(|| session.command("snapshot", json!({"compact":true}))["lines"].to_string().contains("ECHO_OFF"));
+    drain_until_quiet(fd, Duration::from_millis(100));
+    let settled = session.command("snapshot", json!({"compact":true}));
+    assert_eq!(settled["control"]["prompt_edited"], json!(true), "{settled}");
+    assert_eq!(settled["offset"], json!(0), "{settled}");
+    session.command("input", json!({"text":"x"}));
+    assert!(!wait_readable(fd, Duration::from_millis(300)), "a repeated prompt edit woke the host without new state");
+    session.command("input", json!({"text":"\u{7f}printf 'INPUT_STILL_WORKS\\n'\r"}));
+    assert!(wait_readable(fd, Duration::from_secs(2)), "PTY output must still wake the host");
+    wait_for(|| session.command("snapshot", json!({"compact":true}))["lines"].to_string().contains("INPUT_STILL_WORKS"));
+}
+
+#[test]
+fn rejected_input_preserves_the_host_notification() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    let lease = session.command("control_acquire", json!({"actor":"notify-test"}))["lease"].as_u64().expect("lease");
+    drain_readable(fd);
+    let reply = request(&serde_json::to_vec(&json!({"op":"input","id":session.0,"text":"x"})).unwrap());
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert!(wait_readable(fd, Duration::from_millis(500)), "a rejected input must preserve its audit notification");
+    session.command("control_release", json!({"lease":lease}));
 }
 
 #[test]
