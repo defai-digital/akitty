@@ -2176,6 +2176,24 @@ comparison adapters were built locally outside the product build.
 
 ## macOS PTY throughput
 
+### AkiTTY 2.1.4 rerun
+
+On 2026-11-20, the released AkiTTY 2.1.4 arm64 app (build 20104, commit
+`f957c979ac2252f22f8df0e4940fd0faafcb91a6`) ran on the same Apple M3 Max
+with macOS 27.2.1 (26B131). The harness verified the archive digest, app
+build stamp, code signature and Gatekeeper assessment.
+
+Five fresh launches repeated the AkiTTY 2.1.3 settings, workload order and
+cursor probes. Each accepted launch stayed hidden during measurement,
+with three warmups and nine timed writes per workload. The
+[README](../README.md#performance) reports rates from the median elapsed time of 45
+timed writes per workload and retains the four comparator columns from
+November 19. The v2.1.3 and v2.1.4 per-launch median ranges overlap on all
+four workloads.
+
+[Raw AkiTTY 2.1.4 timings](../benchmarks/results/macos-pty-throughput-v2.1.4-2026-11-20.json)
+· [AkiTTY 2.1.4 release](https://github.com/defai-digital/akitty/releases/tag/v2.1.4)
+
 ### AkiTTY 2.1.3 rerun
 
 On 2026-11-20, the released AkiTTY 2.1.3 arm64 app (build 20103, commit
@@ -2185,11 +2203,9 @@ build stamp, code signature and Gatekeeper assessment.
 
 Five fresh launches repeated the AkiTTY 2.1.2 settings, workload order and
 cursor probes. Each accepted launch stayed hidden during measurement,
-with three warmups and nine timed writes per workload. The
-[README](../README.md#performance) reports rates from the median elapsed time of 45
-timed writes per workload and retains the four comparator columns from
-November 19. The v2.1.2 and v2.1.3 per-launch median ranges overlap on all
-four workloads.
+with three warmups and nine timed writes per workload. Rates use the
+median elapsed time of 45 timed writes per workload. The v2.1.2 and
+v2.1.3 per-launch median ranges overlap on all four workloads.
 
 [Raw AkiTTY 2.1.3 timings](../benchmarks/results/macos-pty-throughput-v2.1.3-2026-11-20.json)
 · [AkiTTY 2.1.3 release](https://github.com/defai-digital/akitty/releases/tag/v2.1.3)
