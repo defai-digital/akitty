@@ -12,12 +12,12 @@ in Settings, and reopen saved windows with conversation IDs ready to resume.
 
 [Install](#quick-start) · [Try the agent workflow](#try-the-agent-workflow) ·
 [Performance](#performance) · [Agent integration](#works-with-your-ai-agents) ·
-[What's new in 2.1.1](docs/releases/2.1.1.md)
+[What's new in 2.1.2](docs/releases/2.1.2.md)
 
 ## Quick start
 
-The latest stable release is **AkiTTY 2.1.1**.
-[Download for Apple Silicon](https://github.com/defai-digital/akitty/releases/tag/v2.1.1)
+The latest stable release is **AkiTTY 2.1.2**.
+[Download for Apple Silicon](https://github.com/defai-digital/akitty/releases/tag/v2.1.2)
 
 ```sh
 curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
@@ -226,7 +226,7 @@ integration, quick terminal behavior and VoiceOver validation.
 
 ## Build and run
 
-Source version **2.1.1** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
+Source version **2.1.2** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
 Rust 1.99.1 and Node 22.18+. See the contributor guide for the repository layout
 and focused development commands. [Contributing](CONTRIBUTING.md)
 
