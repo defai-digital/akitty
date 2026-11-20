@@ -1892,6 +1892,11 @@ impl Terminal {
             row.cells[pos.col..].rotate_right(count);
             row.fill_blank(pos.col..pos.col + count, bg);
         } else {
+            // A delete that starts inside a wide pair leaves that glyph's lead outside the range and
+            // shifts a foreign spacer in beside it. The width-adjacency repair below cannot tell that
+            // spacer from the lead's own, so the lead would survive carrying another glyph's
+            // presentation. Blank the split lead first, as an overwrite that splits one does.
+            if count > 0 && pos.col > 0 && row.cells[pos.col].width() == 0 { row.put_blank(pos.col - 1, bg); }
             row.cells[pos.col..].rotate_left(count);
             row.fill_blank(cols - count..cols, bg);
         }
@@ -2509,11 +2514,14 @@ impl Terminal {
         mut emit: impl FnMut(Event),
     ) -> Result<(), &'static str> {
         Self::validate_size(cols, rows)?;
-        self.grapheme_target = None;
-        self.cluster_scratch_at = None;
         if (cols, rows) == (self.cols(), self.rows()) {
             return Ok(());
         }
+        // A size change can move or split the cluster a pending join targets, so it is dropped. A
+        // same-size resize changes no position and must leave it alone, or a following variation
+        // selector silently fails to widen the grapheme it joined to.
+        self.grapheme_target = None;
+        self.cluster_scratch_at = None;
         let delta = self.main.resize(cols, rows, true);
         let alternate_delta = self.alternate.resize(cols, rows, false);
         emit(Event::Resize {
@@ -3421,6 +3429,66 @@ mod tests {
             assert_eq!(row.generation, generation + 2);
             assert_eq!(row.cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(), expected);
         }
+    }
+
+    #[test]
+    fn delete_chars_splitting_a_wide_pair_blanks_both_halves() {
+        // DCH 2 from column 1 deletes 界's spacer and 中's lead. `rotate_left` then parks 中's spacer
+        // next to 界, and the width-adjacency repair cannot tell a foreign spacer from the glyph's own,
+        // so 界 would survive carrying another glyph's presentation on its second column. A wide glyph
+        // split by an edit is blanked, exactly as one split by an overwrite is.
+        let mut term = Terminal::new(4, 1, 0).unwrap();
+        feed(&mut term, "\u{1b}[41m界\u{1b}[44m中".as_bytes());
+        assert_eq!(term.screen().rows[0].cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(),
+                   [('界', 2), (' ', 0), ('中', 2), (' ', 0)]);
+        feed(&mut term, b"\x1b[1;2H\x1b[2P");
+        assert_eq!(term.screen().rows[0].cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(),
+                   [(' ', 1), (' ', 1), (' ', 1), (' ', 1)],
+                   "both split glyphs are blanked and no lead keeps a foreign spacer");
+    }
+
+    #[test]
+    fn delete_chars_ending_on_a_wide_lead_blanks_its_surviving_spacer() {
+        // DCH 2 from column 0 deletes 界 entirely and 中's lead, leaving 中's spacer to shift into
+        // column 0. An orphan spacer at column 0 must be blanked rather than adopted by nothing.
+        let mut term = Terminal::new(4, 1, 0).unwrap();
+        feed(&mut term, "界中".as_bytes());
+        feed(&mut term, b"\x1b[1;1H\x1b[3P");
+        assert_eq!(term.screen().rows[0].cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(),
+                   [(' ', 1), (' ', 1), (' ', 1), (' ', 1)],
+                   "a spacer whose lead was deleted does not survive the shift");
+    }
+
+    #[test]
+    fn delete_chars_starting_on_a_wide_lead_keeps_the_pair_before_it() {
+        // The repair must not over-blank: deleting 中 removes that glyph, while the 界 pair before the
+        // cursor keeps its own spacer and presentation.
+        let mut term = Terminal::new(4, 1, 0).unwrap();
+        feed(&mut term, "界中".as_bytes());
+        feed(&mut term, b"\x1b[1;3H\x1b[1P");
+        assert_eq!(term.screen().rows[0].cells.iter().map(|c| (c.ch, c.width())).collect::<Vec<_>>(),
+                   [('界', 2), (' ', 0), (' ', 1), (' ', 1)],
+                   "the untouched pair keeps its own spacer");
+    }
+
+    #[test]
+    fn a_no_op_resize_keeps_a_pending_grapheme_join() {
+        fn widths(term: &Terminal) -> Vec<(char, u8)> {
+            term.screen().rows.iter().flat_map(|row| row.cells.iter().map(|c| (c.ch, c.width()))).collect()
+        }
+        let mut plain = Terminal::new(4, 3, 0).unwrap();
+        plain.enable_grapheme_support(true);
+        feed(&mut plain, "abc❤".as_bytes());
+        feed(&mut plain, "\u{fe0f}".as_bytes());
+        assert!(widths(&plain).contains(&('❤', 2)), "the selector widens the heart: {:?}", widths(&plain));
+        let mut resized = Terminal::new(4, 3, 0).unwrap();
+        resized.enable_grapheme_support(true);
+        feed(&mut resized, "abc❤".as_bytes());
+        // A window restore or SIGWINCH can report the size already in effect.
+        resized.resize(4, 3, |_| {}).unwrap();
+        feed(&mut resized, "\u{fe0f}".as_bytes());
+        assert_eq!(widths(&resized), widths(&plain),
+                   "a same-size resize must not discard the pending grapheme join");
     }
 
     #[test]

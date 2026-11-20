@@ -88,6 +88,37 @@ equivalence and protocol behavior, and pass `scripts/verify.sh` plus app smoke
 checks. Performance claims need measurements; stability claims need stress-test
 evidence. The owned engine provides independent maintenance; integration improvements still require their own tests.
 
+### Known wide-cell and grapheme defects (reproduced, not yet fixed)
+
+Found by an external review pass and reproduced against the shared engine. Each needs its own fix and
+regression test; the reproductions are recorded here so they are not lost. They are deliberately not
+fixed alongside the two repaired defects above, because the correct repair depends on settling the
+`wrap_padding` / `written` invariant first and a wrong fix would regress selection or reflow.
+
+- **Overwriting wide-wrap padding loses a visible character.** At 4x3 feed `abc界`, then
+  `ESC[1;4HX`, then widen to 8x3. The row shows `abcX` before the resize but reflows to `abc界`.
+  Writing into the padding column leaves `wrap_padding` set, so reflow and text selection both trim
+  the last column and drop the `X`. ICH triggers the same by shifting a character into the padding
+  column, and the mis-trim also survives scrolling into history.
+- **A non-reflow resize can mark a real character as padding.** At 4x3 on the alternate screen feed
+  `ESC[?1049habc界`, then narrow to 3x3. The fourth column is cropped but `wrap_padding` survives, so
+  selection copies `ab界` instead of `abc界`.
+- **A one-column resize permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to 1x4 and
+  back to 4x4. Reflow stores the clamped width in the cell and reuses it on later resizes, so `界`
+  stays one column wide and `B` lands in column 3 instead of column 4.
+- **A grapheme that widens in insert mode deletes existing text.** At 8 columns feed `AB`, home,
+  `ESC[4h`, then `❤` followed by U+FE0F. The heart starts one column wide and shifts `AB` right; when
+  the selector grows it to two columns it overwrites `A`, giving `❤️B` where insert mode should give
+  `❤️AB`. The same growth path deletes a whole existing wide glyph.
+- **Runtime locale changes can desync the two text paths.** `GridRasterizer.Layout` includes the
+  appearance, but neither layout carries `Locale.preferredLanguages` or the resolved CJK font
+  availability. If the preferred languages change while the app runs, an appearance change — or an
+  image appearing, which builds fresh layer passes — rebuilds the rasterizer's CJK cascade while the
+  composer keeps its old masks, so one codepoint can switch between regional Han shapes between
+  frames. Cosmetic, and not confirmed to be reachable on macOS 27. The cheap correct fix is to read
+  the languages once per frame on the main thread and put them in *both* layouts; adding them to only
+  one just reverses which side goes stale.
+
 ## 2. Shell integration (implemented in 1.1.0; qualification continues)
 
 Version 1.1.0 provides local bash/zsh hooks and bounded command history/output; the app enables

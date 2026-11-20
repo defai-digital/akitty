@@ -160,6 +160,14 @@ fn random_edits_resizes_and_screen_switches_preserve_grid_invariants() {
                                 col > 0 && row.cells[col - 1].width() == 2,
                                 "orphan trail step {index} col {col}"
                             );
+                            // `Cell::spacer` promises the trailing column shares its lead's presentation
+                            // and hyperlink. A shift that adopts a foreign spacer keeps valid widths, so
+                            // only these checks can see it.
+                            let lead = &row.cells[col - 1];
+                            assert_eq!(cell.style(), lead.style(), "trail presentation step {index} col {col}");
+                            assert_eq!(cell.link_id(), lead.link_id(), "trail link step {index} col {col}");
+                            assert!(!cell.written(), "trail must not be written step {index} col {col}");
+                            assert_eq!(cell.combining_len(), 0, "trail must carry no marks step {index} col {col}");
                         }
                         if cell.width() == 2 {
                             assert!(
