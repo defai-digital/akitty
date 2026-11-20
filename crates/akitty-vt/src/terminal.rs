@@ -1290,7 +1290,7 @@ impl Terminal {
             return;
         }
         if self.modes.insert {
-            self.edit_chars(width, true, false);
+            self.edit_chars(pos, width, true, false);
         }
         // Pre-clearing cells that will both be overwritten is redundant unless a
         // wide neighbour outside the span needs repair. Preserve the generation
@@ -1444,7 +1444,9 @@ impl Terminal {
         let direct = !self.general_repair;
         #[cfg(not(test))]
         let direct = true;
+        let insert_growth = self.modes.insert && width > usize::from(old_width);
         if direct
+            && !insert_growth
             && old_width == 1
             && width == 2
             && position.col + 2 <= self.cols()
@@ -1480,13 +1482,20 @@ impl Terminal {
         self.cluster_scratch = cluster;
         cell.push_combining_from(ch, &mut self.screen_mut().pool);
         cell.set_width(width as u8);
-        if position.col + width > self.cols() {
+        let wrapped = position.col + width > self.cols();
+        if wrapped {
             self.clear_wide(position.row, position.col, bg, old_width);
             self.screen_mut().rows[position.row].wrapped = true;
             self.screen_mut().rows[position.row].wrap_padding = true;
             self.screen_mut().cursor.position.col = 0;
             self.linefeed(emit);
             position = self.cursor();
+        }
+        if insert_growth {
+            // The base already inserted its original cells, unless it moved to a different row.
+            let inserted = if wrapped { 0 } else { usize::from(old_width) };
+            self.edit_chars(Position { row: position.row, col: position.col + inserted },
+                            width - inserted, true, false);
         }
         if width != usize::from(old_width) {
             self.clear_wide(position.row, position.col, bg, old_width);
@@ -1879,8 +1888,7 @@ impl Terminal {
             _ => {}
         }
     }
-    fn edit_chars(&mut self, count: usize, insert: bool, erase_only: bool) {
-        let pos = self.cursor();
+    fn edit_chars(&mut self, pos: Position, count: usize, insert: bool, erase_only: bool) {
         let cols = self.cols();
         let count = count.min(cols - pos.col);
         let bg = self.style.bg;
@@ -1999,9 +2007,9 @@ impl Terminal {
                 }
                 self.screen_mut().cursor.pending_wrap = false;
             }
-            (None, b'@') => self.edit_chars(n, true, false),
-            (None, b'P') => self.edit_chars(n, false, false),
-            (None, b'X') => self.edit_chars(n, false, true),
+            (None, b'@') => self.edit_chars(pos, n, true, false),
+            (None, b'P') => self.edit_chars(pos, n, false, false),
+            (None, b'X') => self.edit_chars(pos, n, false, true),
             (None, b'L' | b'M') => {
                 let region = self.screen().region.clone();
                 if region.contains(&pos.row) {
@@ -3529,6 +3537,41 @@ mod tests {
         assert!(!term.screen().rows[0].trailing_padding(), "a cropped row's new last column is content");
         term.screen_mut().select(Position { row: 0, col: 0 }, Position { row: 0, col: 2 });
         assert_eq!(term.screen().selection_text(), "abc", "cropping must not mark a real character as padding");
+    }
+
+    #[test]
+    fn insert_mode_grapheme_growth_shifts_following_cells() {
+        for (suffix, expected) in [("AB", [('A', 1), ('B', 1)]), ("界", [('界', 2), (' ', 0)])] {
+            let mut term = Terminal::new(8, 2, 0).unwrap();
+            term.enable_grapheme_support(true);
+            feed(&mut term, suffix.as_bytes());
+            feed(&mut term, b"\x1b[H\x1b[4h");
+            feed(&mut term, "❤".as_bytes());
+            feed(&mut term, "\u{fe0f}".as_bytes());
+            let cells = &term.screen().rows[0].cells;
+            assert_eq!(cells[0].text(), "❤️");
+            assert_eq!(cells[0].width(), 2);
+            assert_eq!(cells[1].width(), 0);
+            assert_eq!([(cells[2].ch, cells[2].width()), (cells[3].ch, cells[3].width())], expected);
+            assert_eq!(term.cursor(), Position { row: 0, col: 2 });
+        }
+    }
+
+    #[test]
+    fn insert_mode_grapheme_growth_wraps_without_overwriting_the_next_row() {
+        let mut term = Terminal::new(8, 2, 0).unwrap();
+        term.enable_grapheme_support(true);
+        feed(&mut term, b"\x1b[2;1HAB\x1b[1;8H\x1b[4h");
+        feed(&mut term, "❤".as_bytes());
+        feed(&mut term, "\u{fe0f}".as_bytes());
+        let screen = term.screen();
+        assert!(screen.rows[0].trailing_padding());
+        assert_eq!(screen.rows[1].cells[0].text(), "❤️");
+        assert_eq!(screen.rows[1].cells[0].width(), 2);
+        assert_eq!(screen.rows[1].cells[1].width(), 0);
+        assert_eq!(screen.rows[1].cells[2].ch, 'A');
+        assert_eq!(screen.rows[1].cells[3].ch, 'B');
+        assert_eq!(term.cursor(), Position { row: 1, col: 2 });
     }
 
     #[test]

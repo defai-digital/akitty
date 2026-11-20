@@ -1,6 +1,6 @@
 # AkiTTY implementation roadmap
 
-This roadmap records shipped behavior through [AkiTTY 2.1.3](releases/2.1.3.md)
+This roadmap records shipped behavior through [AkiTTY 2.1.4](releases/2.1.4.md)
 and the remaining qualification and feature work.
 Native and Web now share the independently authored `akitty-vt` Rust engine.
 The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses
@@ -97,15 +97,12 @@ a column the cursor was parked on, or because text was written or shifted into t
 afterwards. `Row::trailing_padding()` is now the single answer to "is the last column blank padding",
 and selection, reflow and the WASM export that browser copy reads all ask it instead of reading the
 raw flag, so the three cannot disagree about a row. A wide glyph also only marks an unwritten last
-column as padding in the first place. The remaining items each need their own fix and regression test:
+column as padding in the first place. A grapheme that widens in insert mode now shifts following
+cells, including when it wraps onto a populated row. Remaining items:
 
 - **A one-column resize permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to 1x4 and
   back to 4x4. Reflow stores the clamped width in the cell and reuses it on later resizes, so `界`
   stays one column wide and `B` lands in column 3 instead of column 4.
-- **A grapheme that widens in insert mode deletes existing text.** At 8 columns feed `AB`, home,
-  `ESC[4h`, then `❤` followed by U+FE0F. The heart starts one column wide and shifts `AB` right; when
-  the selector grows it to two columns it overwrites `A`, giving `❤️B` where insert mode should give
-  `❤️AB`. The same growth path deletes a whole existing wide glyph.
 - **Runtime locale changes can desync the two text paths.** `GridRasterizer.Layout` includes the
   appearance, but neither layout carries `Locale.preferredLanguages` or the resolved CJK font
   availability. If the preferred languages change while the app runs, an appearance change — or an
