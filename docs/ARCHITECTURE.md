@@ -113,19 +113,20 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
-  Frames of plain single-scalar ASCII with no images, IME text, decorations or fractional geometry can instead be
-  drawn from a glyph atlas (`MetalText.swift`): each distinct glyph is rasterised once by CoreText into one bounded
-  coverage texture and uploaded only when new, and the GPU composites per-row instance buffers of cell fills,
-  glyph quads and cursor quads. Only the rows the core marked dirty are re-encoded and uploaded; while a frame is
-  still on the GPU the upload publishes a complete replacement buffer from a bounded pool instead of rewriting the
-  one it may read, so a frame never samples a half-updated revision. The atlas texture is tied to the glyph
-  mask cache: frames drawn by other paths leave it alone, and it is released only with that cache. Atlas rebuilds
-  are rationed per font/scale/grid/theme epoch, and a frame needing more masks than the atlas holds is refused,
-  so an adversarial colour workload degrades to the software rasterizer instead of churning masks every frame.
-  Because macOS
-  text smoothing depends on the text colour, masks are keyed by style, text and foreground colour; content the
-  atlas does not reproduce pixel-for-pixel (non-ASCII, wide cells, box drawing, underlines and strike, IME
-  composition, Kitty images, backing scales outside 1x-3x) keeps the software rasterizer unchanged.
+  Frames of plain single-scalar ASCII and geometric cell glyphs with no images, IME text, decorations, wide cells
+  or fractional geometry can instead be drawn from a glyph atlas (`MetalText.swift`): each distinct font glyph is
+  rasterised once by CoreText into one bounded coverage texture and uploaded only when new, and the GPU composites
+  per-row instance buffers of cell fills, glyph quads and cursor quads. Box, block and braille scalars reuse the
+  same `CellGlyphs` geometry to make colour-independent coverage tiles. Only the rows the core marked dirty are
+  re-encoded and uploaded; while a frame is still on the GPU the upload publishes a complete replacement buffer
+  from a bounded pool instead of rewriting the one it may read, so a frame never samples a half-updated revision.
+  The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
+  only with that cache. Atlas rebuilds are rationed per font/scale/grid/theme epoch, and a frame needing more masks
+  than an empty atlas holds is refused, so an adversarial colour workload degrades to the software rasterizer
+  instead of churning masks every frame. Because macOS text smoothing depends on the text colour, font masks are
+  keyed by style, text and foreground colour; geometric masks omit style and colour. Content the atlas does not
+  reproduce pixel-for-pixel (other non-ASCII text, wide cells, underlines and strike, IME composition, Kitty images,
+  backing scales outside 1x-3x) keeps the software rasterizer unchanged.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status-bar note. Images are

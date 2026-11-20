@@ -228,7 +228,7 @@ completion callbacks. The observer is internal and inactive in ordinary app use.
 It records no terminal contents. Run it with an unlocked desktop and retain
 keyboard focus in the probe window; losing focus fails the measurement.
 
-Four scenes cover single-pane typing, typing alongside three ASCII streams,
+The original four scenes cover single-pane typing, typing alongside three ASCII streams,
 typing alongside three Unicode streams, and scrolling with three Unicode streams.
 Each producer writes one numbered line every 8 ms with backpressure. Synthetic
 Enter events have matching key releases. Three warmups precede the measured
@@ -485,10 +485,11 @@ close-out reviews supporting rejection; their advice is not test evidence.
 re-uploading a whole window bitmap when only a few rows of ASCII change; the software rasterizer stays the
 reference and the fallback.
 
-- A glyph is shaped and rasterised by CoreText once, at the exact device-pixel position the rasterizer would use,
-  and stored in one 2048x2048 R8 coverage texture (about 4 MiB). Masks are keyed by style, text and foreground
+- A font glyph is shaped and rasterised by CoreText once, at the exact device-pixel position the rasterizer would use,
+  and stored in one 2048x2048 R8 coverage texture (about 4 MiB). Font masks are keyed by style, text and foreground
   colour, because macOS font smoothing is colour-dependent: a colour-independent mask differed from the
-  reference by up to ~50/255, while a mask rasterised in the text colour stays within 2/255.
+  reference by up to ~50/255, while a mask rasterised in the text colour stays within 2/255. Box, block and braille
+  scalars use `CellGlyphs` to rasterise colour-independent masks keyed only by scalar and device geometry.
 - Shelf packing bounds the atlas in entry count as well as size. When it fills it is recreated and every row is
   re-encoded, so eviction costs work but never correctness. Rebuilds are rationed per font/scale/grid/theme epoch:
   a storm that would refill the atlas on every frame stands the path down to the software rasterizer instead of
@@ -504,17 +505,17 @@ reference and the fallback.
   quads. A row that would exceed the stride is an error that hands the frame to the rasterizer, never a truncation.
 - New masks are appended at atlas coordinates that were never written before, so an atlas upload cannot disturb a
   texture a frame in flight is sampling; only a recreate allocates a new texture. The texture's lifetime matches the
-  mask cache: a frame drawn by another path (IME, CJK, an image) drops the instance buffers but keeps the atlas, so
-  returning to the atlas reuses every cached mask. Both are released together when the pane leaves its window.
+  mask cache: a frame drawn by another path (IME, other non-ASCII text, an image) drops the instance buffers but keeps
+  the atlas, so returning to the atlas reuses every cached mask. Both are released together when the pane leaves its window.
 - Glyph quads are clipped to their cell box, matching the rasterizer's per-cell clip, and solid quads (cell fills,
   selection and find highlights, cursor bands) are converted from `CGColor` through the same one-pixel device-RGB
   bitmap the CPU bitmaps and the Metal clear colour use.
 - Frames with Kitty images keep the existing layered path, so image compositing is unchanged. IME composition,
-  non-ASCII text, wide cells, box drawing, underlined or struck-through cells and backing scales outside 1x-3x
+  non-geometric non-ASCII text, wide cells, underlined or struck-through cells and backing scales outside 1x-3x
   keep the software rasterizer.
 
-`MetalTextRenderingTests` compares offscreen GPU frames against `GridRasterizer` output for ASCII at 1x, 2x and
-3x, ANSI colours and highlights, all four cursor styles and a non-default theme. The worst channel difference is
+`MetalTextRenderingTests` compares offscreen GPU frames against `GridRasterizer` output for ASCII and geometric
+cell glyphs at 1x, 2x and 3x, ANSI colours and highlights, all four cursor styles and a non-default theme. The worst channel difference is
 2/255 with more than 95% of pixels byte-identical at every tested scale; the residual is blending rounding on
 antialiased edges. The same suite covers atlas reuse, the entry cap and eviction path, dirty-row-only uploads,
 layout invalidation and resource release. Component timings (raster versus atlas upload) are not yet measured,
@@ -628,9 +629,9 @@ victory; upload savings there come from scheduling and upload behavior rather th
 atlas. Presentation p95 is similar to baseline, with run-to-run variation, so this pass does not claim
 a presentation-latency improvement.
 
-The Metal text path rasterizes ASCII masks once into a bounded atlas and keeps per-row instance
+The Metal text path rasterizes font and geometric cell masks once into a bounded atlas and keeps per-row instance
 buffers. Idle GPUs accept partial row updates; busy GPUs receive a complete replacement buffer from
-a bounded pool, never an in-flight rewrite. Non-ASCII, wide, decorated, image, IME and unsupported
+a bounded pool, never an in-flight rewrite. Non-geometric non-ASCII, wide, decorated, image, IME and unsupported
 geometry cases retain the CPU rasterizer. CPU fall-through after an atlas frame repaints fully rather
 than using a stale bitmap. Solid fills are byte-identical; antialiased glyph comparisons stay within
 2/255 in the tested 1x/2x/3x matrix.
@@ -2252,3 +2253,24 @@ The native pipeline comparison used the frozen `a60050c` baseline and the candid
 The single-pane control moved 3.3% in the opposite direction, ASCII-stream CPU fell 3.6%, and bursts were effectively flat. The native results therefore support the targeted component improvement, not a general CPU or presentation-latency claim. Hidden-cursor damage reduction is separately covered by its deterministic regression.
 
 The canonical `scripts/verify.sh` gate passed, including 462 Swift tests with five opt-in skips and 715 web tests. Chromium and WebKit passed; the existing local Firefox profile-folder startup failure triggered its configured skip. Installer, release-tooling, provenance and public-file checks passed.
+
+## Geometric cell atlas and atlas-cap recovery
+
+A November 20 follow-up review with Muse and AGY selected deterministic cell geometry rather than general CJK shaping as the bounded rendering improvement. Grok was also invoked for the atlas review, but its turn-limited run timed out without findings and is not treated as evidence. Muse's post-implementation diff review found no correctness or stability issue.
+
+- Narrow, undecorated cells holding one `CellGlyphs` scalar now use the Metal text path. Box, block and braille masks are rasterised in white through the existing `CellGlyphs.draw` implementation, anchored to `deviceBox`, and tinted by the instance colour. Their keys contain only the scalar and device geometry; foreground colour, font style and font descent cannot create duplicate masks. Blank braille draws no tile. Other non-ASCII text, wide cells, decorations, images and IME retain the software reference.
+- A full atlas build caches the uniform full-cell masks before shorter CoreText masks, limiting shelf fragmentation. Shelf coordinates change only after a successful allocation. Reaching the entry cap now engages the same bounded reset and suspension policy as packing exhaustion instead of repeatedly attempting a full encode against a full atlas. Supplying prevalidated geometry skips layout work but cannot bypass content eligibility.
+- `MetalTextRenderingTests` compares box, block and braille output against the CPU rasterizer at 1x, 2x and 3x. Geometric output differs by at most 1/255 and braille by at most 2/255 in the tested frames. The complete 415-glyph repertoire fits without a rebuild and reuses exactly one mask per scalar across colour and style changes. Existing in-flight, dirty-row, scroll, discarded-frame, fallback and resource-lifetime tests run with the new path. Recovery tests cover entry-cap rebuilds, over-capacity frames and unpublished masks.
+
+The opt-in geometric `HotpathProbe` uses a 200x50 grid at 2x scale. Before the change the atlas refused it; the warm CPU rasterizer took 38.05 ms for a full repaint and 0.59 ms for one damaged row. In the candidate run, the same-run CPU rasterizer took 32.29 ms and 0.59 ms, while warm-atlas composition took 1.19 ms and 0.11 ms with 19 entries and no reset or suspension. These are component timings on one host, not visible frame latency.
+
+The native probe gained explicit `four-box-typing` and `four-box-burst` scenes with three real background PTYs. Frozen baseline and candidate apps alternated through three pairs, with 60 measured foreground inputs per scene/run. CPU below is the median of the three process user-plus-system percentages; GPU and presentation quantiles pool 180 samples. The foreground retains its mixed-Unicode CPU-rendered content in both versions.
+
+| Scene | Baseline CPU | Candidate CPU | CPU reduction | GPU p95 before | GPU p95 after | Presentation p95 before | Presentation p95 after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Box streams + typing | 57.57% | 20.24% | 64.8% | 10.61 ms | 10.65 ms | 37.06 ms | 40.68 ms |
+| Box bursts + typing | 59.86% | 26.26% | 56.1% | 11.37 ms | 11.15 ms | 40.17 ms | 39.25 ms |
+
+The result is a substantial CPU reduction for geometric-text workloads. GPU-completion tails are effectively unchanged. Typing presentation p95 increased in all three pairs, while burst presentation p95 improved only in the aggregate; this pass therefore claims neither a general presentation-latency improvement nor a latency win for every workload. Presentation is a drawable timestamp for a target or later revision, not physical key-to-photon time. Process CPU excludes producer children and WindowServer. These measurements do not extend the atlas to general CJK, combining text or emoji.
+
+The canonical `scripts/verify.sh` gate passed, including 467 Swift tests with six opt-in skips and 715 web tests. Chromium and WebKit passed 30 browser tests; the existing local Firefox profile-folder startup failure triggered its configured skip. Installer, release-tooling, ABI, provenance and public-file checks passed.

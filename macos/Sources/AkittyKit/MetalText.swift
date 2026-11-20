@@ -21,7 +21,7 @@ struct TextInstance: Equatable {
 /// Why a frame keeps the CPU rasterizer. Each case is content the atlas does not yet reproduce
 /// pixel-for-pixel; the software path remains the reference for all of them.
 enum TextFallback: String, Equatable, Sendable {
-    case composition, images, wideCell, decoratedCell, nonASCII, boxGlyph, geometry
+    case composition, images, wideCell, decoratedCell, nonASCII, geometry
 }
 
 /// The device-pixel placement a grid has in `GridRasterizer`, recomputed for the GPU path so both draw the
@@ -72,7 +72,7 @@ enum TextEligibility {
             let text = cell.text
             if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { continue }
             if text.isEmpty { continue }
-            if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { return .boxGlyph }
+            if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { continue }
             return .nonASCII
         }
         return nil
@@ -118,9 +118,10 @@ struct TextFrame {
 /// Bounded coverage atlas for glyph masks.
 ///
 /// macOS applies colour-dependent font smoothing, so one grey coverage mask cannot reproduce coloured text:
-/// measured error reaches ~50/255, while a mask rasterised in the text's own colour stays within 2/255. Masks
-/// are therefore keyed by style, text and foreground colour. The atlas is shelf-packed, capped in entry count
-/// and texture size, and recovers by being recreated when it fills; callers then re-encode every row.
+/// measured error reaches ~50/255, while a mask rasterised in the text's own colour stays within 2/255. Font masks
+/// are therefore keyed by style, text and foreground colour. Geometric cell masks are colour-independent and keyed
+/// only by scalar and device geometry. The atlas is shelf-packed, capped in entry count and texture size, and
+/// recovers by being recreated when it fills; callers then re-encode every row.
 final class GlyphAtlas: @unchecked Sendable {
     struct Upload { let x: Int, y: Int, width: Int, height: Int; let coverage: [UInt8] }
     struct Entry {
@@ -129,7 +130,10 @@ final class GlyphAtlas: @unchecked Sendable {
         /// Quad origin relative to the cell's floored device origin.
         let dx: Int, dy: Int
     }
-    private struct Key: Hashable { let style: UInt8, text: String, fg: UInt32 }
+    private enum Key: Hashable {
+        case text(style: UInt8, text: String, fg: UInt32)
+        case cell(scalar: UInt32, width: Int, height: Int, scale: Int)
+    }
 
     /// Side of the single atlas texture: 4 MiB of R8 coverage.
     static let textureSize = 2048
@@ -158,10 +162,26 @@ final class GlyphAtlas: @unchecked Sendable {
     /// Coverage for one glyph in one colour, rasterising it the first time it is seen.
     func entry(style: UInt8, text: String, fg: [UInt8], face: CTFont, geometry: TextGeometry) -> Entry? {
         guard fg.count == 3 else { return nil }
-        let key = Key(style: style, text: text, fg: UInt32(fg[0]) << 16 | UInt32(fg[1]) << 8 | UInt32(fg[2]))
+        let key = Key.text(style: style, text: text, fg: UInt32(fg[0]) << 16 | UInt32(fg[1]) << 8 | UInt32(fg[2]))
         if let cached = entries[key] { return cached }
-        guard entries.count < Self.maxEntries,
-              let mask = Self.rasterize(text: text, face: face, fg: fg, geometry: geometry) else { return nil }
+        guard entries.count < Self.maxEntries else { exhausted = true; return nil }
+        guard let mask = Self.rasterize(text: text, face: face, fg: fg, geometry: geometry) else { return nil }
+        return insert(mask, key: key)
+    }
+
+    /// Geometric glyphs need no font, style or colour key: the same white coverage is tinted by each instance.
+    func entry(scalar: Unicode.Scalar, geometry: TextGeometry) -> Entry? {
+        guard CellGlyphs.handles(scalar) else { return nil }
+        let width = max(1, Int((geometry.cell.width * geometry.scale).rounded()))
+        let height = max(1, Int((geometry.cell.height * geometry.scale).rounded()))
+        let key = Key.cell(scalar: scalar.value, width: width, height: height, scale: Int(geometry.scale))
+        if let cached = entries[key] { return cached }
+        guard entries.count < Self.maxEntries else { exhausted = true; return nil }
+        guard let mask = Self.rasterize(scalar: scalar, width: width, height: height, geometry: geometry) else { return nil }
+        return insert(mask, key: key)
+    }
+
+    private func insert(_ mask: Mask, key: Key) -> Entry? {
         guard let origin = allocate(mask.width, mask.height) else { exhausted = true; return nil }
         let entry = Entry(u: Float(origin.x) / Float(Self.textureSize), v: Float(origin.y) / Float(Self.textureSize),
                           width: mask.width, height: mask.height, dx: mask.dx, dy: mask.dy)
@@ -176,12 +196,13 @@ final class GlyphAtlas: @unchecked Sendable {
     private func allocate(_ width: Int, _ height: Int) -> (x: Int, y: Int)? {
         let size = Self.textureSize
         guard width > 0, height > 0, width <= size, height <= size else { return nil }
-        if cursorX + width > size { shelfTop = shelfBottom; cursorX = 0 }
-        if cursorX == 0 { shelfBottom = shelfTop + height }
-        else if shelfTop + height > shelfBottom { shelfTop = shelfBottom; cursorX = 0; shelfBottom = shelfTop + height }
-        guard shelfBottom <= size, shelfTop >= 0 else { return nil }
-        defer { cursorX += width }
-        return (cursorX, shelfTop)
+        var top = shelfTop, bottom = shelfBottom, x = cursorX
+        if x + width > size { top = bottom; x = 0 }
+        if x == 0 { bottom = top + height }
+        else if top + height > bottom { top = bottom; x = 0; bottom = top + height }
+        guard bottom <= size, top >= 0 else { return nil }
+        shelfTop = top; shelfBottom = bottom; cursorX = x + width
+        return (x, top)
     }
 
     private struct Mask { let width: Int, height: Int; let dx: Int, dy: Int; let coverage: [UInt8] }
@@ -218,6 +239,26 @@ final class GlyphAtlas: @unchecked Sendable {
         var coverage = [UInt8](repeating: 0, count: width * height)
         for index in 0..<(width * height) { coverage[index] = pixels[index * 4 + 3] }
         return Mask(width: width, height: height, dx: dx, dy: dy, coverage: coverage)
+    }
+
+    /// Cell geometry is anchored to the device box, not the font baseline. Every eligible cell has zero subpixel phase,
+    /// so one exact-size coverage tile can be reused at every row and column without changing seams or antialiasing.
+    private static func rasterize(scalar: Unicode.Scalar, width: Int, height: Int, geometry: TextGeometry) -> Mask? {
+        guard width > 0, height > 0, width <= textureSize, height <= textureSize else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            context.scaleBy(x: geometry.scale, y: geometry.scale)
+            CellGlyphs.draw(scalar, in: CGRect(origin: .zero, size: geometry.cell), scale: geometry.scale,
+                            color: CGColor(red: 1, green: 1, blue: 1, alpha: 1), context: context)
+            return true
+        }
+        guard drawn else { return nil }
+        var coverage = [UInt8](repeating: 0, count: width * height)
+        for index in 0..<(width * height) { coverage[index] = pixels[index * 4 + 3] }
+        return Mask(width: width, height: height, dx: 0, dy: 0, coverage: coverage)
     }
 }
 
@@ -270,12 +311,11 @@ final class TextComposer: @unchecked Sendable {
                  cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false,
                  prevalidated geometry: TextGeometry? = nil, scroll: Int = 0) -> TextFrame? {
         var damage = damage
+        guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else { return nil }
         let cachedDescent = layout.flatMap { $0.fontName == fontName && $0.fontSize == fontSize ? $0.descent : nil }
         let geometry = if let geometry { geometry } else {
-            TextEligibility.unsupportedContent(snapshot, composition: "") == nil
-                ? TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
-                                           fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows, descent: cachedDescent)
-                : nil
+            TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
+                                     fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows, descent: cachedDescent)
         }
         guard let geometry else { return nil }
         let wanted = Layout(width: geometry.width, height: geometry.height, scale: scale, fontName: fontName,
@@ -341,6 +381,15 @@ final class TextComposer: @unchecked Sendable {
     private func build(snapshot: Snapshot, damage: Set<Int>?, geometry: TextGeometry, appearance: RenderAppearance,
                        resetAtlas: Bool, scroll: Int) -> (rows: [Int], content: [[TextInstance]])? {
         translatedRowCount = 0; reencodedRowCount = 0
+        if resetAtlas {
+            // Pack the uniform full-cell shelves before shorter font masks; interleaving them strands shelf space.
+            for cell in snapshot.cells {
+                let text = cell.text
+                guard text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first,
+                      scalar.value != 0x2800, CellGlyphs.handles(scalar) else { continue }
+                guard atlas.entry(scalar: scalar, geometry: geometry) != nil else { return nil }
+            }
+        }
         if !resetAtlas, scroll > 0, scroll < snapshot.rows, damage != nil {
             let delta = CGFloat(scroll) * geometry.cell.height * geometry.scale
             // The baseline is floored after several floating-point operations. Integral
@@ -422,10 +471,21 @@ final class TextComposer: @unchecked Sendable {
                                           destW: Float(box.width), destH: Float(box.height),
                                           r: color.0, g: color.1, b: color.2))
         }
-        // Eligibility already proved one printable ASCII scalar per cell, so cluster merging would be identity work.
+        // Eligibility excludes emoji clusters, so every remaining cell draws independently in its own box.
         for cell in cells {
             let text = cell.text
-            if text.isEmpty || text == " " { continue }
+            if text.isEmpty || text == " " || text == "\u{2800}" { continue }
+            if text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first, CellGlyphs.handles(scalar) {
+                guard let entry = atlas.entry(scalar: scalar, geometry: geometry) else { return nil }
+                let box = geometry.deviceBox(geometry.box(cell)), tile = Float(GlyphAtlas.textureSize)
+                let color = deviceColor(cell.fg)
+                instances.append(TextInstance(destX: Float(box.minX), destY: Float(box.minY),
+                                              destW: Float(box.width), destH: Float(box.height),
+                                              u: entry.u, v: entry.v,
+                                              uw: Float(entry.width) / tile, uh: Float(entry.height) / tile,
+                                              r: color.0, g: color.1, b: color.2))
+                continue
+            }
             let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))
             let fg = cell.fg
             guard fg.count == 3, let face = faces[safe: Int(style)],

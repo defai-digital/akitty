@@ -69,7 +69,7 @@ import CryptoKit
         let suite = "akitty.native-pipeline-probe.\(UUID().uuidString)"
         let defaults = try require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let scenes = ["single-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll", "four-ascii-burst", "four-unicode-burst"]
+        let scenes = ["single-typing", "four-ascii-typing", "four-unicode-typing", "four-unicode-scroll", "four-ascii-burst", "four-unicode-burst", "four-box-typing", "four-box-burst"]
         let selected = environment["AKITTY_NATIVE_PROBE_SCENES"].flatMap { $0.isEmpty ? nil : $0 }?.split(separator: ",").map(String.init) ?? scenes
         guard !selected.isEmpty, selected.count == Set(selected).count, selected.allSatisfy(scenes.contains) else { throw AkittyError.core("unknown or repeated native probe scene") }
         let profile = environment["AKITTY_NATIVE_PROBE_PROFILE"].flatMap { $0.isEmpty ? nil : $0 }
@@ -97,7 +97,10 @@ import CryptoKit
             for pane in 0..<count {
                 var program = "/usr/bin/awk '{printf \"%s\\r\\n\", $0; fflush()}'"
                 if pane > 0 {
-                    let pattern = condition.contains("unicode") ? "\u{1b}[38;2;90;180;240m漢字かな한글 👩🏽‍💻 e\u{301} log output\u{1b}[0m\r\n" : "\u{1b}[32mbuild log 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\u{1b}[0m\r\n"
+                    let pattern: String
+                    if condition.contains("unicode") { pattern = "\u{1b}[38;2;90;180;240m漢字かな한글 👩🏽‍💻 e\u{301} log output\u{1b}[0m\r\n" }
+                    else if condition.contains("box") { pattern = "\u{1b}[38;2;90;180;240m╭─┬─╮ │ █▓▒░ ⠿⠋⠙⠸ ⣿⣷⣦ ╰─┴─╯\u{1b}[0m\r\n" }
+                    else { pattern = "\u{1b}[32mbuild log 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\u{1b}[0m\r\n" }
                     let literal = String(data: try JSONSerialization.data(withJSONObject: [pattern]), encoding: .utf8)!
                     let ready = String(data: try JSONSerialization.data(withJSONObject: ["\u{1b}]2;probe-ready\u{7}"]), encoding: .utf8)!
                     let js = "const s=\(literal)[0];let ready=true,n=0;process.stdout.write(\(ready)[0]);process.stdout.on('drain',()=>ready=true);setInterval(()=>{if(ready){let t='';for(let j=0;j<\(lines);j++)t+=String(n++).padStart(8,'0')+' '+s;ready=process.stdout.write(t)}},8)"

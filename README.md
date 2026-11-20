@@ -12,12 +12,12 @@ in Settings, and reopen saved windows with conversation IDs ready to resume.
 
 [Install](#quick-start) · [Try the agent workflow](#try-the-agent-workflow) ·
 [Performance](#performance) · [Agent integration](#works-with-your-ai-agents) ·
-[What's new in 2.1.0](docs/releases/2.1.0.md)
+[What's new in 2.1.1](docs/releases/2.1.1.md)
 
 ## Quick start
 
-The latest stable release is **AkiTTY 2.1.0**.
-[Download for Apple Silicon](https://github.com/defai-digital/akitty/releases/tag/v2.1.0)
+The latest stable release is **AkiTTY 2.1.1**.
+[Download for Apple Silicon](https://github.com/defai-digital/akitty/releases/tag/v2.1.1)
 
 ```sh
 curl -fsSL https://download.automatosx.com/akitty/install -o install.sh
@@ -117,7 +117,7 @@ retention. [Native agent guide](docs/AGENT_NATIVE.md) · [Approval demo](docs/AG
   search, hyperlinks, CJK fonts, IME input, Kitty graphics and keyboard
   protocols, and paste and clipboard controls.
 - **Native rendering.** CoreText and Metal with a software fallback. The Metal
-  path uses a glyph atlas for eligible ASCII frames.
+  path caches eligible ASCII, box-drawing, block and braille glyphs in an atlas.
 - **Quick access.** Open the command palette with **⇧⌘P**, or enable the
   persistent quick terminal and assign a global shortcut.
 
@@ -226,7 +226,7 @@ integration, quick terminal behavior and VoiceOver validation.
 
 ## Build and run
 
-Source version **2.1.0** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
+Source version **2.1.1** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
 Rust 1.99.1 and Node 22.18+. See the contributor guide for the repository layout
 and focused development commands. [Contributing](CONTRIBUTING.md)
 
