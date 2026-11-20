@@ -2176,6 +2176,24 @@ comparison adapters were built locally outside the product build.
 
 ## macOS PTY throughput
 
+### AkiTTY 2.1.2 rerun
+
+On 2026-11-20, the released AkiTTY 2.1.2 arm64 app (build 20102, commit
+`791ea0f8b2f9aa3d4fcf1996ac0371522d544fe6`) ran on the same Apple M3 Max
+with macOS 27.2.1 (26B131). The harness verified the archive digest, app
+build stamp, code signature and Gatekeeper assessment.
+
+Five fresh launches repeated the AkiTTY 2.1.1 settings, workload order and
+cursor probes. Each accepted launch stayed hidden during measurement,
+with three warmups and nine timed writes per workload. The
+[README](../README.md#performance) reports rates from the median elapsed time of 45
+timed writes per workload and retains the four comparator columns from
+November 19. The v2.1.1 and v2.1.2 per-launch median ranges overlap on all
+four workloads.
+
+[Raw AkiTTY 2.1.2 timings](../benchmarks/results/macos-pty-throughput-v2.1.2-2026-11-20.json)
+· [AkiTTY 2.1.2 release](https://github.com/defai-digital/akitty/releases/tag/v2.1.2)
+
 ### AkiTTY 2.1.1 rerun
 
 On 2026-11-20, the released AkiTTY 2.1.1 arm64 app (build 20101, commit
@@ -2189,9 +2207,8 @@ the earlier AkiTTY run. Each launch ran hidden, with three warmups and
 nine timed writes per workload. All 180 timed writes met the measurement
 checks. The rates use the median time across 45 samples per workload.
 
-The README uses these four AkiTTY rates alongside the four comparator
-columns from the November 19 session. The AkiTTY per-launch median ranges
-for 2.1.1 and 1.4.1 overlap on all four workloads.
+The AkiTTY per-launch median ranges for 2.1.1 and 1.4.1 overlap on all
+four workloads.
 [Raw AkiTTY 2.1.1 timings](../benchmarks/results/macos-pty-throughput-v2.1.1-2026-11-20.json)
 · [AkiTTY 2.1.1 release](https://github.com/defai-digital/akitty/releases/tag/v2.1.1)
 

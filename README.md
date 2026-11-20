@@ -138,19 +138,19 @@ Manage the feature in Settings. [History behavior and storage](docs/ARCHITECTURE
 
 ## Performance
 
-AkiTTY 2.1.1 was measured on 2026-11-20. The other four columns use the
+AkiTTY 2.1.2 was measured on 2026-11-20. The other four columns use the
 2026-11-19 comparison. Each rate uses the median elapsed time across 45 real
 PTY samples, from the first payload write through the terminal's reply to a
 trailing cursor-position request.
 
-<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s across four workloads. AkiTTY 2.1.1 was measured on November 20. Ghostty, Alacritty, Kitty and cmux were measured on November 19. The exact rates follow in the table.">
+<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s across four workloads. AkiTTY 2.1.2 was measured on November 20. Ghostty, Alacritty, Kitty and cmux were measured on November 19. The exact rates follow in the table.">
 
-| Workload (median MiB/s) | AkiTTY 2.1.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
+| Workload (median MiB/s) | AkiTTY 2.1.2 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| ASCII | 180.9 | 176.5 | 102.9 | 115.0 | 169.1 |
-| ANSI color | 183.4 | 167.0 | 114.3 | 106.2 | 176.7 |
-| CJK and combining text | 194.3 | 163.7 | 112.8 | 97.2 | 161.2 |
-| Long lines | 191.1 | 166.5 | 99.3 | 112.7 | 182.6 |
+| ASCII | 198.1 | 176.5 | 102.9 | 115.0 | 169.1 |
+| ANSI color | 210.2 | 167.0 | 114.3 | 106.2 | 176.7 |
+| CJK and combining text | 200.4 | 163.7 | 112.8 | 97.2 | 161.2 |
+| Long lines | 208.1 | 166.5 | 99.3 | 112.7 | 182.6 |
 
 Both sessions used the same Apple M3 Max with macOS 27.2.1, hidden apps,
 a 98×25 PTY grid and scrollback limits set to zero.
