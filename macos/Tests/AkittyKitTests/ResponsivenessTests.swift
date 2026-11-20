@@ -111,6 +111,24 @@ final class ResponsivenessTests: XCTestCase {
         XCTAssertEqual(chromes, 2)
     }
 
+    @MainActor func testSnapshotDamageIsMergedBeforeReentrantTitleCallbacks() throws {
+        _ = NSApplication.shared
+        let terminal = try TerminalView(headless: false, forceSoftware: true)
+        defer { terminal.shutdown() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = terminal
+        defer { window.close() }
+        terminal.applySnapshot(.success(try snapshot(revision: 1, title: "old")))
+        terminal.onTitle = { [weak terminal] _ in
+            guard let terminal else { return }
+            XCTAssertEqual(terminal.gridDamage.rows, [0], "a reentrant redraw must not use the previous frame's damage")
+            terminal.unmarkText()
+        }
+        terminal.applySnapshot(.success(try snapshot(revision: 2, title: "new", partial: true, dirty: [0])))
+    }
+
     @MainActor func testStatusTextRepublishesOnlyWhenItChanges() throws {
         _ = NSApplication.shared
         let terminal = try TerminalView(headless: true, forceSoftware: true)
@@ -125,13 +143,96 @@ final class ResponsivenessTests: XCTestCase {
         XCTAssertEqual(statuses, ["boom", "bang"])
     }
 
+    @MainActor func testBitmapRasterReadyInvalidatesAtlasBeforeIMEReentry() async throws {
+        _ = NSApplication.shared
+        let terminal: TerminalView
+        do { terminal = try TerminalView(headless: true, forceSoftware: false) }
+        catch { throw XCTSkip("Metal unavailable: \(error)") }
+        defer { terminal.onNativeFrameEvent = nil; terminal.shutdown() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = terminal
+        defer { window.close() }
+        terminal.applySnapshot(.success(try terminal.session.snapshot()))
+        let atlasStart = Date()
+        while !terminal.lastTextFramed, Date().timeIntervalSince(atlasStart) < 2 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(terminal.lastTextFramed, "the warm-up must present an atlas frame")
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[1;1H漢"])
+        let previous = terminal.snapshot
+        let next = try terminal.session.snapshot(since: previous?.revision, base: previous)
+        var reentered = false, completedAfterReentry = false
+        terminal.onNativeFrameEvent = { event in
+            if case .handedOff(let revision) = event, revision == next?.revision, reentered { completedAfterReentry = true }
+            if case .rasterReady(let revision) = event, revision == next?.revision, terminal.hasMarkedText() {
+                XCTAssertFalse(terminal.lastTextFramed, "CPU completion must invalidate atlas reuse before observers run")
+                terminal.unmarkText()
+                reentered = true
+            }
+        }
+        terminal.setMarkedText("x", selectedRange: NSRange(location: 0, length: 0),
+                               replacementRange: NSRange(location: NSNotFound, length: 0))
+        terminal.applySnapshot(.success(next))
+        let start = Date()
+        while (!reentered || !completedAfterReentry), Date().timeIntervalSince(start) < 2 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(reentered)
+        XCTAssertTrue(completedAfterReentry, "the reentrant frame must also complete")
+        XCTAssertFalse(terminal.lastTextFramed, "CJK remains on the CPU reference path")
+    }
+
+    @MainActor func testRasterStartedObserverCannotGiveItsDamageToTheOlderFrame() async throws {
+        _ = NSApplication.shared
+        let terminal: TerminalView
+        do { terminal = try TerminalView(headless: true, forceSoftware: false) }
+        catch { throw XCTSkip("Metal unavailable: \(error)") }
+        defer { terminal.onNativeFrameEvent = nil; terminal.shutdown() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = terminal
+        defer { window.close() }
+        terminal.applySnapshot(.success(try terminal.session.snapshot()))
+        let atlasStart = Date()
+        while !terminal.lastTextFramed, Date().timeIntervalSince(atlasStart) < 2 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(terminal.lastTextFramed)
+        let initial = terminal.snapshot
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[1;1Hx"])
+        let ascii = try terminal.session.snapshot(since: initial?.revision, base: initial)
+        _ = try terminal.session.call("feed", ["text": "\u{1b}[6;1H漢"])
+        let cjk = try terminal.session.snapshot(since: ascii?.revision, base: ascii)
+        var applied = false, completed = false
+        terminal.onNativeFrameEvent = { event in
+            if case .rasterStarted(let revision) = event, revision == ascii?.revision, !applied {
+                applied = true
+                terminal.applySnapshot(.success(cjk))
+            }
+            if case .handedOff(let revision) = event, revision == cjk?.revision { completed = true }
+        }
+        terminal.applySnapshot(.success(ascii))
+        let start = Date()
+        while !completed, Date().timeIntervalSince(start) < 2 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(applied)
+        XCTAssertTrue(completed, "the nested CJK snapshot must retain its own damage and complete")
+        XCTAssertFalse(terminal.lastTextFramed, "the final CJK frame must use the CPU reference path")
+    }
+
     // A snapshot as the core sends it: only the fields a full frame carries, so this decodes exactly like a live one.
-    private func snapshot(revision: UInt64, title: String = "", mark: String? = nil, error: String? = nil) throws -> Snapshot {
+    private func snapshot(revision: UInt64, title: String = "", mark: String? = nil, error: String? = nil,
+                          partial: Bool = false, dirty: [Int]? = nil) throws -> Snapshot {
         var object: [String: Any] = ["changed": true, "revision": revision, "cols": 6, "rows": 3, "title": title,
             "cells": [] as [[String: Any]], "lines": Array(repeating: String(repeating: " ", count: 6), count: 3),
             "links": [] as [String], "cursor": ["row": 0, "col": 0, "visible": false], "bracketed_paste": false,
             "app_cursor": false, "mouse_mode": false, "mouse_sgr": false, "mouse_drag": false, "mouse_motion": false,
             "focus_reporting": false, "alternate": false, "offset": 0, "history": 0, "clipboard": [] as [String], "exited": false]
+        if partial { object["partial"] = true; object["dirty"] = dirty ?? [] }
         var chrome: [String: Any] = [:]
         if let mark { chrome["mark"] = mark }
         if !chrome.isEmpty { object["chrome"] = chrome }

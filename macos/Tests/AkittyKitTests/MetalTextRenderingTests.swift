@@ -285,6 +285,7 @@ final class MetalTextRenderingTests: XCTestCase {
 
         let (recovered, gpu) = try render(next, scale: 2, presenter: presenter, composer: composer, damage: [1])
         XCTAssertEqual(recovered.dirtyRows.count, rows)
+        XCTAssertEqual(composer.eligibilityScannedRows, rows, "no-scroll recovery also forces a full content scan")
         let cpu = try GridRasterizer.make(snapshot: next, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
                                           cellSize: cell, composition: "")
         XCTAssertLessThanOrEqual(compare(cpu, gpu).max, 2, "the recovered frame shows the new glyph in row 0")
@@ -457,6 +458,71 @@ final class MetalTextRenderingTests: XCTestCase {
                      "a supplied geometry only skips layout work, never content validation")
     }
 
+    func testIncrementalEligibilityRechecksOnlyDirtyRows() throws {
+        let composer = TextComposer()
+        let source = (0..<rows).map { "row \($0)" }
+        let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        XCTAssertEqual(composer.eligibilityScannedRows, rows)
+        let changed = try snapshot(cells: line(0, "changed") + (1..<rows).flatMap { line($0, source[$0]) })
+        _ = try XCTUnwrap(compose(changed, composer: composer, damage: [0]))
+        XCTAssertEqual(composer.eligibilityScannedRows, 1)
+        _ = try XCTUnwrap(compose(changed, composer: composer, damage: []))
+        XCTAssertEqual(composer.eligibilityScannedRows, 0, "cursor-only damage needs no content scan")
+    }
+
+    func testDirtyUnsupportedCellsInvalidateEligibilityAndFullDamageRecovers() throws {
+        let unsupported = [
+            line(3, "漢字"), [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")],
+            [wire(3, 0, text: "中", Style(wide: true))], line(3, "und", Style(underline: true)),
+            line(3, "gone", Style(strike: true)),
+        ]
+        let source = (0..<rows).map { "row \($0)" }
+        for changedRow in unsupported {
+            let composer = TextComposer()
+            let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+            _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+            let cells = (0..<rows).flatMap { $0 == 3 ? changedRow : line($0, source[$0]) }
+            let unsupportedSnapshot = try snapshot(cells: cells)
+            XCTAssertNil(compose(unsupportedSnapshot, composer: composer, damage: [3]))
+            XCTAssertEqual(composer.eligibilityScannedRows, 1, "only the changed row is inspected before refusal")
+            XCTAssertNil(compose(unsupportedSnapshot, composer: composer, damage: [0]),
+                         "an unrelated update cannot revive the certificate while unsupported content remains")
+            _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+            XCTAssertEqual(composer.eligibilityScannedRows, rows, "returning from CPU fallback rechecks the whole grid")
+        }
+    }
+
+    func testScrollAndReleaseCannotReuseEligibilityCertificates() throws {
+        let composer = TextComposer()
+        let source = (0..<rows).map { "row \($0)" }
+        let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) })
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        let shifted = try snapshot(cells: (1..<rows).flatMap { line($0 - 1, $0 == 1 ? "漢字" : source[$0]) }
+            + line(rows - 1, "new"))
+        XCTAssertNil(composer.compose(snapshot: shifted, damage: [rows - 1], size: size, scale: 2,
+                                      fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                      appearance: .standard, scroll: 1),
+                     "scroll must find unsupported content in a moved row even when only the exposed row is dirty")
+        XCTAssertEqual(composer.eligibilityScannedRows, 1)
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        composer.releaseFrames()
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: []))
+        XCTAssertEqual(composer.eligibilityScannedRows, rows, "release invalidates the content certificate")
+    }
+
+    func testGlobalFallbackInvalidatesEligibilityBeforeTheNextCompose() throws {
+        let composer = TextComposer()
+        let initial = try snapshot(cells: line(0, "plain"))
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        let unsupported = try snapshot(cells: line(0, "漢字"), images: [placement(id: 1)])
+        XCTAssertNil(compose(unsupported, composer: composer, damage: []), "images take the layered path first")
+        let withoutImages = try snapshot(cells: line(0, "漢字"))
+        XCTAssertNil(compose(withoutImages, composer: composer, damage: []),
+                     "the next content check cannot reuse eligibility from before the image frame")
+        XCTAssertEqual(composer.eligibilityScannedRows, 1)
+    }
+
     func testCachedDescentMatchesFreshGeometry() throws {
         for fontName in ["Menlo", "Courier New"] {
             for fontSize in [CGFloat(13), 17.25] {
@@ -492,6 +558,7 @@ final class MetalTextRenderingTests: XCTestCase {
                                                        appearance: .standard, scroll: 2))
             XCTAssertEqual(composer.translatedRowCount, rows - 4, "scale \(scale)")
             XCTAssertEqual(composer.reencodedRowCount, 4, "two exposed and two cursor rows at scale \(scale)")
+            XCTAssertEqual(composer.eligibilityScannedRows, rows, "scrolls use the full content reference scan")
             XCTAssertEqual(frame.dirtyRows, Array(0..<rows), "every moved row uploads")
             try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
             let actual = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
@@ -601,6 +668,7 @@ final class MetalTextRenderingTests: XCTestCase {
                                                        appearance: .standard, scroll: 1))
         XCTAssertEqual(composer.translatedRowCount, 0, "recovery cannot translate the already-discarded shift")
         XCTAssertEqual(composer.reencodedRowCount, rows)
+        XCTAssertEqual(composer.eligibilityScannedRows, rows, "discarded-frame recovery cannot reuse content certificates")
         XCTAssertEqual(recovered.dirtyRows, Array(0..<rows))
         XCTAssertFalse(recovered.uploads.isEmpty, "the discarded frame's new mask remains queued")
         try presenter.updateText(recovered, grid: grid)
@@ -718,6 +786,7 @@ final class MetalTextRenderingTests: XCTestCase {
                                                    cjkFontName: "", appearance: .standard))
         XCTAssertTrue(frame.resetAtlas)
         XCTAssertEqual(frame.dirtyRows.count, rows, "a new layout re-encodes every row")
+        XCTAssertEqual(composer.eligibilityScannedRows, rows, "a new layout also invalidates content eligibility")
         XCTAssertGreaterThan(composer.atlasResets, resets)
         // The new font still matches the software reference.
         let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 2, fontName: "Courier New", fontSize: 13,
@@ -821,6 +890,13 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(frames.last!, "a suspended composer refuses frames instead of rebuilding every time")
         XCTAssertGreaterThan(composer.atlasResets, 1, "the rebuild budget was spent before standing down")
         XCTAssertLessThanOrEqual(composer.atlasEntries, GlyphAtlas.maxEntries)
+        let resets = composer.atlasResets
+        let otherSize = CGSize(width: size.width + 8, height: size.height)
+        XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: otherSize, scale: 3,
+                                      fontName: "Menlo", fontSize: 36, cell: cell, cjkFontName: "",
+                                      appearance: .standard))
+        XCTAssertTrue(composer.isSuspended, "unsupported content at another layout cannot re-arm the atlas")
+        XCTAssertEqual(composer.atlasResets, resets, "content refusal happens before a suspended layout reset")
     }
 
     /// Leaving the window drops the atlas texture and the instance buffer.

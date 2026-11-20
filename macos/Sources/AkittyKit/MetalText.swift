@@ -61,6 +61,20 @@ struct TextGeometry: Equatable {
 }
 
 enum TextEligibility {
+    static func unsupportedFrame(_ snapshot: Snapshot, composition: String) -> TextFallback? {
+        if !composition.isEmpty { return .composition }
+        if !(snapshot.images ?? []).isEmpty { return .images }
+        return nil
+    }
+    static func unsupportedCell(_ cell: Cell) -> TextFallback? {
+        if cell.wide { return .wideCell }
+        if cell.underline || cell.strike == true { return .decoratedCell }
+        let text = cell.text
+        if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { return nil }
+        if text.isEmpty { return nil }
+        if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { return nil }
+        return .nonASCII
+    }
     /// Content the atlas cannot draw identically. Kept separate from geometry so the routing decision is a
     /// pure snapshot scan that costs one pass over the cells the frame already carries.
     static func unsupportedContent(_ snapshot: Snapshot, composition: String) -> TextFallback? {
@@ -284,6 +298,10 @@ final class TextComposer: @unchecked Sendable {
     private var rows: [[TextInstance]] = []
     private var colors: [UInt32: (Float, Float, Float)] = [:]
     private var lastCursorRow: Int?
+    /// A successful full-grid scan certifies every row eligible. No-scroll updates retain that certificate only
+    /// after rechecking their dirty rows; scrolls and unknown damage always take the full reference scan.
+    private var eligibleContentRows: Int?
+    private(set) var eligibilityScannedRows = 0
     /// Layout plus appearance: a change re-arms the rebuild budget without invalidating still-valid masks.
     private struct Epoch: Equatable { var layout: Layout; var appearance: RenderAppearance }
     private var epoch: Epoch?
@@ -300,6 +318,7 @@ final class TextComposer: @unchecked Sendable {
     /// Drops retained rows and masks; the next frame is a full rebuild. Called when the pane leaves its window.
     func releaseFrames() {
         rows = []; layout = nil; lastCursorRow = nil; colors.removeAll(keepingCapacity: true)
+        eligibleContentRows = nil; eligibilityScannedRows = 0
         epoch = nil; rebuilds = 0; isSuspended = false
         resetPending = false; recoveryPending = false
         atlas.reset(); atlasEntries = 0; atlasResets = atlas.resets
@@ -311,19 +330,26 @@ final class TextComposer: @unchecked Sendable {
                  cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false,
                  prevalidated geometry: TextGeometry? = nil, scroll: Int = 0) -> TextFrame? {
         var damage = damage
-        guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else { return nil }
+        guard TextEligibility.unsupportedFrame(snapshot, composition: "") == nil else {
+            eligibleContentRows = nil; return nil
+        }
         let cachedDescent = layout.flatMap { $0.fontName == fontName && $0.fontSize == fontSize ? $0.descent : nil }
         let geometry = if let geometry { geometry } else {
             TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
                                      fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows, descent: cachedDescent)
         }
-        guard let geometry else { return nil }
+        guard let geometry else { eligibleContentRows = nil; return nil }
         let wanted = Layout(width: geometry.width, height: geometry.height, scale: scale, fontName: fontName,
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
                             rows: snapshot.rows, descent: geometry.descent)
         let signature = Epoch(layout: wanted, appearance: appearance)
+        if isSuspended {
+            // A refused layout must not reset the old layout's rebuild budget before content validation.
+            eligibleContentRows = nil
+            guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else { return nil }
+        }
         if epoch != signature { epoch = signature; rebuilds = 0; isSuspended = false; damage = nil }
-        if isSuspended { return nil }
+        if isSuspended { eligibleContentRows = nil; return nil }
         var resetAtlas = resetPending
         if recoveryPending { damage = nil }
         if layout != wanted || base == nil || rows.count != snapshot.rows {
@@ -333,10 +359,12 @@ final class TextComposer: @unchecked Sendable {
             atlas.reset()
             rows = Array(repeating: [], count: snapshot.rows)
             lastCursorRow = nil
+            eligibleContentRows = nil
             resetAtlas = true
             resetPending = true
             damage = nil
         }
+        guard contentEligible(snapshot: snapshot, damage: damage, scroll: scroll) else { return nil }
         recoveryPending = true
         var result = build(snapshot: snapshot, damage: damage, geometry: geometry, appearance: appearance,
                            resetAtlas: resetAtlas, scroll: scroll)
@@ -360,6 +388,36 @@ final class TextComposer: @unchecked Sendable {
                               uploads: atlas.pending, resetAtlas: resetAtlas)
         if !deferPublication { acknowledgePublication() }
         return frame
+    }
+
+    private func contentEligible(snapshot: Snapshot, damage: Set<Int>?, scroll: Int) -> Bool {
+        eligibilityScannedRows = 0
+        if scroll == 0, eligibleContentRows == snapshot.rows, let damage {
+            for row in damage.sorted() where (0..<snapshot.rows).contains(row) {
+                eligibilityScannedRows += 1
+                if snapshot.cells(in: row).contains(where: { TextEligibility.unsupportedCell($0) != nil }) {
+                    eligibleContentRows = nil
+                    return false
+                }
+            }
+        } else {
+            eligibleContentRows = nil
+            guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else {
+                for cell in snapshot.cells {
+                    if TextEligibility.unsupportedCell(cell) != nil {
+                        eligibilityScannedRows = min(snapshot.rows, max(1, cell.row + 1)); break
+                    }
+                }
+                return false
+            }
+            eligibilityScannedRows = snapshot.rows
+            eligibleContentRows = snapshot.rows
+        }
+        #if DEBUG
+        // The release fast path relies on core damage. Check that contract against the original full scan in tests.
+        assert(TextEligibility.unsupportedContent(snapshot, composition: "") == nil)
+        #endif
+        return true
     }
 
     func acknowledgePublication() {

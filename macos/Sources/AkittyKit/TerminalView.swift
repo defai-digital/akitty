@@ -74,10 +74,10 @@ struct RenderReuse: Equatable {
     private let textComposer = TextComposer()
     /// Whether the last frame went through the layered Metal path.
     private var lastLayered = false
-    /// Whether the last frame presented from the glyph atlas, which leaves the CPU bitmap stale.
-    private var lastTextFramed = false
+    /// Whether retained frame state belongs to the glyph atlas, which leaves the CPU bitmap stale.
+    private(set) var lastTextFramed = false
     /// Grid rows changed since the last raster started; nil means unknown (repaint everything).
-    private var gridDamage = GridDamage()
+    private(set) var gridDamage = GridDamage()
     private var pendingDamage: Set<Int>? {
         get { gridDamage.rows }
         set { gridDamage = GridDamage(rows: newValue) }
@@ -457,6 +457,8 @@ struct RenderReuse: Equatable {
                 // The host owns the visible selection; without a drag selection, drop core marks
                 // left over from a cleared selection (schema 1 has no deselect request).
                 if selectionEnd == nil { snapshot?.clearSelectionMarks() }
+                // Callbacks can synchronously request another redraw; they must never see new cells with old damage.
+                gridDamage.merge(next)
                 // More frames usually follow a changed one: output keeps streaming, an animation advances.
                 lastChange = ProcessInfo.processInfo.systemUptime
                 // A bare `exit` inherits the last command's status. Any reported shell exit
@@ -479,7 +481,6 @@ struct RenderReuse: Equatable {
                 // prompt is open, keeping the approval queue bounded.
                 if let text = next.clipboard.last { pendingClipboard = [text] }
                 if next.bell == true { ringBell(); onBell?() }
-                gridDamage.merge(next)
                 redraw(imageOnly: Self.isImageOnlyUpdate(previous: previous, next: next))
                 updateAccessibility(previous: previous, next: next)
             }
@@ -534,7 +535,6 @@ struct RenderReuse: Equatable {
         }
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
-        onNativeFrameEvent?(.rasterStarted(snapshot.revision))
         let size = bounds.size, scale = window?.backingScaleFactor ?? 2
         let fontName = font.fontName, fontSize = font.pointSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
         // With Metal, frames that show images split the text into two layers and let the GPU composite each image from
@@ -554,6 +554,8 @@ struct RenderReuse: Equatable {
         let reuse = presenter != nil
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
+        // Observers may apply another snapshot synchronously; the old frame now owns its captured state and damage.
+        onNativeFrameEvent?(.rasterStarted(snapshot.revision))
         rasterQueue.async { [weak self] in
             if tryText, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
                                                       fontName: fontName, fontSize: fontSize, cell: cells,
@@ -583,7 +585,7 @@ struct RenderReuse: Equatable {
                 let result = Result { try rasterizer.renderLayers(snapshot: snapshot, damage: damage, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, appearance: appearance) }
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.rasterInFlight = false
+                    self.rasterInFlight = false; self.lastTextFramed = false
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                     guard !self.stopped else { return }
                     // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
@@ -608,7 +610,7 @@ struct RenderReuse: Equatable {
             let result = Result { try rasterizer.render(snapshot: snapshot, damage: damage, scroll: scroll, size: size, scale: scale, fontName: fontName, fontSize: fontSize, cellSize: cells, composition: marked, cjkFontName: cjkFontName, images: images, reuse: reuse, appearance: appearance) }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.rasterInFlight = false
+                self.rasterInFlight = false; self.lastTextFramed = false
                 self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                 guard !self.stopped else { return }
                 guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }

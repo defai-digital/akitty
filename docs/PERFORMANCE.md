@@ -2295,3 +2295,55 @@ The native probe gained explicit `four-box-typing` and `four-box-burst` scenes w
 The result is a substantial CPU reduction for geometric-text workloads. GPU-completion tails are effectively unchanged. Typing presentation p95 increased in all three pairs, while burst presentation p95 improved only in the aggregate; this pass therefore claims neither a general presentation-latency improvement nor a latency win for every workload. Presentation is a drawable timestamp for a target or later revision, not physical key-to-photon time. Process CPU excludes producer children and WindowServer. These measurements do not extend the atlas to general CJK, combining text or emoji.
 
 The canonical `scripts/verify.sh` gate passed, including 467 Swift tests with six opt-in skips and 715 web tests. Chromium and WebKit passed 30 browser tests; the existing local Firefox profile-folder startup failure triggered its configured skip. Installer, release-tooling, ABI, provenance and public-file checks passed.
+
+## Atlas eligibility certificates and callback damage ordering
+
+A follow-up native review targets the remaining full-grid content scan in `TextComposer`. A successful full scan now
+certifies that every row is eligible for the atlas. A later no-scroll frame with known damage rechecks only its dirty
+rows; cursor-only damage needs no cell scan. Any unsupported dirty cell invalidates the certificate and retains the
+CPU reference path. Scrolling, unknown damage, layout changes, fallback recovery and resource release always use the
+full reference scan, as do frames following an early image, geometry or suspension refusal. The implementation keeps
+no independent row-identity map and does not shift eligibility certificates during scrolling. Debug builds compare
+successful cached decisions with the original full-grid predicate.
+
+`TerminalView.applySnapshot` now merges snapshot damage before invoking title, chrome, bell or other host callbacks.
+A callback that synchronously clears composition or otherwise requests a redraw therefore cannot combine newly
+installed cells with the preceding frame's damage. CPU bitmap completion also invalidates atlas reuse before emitting
+`rasterReady`, so an observer that clears IME composition cannot reuse the previous atlas certificate with empty damage.
+A suspended composer validates unsupported content before changing its layout epoch, preventing a refused layout from
+re-arming the rebuild budget. The `rasterStarted` observer runs only after the older frame has captured its snapshot,
+damage and rendering state, so a synchronously applied newer snapshot retains its own damage for the queued redraw.
+Regressions observe the merged dirty row inside a title callback, complete real IME and newer-snapshot reentrant frames,
+and check suspension across a refused layout.
+
+Correctness coverage checks exact scanned-row counts for full, incremental and cursor-only frames, every unsupported
+cell category, unrelated updates while unsupported content remains, full recovery, scrolling with unsupported moved
+content, layout changes, resource release, image fallback and callback reentry. Existing CPU/Metal pixel-equivalence,
+atlas recovery and in-flight resource tests remain required.
+
+The release `HotpathProbe` at 200x50 and 2x scale measured full warm-atlas composition at 1.23 ms for ASCII and 1.24 ms
+for geometric text, compared with 1.18 and 1.22 ms at `db3e2dd`. One damaged row fell from 0.04 to 0.03 ms for ASCII
+and from 0.11 to 0.03 ms for geometric text. These are single-run component timings on one host, not visible frame
+latency; full composition remains near baseline and the small ASCII incremental difference is within timing variation.
+
+The native probe compared the frozen `db3e2dd` app with a clean candidate worktree in three alternating pairs. Each
+scene ran in its own process with 60 measured inputs after three warmups, covering 180 samples per scene/version.
+CPU is the median of three process user-plus-system percentages; GPU and presentation quantiles pool those 180 samples.
+Every measured input had valid GPU-completion and target-presentation samples. Zero-timestamp callbacks outside the
+target samples remained counted as such and were not treated as fast measurements.
+
+| Scene | Baseline CPU | Candidate CPU | GPU p95 before | GPU p95 after | Presentation p95 before | Presentation p95 after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Single typing | 11.63% | 11.13% | 13.74 ms | 13.07 ms | 45.79 ms | 40.19 ms |
+| ASCII streams + typing | 23.41% | 21.69% | 11.10 ms | 10.97 ms | 42.08 ms | 39.40 ms |
+| Box streams + typing | 21.57% | 21.45% | 10.52 ms | 10.80 ms | 39.97 ms | 35.84 ms |
+
+Candidate CPU was lower in seven of nine pairs, with median reductions of 4.3%, 7.4% and 0.6% respectively. Presentation
+p95 improved in eight of nine pairs and in every aggregate scene, while geometric GPU-completion p95 increased slightly.
+These short local runs support the targeted improvement but do not establish a universal latency win or statistical
+significance. Presentation is a drawable timestamp for a target or later revision, not physical key-to-photon time;
+process CPU excludes producer children and WindowServer.
+
+The canonical `scripts/verify.sh` gate passed, including 474 Swift tests with six opt-in skips and 715 web tests with
+two skips. Chromium and WebKit passed 30 browser tests; the existing local Firefox profile-folder startup failure
+triggered its configured skip. Installer, release-tooling, ABI, provenance, commit-message and public-file checks passed.

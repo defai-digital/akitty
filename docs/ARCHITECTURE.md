@@ -126,7 +126,13 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   instead of churning masks every frame. Because macOS text smoothing depends on the text colour, font masks are
   keyed by style, text and foreground colour; geometric masks omit style and colour. Content the atlas does not
   reproduce pixel-for-pixel (other non-ASCII text, wide cells, underlines and strike, IME composition, Kitty images,
-  backing scales outside 1x-3x) keeps the software rasterizer unchanged.
+  backing scales outside 1x-3x) keeps the software rasterizer unchanged. A successful full content scan certifies
+  atlas eligibility; a no-scroll incremental frame rechecks only its damaged rows, while scrolling, unknown damage,
+  layout changes, fallback recovery and resource release require a fresh full scan. Snapshot damage is merged before
+  any host callback can request a redraw, and CPU bitmap completion invalidates atlas reuse before frame observers run,
+  so reentrant callbacks cannot render new cells with stale damage or eligibility. Frame-start observers run after the
+  older frame has captured its state and damage, leaving newer snapshot damage intact for the queued redraw. Suspended
+  atlases validate content before changing layout epochs, so an unsupported frame cannot re-arm their rebuild budget.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status-bar note. Images are
