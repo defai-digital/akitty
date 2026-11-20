@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import SwiftUI
 import XCTest
 @testable import AgentIPC
 @testable import AkittyKit
@@ -6,7 +8,8 @@ import XCTest
 /// Walks the accessibility tree VoiceOver reads for the approval sheets: a request from another pane and an agent's
 /// permission prompt. Every control must have a spoken name, and the facts a person decides on must be readable.
 /// This is an automated audit, not a VoiceOver user session. Settings → Agents is SwiftUI, whose tree is only built
-/// for a connected assistive client, so it is left to a VoiceOver session.
+/// for a connected assistive client, so it is read through the system accessibility API, as VoiceOver reads it;
+/// that test needs the Accessibility permission for the app running the tests and is skipped without it.
 final class AgentAccessibilityAuditTests: XCTestCase {
     struct Element { let role: String; let label: String; let value: String; let help: String }
 
@@ -85,5 +88,54 @@ final class AgentAccessibilityAuditTests: XCTestCase {
             }
             XCTAssertEqual(alert.window.defaultButtonCell?.title, "Deny")
         }
+    }
+
+    /// Reads an AX element tree in this process from a background thread, so the main thread can answer.
+    nonisolated static func axElements(window title: String) -> [Element]? {
+        let app = AXUIElementCreateApplication(getpid())
+        AXUIElementSetMessagingTimeout(app, 5)
+        func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
+            var value: AnyObject?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+        }
+        guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement],
+              let window = windows.first(where: { attribute($0, kAXTitleAttribute) as? String == title }) else { return nil }
+        var result: [Element] = []
+        func visit(_ element: AXUIElement, depth: Int) {
+            guard depth < 40, result.count < 2000 else { return }
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let label = [kAXDescriptionAttribute, kAXTitleAttribute].compactMap { attribute(element, $0) as? String }.first { !$0.isEmpty } ?? ""
+            let value = attribute(element, kAXValueAttribute).map { "\($0)" } ?? ""
+            result.append(Element(role: role, label: label, value: value, help: attribute(element, kAXHelpAttribute) as? String ?? ""))
+            for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] { visit(child, depth: depth + 1) }
+        }
+        visit(window, depth: 0)
+        return result
+    }
+
+    @MainActor func testAgentsSettingsTabReadsEveryAgentAndNamesEveryControl() async throws {
+        guard AXIsProcessTrusted() else {
+            throw XCTSkip("Needs the Accessibility permission (System Settings → Privacy & Security → Accessibility) for the app running the tests")
+        }
+        _ = NSApplication.shared
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "akitty-a11y-\(UUID().uuidString)"))
+        let title = "Agents audit \(UUID().uuidString.prefix(6))"
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 1100), styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = title; window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: AgentIntegrationsView(defaults: defaults)); window.orderFront(nil)
+        defer { window.close() }
+        var elements: [Element] = []
+        for _ in 0..<40 {
+            elements = await Task.detached { Self.axElements(window: title) ?? [] }.value
+            if Self.spoken(elements).contains("AX Code") && elements.contains(where: { $0.role == kAXButtonRole as String }) { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let spoken = Self.spoken(elements)
+        print("AKITTY_A11Y_AGENTS \(elements.count) elements, \(elements.filter { $0.role == kAXButtonRole as String }.map(\.label))")
+        Self.assertEveryControlIsNamed(elements)
+        for text in ["Local Agent Requests", "Turn on when AkiTTY starts", "Claude Code", "Codex", "AX Code"] {
+            XCTAssertTrue(spoken.contains(text), "\(text) is readable: \(spoken)")
+        }
+        XCTAssertFalse(elements.filter { $0.role == kAXButtonRole as String }.isEmpty, spoken)
     }
 }

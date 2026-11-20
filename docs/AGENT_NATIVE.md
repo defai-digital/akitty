@@ -372,8 +372,10 @@ that run only) and AX Code's MCP request are answered through AkiTTY, each
 command runs, and all three report their conversations. It changes no global
 agent configuration. `AgentAccessibilityAuditTests` walks the accessibility tree
 of the approval sheets (names of every control, the source and target panes, the
-whole command, Deny as default). A VoiceOver user session, including Settings →
-Agents, is still outstanding. `scripts/build-app.sh` bundles and audits both native executables.
+whole command, Deny as default) and, when the app running the tests has the
+Accessibility permission, reads Settings → Agents through the system
+accessibility API as VoiceOver does; it is skipped otherwise. A VoiceOver user
+session is still outstanding. `scripts/build-app.sh` bundles and audits both native executables.
 Tests establish bounded behavior and observed effects, not complete terminal
 conformance, multi-day stability, vendor hook compatibility or VoiceOver user
 qualification. Native and Web share the Rust VT engine, while their rendering,
