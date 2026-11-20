@@ -107,6 +107,21 @@ final class AgentDecisionTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: real.path + ".akitty-backup"))
     }
 
+    func testHookStatusDetectsAChangedPermissionMatcherAndReinstallRepairsIt() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let config = root.appendingPathComponent("settings.json")
+        let settings = AgentHookSettings(path: config.path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        try settings.install()
+        let original = try String(contentsOf: config, encoding: .utf8)
+        let changed = original.replacingOccurrences(of: "\"matcher\" : \"Bash\"", with: "\"matcher\" : \"Edit\"")
+        XCTAssertNotEqual(changed, original)
+        try Data(changed.utf8).write(to: config)
+        XCTAssertEqual(try settings.state(), .partial)
+        try settings.install()
+        XCTAssertEqual(try settings.state(), .installed)
+        XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), original)
+    }
+
     @MainActor private func readyPane() throws -> (TerminalView, NSWindow) {
         let terminal = try TerminalView(headless: true, forceSoftware: true)
         _ = try terminal.session.call("feed", ["text": "\u{1b}]7;file:///tmp\u{7}\u{1b}]133;A\u{7}"])

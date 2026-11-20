@@ -132,12 +132,13 @@ public struct AXCodeMCPSettings {
         try SettingsFile.save(settings, to: path)
     }
     public func uninstall() throws {
+        var settings = try load()
+        if var servers = settings["mcp"] as? [String: Any], isManaged(servers[Self.serverName]) {
+            servers.removeValue(forKey: Self.serverName)
+            settings["mcp"] = servers.isEmpty ? nil : servers
+            try SettingsFile.save(settings, to: path)
+        }
         let plugin = pluginState()
         if plugin == .installed || plugin == .partial { try FileManager.default.removeItem(atPath: pluginPath) }
-        var settings = try load()
-        guard var servers = settings["mcp"] as? [String: Any], isManaged(servers[Self.serverName]) else { return }
-        servers.removeValue(forKey: Self.serverName)
-        settings["mcp"] = servers.isEmpty ? nil : servers
-        try SettingsFile.save(settings, to: path)
     }
 }

@@ -132,6 +132,20 @@ final class AgentIntegrationsTests: XCTestCase {
         XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: dangling), "the link stays a link")
     }
 
+    func testAXCodeUninstallKeepsThePluginWhenItsConfigCannotBeRead() throws {
+        let root = try directory()
+        let config = root.appendingPathComponent("ax-code.json")
+        let settings = AXCodeMCPSettings(path: config.path, executable: "/Applications/Akitty.app/Contents/MacOS/akitty-agent")
+        try settings.install()
+        let plugin = URL(fileURLWithPath: settings.pluginPath)
+        let installed = try Data(contentsOf: plugin)
+        let invalid = Data("{\"mcp\": []}".utf8)
+        try invalid.write(to: config)
+        XCTAssertThrowsError(try settings.uninstall())
+        XCTAssertEqual(try Data(contentsOf: config), invalid)
+        XCTAssertEqual(try Data(contentsOf: plugin), installed)
+    }
+
     @MainActor func testLastReportShowsTheNewestConversationOfThatAgent() throws {
         _ = NSApplication.shared
         let root = try directory()

@@ -127,7 +127,10 @@ public struct AgentHookSettings {
         let hooks = try load()["hooks"] as? [String: Any] ?? [:]
         let found = managed.filter { entry in
             (hooks[entry.event] as? [[String: Any]] ?? []).contains { group in
-                (group["hooks"] as? [[String: Any]] ?? []).contains { $0["command"] as? String == command }
+                let matches = entry.matcher.map { group["matcher"] as? String == $0 } ?? (group["matcher"] == nil)
+                return matches && (group["hooks"] as? [[String: Any]] ?? []).contains {
+                    $0["command"] as? String == command && $0["type"] as? String == "command" && $0["timeout"] as? Int == entry.timeout
+                }
             }
         }.count
         let anyManaged = hooks.values.contains { value in
