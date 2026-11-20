@@ -12,7 +12,7 @@ and take back terminal input when you need it.
 
 [Install](#quick-start) · [Try the agent workflow](#try-the-agent-workflow) ·
 [Performance](#performance) · [Agent integration](#works-with-your-ai-agents) ·
-[Release notes](docs/releases/1.4.1.md)
+[Release notes](docs/releases/2.0.0.md)
 
 ## Quick start
 
@@ -38,6 +38,10 @@ to `/Applications`. [Latest release](https://github.com/defai-digital/akitty/rel
 <a id="30-second-tour"></a>
 
 ## Try the agent workflow
+
+Open **Settings → Agents** to set up Claude Code, Codex or AX Code.
+AkiTTY queues requests across panes and can reopen a saved workspace with
+conversation IDs ready to resume. [Agent setup and workspace restore](docs/AGENT_NATIVE.md)
 
 - **Observe.** Open **Window → Agent Overview (⌥⌘A)** to see agent-reported
   activity and input ownership across windows, tabs, splits and the quick terminal.
@@ -207,7 +211,7 @@ integration, quick terminal behavior and VoiceOver validation.
 
 ## Build and run
 
-Source version **1.4.1** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
+Source version **2.0.0** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
 Rust 1.99.1 and Node 22+. See the contributor guide for the repository layout
 and focused development commands. [Contributing](CONTRIBUTING.md)
 
