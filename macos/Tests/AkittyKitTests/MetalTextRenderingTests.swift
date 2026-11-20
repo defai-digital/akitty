@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import CoreText
 import Metal
 @testable import AkittyKit
 
@@ -317,7 +318,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let current = try snapshot(cells: line(6, "new text") + line(1, "changed"))
         let full = try GridRasterizer.make(snapshot: current, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
                                            cellSize: cell, composition: "")
-        let plan = RenderReuse.plan(damage: [1], scroll: 0, layered: false, textEligible: true,
+        let plan = RenderReuse.plan(damage: [1], scroll: 0, layered: false, tryText: true,
                                     previousLayered: false, previousText: true)
         XCTAssertNil(plan.cpuDamage, "the CPU bitmap is stale after an atlas frame")
         XCTAssertEqual(plan.textDamage, [1], "the composer still applies its partial row")
@@ -342,7 +343,7 @@ final class MetalTextRenderingTests: XCTestCase {
     func testReusePlanDecidesDamagePerPath() {
         func plan(_ damage: Set<Int>?, _ scroll: Int, layered: Bool = false, eligible: Bool = true,
                   previousLayered: Bool = false, previousText: Bool = false) -> RenderReuse {
-            RenderReuse.plan(damage: damage, scroll: scroll, layered: layered, textEligible: eligible,
+            RenderReuse.plan(damage: damage, scroll: scroll, layered: layered, tryText: eligible,
                              previousLayered: previousLayered, previousText: previousText)
         }
         // Steady CPU frames keep partial damage and may move scrolled rows.
@@ -377,6 +378,12 @@ final class MetalTextRenderingTests: XCTestCase {
                                             fontName: "Menlo", fontSize: 13)
         }
         XCTAssertNil(try fallback(line(0, "plain ascii")), "ordinary text is eligible")
+        XCTAssertNil(try fallback([wire(0, 0, text: " ")]), "a space is eligible without scalar inspection")
+        XCTAssertNil(try fallback([wire(0, 0, text: "~")]), "the last printable ASCII byte is eligible")
+        XCTAssertEqual(try fallback([wire(0, 0, text: String(UnicodeScalar(0x1f)!))]), .nonASCII)
+        XCTAssertEqual(try fallback([wire(0, 0, text: String(UnicodeScalar(0x7f)!))]), .nonASCII)
+        XCTAssertEqual(try fallback([wire(0, 0, text: "█")]), .boxGlyph)
+        XCTAssertEqual(try fallback([wire(0, 0, text: "⠀")]), .boxGlyph)
         XCTAssertEqual(try fallback(line(0, "漢字")), .nonASCII, "CJK keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "e\u{0301}")]), .nonASCII, "combining text keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "👨‍👩‍👧")]), .nonASCII, "emoji keeps the software path")
@@ -401,6 +408,21 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: size,
                                       scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                       appearance: .standard), "a CJK frame must not be silently drawn as blanks")
+    }
+
+    func testCachedDescentMatchesFreshGeometry() throws {
+        for fontName in ["Menlo", "Courier New"] {
+            for fontSize in [CGFloat(13), 17.25] {
+                let descent = CTFontGetDescent(CTFontCreateWithName(fontName as CFString, fontSize, nil))
+                for scale in [CGFloat(1), 2, 3] {
+                    let fresh = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
+                                                         fontSize: fontSize, cols: cols, rows: rows)
+                    let cached = TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
+                                                          fontSize: fontSize, cols: cols, rows: rows, descent: descent)
+                    XCTAssertEqual(cached, fresh, "\(fontName) \(fontSize) @\(scale)x")
+                }
+            }
+        }
     }
 
     @MainActor func testScrollTranslatesRowsAndMatchesFullEncoding() throws {

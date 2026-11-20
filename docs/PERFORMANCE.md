@@ -2228,3 +2228,27 @@ dimensions, per-launch medians and all sample durations.
 [Five-app PTY measurements](../benchmarks/results/macos-pty-throughput-v1.4.1-2026-11-19.json)
 · [Earlier AkiTTY 1.4.1 and cmux comparison](../benchmarks/results/cmux-pty-throughput-v1.4.1-2026-11-19.json)
 · [Earlier AkiTTY 1.4.0 and cmux comparison](../benchmarks/results/cmux-pty-throughput-2026-11-19.json)
+
+
+## Deferred ASCII certificates and atlas scheduling
+
+A November 20 hot-path review with Muse and AGY found independent costs in deferred VT text and native atlas scheduling. Grok was also invoked for the host review, but its turn-limited and timed-out runs produced no findings and are not treated as evidence.
+
+- Synchronized text entries now retain the parser's ASCII certificate. Adjacent entries merge their certificates with AND, so a mixed run remains conservative. ASCII charging uses the byte length, while other text keeps the exact character count. Replay no longer repeats the ASCII-prefix scan or counts characters when the parser already established the certificate. Differential queue, timeout, overflow and scalar-path tests are unchanged; a focused regression checks mixed-run merging and charging.
+- `TerminalView` no longer scans every retained cell and creates a CoreText font on the main thread for each redraw. It performs only the constant-time image/IME gate; `TextComposer` checks content and geometry on the raster queue and reuses its cached descent while the font is unchanged. The fallback checks printable ASCII before Unicode scalar inspection. A refused frame still uses the original CPU reuse plan, including a full repaint after an atlas frame.
+- The ASCII-only composer iterates its cells directly instead of allocating an identity emoji-cluster merge. Scroll translation releases each source row before editing it, avoiding a copy-on-write allocation for every retained instance row. Existing CPU/GPU pixel comparisons cover both paths.
+- A cursor that remains hidden no longer dirties its row. Previously, an update at the bottom with a hidden cursor at the top could expand the contiguous Metal upload span to the whole bitmap. A regression now requires damage only around the changed bottom row.
+
+The opt-in `HotpathProbe` compares a 200x50 ASCII grid at 2x scale with a warm atlas. In the matched local run, full composition fell from 1.71 ms to 0.94 ms and one damaged row from 0.15 ms to 0.03 ms; a candidate repeat measured 0.95 ms and 0.04 ms. These are component timings, not frame-latency measurements.
+
+The native pipeline comparison used the frozen `a60050c` baseline and the candidate, three saved-probe runs per version, and 60 inputs per scene/run. It covered single typing, typing with three ASCII streams, and ASCII bursts. CPU figures below are medians of the three process user-plus-system percentages; GPU p95 pools all 180 samples. Run-to-run CPU movement was material, so these figures do not support a broad full-app speedup claim.
+
+| Scene | Baseline CPU | Candidate CPU | Baseline GPU p95 | Candidate GPU p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Single typing | 10.77% | 11.13% | 13.34 ms | 13.80 ms |
+| ASCII streams + typing | 22.04% | 21.24% | 10.90 ms | 10.96 ms |
+| ASCII bursts + typing | 24.72% | 24.42% | 10.72 ms | 10.77 ms |
+
+The single-pane control moved 3.3% in the opposite direction, ASCII-stream CPU fell 3.6%, and bursts were effectively flat. The native results therefore support the targeted component improvement, not a general CPU or presentation-latency claim. Hidden-cursor damage reduction is separately covered by its deterministic regression.
+
+The canonical `scripts/verify.sh` gate passed, including 462 Swift tests with five opt-in skips and 715 web tests. Chromium and WebKit passed; the existing local Firefox profile-folder startup failure triggered its configured skip. Installer, release-tooling, provenance and public-file checks passed.

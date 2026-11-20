@@ -27,10 +27,10 @@ const ASCII_HANDOFF: usize = 16;
 const SYNC_SPARE_PARAMS: usize = 256;
 
 /// One synchronized-output queue entry. Printable text stays a run (a range of the
-/// queue's text) so it replays through row writes when the update ends.
+/// queue's text plus its ASCII certificate) so it replays through row writes when the update ends.
 #[derive(Debug)]
 enum Deferred {
-    Text(std::ops::Range<usize>),
+    Text(std::ops::Range<usize>, bool),
     Csi(Csi),
     /// A C0 control, the deferred `Action::Control`.
     Control(u8),
@@ -562,7 +562,7 @@ impl Terminal {
         let mut text = std::mem::take(&mut self.sync.text);
         for entry in entries.drain(..) {
             match entry {
-                Deferred::Text(range) => self.print_text(&text[range], false, emit),
+                Deferred::Text(range, ascii) => self.print_text(&text[range], ascii, emit),
                 Deferred::Csi(csi) => {
                     self.grapheme_target = None;
                     self.csi(&csi, emit);
@@ -591,16 +591,20 @@ impl Terminal {
     /// not observable: the run's characters print in order either way. Kept out of
     /// line so the unsynchronized run writer in `print_text` stays small.
     #[inline(never)]
-    fn defer_text(&mut self, text: &str, emit: &mut impl FnMut(Event)) {
+    fn defer_text(&mut self, text: &str, ascii: bool, emit: &mut impl FnMut(Event)) {
+        debug_assert!(!ascii || text.is_ascii());
         let queue = &mut *self.sync;
         let start = queue.text.len();
         queue.text.push_str(text);
         let end = queue.text.len();
         match queue.entries.last_mut() {
-            Some(Deferred::Text(range)) if range.end == start => range.end = end,
-            _ => queue.entries.push(Deferred::Text(start..end)),
+            Some(Deferred::Text(range, previous)) if range.end == start => {
+                range.end = end;
+                *previous &= ascii;
+            }
+            _ => queue.entries.push(Deferred::Text(start..end, ascii)),
         }
-        let chars = text.chars().count();
+        let chars = if ascii { text.len() } else { text.chars().count() };
         queue.bytes += chars * std::mem::size_of::<Action>();
         if queue.bytes >= MAX_SYNC_MEMORY {
             self.flush_sync(emit);
@@ -794,7 +798,7 @@ impl Terminal {
             return;
         }
         if self.sync_deadline.is_some() {
-            self.defer_text(text, emit);
+            self.defer_text(text, ascii, emit);
             return;
         }
         // A printable run cannot change the style or the hyperlink — it only ever
@@ -2863,7 +2867,7 @@ mod tests {
         let mut actions = Vec::new();
         for entry in &term.sync.entries {
             match entry {
-                Deferred::Text(range) => actions.extend(term.sync.text[range.clone()].chars().map(Action::Print)),
+                Deferred::Text(range, _) => actions.extend(term.sync.text[range.clone()].chars().map(Action::Print)),
                 Deferred::Csi(csi) => actions.push(Action::Csi(csi.clone())),
                 Deferred::Control(byte) => actions.push(Action::Control(*byte)),
                 Deferred::Action(action) => actions.push(action.clone()),
@@ -3490,6 +3494,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn synchronized_text_runs_retain_ascii_certificates() {
+        let mut term = Terminal::new(40, 2, 0).unwrap();
+        feed(&mut term, b"\x1b[?2026h");
+        feed(&mut term, b"plain");
+        feed(&mut term, "中".as_bytes());
+        feed(&mut term, b"tail");
+        assert!(matches!(&term.sync.entries[..], [Deferred::Text(range, false)] if range == &(0..12)));
+        assert_eq!(term.sync.bytes, 10 * std::mem::size_of::<Action>(), "the mixed run charges characters, not bytes");
+
+        feed(&mut term, b"\x1b[31m");
+        feed(&mut term, b"again");
+        assert!(matches!(&term.sync.entries[..], [Deferred::Text(_, false), Deferred::Csi(_), Deferred::Text(range, true)] if range == &(12..17)));
+        assert_eq!(term.sync.text, "plain中tailagain");
+        feed(&mut term, b"\x1b[?2026l");
+        assert!(term.sync.entries.is_empty());
+        assert_eq!(term.screen().rows[0].text().trim_end(), "plain中tailagain");
     }
 
     #[test]

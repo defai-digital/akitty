@@ -40,9 +40,17 @@ final class HotpathProbe: XCTestCase {
         // The idle case: nothing changed, so every idle poll gets the short "unchanged" reply.
         let idle = try XCTUnwrap(try session.snapshot())
         try time("idle poll: snapshot(since:) unchanged", 200) { XCTAssertNil(try session.snapshot(since: idle.revision, base: idle)) }
-        // Persistent rasterizer: a full frame, then a typing frame that repaints one row.
+        // Persistent rasterizer and atlas composer: a full frame, then a typing frame that repaints one row.
         let stateful = GridRasterizer()
         var typed = try XCTUnwrap(try session.snapshot())
+        let composer = TextComposer()
+        _ = try XCTUnwrap(composer.compose(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "", appearance: .standard))
+        try time("TextComposer.compose full (warm atlas)", 50) {
+            _ = try XCTUnwrap(composer.compose(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "", appearance: .standard))
+        }
+        try time("TextComposer.compose one damaged row (warm atlas)", 100) {
+            _ = try XCTUnwrap(composer.compose(snapshot: typed, damage: [0], size: size, scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "", appearance: .standard))
+        }
         _ = try stateful.render(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
         try time("GridRasterizer.render full (warm glyph cache)", 20) {
             _ = try stateful.render(snapshot: typed, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")

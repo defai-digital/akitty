@@ -150,6 +150,25 @@ final class RasterizerTests: XCTestCase {
         XCTAssertNotEqual(resized.context.width, second.context.width)
     }
 
+    func testHiddenCursorDoesNotExpandDamageBeyondTheChangedRow() throws {
+        let session = try TerminalSession(cols: cols, rows: rows, headless: true)
+        defer { try? session.close() }
+        _ = try session.call("feed", ["text": "\u{1b}[?25l"])
+        var held = try XCTUnwrap(try session.snapshot())
+        let rasterizer = GridRasterizer()
+        _ = try rasterizer.render(snapshot: held, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+
+        _ = try session.call("feed", ["text": "\u{1b}[\(rows);1Hlast"])
+        held = try XCTUnwrap(try session.snapshot(since: held.revision, base: held))
+        XCTAssertEqual(held.dirty, [rows - 1])
+        XCTAssertFalse(held.cursor.visible)
+        let frame = try rasterizer.render(snapshot: held, damage: Set(held.dirty ?? []), size: size, scale: 2,
+                                          fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        let top = Int((GridRasterizer.margin + CGFloat(rows - 1) * cell.height) * 2)
+        let bottom = Int((GridRasterizer.margin + CGFloat(rows) * cell.height) * 2)
+        XCTAssertEqual(frame.damage, top..<bottom, "a cursor that stayed hidden paints nothing and adds no upload span")
+    }
+
     func testStatelessMakeNeverSharesABitmap() throws {
         let session = try TerminalSession(cols: cols, rows: rows, headless: true)
         defer { try? session.close() }

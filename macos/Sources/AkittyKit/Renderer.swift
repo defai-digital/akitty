@@ -815,7 +815,7 @@ final class GridRasterizer: @unchecked Sendable {
             // The background layer has no cursor; the foreground layer only repaints a cursor it draws.
             if layer != .background {
                 if let last = lastCursorRow { set.insert(last) }
-                if layer == .all || snapshot.cursor.visible { set.insert(cursorRow) }
+                if snapshot.cursor.visible { set.insert(cursorRow) }
             }
             rows = set.filter { (0..<snapshot.rows).contains($0) }
         }

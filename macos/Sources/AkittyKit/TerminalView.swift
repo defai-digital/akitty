@@ -26,7 +26,7 @@ struct RenderReuse: Equatable {
     /// Rows the CPU bitmap path may move, or zero when it has to repaint.
     let cpuScroll: Int
 
-    static func plan(damage: Set<Int>?, scroll: Int, layered: Bool, textEligible: Bool,
+    static func plan(damage: Set<Int>?, scroll: Int, layered: Bool, tryText: Bool,
                      previousLayered: Bool, previousText: Bool) -> RenderReuse {
         // The other path's retained bitmap went stale while this one drew.
         let cpuCurrent = !previousText && layered == previousLayered
@@ -34,7 +34,7 @@ struct RenderReuse: Equatable {
         let cpuDamage = cpuCurrent ? (layered && scroll > 0 ? nil : damage) : nil
         let cpuScroll = cpuCurrent && !layered ? scroll : 0
         // The composer can translate retained rows on an exact pixel scroll and rebuild only damaged rows.
-        let textDamage = textEligible && previousText ? damage : nil
+        let textDamage = tryText && previousText ? damage : nil
         return RenderReuse(cpuDamage: cpuDamage, textDamage: textDamage, cpuScroll: cpuScroll)
     }
 }
@@ -541,15 +541,11 @@ struct RenderReuse: Equatable {
         // its own texture, so an animation frame re-uploads one texture instead of repainting the window. Frames without
         // images (and the software fallback) keep the single bitmap.
         let layered = presenter != nil && !(snapshot.images ?? []).isEmpty
-        // The atlas path covers what the CPU rasterizer would otherwise repaint wholesale: no images, no IME,
-        // plain single-scalar ASCII, integral geometry. Everything else keeps the software reference path.
-        let textGeometry = presenter != nil && !layered
-            && TextEligibility.unsupportedContent(snapshot, composition: marked) == nil
-            ? TextEligibility.geometry(size: size, scale: scale, cell: cells, fontName: fontName, fontSize: fontSize,
-                                       cols: snapshot.cols, rows: snapshot.rows)
-            : nil
+        // The composer checks content and geometry on the raster queue; the main thread only rules out
+        // paths it cannot take. A refusal still falls through to the CPU plan computed here.
+        let tryText = presenter != nil && !layered && marked.isEmpty
         let plan = RenderReuse.plan(damage: pendingDamage, scroll: gridDamage.scroll, layered: layered,
-                                    textEligible: textGeometry != nil, previousLayered: lastLayered,
+                                    tryText: tryText, previousLayered: lastLayered,
                                     previousText: lastTextFramed)
         lastLayered = layered
         let damage = plan.cpuDamage, textDamage = plan.textDamage, scroll = plan.cpuScroll, textScroll = gridDamage.scroll
@@ -559,10 +555,10 @@ struct RenderReuse: Equatable {
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
         pendingDamage = []
         rasterQueue.async { [weak self] in
-            if let textGeometry, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
-                                                               fontName: fontName, fontSize: fontSize, cell: cells,
-                                                               cjkFontName: cjkFontName, appearance: appearance, deferPublication: true,
-                                                               prevalidated: textGeometry, scroll: textScroll) {
+            if tryText, let frame = composer.compose(snapshot: snapshot, damage: textDamage, size: size, scale: scale,
+                                                      fontName: fontName, fontSize: fontSize, cell: cells,
+                                                      cjkFontName: cjkFontName, appearance: appearance, deferPublication: true,
+                                                      scroll: textScroll) {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.rasterInFlight = false

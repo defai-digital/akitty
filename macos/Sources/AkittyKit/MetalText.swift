@@ -70,22 +70,22 @@ enum TextEligibility {
             if cell.wide { return .wideCell }
             if cell.underline || cell.strike == true { return .decoratedCell }
             let text = cell.text
-            if text.isEmpty || text == " " { continue }
+            if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { continue }
+            if text.isEmpty { continue }
             if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { return .boxGlyph }
-            guard text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) else { return .nonASCII }
+            return .nonASCII
         }
         return nil
     }
     /// The grid geometry the GPU path can place exactly: integral margins, cells and bitmap in device pixels,
     /// and a backing scale the mask rasteriser has been validated at. Fractional scales keep the CPU path.
     static func geometry(size: CGSize, scale: CGFloat, cell: CGSize, fontName: String, fontSize: CGFloat,
-                         cols: Int, rows: Int) -> TextGeometry? {
+                         cols: Int, rows: Int, descent cachedDescent: CGFloat? = nil) -> TextGeometry? {
         guard scale.isFinite, scale == scale.rounded(), (1...3).contains(scale), size.width > 0, size.height > 0 else { return nil }
         func integral(_ value: CGFloat) -> Bool { value.isFinite && value == value.rounded() }
         guard integral(GridRasterizer.margin * scale), integral(cell.width * scale), integral(cell.height * scale),
               integral(size.width * scale), integral(size.height * scale) else { return nil }
-        let font = CTFontCreateWithName(fontName as CFString, fontSize, nil)
-        let descent = CTFontGetDescent(font)
+        let descent = cachedDescent ?? CTFontGetDescent(CTFontCreateWithName(fontName as CFString, fontSize, nil))
         guard descent.isFinite, descent >= 0 else { return nil }
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
         let baseline = descent + 2
@@ -270,10 +270,11 @@ final class TextComposer: @unchecked Sendable {
                  cell: CGSize, cjkFontName: String, appearance: RenderAppearance, deferPublication: Bool = false,
                  prevalidated geometry: TextGeometry? = nil, scroll: Int = 0) -> TextFrame? {
         var damage = damage
+        let cachedDescent = layout.flatMap { $0.fontName == fontName && $0.fontSize == fontSize ? $0.descent : nil }
         let geometry = if let geometry { geometry } else {
             TextEligibility.unsupportedContent(snapshot, composition: "") == nil
                 ? TextEligibility.geometry(size: size, scale: scale, cell: cell, fontName: fontName,
-                                           fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows)
+                                           fontSize: fontSize, cols: snapshot.cols, rows: snapshot.rows, descent: cachedDescent)
                 : nil
         }
         guard let geometry else { return nil }
@@ -359,7 +360,9 @@ final class TextComposer: @unchecked Sendable {
                 // Rows about to be re-encoded skip translation: their instances are replaced anyway.
                 var translated = 0
                 for row in 0..<snapshot.rows - scroll where !rebuild.contains(row) {
+                    // Each source is read once; release it before editing so the row buffer moves without a CoW copy.
                     var moved = rows[row + scroll]
+                    rows[row + scroll] = []
                     for index in moved.indices { moved[index].destY -= Float(delta) }
                     rows[row] = moved
                     translated += 1
@@ -419,19 +422,18 @@ final class TextComposer: @unchecked Sendable {
                                           destW: Float(box.width), destH: Float(box.height),
                                           r: color.0, g: color.1, b: color.2))
         }
-        // Glyphs are drawn after every background so a wide-cell spacer can never cover a neighbour.
-        let clusters = GlyphClusters.merge(cells)
-        for item in clusters {
-            let text = item.text
+        // Eligibility already proved one printable ASCII scalar per cell, so cluster merging would be identity work.
+        for cell in cells {
+            let text = cell.text
             if text.isEmpty || text == " " { continue }
-            let style = UInt8((item.cell.bold ? 1 : 0) + (item.cell.italic ? 2 : 0))
-            let fg = item.cell.fg
+            let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))
+            let fg = cell.fg
             guard fg.count == 3, let face = faces[safe: Int(style)],
                   let entry = atlas.entry(style: style, text: text, fg: fg, face: face, geometry: geometry) else { return nil }
             // The rasteriser clips every glyph line to its cell box, so a glyph whose ink overflows (an
             // underscore below the baseline, a wide punctuation mark) must be clipped identically here.
-            let origin = geometry.deviceOrigin(item.cell)
-            let box = geometry.deviceBox(geometry.box(item.cell))
+            let origin = geometry.deviceOrigin(cell)
+            let box = geometry.deviceBox(geometry.box(cell))
             let quadX = Float(origin.x) + Float(entry.dx), quadY = Float(origin.y) + Float(entry.dy)
             let quadW = Float(entry.width), quadH = Float(entry.height)
             let left = max(quadX, Float(box.minX)), top = max(quadY, Float(box.minY))
