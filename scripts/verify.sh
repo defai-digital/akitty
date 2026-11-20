@@ -32,6 +32,8 @@ build/abi-smoke
 clang -Wall -Wextra -Werror "-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" -I include scripts/sdk-abi-smoke.c -L target/debug -lakitty_core -framework Security -framework Foundation -o build/sdk-abi-smoke
 AKITTY_SDK_ABI_SMOKE="$PWD/build/sdk-abi-smoke" node --test packages/akitty-sdk/test/native.test.ts
 swift test --package-path macos
+# An approval must leave enough executor capacity for later MCP calls and cancellation.
+LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 swift test --package-path macos --filter TerminalToolsTests
 bash scripts/test-native-trace.sh
 python3 scripts/test_mcp.py --cli "$(swift build --package-path macos --show-bin-path)/akitty-agent"
 python3 scripts/test_shell_integration.py

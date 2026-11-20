@@ -168,9 +168,12 @@ public final class LocalSocketRequest: @unchecked Sendable {
     public func send(_ data: Data, path: String = LocalSocket.defaultPath) async throws -> Data {
         try begin()
         return try await withTaskCancellationHandler {
-            try await Task.detached {
-                try LocalSocket.request(data, path: path, cancellation: self)
-            }.value
+            try await withCheckedThrowingContinuation { continuation in
+                // Replies may wait for human approval. Keep blocking I/O off Swift's cooperative executor.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(with: Result { try LocalSocket.request(data, path: path, cancellation: self) })
+                }
+            }
         } onCancel: { self.cancel() }
     }
 }
