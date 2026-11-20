@@ -78,16 +78,9 @@ enum TextEligibility {
     /// Content the atlas cannot draw identically. Kept separate from geometry so the routing decision is a
     /// pure snapshot scan that costs one pass over the cells the frame already carries.
     static func unsupportedContent(_ snapshot: Snapshot, composition: String) -> TextFallback? {
-        if !composition.isEmpty { return .composition }
-        if !(snapshot.images ?? []).isEmpty { return .images }
+        if let reason = unsupportedFrame(snapshot, composition: composition) { return reason }
         for cell in snapshot.cells {
-            if cell.wide { return .wideCell }
-            if cell.underline || cell.strike == true { return .decoratedCell }
-            let text = cell.text
-            if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { continue }
-            if text.isEmpty { continue }
-            if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { continue }
-            return .nonASCII
+            if let reason = unsupportedCell(cell) { return reason }
         }
         return nil
     }
@@ -343,28 +336,24 @@ final class TextComposer: @unchecked Sendable {
                             cjkFontName: cjkFontName, fontSize: fontSize, cell: cell, cols: snapshot.cols,
                             rows: snapshot.rows, descent: geometry.descent)
         let signature = Epoch(layout: wanted, appearance: appearance)
-        if isSuspended {
-            // A refused layout must not reset the old layout's rebuild budget before content validation.
-            eligibleContentRows = nil
-            guard TextEligibility.unsupportedContent(snapshot, composition: "") == nil else { return nil }
-        }
-        if epoch != signature { epoch = signature; rebuilds = 0; isSuspended = false; damage = nil }
-        if isSuspended { eligibleContentRows = nil; return nil }
+        let changesEpoch = epoch != signature
+        let changesLayout = layout != wanted || base == nil || rows.count != snapshot.rows
+        if isSuspended && !changesEpoch { eligibleContentRows = nil; return nil }
+        if changesEpoch || changesLayout || recoveryPending { damage = nil }
+        // A CPU-only frame must leave the last atlas and its rebuild budget intact.
+        guard contentEligible(snapshot: snapshot, damage: damage, scroll: scroll) else { return nil }
+        if changesEpoch { epoch = signature; rebuilds = 0; isSuspended = false }
         var resetAtlas = resetPending
-        if recoveryPending { damage = nil }
-        if layout != wanted || base == nil || rows.count != snapshot.rows {
+        if changesLayout {
             // A new font, size, scale or grid invalidates every UV and every row.
             layout = wanted
             rebuildFonts(fontName: fontName, fontSize: fontSize, cjkFontName: cjkFontName)
             atlas.reset()
             rows = Array(repeating: [], count: snapshot.rows)
             lastCursorRow = nil
-            eligibleContentRows = nil
             resetAtlas = true
             resetPending = true
-            damage = nil
         }
-        guard contentEligible(snapshot: snapshot, damage: damage, scroll: scroll) else { return nil }
         recoveryPending = true
         var result = build(snapshot: snapshot, damage: damage, geometry: geometry, appearance: appearance,
                            resetAtlas: resetAtlas, scroll: scroll)

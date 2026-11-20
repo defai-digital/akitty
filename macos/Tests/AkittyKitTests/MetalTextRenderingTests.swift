@@ -773,6 +773,20 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(presenter.textRowUploads - before, 1, "one uploaded instance row")
     }
 
+    func testUnsupportedFrameAtDifferentLayoutPreservesAtlas() throws {
+        let composer = TextComposer()
+        let initial = try snapshot(cells: line(0, "layout"))
+        _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        let resets = composer.atlasResets
+        let unsupported = try snapshot(cells: line(0, "漢字"))
+        XCTAssertNil(composer.compose(snapshot: unsupported, damage: [0], size: size, scale: 2,
+                                      fontName: "Courier New", fontSize: 13, cell: cell,
+                                      cjkFontName: "", appearance: .standard))
+        let frame = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
+        XCTAssertFalse(frame.resetAtlas)
+        XCTAssertEqual(composer.atlasResets, resets)
+    }
+
     /// A new font, size or grid invalidates every UV, so the atlas is recreated and every row re-encoded.
     @MainActor func testLayoutChangeRecreatesTheAtlasAndReEncodesEveryRow() throws {
         let presenter: MetalPresenter
