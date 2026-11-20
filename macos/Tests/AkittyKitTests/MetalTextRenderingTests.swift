@@ -852,7 +852,7 @@ final class MetalTextRenderingTests: XCTestCase {
         let initial = try snapshot(cells: line(0, "layout"))
         _ = try XCTUnwrap(compose(initial, composer: composer, damage: nil))
         let resets = composer.atlasResets
-        let unsupported = try snapshot(cells: line(0, "漢字"))
+        let unsupported = try snapshot(cells: [wire(0, 0, text: "漢", Style(wide: true))])
         XCTAssertNil(composer.compose(snapshot: unsupported, damage: [0], size: size, scale: 2,
                                       fontName: "Courier New", fontSize: 13, cell: cell,
                                       cjkFontName: "", appearance: .standard))

@@ -252,3 +252,28 @@ fn an_exited_pane_still_clears_a_timed_status_on_time() {
     let reply = request(&serde_json::to_vec(&json!({"op":"input","id":session.0,"text":"x"})).unwrap());
     assert_eq!(reply["ok"], false, "{reply}");
 }
+
+#[test]
+fn find_only_wakes_the_host_when_reveal_changes_the_viewport_or_mark() {
+    let _serial = serial();
+    let session = Session::new();
+    let fd = session.command("notify_fd", json!({}))["fd"].as_i64().expect("notify fd") as i32;
+    let text = "FIND_NOTIFICATION_MARKER";
+    session.command("input", json!({"text":"printf 'FIND_%s_MARKER\\n' NOTIFICATION\r"}));
+    wait_for(|| session.command("snapshot", json!({"compact":true}))["lines"].to_string().contains(text));
+    drain_until_quiet(fd, Duration::from_millis(150));
+    let listed = session.command("find_matches", json!({"text":text}));
+    let hit = &listed["matches"][0];
+    assert!(hit["row_id"].is_u64(), "{listed}");
+    assert!(!wait_readable(fd, Duration::from_millis(150)), "listing matches woke the host");
+    let reveal = json!({
+        "text":text, "row_id":hit["row_id"], "generation":hit["generation"],
+        "col":hit["col"], "end_col":hit["end_col"]
+    });
+    let mut stale = reveal.clone();
+    stale["generation"] = (hit["generation"].as_u64().unwrap() + 1).into();
+    assert_eq!(session.command("find_reveal", stale)["expired"], true);
+    assert!(!wait_readable(fd, Duration::from_millis(150)), "an expired match woke the host");
+    assert_eq!(session.command("find_reveal", reveal)["found"], true);
+    assert!(wait_readable(fd, Duration::from_millis(500)), "the new search mark did not wake the host");
+}

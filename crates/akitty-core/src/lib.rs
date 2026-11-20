@@ -336,10 +336,10 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                 .ok_or("unknown or closed session")?;
             drop(registry);
             // Reads must not wake the host: a snapshot that signalled would make its poller poll again forever.
-            // Input is excluded too because it wakes conditionally from inside its own arm.
+            // Input and find reveal wake only when their own arms change host-visible state.
             let wakes_host = !matches!(request, Request::ShellState { .. } | Request::RecentText { .. } | Request::CommandHistory { .. }
                 | Request::CommandOutput { .. } | Request::ControlAudit { .. } | Request::NotifyFd { .. } | Request::FindMatches { .. }
-                | Request::Input { .. } | Request::InputBytes { .. });
+                | Request::Input { .. } | Request::InputBytes { .. } | Request::FindReveal { .. });
             let result = match request {
                 Request::ControlAcquire { actor, .. } => session.control_acquire(actor),
                 Request::ControlRelease { lease, .. } => session.control_release(Some(lease)),
@@ -408,7 +408,9 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
                     session.find_matches(&text, limit.unwrap_or(32), before, max_lines.unwrap_or(256))
                 }
                 Request::FindReveal { text, row_id, generation, col, end_col, .. } => {
-                    session.find_reveal(&text, row_id, generation, col, end_col)
+                    let revealed = session.find_reveal(&text, row_id, generation, col, end_col)?;
+                    if revealed["found"] == true { session.notify_host(); }
+                    Ok(revealed)
                 }
                 Request::Chrome { clear, status, mark, progress, sprite, .. } => {
                     session.set_chrome(chrome::ChromeInput { clear, status, mark, progress, sprite: sprite.map(|value| *value) })?;
