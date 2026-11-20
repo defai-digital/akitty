@@ -73,7 +73,12 @@ final class AkittyTests: XCTestCase {
         let session = try TerminalSession(shell: "/bin/sh")
         let fd = try XCTUnwrap(session.duplicateNotifyFD())
         defer { Darwin.close(fd) }
-        try session.close()
+        // Close is bounded: on a loaded runner the child can be handed to the background reaper instead
+        // of being reaped inline. The Rust lifecycle tests accept that same documented outcome, and this
+        // test's subject is the descriptor, not the reap — `prepareClose` marks the session closed before
+        // the core call, so every assertion below holds either way.
+        do { try session.close() }
+        catch AkittyError.core(let message) where message.hasPrefix("terminal child did not exit within") {}
         let flags = fcntl(fd, F_GETFD)
         XCTAssertGreaterThanOrEqual(flags, 0)
         XCTAssertEqual(flags & FD_CLOEXEC, FD_CLOEXEC)

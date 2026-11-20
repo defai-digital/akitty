@@ -88,6 +88,43 @@ equivalence and protocol behavior, and pass `scripts/verify.sh` plus app smoke
 checks. Performance claims need measurements; stability claims need stress-test
 evidence. The owned engine provides independent maintenance; integration improvements still require their own tests.
 
+### Known wide-cell and grapheme defects (reproduced, not yet fixed)
+
+Found by an external review pass and reproduced against the shared engine. Two related defects were
+fixed and are covered by tests: `wrap_padding` was asserted over a last column that held visible
+text, so selection trimmed a character the user could see — either because a wide glyph wrapped over
+a column the cursor was parked on, or because text was written or shifted into the padding column
+afterwards. `Row::trailing_padding()` is now the single answer to "is the last column blank padding",
+and selection, reflow and the WASM export that browser copy reads all ask it instead of reading the
+raw flag, so the three cannot disagree about a row. A wide glyph also only marks an unwritten last
+column as padding in the first place. The remaining items each need their own fix and regression test:
+
+- **A one-column resize permanently narrows a wide glyph.** At 4x4 print `A界B`, resize to 1x4 and
+  back to 4x4. Reflow stores the clamped width in the cell and reuses it on later resizes, so `界`
+  stays one column wide and `B` lands in column 3 instead of column 4.
+- **A grapheme that widens in insert mode deletes existing text.** At 8 columns feed `AB`, home,
+  `ESC[4h`, then `❤` followed by U+FE0F. The heart starts one column wide and shifts `AB` right; when
+  the selector grows it to two columns it overwrites `A`, giving `❤️B` where insert mode should give
+  `❤️AB`. The same growth path deletes a whole existing wide glyph.
+- **Runtime locale changes can desync the two text paths.** `GridRasterizer.Layout` includes the
+  appearance, but neither layout carries `Locale.preferredLanguages` or the resolved CJK font
+  availability. If the preferred languages change while the app runs, an appearance change — or an
+  image appearing, which builds fresh layer passes — rebuilds the rasterizer's CJK cascade while the
+  composer keeps its old masks, so one codepoint can switch between regional Han shapes between
+  frames. Cosmetic, and not confirmed to be reachable on macOS 27. The cheap correct fix is to read
+  the languages once per frame on the main thread and put them in *both* layouts; adding them to only
+  one just reverses which side goes stale.
+
+An external review also proposed relaxing the rasterizer's conservative scroll rule, which repaints
+every row containing non-ASCII text instead of reusing the retained bitmap. Removing the rule fails
+pixel equivalence at 2x and 3x, so italic and stroked decorations genuinely do round differently per
+row. A narrowed variant that keeps those dirty did pass an extended font, size and scale matrix, but
+it was not adopted: since wide CJK moved to the Metal atlas, only mixed-emoji, decorated and
+post-suspension frames still reach this path, and bitmap scroll still pays a full-window move and
+texture upload per frame. `GridRasterizer` is the pixel-exact reference for the whole renderer test
+stack, so it is not worth trading that for a shrinking fallback. An earlier, more ambitious version of
+the same idea was measured and rejected; see "Rejected Unicode scroll experiment" above.
+
 ## 2. Shell integration (implemented in 1.1.0; qualification continues)
 
 Version 1.1.0 provides local bash/zsh hooks and bounded command history/output; the app enables

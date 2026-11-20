@@ -183,6 +183,9 @@ final class GlyphAtlas: @unchecked Sendable {
     private struct FittedLine { let line: CTLine, ink: CGRect }
     private enum FittedAnalysis { case unsupported, blank, monochrome(FittedLine) }
     private enum Key: Hashable {
+        /// Reached only by printable ASCII, which has no canonical-equivalence collisions. If eligibility
+        /// is ever widened to multi-scalar or non-ASCII text, this must stop keying by `String`: Swift
+        /// would then alias U+212A (Kelvin sign) with "K" and serve the wrong mask.
         case text(style: UInt8, text: String, fg: UInt32)
         /// Keyed by scalar rather than text: Swift compares strings by canonical equivalence, so a CJK
         /// compatibility ideograph (U+FA10) equals its unified form (U+585A) and hashes the same, while

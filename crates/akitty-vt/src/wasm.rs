@@ -535,7 +535,7 @@ pub extern "C" fn akitty_vt_wrap_padding(id: u32, row: i32) -> u32 {
                 .terminal
                 .screen()
                 .line(row)
-                .is_some_and(|line| line.wrapped && line.wrap_padding),
+                .is_some_and(|line| line.trailing_padding()),
         )
     })
 }
