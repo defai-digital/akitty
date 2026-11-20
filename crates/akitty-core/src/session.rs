@@ -614,6 +614,29 @@ impl Session {
         };
         Ok(model.search(text, direction))
     }
+    /// Read-only list. The caller searches one session at a time so this hold does not
+    /// cover every open pane; the worker for this session waits only for its own scan.
+    pub fn find_matches(&self, text: &str, limit: usize, before: Option<(u64, u64)>, max_lines: usize) -> Result<Value, String> {
+        if text.is_empty() || text.len() > 256 {
+            return Err("search must contain 1..256 bytes".into());
+        }
+        if !(1..=32).contains(&limit) {
+            return Err("find match limit must be 1..32".into());
+        }
+        if !(1..=512).contains(&max_lines) {
+            return Err("find scan must cover 1..512 lines".into());
+        }
+        Ok(self.state()?.list_matches(text, limit, before, max_lines))
+    }
+    pub fn find_reveal(&self, text: &str, row_id: u64, generation: u64, col: usize, end_col: usize) -> Result<Value, String> {
+        if text.is_empty() || text.len() > 256 {
+            return Err("search must contain 1..256 bytes".into());
+        }
+        if end_col <= col || col > 512 || end_col > 512 {
+            return Err("find span is outside the row".into());
+        }
+        Ok(self.state()?.reveal(text, row_id, generation, col, end_col))
+    }
     pub fn set_chrome(&self, input: crate::chrome::ChromeInput) -> Result<(), String> {
         self.state()?.set_chrome(input)?;
         // The worker keeps the clock for a timed status, so it must see a new expiry now

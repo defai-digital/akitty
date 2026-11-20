@@ -174,6 +174,17 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         agentOverview?.showWindow(nil); agentOverview?.window?.makeKeyAndOrderFront(nil)
     }
+    private(set) var globalFind: GlobalFindController?
+    func showGlobalFind(anchor: TerminalWindow?) {
+        if globalFind == nil { globalFind = GlobalFindController(app: self) }
+        globalFind?.show(anchor: anchor)
+    }
+    /// Shows a hidden quick terminal, then selects the tab and focuses that pane.
+    func revealTerminal(_ terminal: TerminalView) {
+        guard let window = windows.first(where: { $0.panes.contains { $0.terminal === terminal } }) else { return }
+        try? revealQuickTerminalIfNeeded(window)
+        window.focus(terminal)
+    }
     private var launched = false
     private var openedFolderAtLaunch = false
     private enum TerminationState { case idle, confirming, closing }
@@ -315,6 +326,10 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if command == .newWindow { newWindow(nil); return }
         // The overview is app-wide and opens from any key window, including itself.
         if command == .agentOverview { showAgentOverview(nil); return }
+        if command == .findAll {
+            showGlobalFind(anchor: (keyWindow?.windowController as? TerminalWindow) ?? windows.first { $0.window?.isVisible == true })
+            return
+        }
         guard let window = keyWindow?.windowController as? TerminalWindow else {
             // Utility windows keep native close and editing behavior; terminal panes retain their confirmation path.
             switch command {
@@ -487,6 +502,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         reclaim.target = nil
         edit.addItem(.separator()); add(.find,key: "f",to: edit)
         add(.findNext,key: "g",to: edit); add(.findPrevious,key: "g",modifiers: [.command, .shift],to: edit)
+        add(.findAll, key: "f", modifiers: [.command, .option], to: edit)
         let paletteItem = view.addItem(withTitle: "Command Palette…", action: #selector(palette(_:)), keyEquivalent: "p"); paletteItem.keyEquivalentModifierMask = [.command,.shift]; paletteItem.target = self
         add(.fontIncrease,key: "+",to: view); add(.fontDecrease,key: "-",to: view); add(.fontReset,key: "0",to: view)
         let window = menu("Window"); NSApp.windowsMenu = window

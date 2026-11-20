@@ -219,6 +219,11 @@ The existing panes and PTYs move together. Escape and app deactivation cancel th
 transfers and transfers during dialogs or termination are disabled. Regression tests cover split
 identity, control leases, callbacks, focus, cancellation and a real shell retaining its environment.
 
+Find in All Terminals (⌥⌘F) searches retained output in the current window or every open
+terminal. Results are grouped by window, tab and pane, bounded to 100 hits, and choosing one
+reveals that pane. A closed pane or a row that has left scrollback is reported and does not
+move focus. [Issue 51](https://github.com/defai-digital/akitty/issues/51)
+
 Version 2.0.0 also ships opt-in workspace reopening with fresh shells and
 per-pane conversation resume for Claude Code, Codex and AX Code.
 [Workspace restore and resume](AGENT_NATIVE.md#reopen-windows-and-resume-agent-conversations)
@@ -226,13 +231,12 @@ per-pane conversation resume for Claude Code, Codex and AX Code.
 ### Feature candidates
 
 1. Attention navigation in the existing Agent Overview: unread state, filters and jump to the next waiting pane.
-2. [Global text search across tabs and windows](https://github.com/defai-digital/akitty/issues/51), with bounded results and direct pane navigation.
-3. Command navigation and output inspection using the existing bounded shell observations. Agent output-read
+2. Command navigation and output inspection using the existing bounded shell observations. Agent output-read
    access would require its own explicit permission and retention contract.
-4. Further workspace recovery for corrupt layout data. Live-process continuation
+3. Further workspace recovery for corrupt layout data. Live-process continuation
    requires a separate persistent PTY design.
-5. Project/worktree launch presets that open a task's tabs, folder and profile together.
-6. Diff preview and selected review-feedback handoff to an agent.
+4. Project/worktree launch presets that open a task's tabs, folder and profile together.
+5. Diff preview and selected review-feedback handoff to an agent.
 
 ## Outside the current roadmap
 

@@ -300,12 +300,15 @@ pub struct Model {
     pub(crate) scanned_cells: usize,
 }
 
-/// One literal hit. `end_col` is exclusive and stays on `line` (a hit does not cross a row).
+/// One literal hit. `end_col` is exclusive and stays on its row (a hit does not cross a row).
+/// `line` is only a hint. The row id and generation decide which row is still that hit.
 pub struct FindMark {
     pub query: String,
     pub line: i32,
     pub start_col: usize,
     pub end_col: usize,
+    pub row_id: u64,
+    pub generation: u64,
 }
 
 pub enum FindDirection {
@@ -409,26 +412,112 @@ impl Model {
             }
             return json!({"found": false});
         };
-        self.find = Some(FindMark {
-            query: text.to_string(),
-            line: hit.0,
-            start_col: hit.1,
-            end_col: hit.2,
-        });
+        self.find = Some(self.find_mark(text, hit.0, hit.1, hit.2));
         self.term.screen_mut().scroll_to(hit.0);
         self.revision = self.revision.saturating_add(1);
         let row = hit.0 + self.term.screen().offset as i32;
         json!({"found": true, "line": hit.0, "row": row, "col": hit.1, "end_col": hit.2, "wrapped": wrapped})
     }
-    /// Validate the stored hit against the current content before reusing its coordinates.
+    /// Newest hits in one bounded slice of the active screen. `before` is the row already
+    /// scanned, identified by id and generation, so a scroll between calls cannot repeat or
+    /// skip it. Absent starts at the bottom row. At most `max_lines` rows are read, so the
+    /// model lock stays short while a host walks the rest. The next cursor is that row, or
+    /// null when this slice reached the top or saw a hit it did not return. `lost` means the
+    /// cursor row is gone. `capped` means another hit was seen and not returned. No find
+    /// mark, viewport or revision change.
+    pub fn list_matches(&self, text: &str, limit: usize, before: Option<(u64, u64)>, max_lines: usize) -> Value {
+        let top = -(self.term.screen().history.len() as i32);
+        let bottom = self.term.rows() as i32 - 1;
+        let mut cursor = match before {
+            None => bottom.saturating_add(1),
+            Some((row_id, generation)) => {
+                let Some(line) = self.row_line(row_id, generation) else {
+                    return json!({"matches": [], "capped": false, "next_row_id": null, "next_generation": null, "lost": true});
+                };
+                line
+            }
+        };
+        let mut matches = Vec::new();
+        let mut capped = false;
+        let mut scanned = 0usize;
+        while scanned < max_lines && cursor > top {
+            let line = cursor - 1;
+            scanned += 1;
+            cursor = line;
+            let Some(content) = line_text(&self.term, line) else { continue };
+            for span in match_spans(&content, text).into_iter().rev() {
+                if matches.len() == limit {
+                    capped = true;
+                    break;
+                }
+                matches.push(json!({
+                    "line": line,
+                    "col": span.col,
+                    "end_col": span.end_col,
+                    "row_id": content.row_id,
+                    "generation": content.generation,
+                    "snippet": display_snippet(&content.text, span.start_byte, span.end_byte),
+                }));
+            }
+            if capped { break; }
+        }
+        let next = if capped || cursor <= top { None } else { self.term.screen().line(cursor).map(|row| (row.id, row.generation)) };
+        json!({
+            "matches": matches,
+            "capped": capped,
+            "next_row_id": next.map(|row| row.0),
+            "next_generation": next.map(|row| row.1),
+            "lost": false,
+        })
+    }
+    /// Highlight `text` on the row that still has this id, generation and span. Scroll, reset
+    /// and resize keep or drop that identity; a miss does not move the viewport or the find mark.
+    pub fn reveal(&mut self, text: &str, row_id: u64, generation: u64, start_col: usize, end_col: usize) -> Value {
+        let top = -(self.term.screen().history.len() as i32);
+        let bottom = self.term.rows() as i32 - 1;
+        let line = (top..=bottom).find(|&line| {
+            self.term.screen().line(line).is_some_and(|row| row.id == row_id && row.generation == generation)
+        });
+        let Some(line) = line else { return json!({"found": false, "expired": true}) };
+        let still = line_matches(&self.term, line, text).into_iter().any(|(start, end)| start == start_col && end == end_col);
+        if !still { return json!({"found": false, "expired": true}) };
+        self.find = Some(self.find_mark(text, line, start_col, end_col));
+        self.term.screen_mut().scroll_to(line);
+        self.revision = self.revision.saturating_add(1);
+        let row = line + self.term.screen().offset as i32;
+        json!({"found": true, "expired": false, "line": line, "row": row, "col": start_col, "end_col": end_col})
+    }
+    fn find_mark(&self, query: &str, line: i32, start_col: usize, end_col: usize) -> FindMark {
+        let row = self.term.screen().line(line);
+        FindMark {
+            query: query.to_string(),
+            line,
+            start_col,
+            end_col,
+            row_id: row.map_or(0, |row| row.id),
+            generation: row.map_or(0, |row| row.generation),
+        }
+    }
+    fn row_line(&self, row_id: u64, generation: u64) -> Option<i32> {
+        let top = -(self.term.screen().history.len() as i32);
+        let bottom = self.term.rows() as i32 - 1;
+        (top..=bottom).find(|&line| {
+            self.term.screen().line(line).is_some_and(|row| row.id == row_id && row.generation == generation)
+        })
+    }
+    /// Validate the stored hit against the row that still has its id and generation.
+    /// A scrolled row keeps that identity, so the highlight does not move onto whatever
+    /// text now occupies the old line number.
     fn current_mark(&self) -> Option<(i32, usize, usize)> {
-        let (query, line, start_col, end_col) = {
+        let (query, hint, start_col, end_col, row_id, generation) = {
             let mark = self.find.as_ref()?;
-            (mark.query.clone(), mark.line, mark.start_col, mark.end_col)
+            (mark.query.clone(), mark.line, mark.start_col, mark.end_col, mark.row_id, mark.generation)
         };
         let top = -(self.term.screen().history.len() as i32);
         let bottom = self.term.rows() as i32 - 1;
-        if line < top || line > bottom { return None; }
+        let hinted = (top..=bottom).contains(&hint)
+            && self.term.screen().line(hint).is_some_and(|row| row.id == row_id && row.generation == generation);
+        let line = if hinted { Some(hint) } else { self.row_line(row_id, generation) }?;
         line_matches(&self.term, line, &query)
             .into_iter()
             .find(|(start, end)| *start == start_col && *end == end_col)
@@ -1198,15 +1287,25 @@ fn search_marks(ranges: &[Vec<(usize, usize)>], active: Option<(i32, usize, usiz
     let active = active.is_some_and(|(mark_line, start, end)| line == mark_line && col >= start && col < end);
     (searched, active)
 }
-/// Literal hits on one grid line: `(start_col, end_col)` with `end_col` exclusive.
-/// The text is the cell characters a person sees (primary plus zero-width), one row at a time.
-fn line_matches(term: &Terminal, line: i32, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() { return Vec::new(); }
-    let Some(row) = term.screen().line(line) else { return Vec::new(); };
+struct LineText {
+    row_id: u64,
+    generation: u64,
+    text: String,
+    /// Byte offset of each glyph, its column, and how many columns it occupies.
+    glyphs: Vec<(usize, usize, usize)>,
+}
+struct MatchSpan {
+    start_byte: usize,
+    end_byte: usize,
+    col: usize,
+    end_col: usize,
+}
+/// The cell characters a person sees on one grid line (primary plus zero-width).
+fn line_text(term: &Terminal, line: i32) -> Option<LineText> {
+    let row = term.screen().line(line)?;
     let limit = row.used().min(term.cols());
     let mut text = String::new();
-    // Byte offset of each glyph, its column, and how many columns it occupies.
-    let mut glyphs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut glyphs = Vec::new();
     let mut col = 0usize;
     while col < limit {
         let cell = &row.cells[col];
@@ -1221,21 +1320,60 @@ fn line_matches(term: &Terminal, line: i32, query: &str) -> Vec<(usize, usize)> 
         text.extend(cell.combining());
         col += 1;
     }
+    Some(LineText { row_id: row.id, generation: row.generation, text, glyphs })
+}
+fn match_spans(line: &LineText, query: &str) -> Vec<MatchSpan> {
+    if query.is_empty() { return Vec::new(); }
     let mut found = Vec::new();
     let mut from = 0usize;
-    while from < text.len() {
-        let Some(pos) = text[from..].find(query) else { break };
+    while from < line.text.len() {
+        let Some(pos) = line.text[from..].find(query) else { break };
         let start = from + pos;
         let end = start + query.len();
-        let start_glyph = glyphs.iter().rev().find(|glyph| glyph.0 <= start);
-        let end_glyph = glyphs.iter().rev().find(|glyph| glyph.0 < end);
+        let start_glyph = line.glyphs.iter().rev().find(|glyph| glyph.0 <= start);
+        let end_glyph = line.glyphs.iter().rev().find(|glyph| glyph.0 < end);
         if let (Some((_, col, _)), Some((_, end_col, width))) = (start_glyph, end_glyph) {
-            found.push((*col, end_col + width));
+            found.push(MatchSpan { start_byte: start, end_byte: end, col: *col, end_col: end_col + width });
         }
         if end <= from { break; }
         from = end;
     }
     found
+}
+/// At most 160 characters, keeping the hit on screen. An ellipsis replaces a cut end.
+fn display_snippet(text: &str, start: usize, end: usize) -> String {
+    let end = end.min(text.len());
+    let start = start.min(end);
+    let visible_len = text.trim_end().len().max(end);
+    let text = &text[..visible_len];
+    let chars: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    const MAX: usize = 160;
+    if chars.len() <= MAX { return text.to_string(); }
+    let at = chars.iter().position(|index| *index >= start).unwrap_or(0);
+    let mut lo = at.saturating_sub(40);
+    let mut hi = (lo + MAX).min(chars.len());
+    if hi - lo < MAX { lo = hi.saturating_sub(MAX); }
+    let lead = lo > 0;
+    let trail = hi < chars.len();
+    let budget = MAX - usize::from(lead) - usize::from(trail);
+    if hi - lo > budget {
+        if at - lo > budget { lo = at.saturating_sub(budget / 2); }
+        hi = (lo + budget).min(chars.len());
+        lo = hi.saturating_sub(budget);
+    }
+    let byte_lo = chars[lo];
+    let byte_hi = if hi >= chars.len() { text.len() } else { chars[hi] };
+    let mut snippet = String::new();
+    if lo > 0 { snippet.push('…'); }
+    snippet.push_str(&text[byte_lo..byte_hi]);
+    if hi < chars.len() { snippet.push('…'); }
+    snippet
+}
+/// Literal hits on one grid line: `(start_col, end_col)` with `end_col` exclusive.
+fn line_matches(term: &Terminal, line: i32, query: &str) -> Vec<(usize, usize)> {
+    line_text(term, line)
+        .map(|line| match_spans(&line, query).into_iter().map(|span| (span.col, span.end_col)).collect())
+        .unwrap_or_default()
 }
 fn first_match(term: &Terminal, query: &str, top: i32, bottom: i32) -> Option<(i32, usize, usize)> {
     if top > bottom { return None; }
@@ -2521,11 +2659,17 @@ mod tests {
         model.feed(b"alpha\r\nbeta\r\nalpha again");
         let first = model.snapshot(None);
         let mut since = first["revision"].as_u64();
+        let (row_id, generation) = {
+            let row = model.term.screen().line(2).unwrap();
+            (row.id, row.generation)
+        };
         model.find = Some(FindMark {
             query: "alpha".into(),
             line: 2,
             start_col: 0,
             end_col: 5,
+            row_id,
+            generation,
         });
         model.revision += 1;
         let marked = model.snapshot(since);

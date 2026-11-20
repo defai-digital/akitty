@@ -17,6 +17,7 @@ export const commands: readonly Command[] = Object.freeze([
   { id: "find", title: "Find in Scrollback", shortcut: "⌘F", keywords: ["search", "history"] },
   { id: "find-next", title: "Find Next", shortcut: "⌘G", keywords: ["search", "next"] },
   { id: "find-previous", title: "Find Previous", shortcut: "⌘⇧G", keywords: ["search", "previous"] },
+  { id: "find-all", title: "Find in All Terminals", shortcut: "⌥⌘F", keywords: ["search", "all", "tabs", "windows"] },
   { id: "font-increase", title: "Increase Font Size", shortcut: "⌘+", keywords: ["zoom", "larger"] },
   { id: "font-decrease", title: "Decrease Font Size", shortcut: "⌘−", keywords: ["zoom", "smaller"] },
   { id: "font-reset", title: "Reset Font Size", shortcut: "⌘0", keywords: ["zoom", "default"] },

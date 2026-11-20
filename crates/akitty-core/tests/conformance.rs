@@ -583,6 +583,260 @@ fn find_active_mark_does_not_stick_to_scrolled_in_text() {
     );
 }
 #[test]
+fn find_matches_lists_newest_hits_without_moving_the_viewport() {
+    let t = Terminal::new(48, 4);
+    t.feed("old MARKER-a\r\nmid MARKER-b and MARKER-b2\r\nnew MARKER-c tail");
+    let before = t.snapshot();
+    let listed = call(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":3}));
+    let matches = listed["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3);
+    assert_eq!(listed["capped"], true, "MARKER-a is older than the limit");
+    assert!(matches[0]["snippet"].as_str().unwrap().contains("MARKER-c"));
+    assert!(matches[1]["snippet"].as_str().unwrap().contains("MARKER-b2"), "the rightmost hit on a line is first");
+    assert!(matches[2]["snippet"].as_str().unwrap().contains("MARKER-b "));
+    assert!(matches.iter().all(|hit| hit["snippet"].as_str().unwrap().chars().count() <= 160));
+    assert!(matches.iter().all(|hit| hit["generation"].as_u64().is_some()));
+    assert!(listed["next_row_id"].is_null(), "a capped short screen has nowhere left to resume");
+    assert_eq!(listed["lost"], false);
+    let after = t.snapshot();
+    assert_eq!(after["revision"], before["revision"]);
+    assert_eq!(after["offset"], before["offset"]);
+    assert!(after["cells"].as_array().unwrap().iter().all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+    assert_eq!(call(json!({"op":"find_matches","id":t.0,"text":"marker"}))["matches"].as_array().unwrap().len(), 0);
+    let wide = Terminal::new(20, 2);
+    wide.feed("wide 界 end");
+    let wide_hit = &call(json!({"op":"find_matches","id":wide.0,"text":"界"}))["matches"][0];
+    assert_eq!(wide_hit["end_col"].as_u64().unwrap() - wide_hit["col"].as_u64().unwrap(), 2);
+    let hit = &matches[0];
+    let revealed = call(json!({
+        "op":"find_reveal","id":t.0,"text":"MARKER",
+        "row_id": hit["row_id"], "generation": hit["generation"],
+        "col": hit["col"], "end_col": hit["end_col"]
+    }));
+    assert_eq!(revealed["found"], true);
+    assert_eq!(revealed["expired"], false);
+    assert_eq!(revealed["line"], hit["line"]);
+    let shown = t.snapshot();
+    let active: String = shown["cells"].as_array().unwrap().iter()
+        .filter(|cell| cell[5].as_u64().unwrap() & 128 != 0)
+        .map(|cell| cell[2].as_str().unwrap())
+        .collect();
+    assert_eq!(active, "MARKER");
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":0}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":33}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","max_lines":0}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","max_lines":513}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","extra":true}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_matches","id":t.0,"text":"MARKER","before_row_id":1}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_reveal","id":t.0,"text":"MARKER","row_id":1,"generation":1,"col":0,"end_col":6,"nope":1}))["ok"], false);
+    assert_eq!(response(json!({"op":"find_reveal","id":t.0,"text":"MARKER","row_id":1,"col":0,"end_col":6}))["ok"], false);
+}
+#[test]
+fn find_reveal_leaves_an_evicted_row_where_it_is() {
+    let id = call(json!({"op":"create","cols":20,"rows":3,"headless":true,"scrollback":1}))["id"].as_u64().unwrap();
+    let t = Terminal(id);
+    t.feed("MARKER-gone\r\n");
+    let listed = call(json!({"op":"find_matches","id":t.0,"text":"MARKER"}));
+    let hit = &listed["matches"][0];
+    for _ in 0..4 { t.feed("pad\r\n"); }
+    let before = t.snapshot();
+    assert!(before["cells"].as_array().unwrap().iter().all(|cell| cell[2] != "M" || cell[5].as_u64().unwrap() & 64 == 0));
+    let revealed = call(json!({
+        "op":"find_reveal","id":t.0,"text":"MARKER",
+        "row_id": hit["row_id"], "generation": hit["generation"],
+        "col": hit["col"], "end_col": hit["end_col"]
+    }));
+    assert_eq!(revealed["found"], false);
+    assert_eq!(revealed["expired"], true);
+    let after = t.snapshot();
+    assert_eq!(after["revision"], before["revision"]);
+    assert_eq!(after["offset"], before["offset"]);
+    assert!(after["cells"].as_array().unwrap().iter().all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+}
+#[test]
+fn find_reveal_scrolls_a_history_row_into_view() {
+    let t = Terminal::new(20, 4);
+    t.feed("MARKER-hist\r\n");
+    let listed = call(json!({"op":"find_matches","id":t.0,"text":"MARKER"}));
+    let hit = listed["matches"][0].clone();
+    for _ in 0..6 {
+        t.feed("pad\r\n");
+    }
+    let buried = t.snapshot();
+    assert!(buried["history"].as_u64().unwrap() > 0);
+    assert!(buried["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|line| !line.as_str().unwrap().contains("MARKER")));
+    let revealed = call(json!({
+        "op":"find_reveal","id":t.0,"text":"MARKER",
+        "row_id": hit["row_id"], "generation": hit["generation"],
+        "col": hit["col"], "end_col": hit["end_col"]
+    }));
+    assert_eq!(revealed["found"], true);
+    assert_eq!(revealed["expired"], false);
+    let shown = t.snapshot();
+    assert!(shown["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("MARKER")));
+    let active: String = shown["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|cell| cell[5].as_u64().unwrap() & 128 != 0)
+        .map(|cell| cell[2].as_str().unwrap())
+        .collect();
+    assert_eq!(active, "MARKER");
+}
+#[test]
+fn find_reveal_expires_when_reset_reprints_the_same_text() {
+    let t = Terminal::new(20, 4);
+    t.feed("MARKER\r\n");
+    let listed = call(json!({"op":"find_matches","id":t.0,"text":"MARKER"}));
+    let hit = listed["matches"][0].clone();
+    t.feed("\x1bcMARKER\r\n");
+    let before = t.snapshot();
+    assert!(before["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("MARKER")));
+    let revealed = call(json!({
+        "op":"find_reveal","id":t.0,"text":"MARKER",
+        "row_id": hit["row_id"], "generation": hit["generation"],
+        "col": hit["col"], "end_col": hit["end_col"]
+    }));
+    assert_eq!(revealed["found"], false);
+    assert_eq!(revealed["expired"], true);
+    let after = t.snapshot();
+    assert_eq!(after["revision"], before["revision"]);
+    assert_eq!(after["offset"], before["offset"]);
+    assert!(after["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|cell| cell[5].as_u64().unwrap() & 64 == 0));
+}
+#[test]
+fn find_matches_searches_only_the_active_screen() {
+    let t = Terminal::new(20, 4);
+    t.feed("MAIN-MARKER\r\n");
+    t.feed("\x1b[?1049h");
+    assert_eq!(
+        call(json!({"op":"find_matches","id":t.0,"text":"MAIN-MARKER"}))["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "the hidden primary screen is not searched"
+    );
+    t.feed("ALT-MARKER\r\n");
+    assert_eq!(
+        call(json!({"op":"find_matches","id":t.0,"text":"ALT-MARKER"}))["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        call(json!({"op":"find_matches","id":t.0,"text":"MAIN-MARKER"}))["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    t.feed("\x1b[?1049l");
+    assert_eq!(
+        call(json!({"op":"find_matches","id":t.0,"text":"MAIN-MARKER"}))["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        call(json!({"op":"find_matches","id":t.0,"text":"ALT-MARKER"}))["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+#[test]
+fn find_matches_chunk_cursor_continues_above_the_slice() {
+    let t = Terminal::new(24, 3);
+    t.feed("TOP-MARKER\r\nmid\r\nBOT-MARKER\r\n");
+    let first = call(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":1}));
+    assert_eq!(first["matches"].as_array().unwrap().len(), 0, "the bottom row is blank");
+    let mut cursor = (first["next_row_id"].as_u64().unwrap(), first["next_generation"].as_u64().unwrap());
+    let second = call(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":1,"before_row_id":cursor.0,"before_generation":cursor.1}));
+    assert!(second["matches"][0]["snippet"].as_str().unwrap().contains("BOT-MARKER"));
+    cursor = (second["next_row_id"].as_u64().unwrap(), second["next_generation"].as_u64().unwrap());
+    let mut saw_top = false;
+    let mut seen = vec![second["matches"][0]["row_id"].as_u64().unwrap()];
+    for _ in 0..8 {
+        let page = call(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":1,"before_row_id":cursor.0,"before_generation":cursor.1}));
+        for hit in page["matches"].as_array().unwrap() {
+            let row_id = hit["row_id"].as_u64().unwrap();
+            assert!(!seen.contains(&row_id), "a slice must not repeat a row");
+            seen.push(row_id);
+            if hit["snippet"].as_str().unwrap().contains("TOP-MARKER") { saw_top = true; }
+        }
+        match (page["next_row_id"].as_u64(), page["next_generation"].as_u64()) {
+            (Some(row_id), Some(generation)) => {
+                assert_ne!((row_id, generation), cursor, "the cursor moves toward the top");
+                cursor = (row_id, generation);
+            }
+            _ => break,
+        }
+        if saw_top { break; }
+    }
+    assert!(saw_top, "the next slices must reach the older hit");
+}
+#[test]
+fn find_matches_cursor_survives_a_scroll_between_slices() {
+    let t = Terminal::new(24, 3);
+    t.feed("TOP-MARKER\r\nMID-MARKER\r\nBOT-MARKER");
+    let first = call(json!({"op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":1}));
+    assert!(first["matches"][0]["snippet"].as_str().unwrap().contains("BOT-MARKER"));
+    let seen = first["matches"][0]["row_id"].as_u64().unwrap();
+    t.feed("\r\n");
+    let second = call(json!({
+        "op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":1,
+        "before_row_id": first["next_row_id"], "before_generation": first["next_generation"]
+    }));
+    assert!(second["matches"][0]["snippet"].as_str().unwrap().contains("MID-MARKER"));
+    assert_ne!(second["matches"][0]["row_id"].as_u64().unwrap(), seen);
+    let third = call(json!({
+        "op":"find_matches","id":t.0,"text":"MARKER","limit":8,"max_lines":8,
+        "before_row_id": second["next_row_id"], "before_generation": second["next_generation"]
+    }));
+    assert!(third["matches"].as_array().unwrap().iter().any(|hit| hit["snippet"].as_str().unwrap().contains("TOP-MARKER")));
+}
+#[test]
+fn find_reveal_keeps_the_active_mark_on_its_row_after_output_scrolls() {
+    let t = Terminal::new(20, 3);
+    t.feed("MARKER-a\r\nMARKER-b\r\nMARKER-c");
+    let listed = call(json!({"op":"find_matches","id":t.0,"text":"MARKER"}));
+    let hit = listed["matches"].as_array().unwrap().iter()
+        .find(|hit| hit["snippet"].as_str().unwrap().contains("MARKER-b"))
+        .unwrap()
+        .clone();
+    call(json!({
+        "op":"find_reveal","id":t.0,"text":"MARKER",
+        "row_id": hit["row_id"], "generation": hit["generation"],
+        "col": hit["col"], "end_col": hit["end_col"]
+    }));
+    t.feed("\r\n");
+    let shown = t.snapshot();
+    let active_row = shown["cells"].as_array().unwrap().iter()
+        .find(|cell| cell[5].as_u64().unwrap() & 128 != 0)
+        .expect("the revealed row stays the active hit")[0].as_u64().unwrap() as usize;
+    assert!(shown["lines"][active_row].as_str().unwrap().contains("MARKER-b"));
+}
+#[test]
 fn actual_pty_roundtrip_resize_and_bounded_shutdown() {
     let id = call(json!({"op":"create","cols":40,"rows":8,"shell":"/bin/sh","cwd":"/tmp"}))["id"]
         .as_u64()

@@ -609,6 +609,7 @@ import AppKit
             case .find: showFind(target)
             case .findNext: showFind(target); runSearch(findBar.query == searchedQuery ? "next" : "latest")
             case .findPrevious: showFind(target); runSearch("previous")
+            case .findAll: app?.showGlobalFind(anchor: self)
             case .fontIncrease: terminal?.changeFont(1)
             case .fontDecrease: terminal?.changeFont(-1)
             case .fontReset: terminal?.changeFont(nil)

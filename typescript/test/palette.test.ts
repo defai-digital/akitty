@@ -27,10 +27,11 @@ const command = (id: string): Command => {
 
 test('bounded deterministic command catalog', () => {
   assert.equal(list('').version, 1);
-  assert.equal(list('').commands.length, 13);
-  assert.equal(new Set(list('').commands.map((x) => x.id)).size, 13);
+  assert.equal(list('').commands.length, 14);
+  assert.equal(new Set(list('').commands.map((x) => x.id)).size, 14);
   assert.equal(command('find-next').shortcut, '⌘G');
   assert.equal(command('find-previous').shortcut, '⌘⇧G');
+  assert.equal(command('find-all').shortcut, '⌥⌘F');
   assert.deepEqual(list('split'), list('split'));
   assert.equal(only('split').id, 'split');
   assert.equal(only('next').id, 'find-next');
