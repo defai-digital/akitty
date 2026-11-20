@@ -39,6 +39,39 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
+    /// Box and block geometry is cached as colour-independent coverage, including junctions and complementary halves.
+    @MainActor func testGeometricFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(0, "╭──┬──╮") + line(1, "│ ▀▄▌▐│", Style(fg: [90, 180, 240]))
+            + line(2, "├─█▓▒░┤", Style(bold: true)) + line(3, "╰──┴──╯")
+            + line(4, "╱╲╳╬╪╫", Style(fg: [240, 180, 90]))
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 1, "\(scale)x geometric max channel difference \(result.max)")
+        }
+    }
+
+    /// Braille circles use ordinary antialiasing rather than colour-dependent font smoothing.
+    @MainActor func testBrailleFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(0, "⠀⠁⠃⠇⡿⣿") + line(1, "⠿⠋⠙⠸⣿⣷⣦", Style(fg: [120, 220, 130]))
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (_, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            XCTAssertLessThanOrEqual(compare(cpu, gpu).max, 2, "\(scale)x braille max channel difference")
+        }
+    }
+
     /// ANSI colours, custom cell backgrounds, selection and both find highlights are drawn by the GPU path.
     @MainActor func testAnsiColoursBackgroundsAndHighlightsMatchTheCpuRasterizer() throws {
         let presenter: MetalPresenter
@@ -382,15 +415,19 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(try fallback([wire(0, 0, text: "~")]), "the last printable ASCII byte is eligible")
         XCTAssertEqual(try fallback([wire(0, 0, text: String(UnicodeScalar(0x1f)!))]), .nonASCII)
         XCTAssertEqual(try fallback([wire(0, 0, text: String(UnicodeScalar(0x7f)!))]), .nonASCII)
-        XCTAssertEqual(try fallback([wire(0, 0, text: "█")]), .boxGlyph)
-        XCTAssertEqual(try fallback([wire(0, 0, text: "⠀")]), .boxGlyph)
+        XCTAssertNil(try fallback([wire(0, 0, text: "█")]), "block geometry is eligible")
+        XCTAssertNil(try fallback([wire(0, 0, text: "⠀")]), "blank braille is eligible without an atlas tile")
+        XCTAssertNil(try fallback(line(0, "│")), "box geometry is eligible")
         XCTAssertEqual(try fallback(line(0, "漢字")), .nonASCII, "CJK keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "e\u{0301}")]), .nonASCII, "combining text keeps the software path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "👨‍👩‍👧")]), .nonASCII, "emoji keeps the software path")
-        XCTAssertEqual(try fallback([wire(0, 0, text: "│")]), .boxGlyph, "box drawing is geometric, not a font glyph")
+        XCTAssertNil(try fallback([wire(0, 0, text: "│")]), "box drawing uses geometric coverage, not a font glyph")
         XCTAssertEqual(try fallback(line(0, "und", Style(underline: true))), .decoratedCell, "underlines keep the CPU path")
         XCTAssertEqual(try fallback(line(0, "gone", Style(strike: true))), .decoratedCell, "strikethrough keeps the CPU path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "中", Style(wide: true))]), .wideCell, "wide cells keep the CPU path")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "█", Style(wide: true))]), .wideCell, "wide geometry keeps the CPU path")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "│", Style(underline: true))]), .decoratedCell,
+                       "decorated geometry keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), composition: "ab"), .composition, "IME composition keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), images: [placement(id: 1)]), .images,
                        "Kitty images keep the layered Metal path")
@@ -408,6 +445,16 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertNil(composer.compose(snapshot: try snapshot(cells: line(0, "漢字")), damage: nil, size: size,
                                       scale: 2, fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                       appearance: .standard), "a CJK frame must not be silently drawn as blanks")
+    }
+
+    func testPrevalidatedGeometryCannotBypassContentEligibility() throws {
+        let unsupported = try snapshot(cells: line(0, "漢字") + [wire(1, 0, text: "e\u{0301}")])
+        let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo", fontSize: 13,
+                                                              cols: cols, rows: rows))
+        XCTAssertNil(TextComposer().compose(snapshot: unsupported, damage: nil, size: size, scale: 2,
+                                            fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                            appearance: .standard, prevalidated: geometry),
+                     "a supplied geometry only skips layout work, never content validation")
     }
 
     func testCachedDescentMatchesFreshGeometry() throws {
@@ -486,9 +533,9 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(frame.dirtyRows, Array(0..<rows))
     }
 
-    /// A scroll frame can be refused partway through its re-encode, after translating rows and replacing
-    /// some of them. The next frame must re-encode every row from the snapshot, not trust the retained rows.
-    @MainActor func testScrollRefusedMidBuildRecoversWithAFullReencode() throws {
+    /// Exhaustion partway through a translated scroll discards that attempt and rebuilds every destination row
+    /// into a fresh atlas before anything reaches the presenter.
+    @MainActor func testScrollExhaustionRebuildsAllRowsBeforeHandoff() throws {
         let presenter: MetalPresenter
         do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
         let composer = TextComposer()
@@ -504,8 +551,6 @@ final class MetalTextRenderingTests: XCTestCase {
             try presenter.updateText(storm, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
         }
         XCTAssertEqual(composer.atlasEntries, 8 * rows * cols, "the storm leaves the atlas just under its cap")
-        // Six damaged rows plus the exposed bottom row need more fresh masks than the remaining headroom;
-        // the first rows fit, so the cap is hit partway through the re-encode, not before it starts.
         func coloured(_ row: Int) -> [[Any]] {
             (0..<cols).map { col in
                 let key = row * cols + col
@@ -514,27 +559,18 @@ final class MetalTextRenderingTests: XCTestCase {
             }
         }
         let source = (0..<rows).map { "row \($0) ascii" }
-        let refusedCells = (0..<6).flatMap(coloured)
+        let cells = (0..<6).flatMap(coloured)
             + (6..<rows - 1).flatMap { line($0, source[$0 + 1]) }
             + coloured(rows - 1)
-        let refused = try snapshot(cells: refusedCells)
-        XCTAssertNil(composer.compose(snapshot: refused, damage: Set(0..<6), size: size, scale: 1,
-                                      fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
-                                      appearance: .standard, scroll: 1), "the over-capacity scroll frame is refused")
-        // Recovery re-encodes a scroll whose every mask the storm already cached: no row may keep the
-        // refused attempt's translated or half-replaced instances.
-        let recoveryCells = (0..<(rows - 1)).flatMap { row in
-            (0..<cols).map { stormCell(7 * rows * cols + (row + 1) * cols + $0, row: row, col: $0) }
-        } + (0..<cols).map { stormCell(6 * rows * cols + $0, row: rows - 1, col: $0) }
-        let next = try snapshot(cells: recoveryCells)
-        let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [rows - 1], size: size, scale: 1,
+        let next = try snapshot(cells: cells)
+        let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: Set(0..<6), size: size, scale: 1,
                                                    fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                                    appearance: .standard, scroll: 1))
-        XCTAssertFalse(frame.resetAtlas, "cached masks recover without an atlas reset")
-        XCTAssertEqual(frame.dirtyRows, Array(0..<rows), "recovery cannot certify partial row damage")
+        XCTAssertTrue(frame.resetAtlas, "the cap now triggers the same bounded rebuild as packing exhaustion")
+        XCTAssertEqual(frame.dirtyRows, Array(0..<rows), "a partial translated attempt cannot certify row damage")
         XCTAssertEqual(composer.translatedRowCount, 0)
         XCTAssertEqual(composer.reencodedRowCount, rows)
-        XCTAssertFalse(frame.uploads.isEmpty, "the refused attempt's unpublished masks still reach the GPU")
+        XCTAssertFalse(frame.uploads.isEmpty, "the fresh atlas is uploaded before the rebuilt rows")
         try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
         let actual = try presenter.renderOffscreen(width: bitmapSize(1).width, height: bitmapSize(1).height)
         let reference = TextComposer()
@@ -543,7 +579,7 @@ final class MetalTextRenderingTests: XCTestCase {
                                                    appearance: .standard))
         try presenter.updateText(full, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 1))
         let expected = try presenter.renderOffscreen(width: bitmapSize(1).width, height: bitmapSize(1).height)
-        XCTAssertEqual(actual, expected, "the recovered scroll frame matches a fresh full encode")
+        XCTAssertEqual(actual, expected, "the rebuilt scroll frame matches a fresh full encode")
     }
 
     @MainActor func testDiscardedScrollRecoversWithoutApplyingItsShiftTwice() throws {
@@ -602,6 +638,31 @@ final class MetalTextRenderingTests: XCTestCase {
     }
 
     // MARK: Atlas retention and bounds
+
+    /// Every geometric scalar shares one mask across style and colour, so long-running TUI colour changes cannot
+    /// turn the fixed geometric repertoire into an atlas-growth workload.
+    func testGeometricMasksAreBoundedAndColourIndependent() throws {
+        let scalars = (0x2500...0x259F).map { UnicodeScalar($0)! } + (0x2801...0x28FF).map { UnicodeScalar($0)! }
+        func cells(colourOffset: Int) -> [[Any]] {
+            scalars.enumerated().map { index, scalar in
+                let key = index + colourOffset
+                return wire(index / cols, index % cols, text: String(scalar),
+                            Style(fg: [key % 251, (key * 3) % 251, (key * 7) % 251],
+                                  bold: index % 2 == 0, italic: index % 3 == 0))
+            }
+        }
+        let composer = TextComposer()
+        let first = try XCTUnwrap(compose(try snapshot(cells: cells(colourOffset: 0)), composer: composer, damage: nil))
+        XCTAssertEqual(composer.atlasEntries, scalars.count)
+        XCTAssertEqual(first.uploads.count, scalars.count)
+        XCTAssertEqual(composer.atlasResets, 1, "the complete uniform repertoire fits without fragmentation")
+        let resets = composer.atlasResets
+        let second = try XCTUnwrap(compose(try snapshot(cells: cells(colourOffset: 37)), composer: composer,
+                                           damage: Set(0..<rows)))
+        XCTAssertTrue(second.uploads.isEmpty, "colour and font style do not create geometric masks")
+        XCTAssertEqual(composer.atlasEntries, scalars.count)
+        XCTAssertEqual(composer.atlasResets, resets)
+    }
 
     /// A second frame with the same text reuses every mask: no atlas uploads and no new entries.
     @MainActor func testUnchangedGlyphsAreReusedFromTheAtlas() throws {
@@ -667,11 +728,11 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.max, 2, "max channel difference \(result.max)")
     }
 
-    /// The atlas never grows past its entry cap: a frame that needs more distinct masks than the cap is refused
-    /// so the CPU rasterizer draws it, rather than being drawn with missing or overwritten glyphs.
+    /// The atlas never grows past its entry cap. Reaching the cap recreates the atlas and re-encodes the current
+    /// frame instead of repeatedly attempting a full encode against an atlas with no free entries.
     @MainActor func testAtlasStaysBoundedUnderAColourStorm() throws {
         let composer = TextComposer()
-        var refused = 0
+        var completed = 0
         for frame in 0..<12 {
             var cells: [[Any]] = []
             for row in 0..<rows {
@@ -685,38 +746,36 @@ final class MetalTextRenderingTests: XCTestCase {
             let result = composer.compose(snapshot: try snapshot(cells: cells), damage: nil, size: size, scale: 1,
                                           fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                           appearance: .standard)
-            if result == nil { refused += 1 }
+            if result != nil { completed += 1 }
             XCTAssertLessThanOrEqual(composer.atlasEntries, GlyphAtlas.maxEntries, "the atlas entry cap holds")
             // A recreate frame uploads every entry: none of a failed attempt's coverage may survive into the new
             // atlas, where it would overwrite a live entry at the same coordinates.
             if let result, result.resetAtlas { assertDisjoint(result.uploads, entries: composer.atlasEntries) }
         }
-        XCTAssertGreaterThan(refused, 0, "an over-capacity frame is refused instead of drawn with missing glyphs")
+        XCTAssertEqual(completed, 12, "each current frame fits after old colours are discarded")
+        XCTAssertGreaterThan(composer.atlasResets, 1, "the entry cap engages the bounded rebuild path")
         XCTAssertLessThanOrEqual(GlyphAtlas.maxEntries, 4096, "the entry cap is bounded")
         XCTAssertLessThanOrEqual(GlyphAtlas.textureSize, 2048, "one bounded atlas texture, never one per glyph")
     }
 
-    /// A refused build can add masks without publishing them to the GPU.
+    /// A frame too large even for an empty atlas is refused after its bounded retry. The next smaller frame must
+    /// still upload every cached mask that the refused attempt never handed to the presenter.
     func testRefusedFrameKeepsUnpublishedGlyphUploadsForRecovery() throws {
         let composer = TextComposer()
-        for frame in 0..<12 {
-            let cells = (0..<(rows * cols)).map { index -> [Any] in
-                let key = frame * rows * cols + index
-                return wire(index / cols, index % cols, text: "A", Style(fg: [key % 251, key / 251, 100]))
-            }
-            func make(_ snapshot: Snapshot, damage: Set<Int>?) -> TextFrame? {
-                composer.compose(snapshot: snapshot, damage: damage, size: size, scale: 1,
-                                 fontName: "Menlo", fontSize: 5, cell: cell, cjkFontName: "", appearance: .standard)
-            }
-            if make(try snapshot(cells: cells), damage: nil) != nil { continue }
-            // This frame inserted some masks before reaching the entry cap. A smaller frame can reuse
-            // its first glyph, but that mask has never been delivered to the presenter.
-            let recovered = try XCTUnwrap(make(try snapshot(cells: [cells[0]]), damage: [0]))
-            XCTAssertFalse(recovered.uploads.isEmpty, "a cached but unpublished glyph still needs its pixels uploaded")
-            XCTAssertEqual(recovered.dirtyRows.count, rows, "a refused frame cannot certify partial row damage")
-            return
+        let wideCols = 100, tallRows = 50
+        let largeSize = CGSize(width: CGFloat(wideCols) * cell.width + 16, height: CGFloat(tallRows) * cell.height + 16)
+        let cells = (0..<(wideCols * tallRows)).map { key in
+            wire(key / wideCols, key % wideCols, text: "A", Style(fg: [key % 251, key / 251, 100]))
         }
-        XCTFail("the colour workload must reach the entry cap")
+        func make(_ cells: [[Any]], damage: Set<Int>?) throws -> TextFrame? {
+            composer.compose(snapshot: try snapshot(cells: cells, cols: wideCols, rows: tallRows), damage: damage,
+                             size: largeSize, scale: 1, fontName: "Menlo", fontSize: 5, cell: cell,
+                             cjkFontName: "", appearance: .standard)
+        }
+        XCTAssertNil(try make(cells, damage: nil), "one frame cannot exceed the empty-atlas entry cap")
+        let recovered = try XCTUnwrap(make([cells[0]], damage: [0]))
+        XCTAssertFalse(recovered.uploads.isEmpty, "a cached but unpublished glyph still needs its pixels uploaded")
+        XCTAssertEqual(recovered.dirtyRows.count, tallRows, "a refused frame cannot certify partial row damage")
     }
 
     func testRefusedFirstFrameKeepsItsAtlasResetUntilRecovery() throws {
@@ -743,8 +802,7 @@ final class MetalTextRenderingTests: XCTestCase {
     func testPersistentAtlasExhaustionStandsDownToTheCpuPath() throws {
         let composer = TextComposer()
         var frames: [TextFrame?] = []
-        // Large masks at 36 pt/3x fill the packing well below the entry cap, so the recreate path is exercised
-        // rather than the cheaper "refuse this frame" path.
+        // Large masks at 36 pt/3x repeatedly exhaust packing even though each current frame fits after a recreate.
         for frame in 0..<14 {
             var cells: [[Any]] = []
             for row in 0..<rows {

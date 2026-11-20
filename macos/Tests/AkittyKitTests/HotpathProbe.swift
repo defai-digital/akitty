@@ -80,4 +80,47 @@ final class HotpathProbe: XCTestCase {
             _ = try GridRasterizer.make(snapshot: small, size: size, scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
         }
     }
+
+    /// Geometric text uses the same full and incremental measurements as the ASCII probe. Before geometric atlas
+    /// support the composer reports its fallback; afterwards both paths can be compared from this same output.
+    func testGeometricProbe() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["AKITTY_HOTPATH_PROBE"] == "1", "benchmark")
+        let cols = 200, rows = 50
+        let session = try TerminalSession(cols: cols, rows: rows, headless: true)
+        defer { try? session.close() }
+        let glyphs = Array("╭─┬─╮│█▓▒░⠿⠋⠙⠸⣿⣷⣦╰─┴─╯")
+        var text = "\u{1b}[?25l"
+        for row in 0..<rows {
+            text += "\u{1b}[\(row + 1);1H\u{1b}[3\(row % 7 + 1)m"
+            for col in 0..<cols { text.append(glyphs[(row + col) % glyphs.count]) }
+        }
+        _ = try session.call("feed", ["text": text])
+        let snapshot = try XCTUnwrap(try session.snapshot())
+        let cell = CGSize(width: 8, height: 18), size = CGSize(width: 1616, height: 916)
+        let rasterizer = GridRasterizer()
+        _ = try rasterizer.render(snapshot: snapshot, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                  cellSize: cell, composition: "")
+        try time("geometric GridRasterizer.render full (warm)", 20) {
+            _ = try rasterizer.render(snapshot: snapshot, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                      cellSize: cell, composition: "")
+        }
+        try time("geometric GridRasterizer.render one damaged row (warm)", 100) {
+            _ = try rasterizer.render(snapshot: snapshot, damage: [0], size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                      cellSize: cell, composition: "")
+        }
+        let composer = TextComposer()
+        let initial = composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                       cell: cell, cjkFontName: "", appearance: .standard)
+        print("PROBE geometric atlas eligible: \(initial != nil)")
+        guard initial != nil else { return }
+        try time("geometric TextComposer.compose full (warm atlas)", 50) {
+            _ = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                               cell: cell, cjkFontName: "", appearance: .standard))
+        }
+        try time("geometric TextComposer.compose one damaged row (warm atlas)", 100) {
+            _ = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: [0], size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                               cell: cell, cjkFontName: "", appearance: .standard))
+        }
+        print("PROBE geometric atlas entries: \(composer.atlasEntries), resets: \(composer.atlasResets), suspended: \(composer.isSuspended)")
+    }
 }
