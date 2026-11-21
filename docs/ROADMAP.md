@@ -133,37 +133,42 @@ here:
   notification can be observed safely (the view, passed into both render calls). Adding a notification
   observer and a lock to a pure helper type to close a cosmetic gap is the wrong trade.
 
-One pre-existing race in the Metal handoff is known, was re-confirmed by external review while the colour
-atlas page was added, and is deliberately not fixed in that change:
+Two defects found by external review of the colour atlas page are now **fixed**, and one is still open:
 
-- **A frame can be handed to the presenter after its textures were released.**
-  `TerminalView.releaseRetainedFrames()` calls `presenter?.releaseTextures()` on the main thread but
-  dispatches `TextComposer.releaseFrames()` to the raster queue, so a frame composed before a hide can
-  reach its main-thread handoff after the pane is visible again. The handoff only re-checks visibility,
-  size and appearance. A partial frame then fails the `Metal text frame is not a full repaint` guard and
-  `renderFailed` disables Metal for that pane for good; a full warm-cache frame instead draws from
-  freshly allocated blank atlases, so its glyphs are missing, and a colour tile would sample the R8
-  coverage page bound at `texture(1)` as BGRA. The coverage atlas has always had this exposure; the
-  colour page only changes how the bad frame looks. The fix is a release generation captured when the
-  frame is composed and compared at handoff, dropping the frame and requesting a redraw instead of
-  publishing it — it belongs in `TerminalView`, needs its own regression test, and must not route
-  through `renderFailed`, which is permanent.
-
-Two more resource items are open, both found by external review of the colour atlas page:
-
-- **Atlas pages are reallocated on every reset instead of being pooled.** `TextComposer.Layout` carries
+- **A frame could be handed to the presenter after its textures were released.** `releaseRetainedFrames()`
+  calls `presenter?.releaseTextures()` on the main thread but dispatches `TextComposer.releaseFrames()`
+  to the raster queue, so a frame composed before a hide could reach its main-thread handoff after the
+  pane was visible again. A partial frame then failed the `Metal text frame is not a full repaint` guard
+  and `renderFailed` disabled Metal for that pane for good; a full warm-cache frame instead drew from
+  freshly allocated blank atlases. The handoff now compares a `releaseGeneration` captured when the
+  raster work was dispatched and simply drops the frame and redraws on a mismatch — deliberately not via
+  `renderFailed`, which is permanent. The bitmap and layered handoffs take the same guard: they would not
+  fail, since `upload(into:)` falls back to a complete upload whenever the texture is nil, but they would
+  upload a whole window of pixels that is about to be replaced anyway.
+  `LifecycleStressTests.testAFrameComposedBeforeAHideIsDroppedInsteadOfDisablingMetal` reproduces the
+  race deterministically by hiding and un-hiding inside `.rasterReady`, which fires on the main thread
+  inside the handoff after the compose and before the publish. A negative control with the guard removed
+  fails with `Metal text frame is not a full repaint` and `usesSoftware == true`.
+- **Atlas pages were reallocated on every reset instead of being pooled.** `TextComposer.Layout` carries
   width, height, cols and rows, so every frame of a live drag-resize is a layout change and therefore an
-  atlas reset, and `syncText` answers a reset with a fresh texture. The fresh allocation is load-bearing
-  — a reset reuses atlas coordinates, so the page cannot be rewritten while an in-flight frame samples
-  it — but the discarded one could be retired and reused once `pending.completed` passes it, exactly as
-  `retire()` / `makeTexture(width:height:)` already do for window bitmaps. Both pages are a compile-time
-  constant 2048x2048, so a one-slot pool per pixel format would remove the churn. This predates the
-  colour page at 4 MiB per resize frame; the colour page makes it 20 MiB.
-- **`TextComposer.compose(deferPublication:)` defaults to `false`,** which acknowledges publication
-  inside `compose` and clears the pending uploads of a frame the caller may still drop. Production
-  always passes `true`; only test helpers take the default. With a dropped frame the atlas keeps entries
-  whose bytes were never uploaded, so a later warm frame vends UVs into empty texels — invisible glyphs
-  rather than a loud failure. The default should be `true`, or the parameter should go away.
+  atlas reset: 4 MiB per frame before the colour page, 20 MiB after it. A reset reuses atlas coordinates,
+  so a page cannot be rewritten while an in-flight frame samples it — but it can be reused once
+  `pending.completed` passes it, which is the same gate the window-bitmap pool already used. `retireAtlas`
+  and `takeAtlas` now do that for both pages, bounded at four entries and emptied by `releaseTextures()`.
+  Both pages are taken *before* either is retired, because with two frames in flight and emoji on screen
+  the pool reaches its cap, and retiring first would evict exactly the pages that had just become reusable
+  — collapsing reuse to zero. Completed pages are pruned once all takes for a frame are done, so a burst's
+  pages are not kept alive after it ends, and a colour page is not retained after its last tile has gone.
+  With the GPU idle a steady resize allocates nothing at all.
+  `testAtlasPagesAreReusedOnlyOnceNoFrameCanSampleThem` checks the allocation counter across idle,
+  in-flight, completed and released states and compares both paths against the CPU rasterizer;
+  `testAtlasReuseSurvivesTwoFramesInFlightAndPrunesWhenIdle` covers the cap-ordering and pruning cases.
+- **`TextComposer.compose(deferPublication:)` still defaults to `false`,** which acknowledges publication
+  inside `compose` and clears the pending uploads of a frame the caller may still drop. Production always
+  passes `true`; only test helpers take the default. With a dropped frame the atlas keeps entries whose
+  bytes were never uploaded, so a later warm frame vends UVs into empty texels — invisible glyphs rather
+  than a loud failure. Left alone deliberately: flipping the default changes the semantics of 47 test
+  call sites, so it belongs in a change that is about that API rather than in a resource fix.
 
 An external review also proposed relaxing the rasterizer's conservative scroll rule, which repaints
 every row containing non-ASCII text instead of reusing the retained bitmap. Removing the rule fails
