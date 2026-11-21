@@ -6,7 +6,7 @@ import Foundation
 ///   to run a command through the `request_command` tool, which waits for approval.
 /// - a small plugin, `plugin/akitty.js`, that reports which conversation runs in the pane (AX Code's plugin `event`
 ///   hook), so AkiTTY can show it and offer `ax-code --session <id>` after a restart.
-public struct AXCodeMCPSettings {
+public struct AXCodeMCPSettings: AgentMCPSettings {
     public static let serverName = "akitty"
     public let path: String
     public let executable: String

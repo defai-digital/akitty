@@ -5,7 +5,7 @@
 **A native macOS terminal for working with AI coding agents.**
 
 See what agents report across your panes, review their queued requests, and
-take back terminal input when you need it. Set up Claude Code, Codex or AX Code
+take back terminal input when you need it. Set up Claude Code, Codex, AX Code, Grok, Muse Code, Kimi Code or AGY
 in Settings, and reopen saved windows with conversation IDs ready to resume.
 
 **Apple Silicon · macOS 27.2+ · MIT licensed**
@@ -42,7 +42,7 @@ to `/Applications`. [Latest release](https://github.com/defai-digital/akitty/rel
 
 ## Try the agent workflow
 
-Open **Akitty → Agent Integrations…** to set up Claude Code, Codex or AX Code.
+Open **Akitty → Agent Integrations…** to set up Claude Code, Codex, AX Code, Grok, Muse Code, Kimi Code or AGY.
 Turn on **Local Agent Requests** when you want those integrations to connect.
 [Agent setup](docs/AGENT_NATIVE.md#agent-integrations)
 
@@ -173,8 +173,9 @@ exact command and pane. Actions require local device authentication.
 ## Works with your AI agents
 
 Use your existing command-line agent in its usual shell. **Settings → Agents**
-installs hooks for Claude Code and Codex or configures MCP and conversation
-reporting for AX Code. [Integration setup and permissions](docs/AGENT_NATIVE.md#agent-integrations)
+installs permission hooks for Claude Code and Codex, or configures MCP and
+conversation reporting for AX Code, Grok, Muse Code, Kimi Code and AGY.
+[Integration setup and permissions](docs/AGENT_NATIVE.md#agent-integrations)
 
 | Goal | Integration |
 | --- | --- |

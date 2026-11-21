@@ -22,6 +22,7 @@ final class AgentIntegrationsTests: XCTestCase {
         let path = AgentCLI.searchPath(environment: ["PATH": "/usr/bin:relative/bin:/custom/bin"], home: home)
         XCTAssertEqual(Array(path.prefix(2)), ["/usr/bin", "/custom/bin"], "the inherited PATH comes first; relative entries are dropped")
         XCTAssertTrue(path.contains("/tmp/home-for-test/.local/bin")); XCTAssertTrue(path.contains("/opt/homebrew/bin"))
+        XCTAssertTrue(path.contains("/tmp/home-for-test/.kimi-code/bin")); XCTAssertTrue(path.contains("/tmp/home-for-test/.grok/bin"))
         XCTAssertEqual(path.filter { $0 == "/usr/bin" }.count, 1)
     }
 
@@ -68,6 +69,13 @@ final class AgentIntegrationsTests: XCTestCase {
         // AX Code connects through AkiTTY's MCP server and its plugin: command requests, reports and resume.
         XCTAssertEqual(byID["ax-code"]?.usesMCP, true)
         XCTAssertEqual(byID["ax-code"]?.capabilities.map(\.available), [true, true, true])
+        for id in ["grok", "muse", "kimi", "agy"] {
+            XCTAssertEqual(byID[id]?.usesMCP, true, id)
+            XCTAssertNil(byID[id]?.hooks, id)
+            XCTAssertEqual(byID[id]?.capabilities.map(\.available), [true, true, true], id)
+            XCTAssertNotNil(byID[id]?.unavailableReason, "the client's own approval prompts stay visible")
+        }
+        XCTAssertEqual(Set(AgentCLI.all.map(\.id)), ["claude-code", "codex", "ax-code", "grok", "muse", "kimi", "agy"])
         // Every agent the service accepts has a row, and every row with an integration is an accepted agent.
         XCTAssertEqual(Set(AgentRequests.agentNames.keys), Set(AgentCLI.all.filter { $0.hooks != nil || $0.usesMCP }.map(\.id)))
         XCTAssertFalse(AgentRequestsLaunchSetting.isOn(UserDefaults(suiteName: "akitty-empty-\(UUID().uuidString)")!), "off by default")

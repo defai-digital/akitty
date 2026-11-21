@@ -27,6 +27,12 @@ final class AgentResumeTests: XCTestCase {
         XCTAssertNil(AgentConversation(agent: "other", sessionID: "abc", reported: 0).resumeCommand)
         XCTAssertEqual(AgentConversation(agent: "ax-code", sessionID: "ses_-e5e0a0370dbffeRG78fg4pj0f", reported: 0).resumeCommand,
                        "ax-code --session ses_-e5e0a0370dbffeRG78fg4pj0f")
+        for (agent, base) in ["grok": "grok --resume", "muse": "muse resume", "kimi": "kimi --session", "agy": "agy --conversation"] {
+            XCTAssertEqual(AgentConversation(agent: agent, sessionID: "conversation-123", reported: 0).resumeCommand, "\(base) conversation-123")
+            for id in ["--help", "id;rm", "id with spaces", "é1"] {
+                XCTAssertNil(AgentConversation(agent: agent, sessionID: id, reported: 0).resumeCommand, "\(agent): \(id)")
+            }
+        }
         XCTAssertFalse(AgentConversation(agent: "claude-code", sessionID: "abc", reported: .nan).isResumable)
     }
 

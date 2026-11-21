@@ -442,7 +442,10 @@ import AgentIPC
         let cwd: String?
         let reason: String?
     }
-    nonisolated static let agentNames = ["claude-code": "Claude Code", "codex": "Codex", "ax-code": "AX Code"]
+    nonisolated static let agentNames = [
+        "claude-code": "Claude Code", "codex": "Codex", "ax-code": "AX Code",
+        "grok": "Grok", "muse": "Muse Code", "kimi": "Kimi Code", "agy": "AGY",
+    ]
     /// Shell commands shown for a decision may span lines, but no other control or invisible formatting character.
     static func validateDecisionCommand(_ command: String) throws {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, command.utf8.count <= 4096,
@@ -667,11 +670,16 @@ import AgentIPC
                 if let number = input["offset"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue), (0...64).contains(number.intValue) { offset = number.intValue }
                 else if input["offset"] == nil { offset = 0 }
                 else { throw AkittyError.core("Invalid pane-list offset.") }
+                let callerPane = pane(for: peer)
                 result = ["panes": panes.dropFirst(offset).prefix(16).map { terminal -> [String: Any] in
-                    ["pane": paneID(terminal), "event_session": sessions[terminal.session.id] ?? "unknown", "title_untrusted": String(ProgramStatusRecord.displayText(terminal.snapshot?.title ?? "Terminal").prefix(32)),
+                    let shell = try? terminal.session.shellState()
+                    return ["pane": paneID(terminal), "event_session": sessions[terminal.session.id] ?? "unknown", "title_untrusted": String(ProgramStatusRecord.displayText(terminal.snapshot?.title ?? "Terminal").prefix(32)),
+                     "directory_untrusted": shell?.shell?.cwd.map { String(ProgramStatusRecord.displayText($0).prefix(512)) } ?? NSNull(),
+                     "shell_ready": shell?.shell?.ready == true,
                      "input_agent_controlled": terminal.snapshot?.control?.agent == true,
                      "execution": "request_requires_human_approval", "ordinary_agent_operations": "observation_only"]
-                }, "next_offset": offset + 16 < panes.count ? offset + 16 : NSNull(), "total_panes": panes.count]
+                }, "source_pane": callerPane.map { paneID($0) } ?? NSNull(),
+                "next_offset": offset + 16 < panes.count ? offset + 16 : NSNull(), "total_panes": panes.count]
             } else if operation == "status", Set(input.keys) == ["version", "op", "request_id"], let requestID = input["request_id"] as? String {
                 guard Self.isValidRequestID(requestID) else { throw AkittyError.core("Invalid request_id.") }
                 guard let state = status(of: requestID) else { throw AkittyError.core("Unknown request_id for this AkiTTY launch. Finished requests are kept for the most recent \(Self.finishedHistoryLimit).") }

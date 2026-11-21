@@ -1,7 +1,8 @@
 # Native agent workflows
 
-AkiTTY 2.0.0 queues requests across panes, integrates with Claude Code,
-Codex and AX Code, and can reopen a workspace with reported conversation IDs.
+AkiTTY queues requests across panes, integrates with Claude Code, Codex,
+AX Code, Grok, Muse Code, Kimi Code and AGY, and can reopen a workspace with
+reported conversation IDs.
 Local command requests and supported permission prompts require human approval.
 The local workflow works with an ordinary shell and the bundled companion.
 [Release notes](releases/2.0.0.md)
@@ -124,8 +125,8 @@ before the subcommand selects a different local test/instance endpoint.
 
 ## Agent integrations
 
-**Settings → Agents** (**Akitty → Agent Integrations…**) lists Claude Code, Codex
-and AX Code. For each it shows where the CLI was found (the inherited PATH, then
+**Settings → Agents** (**Akitty → Agent Integrations…**) lists Claude Code, Codex,
+AX Code, Grok, Muse Code, Kimi Code and AGY. For each it shows where the CLI was found (the inherited PATH, then
 the usual install folders such as `~/.local/bin` and `/opt/homebrew/bin`), the
 version `--version` prints, and the workflows available for that agent. A missing
 CLI links to its install instructions. **Install**, **Reinstall** and **Remove**
@@ -148,6 +149,43 @@ removed. AX Code has no permission hook, so its own approval prompts stay in
 AX Code. AX Code 7.31.2 connects to the server (`ax-code mcp list` shows `akitty
 connected`) and loads the plugin, which reported start and end for a real
 `ax-code run`.
+
+The other four rows install the same MCP request workflow plus client-specific
+lifecycle reporting, without granting AkiTTY control of the client's own prompts:
+
+- **Grok**: `akitty-agent grok-mcp install` adds a managed
+  `[mcp_servers.akitty]` block with a 150-second tool timeout to
+  `$GROK_HOME/config.toml` (default `~/.grok/config.toml`) and SessionStart /
+  SessionEnd hooks to `hooks/akitty.json` beside it. The hook file is separate
+  from Grok's Claude-compatible discovery so a Grok conversation is never
+  deliberately installed as a Claude Code conversation. The reporting adapter
+  also recognizes Grok's extra payload fields if Grok invokes AkiTTY's Claude
+  hook through compatibility discovery, preventing the wrong resume command.
+- **Muse Code**: `akitty-agent muse-mcp install` updates
+  `$XDG_CONFIG_HOME/muse/settings.json` (default `~/.config/muse/settings.json`)
+  with a newline-framed stdio server, a 150-second tool timeout, and SessionStart
+  / SessionEnd hooks. Existing settings require `schema_version: 1`; AkiTTY
+  refuses to rewrite a settings file that lacks it.
+- **Kimi Code**: `akitty-agent kimi-mcp install` updates
+  `$KIMI_CODE_HOME/mcp.json` (default `~/.kimi-code/mcp.json`) with
+  `toolTimeoutMs: 150000` and appends marked SessionStart / SessionEnd hook
+  entries to `config.toml`, preserving unrelated TOML text. Kimi Code's
+  PermissionRequest event is observation-only, so its own approval UI remains
+  authoritative.
+- **AGY**: `akitty-agent agy-mcp install` updates
+  `~/.gemini/config/mcp_config.json` and installs a SessionStart hook in
+  `hooks.json` beside it. AGY reports `conversationId`; its Stop event is not
+  treated as SessionEnd because AGY documents no SessionEnd hook.
+
+Each installer is idempotent, preserves unrelated settings, recognizes its own
+entries after the app moves, and refuses to replace a conflicting user-owned MCP
+server or AGY hook. Grok, Muse and Kimi lifecycle entries are merged with other
+hooks; Remove deletes only AkiTTY's entries. JSON settings are reformatted with
+sorted keys, while managed TOML blocks preserve text outside their markers. Use
+`status` to inspect a row, or `uninstall` to remove it. `--config` selects the
+main settings file; `--hooks` selects the separate lifecycle file for Grok,
+Kimi Code or AGY, which is useful for isolated validation. Restart the client
+to load configuration changes.
 
 **Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
 launch, so integrations work without the menu each time. **Turn On** / **Turn
@@ -203,7 +241,9 @@ a command fingerprint, never the command.
 | Decide | `{"version":1,"op":"decide","agent":"claude-code","tool":"Bash","command":"…","cwd":"…","reason":"…"}`; `cwd`, `reason`, `request_id` optional. Returns `{decision, request_id, executor, akitty_sent_input: false}` with `decision` `allow` or `deny` |
 | Report | `{"version":1,"op":"report","agent":"claude-code","event":"session_start","session_id":"…"}`; `event` is `session_start` or `session_end` |
 
-`decide` accepts `claude-code` and `codex`. `report` also accepts `ax-code`.
+`decide` accepts only `claude-code` and `codex`. `report` also accepts `ax-code`,
+`grok`, `muse`, `kimi` and `agy`; the reporting-only clients never gain permission
+authority merely because they have a lifecycle hook.
 
 ## Codex permission prompts
 
@@ -230,8 +270,8 @@ The sheet shows the command, its folder and Codex's reason
 (`tool_input.description`) when Codex gives one. Agent Overview shows the
 conversation ID Codex reports, and a restored workspace resumes it with
 `codex resume <id>` (Codex 0.170.0 keeps the ID when resuming). The hook
-contract follows Codex's published hooks documentation; it has not been
-qualified end to end against a running Codex with trusted hooks.
+contract follows Codex's published hooks documentation. The opt-in `AgentLiveTests`
+exercises it end to end with trusted hooks isolated to that test run.
 
 ## Reopen windows and resume agent conversations
 
@@ -264,9 +304,11 @@ different conversation starts in that pane. The CLI's own output in the pane
 says why, and you can choose Resume again; a later report of the same ID still
 confirms it. Once resumed or never started, a different conversation in the pane
 replaces the offer. Approvals that were waiting, earlier approvals and input
-leases end with the app and are never replayed. Conversations of three agents
-can be resumed: Claude Code with `claude --resume <id>`, Codex with
-`codex resume <id>`, and AX Code with `ax-code --session <id>`.
+leases end with the app and are never replayed. Conversations can be resumed with each client's own command: Claude Code with
+`claude --resume <id>`, Codex with `codex resume <id>`, AX Code with
+`ax-code --session <id>`, Grok with `grok --resume <id>`, Muse Code with
+`muse resume <id>`, Kimi Code with `kimi --session <id>`, and AGY with
+`agy --conversation <id>`.
 
 ## Local request protocol and trust boundary
 
@@ -372,6 +414,11 @@ Code's and Codex's permission prompts (Codex with AkiTTY's hooks, trusted for
 that run only) and AX Code's MCP request are answered through AkiTTY, each
 command runs, and all three report their conversations. It changes no global
 agent configuration. `AgentAccessibilityAuditTests` walks the accessibility tree
+`AgentMCPSettingsTests` covers idempotent installation and removal, conflict
+preservation, Grok/Claude identity separation, client-specific lifecycle payloads,
+all seven resume commands, and Muse/Kimi/Grok/AGY settings. Isolated real-CLI
+smoke checks validate the generated Grok, Muse, Kimi and AGY configuration without
+requiring a model call. `AgentAccessibilityAuditTests` walks the accessibility tree
 of the approval sheets (names of every control, the source and target panes, the
 whole command, Deny as default) and, when the app running the tests has the
 Accessibility permission, reads Settings → Agents through the system

@@ -436,6 +436,10 @@ final class AgentDecisionTests: XCTestCase {
         XCTAssertTrue(String(decoding: refused, as: UTF8.self).contains("not running inside an AkiTTY pane"))
         XCTAssertNil(window.attachedSheet)
         for bad: [String: Any] in [["version": 1, "op": "decide", "agent": "other", "tool": "Bash", "command": "x"],
+                                   ["version": 1, "op": "decide", "agent": "grok", "tool": "Bash", "command": "x"],
+                                   ["version": 1, "op": "decide", "agent": "muse", "tool": "Bash", "command": "x"],
+                                   ["version": 1, "op": "decide", "agent": "kimi", "tool": "Bash", "command": "x"],
+                                   ["version": 1, "op": "decide", "agent": "agy", "tool": "Bash", "command": "x"],
                                    ["version": 1, "op": "decide", "agent": "claude-code", "tool": "Edit", "command": "x"],
                                    ["version": 1, "op": "decide", "agent": "claude-code", "tool": "Bash", "command": "x", "pane": "p"],
                                    ["version": 1, "op": "report", "agent": "claude-code", "event": "session_start", "session_id": "bad id"]] {

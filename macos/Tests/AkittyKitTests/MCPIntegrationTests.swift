@@ -49,7 +49,12 @@ final class MCPIntegrationTests: XCTestCase {
         let listing = try await client.listTools()
         XCTAssertEqual(Set(listing.tools.map(\.name)), ["list_panes", "request_command", "request_status"])
         let listed: CallTool.Result = try await client.send(CallTool.request(.init(name: "list_panes"))).value
-        let pane = try XCTUnwrap(listed.structuredContent?.objectValue?["data"]?.objectValue?["panes"]?.arrayValue?.first?.objectValue?["pane"]?.stringValue)
+        let listedData = try XCTUnwrap(listed.structuredContent?.objectValue?["data"]?.objectValue)
+        let firstPane = try XCTUnwrap(listedData["panes"]?.arrayValue?.first?.objectValue)
+        let pane = try XCTUnwrap(firstPane["pane"]?.stringValue)
+        XCTAssertEqual(firstPane["shell_ready"]?.boolValue, true)
+        XCTAssertNotNil(firstPane["directory_untrusted"]?.stringValue)
+        XCTAssertTrue(listedData.keys.contains("source_pane"))
 
         for mode in ["denied", "approved", "cancelled", "eof"] {
             let marker = root.appendingPathComponent(mode)

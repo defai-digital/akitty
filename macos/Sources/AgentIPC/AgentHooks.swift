@@ -51,6 +51,10 @@ public enum AgentHook {
         return !description.hasPrefix("network-access") && !description.hasPrefix("network access")
     }
 
+    static func isGrokPayload(_ event: [String: Any]) -> Bool {
+        event["hookEventName"] != nil && event["sessionId"] != nil && event["workspaceRoot"] != nil
+    }
+
     /// The hook's stdout for one event: nil means "no decision" (print nothing, exit 0).
     public static func respond(to input: Data, agent: HookAgent = .claudeCode, path: String = LocalSocket.defaultPath,
                                send: (Data, String, TimeInterval) throws -> Data = { try LocalSocket.request($0, path: $1, timeout: $2) }) -> Data? {
@@ -59,6 +63,8 @@ public enum AgentHook {
               let name = event["hook_event_name"] as? String else { return nil }
         switch name {
         case "PermissionRequest":
+            // Grok has no PermissionRequest event, but a future/compatibility payload must never gain Claude's authority.
+            guard agent != .claudeCode || !isGrokPayload(event) else { return nil }
             guard event["tool_name"] as? String == "Bash",
                   let tool = event["tool_input"] as? [String: Any], let command = tool["command"] as? String,
                   command.utf8.count <= 4096, isDescribable(tool, agent: agent) else { return nil }
@@ -74,8 +80,12 @@ public enum AgentHook {
             if decision == "deny" { answer["message"] = "Denied by the user in AkiTTY." }
             return try? JSONSerialization.data(withJSONObject: ["hookSpecificOutput": ["hookEventName": "PermissionRequest", "decision": answer]], options: [.sortedKeys])
         case "SessionStart", "SessionEnd":
-            guard let session = event["session_id"] as? String else { return nil }
-            let request: [String: Any] = ["version": 1, "op": "report", "agent": agent.rawValue,
+            let snakeID = event["session_id"] as? String, camelID = event["sessionId"] as? String
+            guard let session = snakeID ?? camelID, snakeID == nil || camelID == nil || snakeID == camelID else { return nil }
+            // Grok discovers Claude-compatible settings by default but adds these Grok-only fields. Never save a
+            // Grok conversation as Claude Code: that would offer the wrong CLI and resume command after a restart.
+            let isGrok = agent == .claudeCode && isGrokPayload(event)
+            let request: [String: Any] = ["version": 1, "op": "report", "agent": isGrok ? "grok" : agent.rawValue,
                                           "event": name == "SessionStart" ? "session_start" : "session_end", "session_id": session]
             // Reports must finish well inside the agent's limit for these hooks (Codex kills SessionEnd after 3 s).
             if let payload = try? JSONSerialization.data(withJSONObject: request) { _ = try? send(payload, path, reportTimeout) }

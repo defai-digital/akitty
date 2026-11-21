@@ -91,7 +91,14 @@ final class AgentRequestTests: XCTestCase {
         let listData = Data("{\"version\":1,\"op\":\"list\"}".utf8)
         let response = try await Task.detached { try LocalSocket.request(listData, path: path) }.value
         let object = try JSONSerialization.jsonObject(with: response) as! [String: Any]
-        let pane = (((object["data"] as! [String: Any])["panes"] as! [[String: Any]])[0]["pane"] as! String)
+        let listEnvelope = try XCTUnwrap(object["data"] as? [String: Any])
+        let listed = try XCTUnwrap(listEnvelope["panes"] as? [[String: Any]])
+        let pane = try XCTUnwrap(listed[0]["pane"] as? String)
+        XCTAssertEqual(listed[0]["shell_ready"] as? Bool, true)
+        let directory = listed[0]["directory_untrusted"] as? String
+        XCTAssertTrue(directory == root.path || directory == "/private" + root.path, "accept the shell's canonical /private/tmp spelling")
+        XCTAssertTrue(listEnvelope.keys.contains("source_pane"))
+        XCTAssertTrue(listEnvelope["source_pane"] is NSNull, "this caller is outside every AkiTTY pane")
         let marker = root.appendingPathComponent("executed.txt")
         // Keep the marker empty briefly to exercise redirection creating it before printf writes.
         let command = ": >> '\(marker.path)'; sleep 0.1; printf 'MANAGED_ONCE' >> '\(marker.path)'; sleep 5"
@@ -113,6 +120,19 @@ final class AgentRequestTests: XCTestCase {
         let history = try JSONSerialization.jsonObject(with: terminal.session.call("command_history")) as! [String: Any]
         let commands = history["commands"] as! [[String: Any]]
         XCTAssertEqual(commands.filter { $0["command"] as? String == command }.count, 1)
+
+        // A list client inside this real PTY is bound to the caller's pane through its controlling terminal.
+        let cli = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("akitty-agent").path
+        let listOut = root.appendingPathComponent("inside-list"), listDone = root.appendingPathComponent("inside-list-done")
+        try terminal.session.input("'\(cli)' --socket '\(path)' list > '\(listOut.path)'; : > '\(listDone.path)'\r", paste: false)
+        try await waitUntil { FileManager.default.fileExists(atPath: listDone.path) }
+        let listing = try JSONSerialization.jsonObject(with: Data(contentsOf: listOut)) as? [String: Any]
+        let insideData = try XCTUnwrap(listing?["data"] as? [String: Any])
+        XCTAssertEqual((insideData["source_pane"] as? String)?.hasSuffix("/\(terminal.session.id)"), true)
+        let insidePane = try XCTUnwrap((insideData["panes"] as? [[String: Any]])?.first)
+        XCTAssertEqual(insidePane["shell_ready"] as? Bool, false, "the listing command is still running when its reply is captured")
+        let insideDirectory = insidePane["directory_untrusted"] as? String
+        XCTAssertTrue(insideDirectory == root.path || insideDirectory == "/private" + root.path)
     }
 
     @MainActor func testDemoScriptUsesTheRealCompanionAndApprovalUI() async throws {

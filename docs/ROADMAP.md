@@ -308,10 +308,13 @@ verification gate plus a built-app smoke. Published binaries are separate eviden
 
 Version 2.0.0 adds per-pane approval queues, request IDs and request status,
 Claude Code and Codex hooks for supported Bash permission prompts, and AX Code
-setup through Settings → Agents. The [local MCP approval bridge](MCP.md)
-exposes `list_panes`, `request_command` and `request_status`. Output reading,
-UTCP, optional policy and evidence adapters, cloud execution, remote multiplexing,
-and result attestation remain follow-up areas.
+setup through Settings → Agents. Settings now also configures MCP and lifecycle
+reporting for Grok, Muse Code, Kimi Code and AGY, with per-client conversation
+resume commands. The [local MCP approval bridge](MCP.md) exposes `list_panes`,
+`request_command` and `request_status`; pane listing also identifies the caller's
+pane when known and reports untrusted readiness and directory observations.
+Output reading, UTCP, optional policy and evidence adapters, cloud execution,
+remote multiplexing, and result attestation remain follow-up areas.
 
 ## 6. Workspace usability
 
@@ -327,7 +330,9 @@ reveals that pane. A closed pane or a row that has left scrollback is reported a
 move focus. [Issue 51](https://github.com/defai-digital/akitty/issues/51)
 
 Version 2.0.0 also ships opt-in workspace reopening with fresh shells and
-per-pane conversation resume for Claude Code, Codex and AX Code.
+per-pane conversation resume for Claude Code, Codex and AX Code. Grok, Muse Code,
+Kimi Code and AGY use the same human-started restore flow through their own
+resume commands.
 [Workspace restore and resume](AGENT_NATIVE.md#reopen-windows-and-resume-agent-conversations)
 
 ### Feature candidates

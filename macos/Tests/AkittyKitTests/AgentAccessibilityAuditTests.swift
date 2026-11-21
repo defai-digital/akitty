@@ -139,7 +139,7 @@ final class AgentAccessibilityAuditTests: XCTestCase {
         let spoken = Self.spoken(elements)
         print("AKITTY_A11Y_AGENTS \(elements.count) elements, \(elements.filter { $0.role == kAXButtonRole as String }.map(\.label))")
         Self.assertEveryControlIsNamed(elements)
-        for text in ["Local Agent Requests", "Turn on when AkiTTY starts", "Claude Code", "Codex", "AX Code"] {
+        for text in ["Local Agent Requests", "Turn on when AkiTTY starts", "Claude Code", "Codex", "AX Code", "Grok", "Muse Code", "Kimi Code", "AGY"] {
             XCTAssertTrue(spoken.contains(text), "\(text) is readable: \(spoken)")
         }
         XCTAssertFalse(elements.filter { $0.role == kAXButtonRole as String }.isEmpty, spoken)
