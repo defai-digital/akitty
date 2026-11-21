@@ -32,8 +32,6 @@ jobs:
           AKITTY_TEST_BASH="$(brew --prefix)/bin/bash" python3 scripts/test_shell_integration.py
       - name: Build app bundle
         run: scripts/build-app.sh release
-      - name: Check generated TypeScript bundle is current
-        run: git diff --exit-code -- macos/Sources/AkittyKit/Resources/features.js
       - name: Retain Native and WASM benchmark smoke evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

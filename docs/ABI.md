@@ -46,11 +46,12 @@ it twice. Null output indicates failure to produce a response.
 Every response is `{ "version": 1, "ok": true, "data": ... }` or
 `{ "version": 1, "ok": false, "error": "..." }`. An oversized snapshot returns
 an error, never truncated terminal data. Inputs reject unknown fields. `op`
-selects the request; `id` is a nonreused integer returned by `create`.
+selects the request. Session operations use the nonreused integer `id` returned by `create`.
 
 | Operation | Additional fields | Behavior |
 | --- | --- | --- |
 | version | none | Version/platform information |
+| command_palette | query | Rank native command descriptors without a session; see below |
 | create | cols, rows; optional shell, cwd, headless, scrollback, shell_integration_dir, folder_history | Create session; absolute shell path; default login shell |
 | close | id | Stop/reap the child; idempotent |
 | snapshot | id; optional since, compact, allow_shift | Current snapshot, changed=false, or a partial snapshot (below) |
@@ -67,6 +68,14 @@ selects the request; `id` is a nonreused integer returned by `create`.
 | chrome | id; optional clear, status, mark, progress, sprite | Replace the session chrome document. Applies even when program chrome is off |
 | program_chrome | id, enabled | When false, `OSC 771` no longer changes the document |
 | theme | id; optional foreground, background, cursor (0xRRGGBB), ansi (up to 16 colours) | Host colour theme, the baseline OSC 104/110–112 reset to; omitted colours use the built-in defaults, and an empty request restores them. Program OSC 4/10/11/12 overrides still apply over it. Blank cells on the theme background are omitted from snapshots, so the host clears its frame to that background |
+
+`command_palette` returns `{ "version": 1, "commands": [...] }` with `id`,
+`title`, `shortcut`, and `keywords` for each descriptor. `query` is at most 512
+UTF-8 bytes; ranking uses its first 128 Unicode scalar values after replacing
+control/line-separator characters with spaces, trimming, NFKC normalization, and
+lowercasing. Contiguous matches outrank sparse ordered-character matches; equal
+scores retain declaration order. An empty query returns the complete catalog.
+The host must validate the closed command IDs before dispatching an action.
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
 sessions and 5,000 scrollback lines per session. Input/reply queues are bounded:

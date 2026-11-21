@@ -1,5 +1,4 @@
 import Foundation
-import JavaScriptCore
 
 public enum NativeCommand: String, CaseIterable, Codable {
     case newWindow = "new-window", newTab = "new-tab", split, closePane = "close-pane"
@@ -33,25 +32,12 @@ public struct CommandDescriptor: Codable {
 }
 private struct CommandEnvelope: Codable { let version: Int; let commands: [CommandDescriptor] }
 
-/// Only trusted, bounded code from the app bundle executes. No native objects are exported.
-/// All calls occur on the main actor; this is command UI, never the render path.
-@MainActor public final class FeatureHost {
-    private var context: JSContext?
+/// Swift validates the closed command catalog returned by Rust before dispatching native actions.
+@MainActor public final class CommandProvider {
+    private let request: ([String: Any]) throws -> Data
     public private(set) var warning: String?
-    public init(source: String? = nil) {
-        do {
-            let script: String
-            if let source { script = source }
-            else {
-                guard let url = Bundle.main.url(forResource: "features", withExtension: "js") else { throw AkittyError.core("Palette bundle missing") }
-                script = try String(contentsOf: url, encoding: .utf8)
-            }
-            guard script.utf8.count <= 262144, let context = JSContext() else { throw AkittyError.core("Palette initialization failed") }
-            context.evaluateScript(script)
-            guard context.exception == nil else { throw AkittyError.core("Palette script failed") }
-            self.context = context
-        } catch { warning = "TypeScript palette unavailable; using native commands." }
-    }
+    public init() { request = CoreBridge.call }
+    init(request: @escaping ([String: Any]) throws -> Data) { self.request = request }
     public static func decode(_ data: Data) throws -> [CommandDescriptor] {
         guard data.count <= 65536 else { throw AkittyError.core("Palette response too large") }
         let envelope = try JSONDecoder().decode(CommandEnvelope.self, from: data)
@@ -68,16 +54,16 @@ private struct CommandEnvelope: Codable { let version: Int; let commands: [Comma
     }
     public func search(_ query: String) -> [CommandDescriptor] {
         var query = String(query.prefix(128))
-        while query.utf16.count > 512 { query.removeLast() }
-        if let context {
-            context.exception = nil
-            let value = context.objectForKeyedSubscript("AkittyFeatures")?.objectForKeyedSubscript("listCommands")?.call(withArguments: [query])
-            if context.exception == nil, let string = value?.toString(), let data = string.data(using: .utf8), let entries = try? Self.decode(data) { return entries }
-            self.context = nil
-            warning = "TypeScript palette failed; using native commands."
-        }
-        return NativeCommand.allCases.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }.map {
-            CommandDescriptor(id: $0, title: $0.title, shortcut: "", keywords: [])
+        while query.utf8.count > 512 { query.removeLast() }
+        do {
+            let entries = try Self.decode(try request(["op": "command_palette", "query": query]))
+            warning = nil
+            return entries
+        } catch {
+            warning = "Rust command ranking unavailable; using native commands."
+            return NativeCommand.allCases.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }.map {
+                CommandDescriptor(id: $0, title: $0.title, shortcut: "", keywords: [])
+            }
         }
     }
 }

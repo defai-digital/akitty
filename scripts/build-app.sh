@@ -90,7 +90,6 @@ mkdir -p "$app/Contents/Resources/shell-integration"
 for resource in .zshenv akitty.bash akitty.zsh bashrc; do
     cp "macos/Sources/AkittyKit/Resources/shell-integration/$resource" "$app/Contents/Resources/shell-integration/$resource"
 done
-cp macos/Sources/AkittyKit/Resources/features.js "$app/Contents/Resources/features.js"
 # AppKit loads these credits in the standard About panel from Bundle.main.
 cp macos/Sources/AkittyKit/Resources/Credits.html "$app/Contents/Resources/Credits.html"
 swift scripts/build-icons.swift
@@ -99,8 +98,6 @@ cp macos/Info.plist "$app/Contents/Info.plist"
 python3 scripts/build-siri-metadata.py --build-dir "$PWD/macos/.build" --configuration "$config" --resources "$app/Contents/Resources" --binary "$app/Contents/MacOS/Akitty"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 cp third_party/unicode/LICENSE "$app/Contents/Resources/UNICODE_LICENSE"
-# features.js carries the adapted AX TUI ranking, so its MIT notice ships with it.
-cp third_party/ax-tui/LICENSE "$app/Contents/Resources/AX_TUI_LICENSE"
 cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 python3 scripts/dependency-licenses.py
 cp build/THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"

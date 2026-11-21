@@ -35,7 +35,7 @@ PLIST
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macosx27.2 -I "$native_bin" -I macos/Bridge -F "$native_bin" \
   benchmarks/native-pipeline.swift benchmarks/native-input-trace.swift "$native_bin/AkittyKit.o" "$native_bin/AgentIPC.o" \
   -L "$AKITTY_RUST_LIB_DIR" -lakitty_core -framework Sparkle -framework AppKit -framework MetalKit \
-  -framework Carbon -framework CoreText -framework JavaScriptCore -framework AppIntents \
+  -framework Carbon -framework CoreText -framework AppIntents \
   -Xlinker -rpath -Xlinker "$native_bin" -Xlinker -rpath -Xlinker "$AKITTY_RUST_LIB_DIR" \
   -o "$app/Contents/MacOS/NativePipelineProbe"
 if [[ -n ${AKITTY_NATIVE_PROBE_SAVE_APP:-} ]]; then

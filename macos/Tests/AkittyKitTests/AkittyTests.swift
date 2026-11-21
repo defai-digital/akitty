@@ -127,37 +127,38 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(composition.commit("日本"),"日本"); XCTAssertTrue(composition.text.isEmpty)
         composition.mark("中"); composition.cancel(); XCTAssertTrue(composition.text.isEmpty)
     }
-    @MainActor func testRealJavaScriptCorePalette() async {
-        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/AkittyKit/Resources/features.js")
-        let source = try! String(contentsOf: sourceURL, encoding: .utf8)
-        let host = FeatureHost(source: source)
-        XCTAssertEqual(host.search("split").first?.id, .split)
-        XCTAssertEqual(host.search("ｓｐｌｉｔ").first?.id, .split)
-        XCTAssertEqual(Set(host.search("").map(\.id)), Set(NativeCommand.allCases))
-        XCTAssertNil(host.warning)
+    @MainActor func testRealRustCommandPalette() {
+        let commands = CommandProvider()
+        XCTAssertEqual(commands.search("split").first?.id, .split)
+        XCTAssertEqual(commands.search("ｓｐｌｉｔ").first?.id, .split)
+        XCTAssertEqual(commands.search("nwtab").first?.id, .newTab)
+        XCTAssertEqual(commands.search("next").first?.shortcut, "⌘G")
+        XCTAssertTrue(commands.search("🚀unknown").isEmpty)
+        XCTAssertEqual(Set(commands.search("").map(\.id)), Set(NativeCommand.allCases))
+        XCTAssertNil(commands.warning)
     }
-    @MainActor func testScriptExceptionFallsBackToNativeCommands() async {
-        let host = FeatureHost(source: "var AkittyFeatures = { listCommands: function() { throw new Error('test'); } };")
-        XCTAssertEqual(host.search("split").first?.id,.split)
-        XCTAssertNotNil(host.warning)
-        XCTAssertEqual(host.search("").count,NativeCommand.allCases.count)
+    @MainActor func testCommandProviderFailureFallsBackToNativeCommands() {
+        let commands = CommandProvider { _ in throw AkittyError.core("test") }
+        XCTAssertEqual(commands.search("split").first?.id,.split)
+        XCTAssertNotNil(commands.warning)
+        XCTAssertEqual(commands.search("").count,NativeCommand.allCases.count)
     }
-    @MainActor func testMalformedScriptAndMissingEntryFallBack() async {
-        for source in ["throw new Error('load')", "var AkittyFeatures = {}", "var AkittyFeatures = {listCommands:function(){return 'null'}}"] {
-            let host = FeatureHost(source:source)
-            XCTAssertEqual(host.search("").count,NativeCommand.allCases.count)
-            XCTAssertNotNil(host.warning)
+    @MainActor func testMalformedCommandResponsesFallBack() {
+        for response in ["null", "{}"] {
+            let commands = CommandProvider { _ in Data(response.utf8) }
+            XCTAssertEqual(commands.search("").count,NativeCommand.allCases.count)
+            XCTAssertNotNil(commands.warning)
         }
     }
-    @MainActor func testCommandSchemaRejectsUnknownIDsVersionsAndDuplicates() async throws {
+    @MainActor func testCommandSchemaRejectsUnknownIDsVersionsAndDuplicates() throws {
         let item: [String:Any] = ["id":"split","title":"Split Pane","shortcut":"","keywords":[]]
         for envelope: [String:Any] in [
             ["version":2,"commands":[item]],
             ["version":1,"commands":[item,item]],
             ["version":1,"commands":[["id":"sh -c malicious","title":"x","shortcut":"","keywords":[]]]],
             ["version":1,"commands":[["id":"split","title":"bad\u{1b}","shortcut":"","keywords":[]]]]
-        ] { XCTAssertThrowsError(try FeatureHost.decode(JSONSerialization.data(withJSONObject:envelope))) }
-        XCTAssertThrowsError(try FeatureHost.decode(Data(repeating:0,count:65537)))
+        ] { XCTAssertThrowsError(try CommandProvider.decode(JSONSerialization.data(withJSONObject:envelope))) }
+        XCTAssertThrowsError(try CommandProvider.decode(Data(repeating:0,count:65537)))
     }
     @MainActor func testActualRendererUnavailableFallsBackAndExposesAXText() async throws {
         _ = NSApplication.shared

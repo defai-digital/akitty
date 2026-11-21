@@ -12,7 +12,6 @@
     "noEmit": true
   },
   "include": [
-    "typescript/test/**/*.ts",
     "distribution/**/*.ts",
     "scripts/**/*.ts"
   ]

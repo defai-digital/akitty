@@ -9,6 +9,7 @@ mod control;
 mod graphics;
 mod media;
 mod model;
+mod palette;
 mod placeholder;
 mod program_status;
 mod session;
@@ -28,6 +29,7 @@ const MAX_RESPONSE: usize = 8 * 1_048_576;
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Version {},
+    CommandPalette { query: String },
     Create {
         cols: usize,
         rows: usize,
@@ -253,6 +255,7 @@ fn dispatch(bytes: &[u8], allow_binary: bool) -> Result<Reply, String> {
         Request::Version {} => Ok(
             json!({"abi": ABI_VERSION, "schema": 1, "platform": "macos", "engine": "akitty-vt"}),
         ),
+        Request::CommandPalette { query } => palette::search(&query),
         Request::Create {
             cols,
             rows,

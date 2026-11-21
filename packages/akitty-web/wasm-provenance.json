@@ -6,7 +6,7 @@
   "artifact": "akitty-vt.wasm",
   "sha256": "2a0991430819581850880c64e69e603afeef82fefc451da2de09a194054855d0",
   "inputs": {
-    "Cargo.lock": "096f23c982fc7b7d92e6244b45e020b6ad13466821ae003c7ba5fb55621253fb",
+    "Cargo.lock": "86f34ce84011f9874fe46365158fa0f48db0d87defeb191dfc4ba2542a01b1a9",
     "Cargo.toml": "1f669b3f7f5c4347ea5c8f5548e5f7ac0e34e1d2c43dfe8bb5e3846e1f4b231c",
     "crates/akitty-vt/Cargo.toml": "16c6833e8fed57d9a291ad2be1160a67754841960ece98b89ba5605f059012ad",
     "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",

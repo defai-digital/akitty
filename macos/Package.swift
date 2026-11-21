@@ -17,7 +17,7 @@ let package = Package(
         .target(name: "AkittyKit", dependencies: ["AkittyCore", "AgentIPC", .product(name: "Sparkle", package: "Sparkle")], exclude: ["Resources"],
                 linkerSettings: [.unsafeFlags(["-L", rustLibrary, "-lakitty_core", "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
                                  .linkedFramework("AppKit"), .linkedFramework("MetalKit"),
-                                 .linkedFramework("Carbon"), .linkedFramework("CoreText"), .linkedFramework("JavaScriptCore"), .linkedFramework("AppIntents")]),
+                                 .linkedFramework("Carbon"), .linkedFramework("CoreText"), .linkedFramework("AppIntents")]),
         .executableTarget(name: "Akitty", dependencies: ["AkittyKit"]),
         .testTarget(name: "AkittyMCPTests", dependencies: ["AkittyMCP", "AgentIPC", .product(name: "MCP", package: "swift-sdk")]),
         .testTarget(name: "AkittyKitTests", dependencies: ["AkittyKit", "AgentIPC", .product(name: "MCP", package: "swift-sdk")])

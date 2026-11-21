@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor final class PaletteController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    private let features = FeatureHost()
+    private let commands = CommandProvider()
     private let search = NSSearchField()
     private let table = NSTableView()
     private let warning = NSTextField(labelWithString: "")
@@ -30,7 +30,7 @@ import AppKit
     }
     required init?(coder: NSCoder) { nil }
     func controlTextDidChange(_ obj: Notification) { refresh() }
-    private func refresh() { entries = features.search(search.stringValue); warning.stringValue = features.warning ?? "TypeScript command ranking · native Mac actions"; table.reloadData(); if !entries.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) } }
+    private func refresh() { entries = commands.search(search.stringValue); warning.stringValue = commands.warning ?? "Rust command ranking · native Mac actions"; table.reloadData(); if !entries.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) } }
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let label = NSTextField(labelWithString: "\(entries[row].title)     \(entries[row].shortcut)"); label.font = .systemFont(ofSize: 14); return label

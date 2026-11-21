@@ -31,6 +31,21 @@ impl Drop for Terminal {
         call(json!({"op":"close","id":self.0}));
     }
 }
+
+#[test]
+fn command_palette_is_bounded_deterministic_and_session_independent() {
+    let all = call(json!({"op":"command_palette","query":""}));
+    assert_eq!(all["version"], 1);
+    assert_eq!(all["commands"].as_array().unwrap().len(), 14);
+    assert_eq!(call(json!({"op":"command_palette","query":"split"})), call(json!({"op":"command_palette","query":"split"})));
+    assert_eq!(call(json!({"op":"command_palette","query":"ｓｐｌｉｔ"}))["commands"][0]["id"], "split");
+    assert_eq!(call(json!({"op":"command_palette","query":"nwtab"}))["commands"][0]["id"], "new-tab");
+    assert_eq!(call(json!({"op":"command_palette","query":"side"}))["commands"][0]["id"], "split");
+    assert_eq!(call(json!({"op":"command_palette","query":"🚀unknown"}))["commands"], json!([]));
+    assert_eq!(response(json!({"op":"command_palette","query":"x".repeat(513)}))["ok"], false);
+    assert_eq!(response(json!({"op":"command_palette","query":"split","id":1}))["ok"], false);
+}
+
 #[test]
 fn shell_directory_rejects_a_uri_over_the_documented_byte_limit() {
     let t = Terminal::new(20, 4);

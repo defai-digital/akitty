@@ -2,7 +2,7 @@
 
 Akitty's native macOS app uses the independently authored `akitty-vt` Rust
 terminal engine with its own Rust PTY integration, Swift/AppKit interface,
-CoreText/Metal rendering and TypeScript feature layer. Its own source is MIT licensed.
+CoreText/Metal rendering and Rust command-palette ranking. Its own source is MIT licensed.
 Windows and Linux are reached through the separate AkiTTY Web browser terminal.
 The Experimental Linux and Windows Tauri desktops shipped in 1.3.5 are discontinued
 and removed from the tree; git history retains them.
@@ -165,26 +165,21 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status-bar note. Images are
   unsupported, so confirmation never decodes images.
-- TypeScript ranks native commands through bundled JavaScriptCore code. Swift is
-  the command authority. No Node runtime, shell bridge, dynamic plugin loading,
-  AX TUI native renderer, or arbitrary user JavaScript is included.
-- Adapt only AX TUI's fuzzy ranking algorithm, with pinned provenance and license.
-  AX TUI now lives in the AX Code repository at `packages/ax-tui`. Akitty does not
-  depend on that package. The original registry imports Node and renderer classes
-  and is not copied whole.
+- Rust ranks native commands through the bounded `command_palette` ABI operation.
+  Swift validates the closed command IDs and dispatches native actions, falling back
+  to its native catalog on failure. No Node runtime, JavaScript engine, shell bridge,
+  dynamic plugin loading, or arbitrary user JavaScript is included.
 
 ## Independent advice
 
 Muse CLI recommended a mature Rust engine, narrow versioned ABI, bounded process
 shutdown, permission-first clipboard behavior, native IME/accessibility and
 blocking regressions. Grok CLI and Muse CLI independently recommended declarative
-TypeScript palette results validated and dispatched by Swift. Grok's first architecture call timed out; a shorter retry completed and agreed on
+palette results validated and dispatched by Swift. Grok's first architecture call timed out; a shorter retry completed and agreed on
 engine reuse, while highlighting render data cost, character-width authority and
 PTY cleanup. Raw discussions are private and excluded from publication.
 
-Advice is not test evidence. In particular, a serial queue is not a fixed OS
-thread, and a JavaScriptCore time-limit API must not be assumed public/available.
-Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
+Advice is not test evidence. In particular, a serial queue is not a fixed OS thread.
 
 ## Implementation order and acceptance
 
@@ -195,8 +190,8 @@ Only bounded, bundled trusted code is evaluated; no untrusted JavaScript runs.
    accessible text. Test native policy and Unicode selection behavior.
 3. Metal presentation: check each creation/encoding/completion stage; exercise
    fallback by injected device/pipeline failure and verify the app still draws.
-4. TS palette: deterministic ranking, bounded inputs, schema/ID validation,
-   exception fallback and native execution. Typecheck and run JSCore integration.
+4. Rust palette: deterministic ranking, bounded inputs, schema/ID validation,
+   failure fallback and native execution. Run Rust conformance and Swift ABI integration.
 5. macOS CI runs the complete local verification command with no ignored test
    failures. Public files are checked for secrets, machine paths and agent files.
 6. Build and smoke-test the app before committing/pushing. Signing/notarization,

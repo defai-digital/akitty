@@ -251,7 +251,6 @@ browser tests and release tooling. [Verification and build details](CONTRIBUTING
 
 AkiTTY's code is MIT licensed. The native and web terminals use the
 independently authored `akitty-vt` engine. Thanks to the Ghostty, Alacritty
-and VTE contributors for earlier engines and design references, to iTerm2
-and Kitty for architectural ideas and protocol work, and to AX TUI for the
-adapted command palette ranking. [License](LICENSE) ·
+and VTE contributors for earlier engines and design references, and to iTerm2
+and Kitty for architectural ideas and protocol work. [License](LICENSE) ·
 [Engine provenance](third_party/TERMINAL_ENGINE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
