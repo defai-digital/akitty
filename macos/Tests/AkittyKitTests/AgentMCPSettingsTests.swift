@@ -202,6 +202,7 @@ final class AgentMCPSettingsTests: XCTestCase {
             "[mcp_servers.akitty.env]\nTOKEN = \"x\"\n",
             "\t[mcp_servers.\"akitty\"]\t# mine\n",
             "[mcp_servers.akitty]\r\ncommand = \"/mine\"\r\n",
+            "mcp_servers = { mine = { command = \"/mine\" } }\n",
         ]
         for (index, original) in variants.enumerated() {
             let root = try directory().appendingPathComponent("case\(index)")
@@ -212,6 +213,7 @@ final class AgentMCPSettingsTests: XCTestCase {
             XCTAssertEqual(try settings.state(), .conflict, original)
             XCTAssertThrowsError(try settings.install(), original)
             XCTAssertEqual(try text(config), original, original)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: hooks.path), original)
         }
     }
 
@@ -255,6 +257,10 @@ final class AgentMCPSettingsTests: XCTestCase {
         let settings = KimiMCPSettings(path: config.path, hooksPath: hooks.path, executable: companion)
         XCTAssertThrowsError(try settings.install())
         XCTAssertEqual(try text(config), original, "a malformed hook file must not leave a newly written MCP server")
+        let installedServer = #"{"mcpServers":{"akitty":{"command":"/Applications/Akitty.app/Contents/MacOS/akitty-agent","args":["mcp"]}}}"#
+        try write(installedServer, config)
+        XCTAssertThrowsError(try settings.uninstall())
+        XCTAssertEqual(try text(config), installedServer, "validate the hook file before removing the server")
         let permission = try report(.kimi, ["hook_event_name": "PermissionRequest", "session_id": "kimi-no-decision",
                                            "tool_name": "Bash", "tool_input": ["command": "echo no"]])
         XCTAssertTrue(permission.isEmpty, "Kimi PermissionRequest is observation-only")
@@ -296,5 +302,23 @@ final class AgentMCPSettingsTests: XCTestCase {
         XCTAssertFalse(removed.contains("AkiTTY")); XCTAssertTrue(removed.contains("# first\n\n\n[value]"))
         XCTAssertThrowsError(try marker.body(in: marker.begin + "\na = 1\n"))
         XCTAssertThrowsError(try marker.installing("x = 1", into: marker.begin + "\n" + marker.begin + "\n" + marker.end + "\n" + marker.end))
+    }
+
+    func testAGYMixedHookEntryIsPreserved() throws {
+        let root = try directory(), config = root.appendingPathComponent("mcp_config.json"), hooks = root.appendingPathComponent("hooks.json")
+        let settings = AGYMCPSettings(path: config.path, hooksPath: hooks.path, executable: companion)
+        try settings.install()
+        let installedServer = try text(config)
+        let original = #"{"akitty":{"SessionStart":[{"hooks":[{"type":"command","command":"'/Applications/Akitty.app/Contents/MacOS/akitty-agent' agy-hook","timeout":10},{"type":"command","command":"/bin/true","timeout":10}]}]}}"#
+        try write(original, hooks)
+
+        XCTAssertEqual(try settings.state(), .conflict)
+        XCTAssertThrowsError(try settings.install())
+        XCTAssertEqual(try text(config), installedServer)
+        XCTAssertEqual(try text(hooks), original)
+
+        try settings.uninstall()
+        XCTAssertEqual(try text(hooks), original)
+        XCTAssertNil((try object(config)["mcpServers"] as? [String: Any])?["akitty"])
     }
 }

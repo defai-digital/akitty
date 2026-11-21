@@ -181,13 +181,13 @@ struct ManagedTextBlock {
             if normalized.hasPrefix("[") {
                 let header = normalized.components(separatedBy: "#").first ?? normalized
                 section = header
-                if header == "[mcp_servers.akitty]" || header.hasPrefix("[mcp_servers.akitty.") ||
+                if header == "[[mcp_servers]]" || header == "[mcp_servers.akitty]" || header.hasPrefix("[mcp_servers.akitty.") ||
                     header == "[[mcp_servers.akitty]]" || header.hasPrefix("[[mcp_servers.akitty.") { return true }
                 continue
             }
             if normalized.hasPrefix("mcp_servers.akitty=") || normalized.hasPrefix("mcp_servers.akitty.") ||
                 section == "[mcp_servers]" && (normalized.hasPrefix("akitty=") || normalized.hasPrefix("akitty.")) ||
-                normalized.hasPrefix("mcp_servers=") && normalized.contains("akitty") { return true }
+                section.isEmpty && normalized.hasPrefix("mcp_servers=") { return true }
         }
         return false
     }

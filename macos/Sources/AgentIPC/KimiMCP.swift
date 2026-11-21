@@ -55,12 +55,12 @@ public struct KimiMCPSettings: AgentMCPSettings {
     }
     public func uninstall() throws {
         var settings = try load()
+        let text = try TextSettingsFile.load(hooksPath), cleaned = try marker.removing(from: text)
         if var servers = settings["mcpServers"] as? [String: Any], MCPConfig.standardServer(servers["akitty"], executable: executable) {
             servers.removeValue(forKey: "akitty")
             settings["mcpServers"] = servers.isEmpty ? nil : servers
             try SettingsFile.save(settings, to: path)
         }
-        let text = try TextSettingsFile.load(hooksPath), cleaned = try marker.removing(from: text)
         if cleaned != text { try TextSettingsFile.save(cleaned, to: hooksPath) }
     }
 }

@@ -31,7 +31,7 @@ public struct GrokMCPSettings: AgentMCPSettings {
     public func install() throws {
         let text = try TextSettingsFile.load(path)
         guard try !marker.conflictsWithGrokServer(in: text) else {
-            throw AgentIPCError.failure("\(path) already has an MCP server named \"akitty\" that AkiTTY did not add; it was left unchanged.")
+            throw AgentIPCError.failure("\(path) defines an MCP table that conflicts with AkiTTY's server; it was left unchanged.")
         }
         // Validate both files before changing either one, then leave an explicit partial state if the second write fails.
         let updated = try marker.installing(try body, into: text)

@@ -28,17 +28,17 @@ public struct AGYMCPSettings: AgentMCPSettings {
         return current == nil ? .notInstalled : .conflict
     }
     private func managedHook(_ value: Any?) -> Bool {
-        guard let entry = value as? [String: Any], let groups = entry["SessionStart"] as? [[String: Any]] else { return false }
-        return groups.contains { group in
-            (group["hooks"] as? [[String: Any]] ?? []).contains { handler in
-                guard let command = handler["command"] as? String else { return false }
-                return command == AgentHookSettings.shellQuoted(executable) + " agy-hook" ||
-                    command.hasPrefix("'/") && command.hasSuffix(".app/Contents/MacOS/akitty-agent' agy-hook")
-            }
-        }
+        // AGY stores each named entry as a unit. Only replace or remove a standalone AkiTTY hook.
+        guard let entry = value as? [String: Any], entry.count == 1,
+              let groups = entry["SessionStart"] as? [[String: Any]], groups.count == 1, groups[0].count == 1,
+              let handlers = groups[0]["hooks"] as? [[String: Any]], handlers.count == 1,
+              Set(handlers[0].keys).isSubset(of: ["type", "command", "timeout"]),
+              handlers[0]["type"] as? String == "command",
+              let command = handlers[0]["command"] as? String else { return false }
+        return command == AgentHookSettings.shellQuoted(executable) + " agy-hook" ||
+            command.hasPrefix("'/") && command.hasSuffix(".app/Contents/MacOS/akitty-agent' agy-hook")
     }
-    private func hookState() throws -> AgentHookSettings.State {
-        let settings = try SettingsFile.load(hooksPath)
+    private func hookState(in settings: [String: Any]) -> AgentHookSettings.State {
         let current = settings["akitty"]
         if managedHook(current) {
             return NSDictionary(dictionary: current as? [String: Any] ?? [:]) == NSDictionary(dictionary: hookEntry) ? .installed : .partial
@@ -46,7 +46,7 @@ public struct AGYMCPSettings: AgentMCPSettings {
         return current == nil ? .notInstalled : .conflict
     }
     public func state() throws -> AgentHookSettings.State {
-        MCPConfig.combined(serverState(in: try loadServers()), try hookState())
+        MCPConfig.combined(serverState(in: try loadServers()), hookState(in: try SettingsFile.load(hooksPath)))
     }
     public func install() throws {
         var settings = try loadServers()
@@ -54,7 +54,7 @@ public struct AGYMCPSettings: AgentMCPSettings {
             throw AgentIPCError.failure("\(path) already has an MCP server named \"akitty\" that AkiTTY did not add; it was left unchanged.")
         }
         var hooks = try SettingsFile.load(hooksPath)
-        guard try hookState() != .conflict else {
+        guard hookState(in: hooks) != .conflict else {
             throw AgentIPCError.failure("\(hooksPath) already has an \"akitty\" hook that AkiTTY did not add; it was left unchanged.")
         }
         var servers = settings["mcpServers"] as? [String: Any] ?? [:]
@@ -65,12 +65,12 @@ public struct AGYMCPSettings: AgentMCPSettings {
     }
     public func uninstall() throws {
         var settings = try loadServers()
+        var hooks = try SettingsFile.load(hooksPath)
         if var servers = settings["mcpServers"] as? [String: Any], MCPConfig.standardServer(servers["akitty"], executable: executable) {
             servers.removeValue(forKey: "akitty")
             settings["mcpServers"] = servers.isEmpty ? nil : servers
             try SettingsFile.save(settings, to: path)
         }
-        var hooks = try SettingsFile.load(hooksPath)
         if managedHook(hooks["akitty"]) {
             hooks.removeValue(forKey: "akitty")
             try SettingsFile.save(hooks, to: hooksPath)
