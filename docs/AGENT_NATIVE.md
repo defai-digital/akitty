@@ -1,11 +1,35 @@
 # Native agent workflows
 
-AkiTTY queues requests across panes, integrates with Claude Code, Codex,
-AX Code, Grok, Muse Code, Kimi Code and AGY, and can reopen a workspace with
-reported conversation IDs.
-Local command requests and supported permission prompts require human approval.
-The local workflow works with an ordinary shell and the bundled companion.
-[Release notes](releases/2.0.0.md)
+AkiTTY can show your agents' reported activity, ask you to review commands, and
+offer to resume a reported conversation when you reopen your workspace.
+[AkiTTY user guide](USER_GUIDE.md) · [AkiTTY 2.2.0 release notes](releases/2.2.0.md)
+
+## Set up an agent
+
+1. Open **Akitty → Agent Integrations…**. Find your CLI and click **Install**
+   in its row. If AkiTTY cannot find the CLI, use **Install Instructions…**.
+2. Choose **Akitty → Enable Local Agent Requests** or click **Turn On**
+   in **Settings → Agents**. To enable it on future launches, select
+   **Turn on when AkiTTY starts**.
+3. Start a new agent session in an AkiTTY pane. For Codex, run `/hooks`
+   and trust the installed hooks first.
+4. Open **Window → Agent Overview** (**⌥⌘A**) to see the pane's reported
+   conversation, its input owner, and its approval queue. Select the pane and
+   choose **Show Terminal** to see its output.
+
+### What an approval does
+
+| Sheet action | When it appears | What happens after you approve |
+| --- | --- | --- |
+| **Allow Once** | A supported Claude Code or Codex Bash permission prompt | AkiTTY sends the decision to the agent. The agent runs the command using its own sandbox and permissions. |
+| **Run Command** | An explicit request for an AkiTTY pane via MCP, the companion CLI, or Siri and Shortcuts | AkiTTY queues the exact command at the target pane's idle, integrated bash or zsh prompt. The pane stays under agent control until you reclaim input. |
+
+Review the command and target in the sheet. **Deny** is the default. After
+**Run Command**, check the terminal for the result and choose **Edit →
+Reclaim Terminal Control** to return input to yourself. A command already
+running keeps going. Ordinary agent subprocesses and file tools use the
+agent's existing permissions. [Client-specific setup](#agent-integrations) ·
+[Local request scope](#local-request-protocol-and-trust-boundary)
 
 ## Responsibilities and scope
 
@@ -38,6 +62,18 @@ execution column does not imply interception of ordinary program operations.
 The existing **Allow programs to set the status bar** preference gates new OSC
 7501 reports and capability replies as well as OSC 771 updates. Existing records
 retain their normal lifecycle. Protocol details are in [ABI.md](ABI.md).
+
+To see a report yourself, enable **Settings → Keyboard → Allow programs to
+set the status bar**, open **Agent Overview**, and run the following in a pane.
+The pane reports work for five seconds, then reports completion.
+
+```sh
+{
+  printf '\033]7501;state=working:app=demo\007'
+  sleep 5
+  printf '\033]7501;state=done:app=demo\007'
+}
+```
 
 ## Request a command from a local agent
 
