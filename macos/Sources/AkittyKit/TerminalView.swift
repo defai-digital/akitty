@@ -123,6 +123,10 @@ struct RenderReuse: Equatable {
     /// Polls at the display rate while frames move; paused, not invalidated, while the view is idle.
     private var refreshLink: CADisplayLink?
     private var renderingWasVisible = false
+    /// Bumped every time `releaseRetainedFrames` drops the presenter's textures. A text frame carries atlas
+    /// UVs and instance rows into those textures, so a frame composed before a release must never be handed
+    /// over afterwards. Observable so a test can prove the release really happened.
+    private(set) var releaseGeneration = 0
     /// Uptime seconds of the last changed snapshot or local input. Headless sessions use this to poll for a
     /// following frame; live PTYs already wake through their notification pipe.
     private var lastChange: Double = 0
@@ -292,6 +296,7 @@ struct RenderReuse: Equatable {
     }
     private func releaseRetainedFrames() {
         // In-flight commands retain their Metal resources; queued raster work checks visibility before publishing again.
+        releaseGeneration += 1
         pendingDamage = nil; bitmap = nil; presenter?.releaseTextures()
         lastTextFramed = false; lastLayered = false
         let rasterizer = self.rasterizer, composer = textComposer
@@ -575,6 +580,7 @@ struct RenderReuse: Equatable {
         // Reuse the bitmap only when the GPU path copies it out before the next frame starts drawing into it.
         let reuse = presenter != nil
         let grid = GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cells, scale: scale)
+        let generation = releaseGeneration
         pendingDamage = []
         // Observers may apply another snapshot synchronously; the old frame now owns its captured state and damage.
         onNativeFrameEvent?(.rasterStarted(snapshot.revision))
@@ -589,6 +595,16 @@ struct RenderReuse: Equatable {
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                     guard !self.stopped else { return }
                     guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
+                    // Textures were released while this frame was composed: its atlas UVs and instance rows
+                    // point into pages the presenter no longer owns. Publishing it would either fail the
+                    // full-repaint guard -- and renderFailed disables Metal for this pane for good -- or draw
+                    // from freshly allocated blank pages. Drop it and compose again instead: the composer's
+                    // own release has already forced a full repaint, and unlike `renderFailed` this is
+                    // recoverable. The bitmap and layered handoffs need no such guard, because they upload a
+                    // complete bitmap into whatever texture is current.
+                    guard generation == self.releaseGeneration else {
+                        self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
+                    }
                     if size == self.bounds.size, self.paneVisible, let presenter = self.presenter {
                         do {
                             presenter.startFrame(revision: snapshot.revision)

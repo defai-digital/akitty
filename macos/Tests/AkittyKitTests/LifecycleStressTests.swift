@@ -16,6 +16,67 @@ final class LifecycleStressTests: XCTestCase {
         try await runRepeatedShutdownTest(forceSoftware: false, rounds: 2, resizeSteps: 4)
     }
 
+    /// `releaseRetainedFrames` drops the presenter's textures on the main thread while the composer is reset
+    /// on the raster queue, so a text frame composed before a hide can reach its handoff afterwards. Before the
+    /// release-generation guard that either failed the full-repaint check -- and `renderFailed` disables Metal
+    /// for the pane for good -- or drew from freshly allocated blank pages.
+    ///
+    /// Hiding and un-hiding inside `.rasterReady` fixes the ordering deterministically: that event fires on
+    /// the main thread inside the handoff, after the frame was composed on the raster queue and before it is
+    /// published, so the release always lands in exactly the window the guard exists for.
+    @MainActor func testAFrameComposedBeforeAHideIsDroppedInsteadOfDisablingMetal() async throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        var preferences = TerminalPreferences()
+        preferences.shell = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/lifecycle-shell.sh").path
+        preferences.directory = "/tmp"; preferences.scrollback = 100
+        let pane = try TerminalView(headless: false, forceSoftware: false, forceShaderFailure: false, initial: preferences)
+        window.contentView?.addSubview(pane)
+        defer { pane.onNativeFrameEvent = nil; pane.shutdown(); pane.removeFromSuperview(); window.close() }
+        try XCTSkipIf(pane.health.usesSoftware, "Metal renderer unavailable")
+
+        // Wait for the fixture shell to be reading before sending it any input.
+        let ready = Date().addingTimeInterval(5)
+        while pane.snapshot?.text.contains("PANE_READY") != true, Date() < ready {
+            pane.poll()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try XCTSkipIf(pane.health.usesSoftware, "Metal renderer unavailable")
+        XCTAssertTrue(pane.snapshot?.text.contains("PANE_READY") == true)
+
+        var races = 0
+        pane.onNativeFrameEvent = { event in
+            // Un-hiding redraws, which starts another frame: only race the first few, or the observer
+            // re-triggers itself forever and the main thread never gets to poll again.
+            if case .rasterReady = event, races < 4 {
+                let before = pane.releaseGeneration
+                pane.isHidden = true
+                XCTAssertGreaterThan(pane.releaseGeneration, before, "hiding released the presenter's textures")
+                pane.isHidden = false
+                races += 1
+            }
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while races < 4, Date() < deadline {
+            // Fresh output each pass so a new frame is composed and raced every time.
+            _ = try pane.session.call("input", ["text": "printf 'RACE\\n'\r"])
+            pane.poll()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(races, 4, "the hide/restore interleaving actually happened")
+        XCTAssertNil(pane.health.failure, "a stale frame must never reach renderFailed")
+        XCTAssertFalse(pane.health.usesSoftware, "a stale frame must not permanently disable Metal")
+        let settle = Date().addingTimeInterval(5)
+        while pane.snapshot?.text.contains("RACE") != true, Date() < settle {
+            pane.poll()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(pane.snapshot?.text.contains("RACE") == true, "the pane recovered by composing again")
+    }
+
     @MainActor private func runRepeatedShutdownTest(forceSoftware: Bool, rounds: Int, resizeSteps: Int) async throws {
         _ = NSApplication.shared
         for round in 0..<rounds {
