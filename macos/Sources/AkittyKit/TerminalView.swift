@@ -595,13 +595,12 @@ struct RenderReuse: Equatable {
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                     guard !self.stopped else { return }
                     guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
-                    // Textures were released while this frame was composed: its atlas UVs and instance rows
-                    // point into pages the presenter no longer owns. Publishing it would either fail the
-                    // full-repaint guard -- and renderFailed disables Metal for this pane for good -- or draw
-                    // from freshly allocated blank pages. Drop it and compose again instead: the composer's
-                    // own release has already forced a full repaint, and unlike `renderFailed` this is
-                    // recoverable. The bitmap and layered handoffs need no such guard, because they upload a
-                    // complete bitmap into whatever texture is current.
+                    // Textures were released while this frame was composed. For a text frame that means UVs
+                    // and instance rows into pages the presenter no longer owns: publishing would fail the
+                    // full-repaint guard, and renderFailed disables Metal for this pane for good. A bitmap or
+                    // layered frame would instead upload a whole window of pixels that is about to be
+                    // replaced anyway. Every handoff drops such a frame and composes again, which is always
+                    // recoverable because the composer's own release has already forced a full repaint.
                     guard generation == self.releaseGeneration else {
                         self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
                     }
@@ -629,6 +628,9 @@ struct RenderReuse: Equatable {
                     // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
                     // presenting it would flash the new background behind them. Repaint fully instead.
                     guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
+                    guard generation == self.releaseGeneration else {
+                        self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
+                    }
                     do {
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
@@ -652,6 +654,9 @@ struct RenderReuse: Equatable {
                 self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
                 guard !self.stopped else { return }
                 guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
+                guard generation == self.releaseGeneration else {
+                    self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
+                }
                 do {
                     let frame = try result.get()
                     if size == self.bounds.size, self.paneVisible {

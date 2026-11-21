@@ -38,6 +38,24 @@ final class LifecycleStressTests: XCTestCase {
         defer { pane.onNativeFrameEvent = nil; pane.shutdown(); pane.removeFromSuperview(); window.close() }
         try XCTSkipIf(pane.health.usesSoftware, "Metal renderer unavailable")
 
+        var races = 0, handoffs = 0, racing = false
+        pane.onNativeFrameEvent = { event in
+            switch event {
+            case .handedOff:
+                handoffs += 1
+            case .rasterReady where racing && races < 4:
+                // Un-hiding redraws, which starts another frame: only race the first few, or the observer
+                // re-triggers itself forever and the main thread never gets to poll again.
+                let before = pane.releaseGeneration
+                pane.isHidden = true
+                XCTAssertGreaterThan(pane.releaseGeneration, before, "hiding released the presenter's textures")
+                pane.isHidden = false
+                races += 1
+            default:
+                break
+            }
+        }
+
         // Wait for the fixture shell to be reading before sending it any input.
         let ready = Date().addingTimeInterval(5)
         while pane.snapshot?.text.contains("PANE_READY") != true, Date() < ready {
@@ -47,18 +65,15 @@ final class LifecycleStressTests: XCTestCase {
         try XCTSkipIf(pane.health.usesSoftware, "Metal renderer unavailable")
         XCTAssertTrue(pane.snapshot?.text.contains("PANE_READY") == true)
 
-        var races = 0
-        pane.onNativeFrameEvent = { event in
-            // Un-hiding redraws, which starts another frame: only race the first few, or the observer
-            // re-triggers itself forever and the main thread never gets to poll again.
-            if case .rasterReady = event, races < 4 {
-                let before = pane.releaseGeneration
-                pane.isHidden = true
-                XCTAssertGreaterThan(pane.releaseGeneration, before, "hiding released the presenter's textures")
-                pane.isHidden = false
-                races += 1
-            }
+        // Let the initial full-repaint frame publish first. Racing it would only ever exercise full frames,
+        // and only a partial frame can fail the full-repaint guard this test exists for.
+        let initial = Date().addingTimeInterval(5)
+        while handoffs == 0, Date() < initial {
+            pane.poll()
+            try await Task.sleep(nanoseconds: 20_000_000)
         }
+        XCTAssertGreaterThan(handoffs, 0, "the initial frame published before any race")
+        racing = true
         let deadline = Date().addingTimeInterval(5)
         while races < 4, Date() < deadline {
             // Fresh output each pass so a new frame is composed and raced every time.
@@ -67,13 +82,19 @@ final class LifecycleStressTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertGreaterThanOrEqual(races, 4, "the hide/restore interleaving actually happened")
-        XCTAssertNil(pane.health.failure, "a stale frame must never reach renderFailed")
-        XCTAssertFalse(pane.health.usesSoftware, "a stale frame must not permanently disable Metal")
+        // Wait for a post-race frame to be handed off, not merely for the snapshot to have moved on: a bug
+        // that starved every later frame would otherwise pass here.
+        let published = handoffs
         let settle = Date().addingTimeInterval(5)
-        while pane.snapshot?.text.contains("RACE") != true, Date() < settle {
+        while handoffs == published, Date() < settle {
+            // Keep producing output: without a new frame there would be no handoff to wait for at all.
+            _ = try pane.session.call("input", ["text": "printf 'RACE\\n'\r"])
             pane.poll()
             try await Task.sleep(nanoseconds: 20_000_000)
         }
+        XCTAssertGreaterThan(handoffs, published, "a post-race frame was handed off")
+        XCTAssertNil(pane.health.failure, "a stale frame must never reach renderFailed")
+        XCTAssertFalse(pane.health.usesSoftware, "a stale frame must not permanently disable Metal")
         XCTAssertTrue(pane.snapshot?.text.contains("RACE") == true, "the pane recovered by composing again")
     }
 
