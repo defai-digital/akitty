@@ -15,6 +15,12 @@ enum GlyphClusters {
     private static let zwj: Unicode.Scalar = "\u{200D}"
 
     /// Walks row-major `cells` and joins emoji clusters within a row, omitting the cells they absorb.
+    ///
+    /// These two triggers are the whole contract the Metal text path depends on: `TextEligibility.colourCluster`
+    /// refuses any cell holding a ZWJ or a regional indicator so that, on an eligible frame, this merge is the
+    /// identity and the composer may iterate raw cells instead of merged clusters. A third trigger added here
+    /// breaks that silently — widen the refusal set in the same change, and extend
+    /// `testEveryCellMergeWouldJoinIsRefusedByEligibility`.
     static func merge(_ cells: [Cell]) -> [Drawn] {
         var drawn: [Drawn] = []
         var index = 0

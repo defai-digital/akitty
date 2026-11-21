@@ -53,12 +53,16 @@ Establish repeatable baselines before changing hot paths. Priorities are:
   windows use 0.10% CPU and about 34 context switches a second, eight use 0.21% and about 63, with almost
   no idle wakeups; hiding the app changes neither. Each pane adds about eight switches a second, which
   matches the PTY worker's 250 ms idle poll for a silent child exit.
-- The Metal text path draws wide (two-column) monochrome single-scalar cells from the glyph atlas, so
-  CJK ideographs, kana, hangul and fullwidth forms no longer force a whole-frame CPU raster. Colour
-  emoji, ZWJ and regional-indicator clusters, combining sequences, wide geometric glyphs and
-  decorations on wide cells still fall back: the atlas stores alpha coverage only, so colour glyphs
-  need a separate RGBA tile pass. Eligibility is per frame, so one emoji left on screen keeps that
-  frame on the CPU path, and a repertoire larger than the atlas stands down to it after two rebuilds.
+- The Metal text path draws wide (two-column) monochrome single-scalar cells and single-cell colour
+  clusters from the glyph atlas, so CJK ideographs, kana, hangul and fullwidth forms, plus emoji such
+  as `😀`, `❤️`, `👍🏽` and `#️⃣`, no longer force a whole-frame CPU raster. Clusters that span
+  cells — ZWJ sequences and flags — still fall back, as do combining sequences, wide geometric glyphs
+  and decorations on wide cells. Drawing a spanning cluster from the atlas needs cluster iteration in
+  the composer, which today iterates raw cells: eligibility excludes a superset of the scalars
+  `GlyphClusters.merge` joins on, and every join starts at a cell carrying one, so on an eligible frame
+  merging is the identity. `testEveryCellMergeWouldJoinIsRefusedByEligibility` pins that coupling. Eligibility is per
+  frame, so one spanning cluster left on screen keeps that frame on the CPU path, and a repertoire
+  larger than either atlas page stands down to it after two rebuilds.
 - Engine cells are 40 bytes (packed colours, boxed combining marks, one shared
   hyperlink record per OSC 8 target), so grid and scrollback memory halved and the
   64 MiB history cap retains twice as many rows. Printable ASCII bypasses the parser
@@ -128,6 +132,38 @@ here:
   `GlyphFonts`, which is documented as pure helpers with no observable state, and be owned where the
   notification can be observed safely (the view, passed into both render calls). Adding a notification
   observer and a lock to a pure helper type to close a cosmetic gap is the wrong trade.
+
+One pre-existing race in the Metal handoff is known, was re-confirmed by external review while the colour
+atlas page was added, and is deliberately not fixed in that change:
+
+- **A frame can be handed to the presenter after its textures were released.**
+  `TerminalView.releaseRetainedFrames()` calls `presenter?.releaseTextures()` on the main thread but
+  dispatches `TextComposer.releaseFrames()` to the raster queue, so a frame composed before a hide can
+  reach its main-thread handoff after the pane is visible again. The handoff only re-checks visibility,
+  size and appearance. A partial frame then fails the `Metal text frame is not a full repaint` guard and
+  `renderFailed` disables Metal for that pane for good; a full warm-cache frame instead draws from
+  freshly allocated blank atlases, so its glyphs are missing, and a colour tile would sample the R8
+  coverage page bound at `texture(1)` as BGRA. The coverage atlas has always had this exposure; the
+  colour page only changes how the bad frame looks. The fix is a release generation captured when the
+  frame is composed and compared at handoff, dropping the frame and requesting a redraw instead of
+  publishing it — it belongs in `TerminalView`, needs its own regression test, and must not route
+  through `renderFailed`, which is permanent.
+
+Two more resource items are open, both found by external review of the colour atlas page:
+
+- **Atlas pages are reallocated on every reset instead of being pooled.** `TextComposer.Layout` carries
+  width, height, cols and rows, so every frame of a live drag-resize is a layout change and therefore an
+  atlas reset, and `syncText` answers a reset with a fresh texture. The fresh allocation is load-bearing
+  — a reset reuses atlas coordinates, so the page cannot be rewritten while an in-flight frame samples
+  it — but the discarded one could be retired and reused once `pending.completed` passes it, exactly as
+  `retire()` / `makeTexture(width:height:)` already do for window bitmaps. Both pages are a compile-time
+  constant 2048x2048, so a one-slot pool per pixel format would remove the churn. This predates the
+  colour page at 4 MiB per resize frame; the colour page makes it 20 MiB.
+- **`TextComposer.compose(deferPublication:)` defaults to `false`,** which acknowledges publication
+  inside `compose` and clears the pending uploads of a frame the caller may still drop. Production
+  always passes `true`; only test helpers take the default. With a dropped frame the atlas keeps entries
+  whose bytes were never uploaded, so a later warm frame vends UVs into empty texels — invisible glyphs
+  rather than a loud failure. The default should be `true`, or the parameter should go away.
 
 An external review also proposed relaxing the rasterizer's conservative scroll rule, which repaints
 every row containing non-ASCII text instead of reusing the retained bitmap. Removing the rule fails

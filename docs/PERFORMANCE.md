@@ -2583,6 +2583,147 @@ matches a full encode of the same snapshot; a static CJK screen uploads nothing 
 one mask per glyph after warmup; a ZWJ-led frame is refused without growing the atlas; unsupported
 column counts are rejected rather than clamped; and suspension recovers within one probation interval.
 
-Colour emoji, ZWJ and regional-indicator clusters, combining sequences, wide geometric glyphs,
-decorations on wide cells and fractional geometry all still fall back without changing atlas entries or
-reset counts.
+ZWJ and regional-indicator clusters, combining sequences, wide geometric glyphs, decorations on wide
+cells and fractional geometry all still fall back without changing atlas entries or reset counts;
+single-cell colour clusters no longer do, see the next section.
+
+## Colour emoji from a second atlas page
+
+Until this pass a single emoji cell forced its whole frame onto the CPU rasterizer: the atlas stored
+alpha coverage only, so any cell whose resolved font was a colour face was refused. Because
+eligibility is per frame, one `😀` in a build log kept every row of that pane on the software path.
+
+This adds the narrowest useful slice of colour support rather than all of it.
+
+- **Scope: single-cell complete colour clusters.** A cell is a candidate when its text is at most
+  eight scalars, contains an emoji-presentation scalar, a variation selector, a skin-tone modifier or
+  a combining enclosing keycap, and contains neither a ZWJ nor a regional indicator. Those two
+  exclusions are the point: they are exactly what `GlyphClusters.merge` joins on, so on an eligible
+  frame merging is the identity and the composer may keep iterating raw cells. The raw-cell loop and
+  its debug assertion that raw cells equal merged clusters are therefore unchanged. Clusters that span
+  cells — `👩🏽‍💻`, `🇯🇵` — need cluster iteration and are deliberately deferred; they still
+  fall back, and `analyse` is never reached for them. The exclusion is a strict superset of merge's
+  trigger set (any ZWJ rather than a trailing one, any indicator rather than a pair), which is the safe
+  direction: every join merge can make starts at a cell carrying one of those scalars, so refusing it
+  sinks the whole frame. A ZWJ sequence's tail on its own does pass, and is harmless only because its
+  leading cell never does and eligibility is per frame — a fact worth remembering before anyone makes
+  eligibility per row.
+- **One extra page, not a new pipeline.** A second `bgra8Unorm` texture of the same bounded 2048 side
+  holds whole-cell-box tiles, allocated only for a frame that reports it may sample the page and
+  dropped on any atlas reset, so an emoji-free epoch never pays 16 MiB. It rides the existing text draw call and pipeline: the instance's alpha is set
+  negative to select the page in the vertex shader, `abs()` restores the real alpha for the
+  translucent block cursor, and the coverage atlas stays bound at `texture(1)` when no colour page
+  exists so the fragment shader's second texture is always valid. Tiles are premultiplied BGRA, which
+  matches both the pixel format and the pipeline's `.one` / `.oneMinusSourceAlpha` blend.
+- **The tile shares the mask's transform.** Coverage and colour rasterisation were folded into one
+  `rasterizeWindow(line:ink:fg:geometry:columns:dx:dy:width:height:)`; the fitted path crops it to the
+  ink box and keeps the alpha byte, the colour path takes the full cell box and keeps all four. Same
+  `GlyphFonts.placement`, same clip, same backing scale — which is what makes a tile land where the
+  equivalent mask would, at 1x, 2x and 3x.
+- **Keys and bounds.** Tiles are keyed by style, scalar array, column count and foreground colour.
+  Scalars rather than a `String` for the same canonical-equivalence reason the fitted path uses, and
+  the foreground because a COLR palette may reference current colour even though `sbix` ignores it.
+  The colour page has its own shelf cursor and a 4096-entry cap; either page filling sets one
+  `exhausted` flag and both are reset together, because a reset invalidates every row's UVs either
+  way, so there is nothing to gain by tracking them separately.
+
+### Measurements
+
+`scripts/benchmark-native.sh`, 30 samples per scene, single pane, release build, schema 4. The
+`single-unicode-typing` payload is `漢字 emoji 😀` per line; the other four single-pane scenes carry no
+emoji. Control is the same probe binary with `AKITTY_NATIVE_PROBE_FORCE_SOFTWARE=1`, which measures
+18.6-19.3% process CPU on all five.
+
+| scene | process CPU %, before → after | median event→commit ms, before → after |
+| --- | --- | --- |
+| `single-unicode-typing` | 15.1 → **4.7** | 12.67 → **6.15** |
+| `single-typing` | 4.5 → 4.4 | 6.53 → 5.94 |
+| `single-narrow-typing` | 5.2 → 4.8 | 6.59 → 7.28 |
+| `single-decorated-typing` | 5.0 → 4.6 | 5.78 → 6.03 |
+| `single-cjk-typing` | 4.9 → 5.1 | 5.52 → **4.94** |
+
+The emoji scene drops into the same CPU band as the ASCII scenes and its median event-to-commit halves.
+The four emoji-free scenes are flat: a repeat run of one probe binary moved the commit median by up to
+1.1 ms and CPU by up to 0.4 points, so only the emoji scene's change is outside run-to-run noise.
+
+The "before" column is `native-wide-cjk-atlas-2026-11-20.json`, whose probe binary hash differs, so this
+is a scene-to-scene comparison on one machine rather than a single-binary A/B. That caveat mattered: the
+first implementation of this change *did* regress `single-cjk-typing` (commit median 5.52 → 7.50 ms),
+and an external review found the cause. Widening the analysis cache key from one scalar to `[UInt32]`
+made every fitted cell — that is, every CJK cell — allocate a heap array per lookup, thousands of times
+a frame. Splitting the key into `.one(scalar)` and `.many(scalars)` and building it from a single
+non-allocating iterator pass put CJK back at 4.94 ms, below its own baseline. The lesson is that the
+benchmark's "flat within noise" reading was not flat at all, and CPU% alone did not show it.
+
+The four-pane `four-unicode-*` scenes were not re-measured: their payload carries `👩🏽‍💻` and
+`e\u{0301}`, both still refused, so they remain on the CPU path by construction.
+
+Records: `benchmarks/results/colour-emoji-atlas-2026-11-20.json` and
+`colour-emoji-software-control-2026-11-20.json` (shared `probe_binary_sha256`, schema 4).
+
+### Review-driven corrections
+
+Eight external reviewers read the change (grok, muse, codex, agy, kimi, qwen4-max, glm-5.3 and
+claude-opus-5-5). None found a reachable wrong-pixel bug; the pixel contract and the raw-cell invariant
+held under all of them. What did come out of the review:
+
+- **A CJK hot-path regression this change introduced, and then fixed.** The first version widened the
+  analysis cache key from one scalar to `[UInt32]`, which made every fitted cell — that is, every CJK
+  cell — allocate a heap array per lookup, thousands of times a frame. `single-cjk-typing` commit median
+  went 5.52 → 7.50 ms while its process CPU stayed flat, so the benchmark's headline metric hid it.
+  Splitting the key into `.one(scalar)` / `.many(scalars)` and building it from a single non-allocating
+  iterator pass put CJK at 4.94 ms, below its own baseline.
+- **The colour page is allocated from the frame, not from what happens to be resident.** It was first
+  recreated on every atlas reset whenever one already existed, so a pane that had shown one emoji paid
+  16 MiB per resize frame even with an emoji-free screen. `TextFrame.usesColourPage` now drives it, the
+  reset branch drops the page, and allocation happens before any upload.
+- **The ink box is standardised once, in `analyse`.** Extracting the shared rasterizer had left
+  `rasterizeFitted` standardising its own copy while `rasterizeColour` passed the raw rect, so a font
+  reporting a negative extent would have placed the tile differently from the mask. `rasterizeWindow`
+  also fails closed on a non-finite placement instead of caching an all-zero tile that would hide a
+  glyph for the rest of the epoch.
+- **The scalar bound is enforced at every CoreText boundary, not only in eligibility.** `colourCluster`
+  already counted at most eight scalars, but a stale eligibility certificate could still route a longer
+  cell to the shaper; `fittedAnalysis`, `rasterize(text:)` and `colourEntry`'s key all refuse past the cap.
+- **A proposed fix was rejected after a second reviewer disproved its premise.** One review reported that
+  a failed build attempt "leaks" the tiles it packed, and that resetting the atlas there would stop a
+  later frame uploading them. It would not: `pending` only ever holds uploads for entries that exist,
+  `recoveryPending` forces a full re-encode that draws exactly what is cached, and those coordinates were
+  never written before, so republishing them is idempotent. Resetting instead would have turned every
+  repeated build failure — a cell whose `fg` is not three bytes, reachable through the keyed decoder —
+  into a cold CoreText re-rasterisation of the whole grid per frame. The entries are kept and the
+  reasoning is now recorded at the refusal site.
+- **The `mode` interpolant is `[[flat]]`,** so the 0/1/2 band is structural rather than relying on all
+  four corners of a quad emitting the same value and the thresholds sitting 0.5 away.
+- **The release test now covers the colour page.** It rendered pure ASCII, so `textColourAtlas` was nil
+  throughout and its `hasTextResources` assertion was vacuous with respect to 16 MiB.
+
+Two resource items were confirmed and deliberately left open, both documented in `docs/ROADMAP.md`:
+atlas pages are reallocated rather than pooled on every reset (a live drag-resize of an emoji pane
+allocates 20 MiB per frame, 4 MiB of which predates this change), and `compose(deferPublication:)`
+defaults to the value production never uses.
+
+### Coverage
+
+`MetalTextRenderingTests` grew from 58 cases to 66, and the whole Swift suite is 515 tests, 0 failures.
+
+Pixel equivalence against `GridRasterizer` at 1x, 2x and 3x for single-scalar emoji, VS16-promoted text
+scalars (`❤️`, `⚠️`, `✅`, `☑️`), skin-tone modifiers, keycap sequences, a combining mark on an emoji
+base, a subdivision tag flag (`🏴󠁧󠁢󠁥󠁮󠁧󠁿`), a decorated colour cell, narrow and wide, beside ASCII and
+beside wide CJK, in all four faces — within the established 2/255 worst-channel and 95% identical-pixel
+contract. A second case fills the whole 40x12 grid with colour clusters, because on a sparse screen the
+identical-pixel fraction mostly measures background and a wrong channel order, a flipped tile or a
+one-cell offset would all pass.
+
+The rest cover: tile packing and disjointness, warm frames uploading nothing on either page, a layout
+change re-uploading every tile, **an emoji-free epoch not allocating the page at all**; refusal of ZWJ,
+flag and over-long clusters without growing either page or burning a reset; all four cursor styles over
+both a narrow and a wide colour tile; scroll translation of emoji rows against a full re-encode; the
+entry cap engaging the bounded rebuild under a distinct-cluster storm; and the resource release now
+proven to drop the 16 MiB page and reallocate it for a frame that needs it.
+
+`testEveryCellMergeWouldJoinIsRefusedByEligibility` pins the load-bearing coupling from the merge side:
+for both of `GlyphClusters.merge`'s two triggers, over a set of bases and all 26 regional indicators, it
+asserts that merge really would have joined the pair (33 joins, so the property is not vacuous) and that
+eligibility refuses the leading cell. A third trigger added to merge without widening the refusal set
+fails here, and `merge`'s doc comment now points back at it.

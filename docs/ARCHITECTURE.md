@@ -117,14 +117,24 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
   font preference or the system language.
   Frames of plain single-scalar ASCII, geometric cell glyphs, fitted monochrome single-scalar text in one or two
-  columns, and single underline/strikethrough decorations on narrow cells can be drawn from a glyph atlas when they
-  contain no images, IME text, wide geometric glyphs, decorations on wide cells, multi-scalar or color glyphs,
-  complex underline styles, or fractional geometry (`MetalText.swift`). A two-column cell is fitted into a box twice
-  as wide and centred in it, exactly as the CPU rasterizer places it.
+  columns, single-cell colour clusters, and single underline/strikethrough decorations on narrow cells can be drawn
+  from a glyph atlas when they contain no images, IME text, wide geometric glyphs, decorations on wide cells,
+  multi-scalar text, colour clusters that span cells, complex underline styles, or fractional geometry
+  (`MetalText.swift`). A two-column cell is fitted into a box twice
+  as wide and centred in it, exactly as the CPU rasterizer places it. What the colour eligibility excludes is a
+  superset of what `GlyphClusters.merge` joins on — any ZWJ or regional indicator, not only a trailing ZWJ or an
+  indicator pair — and every join merge can make starts at a cell carrying one, so on an eligible frame
+  merging is the identity and the atlas may iterate raw cells instead of merged clusters.
   Each distinct font glyph is rasterised once by CoreText into one bounded coverage texture and uploaded only when
   new, and the GPU composites per-row instance buffers of cell fills, glyph quads, decoration strips and cursor
   quads. Box, block and braille scalars reuse the same `CellGlyphs` geometry to make colour-independent coverage
-  tiles. Only the rows the core marked dirty are
+  tiles. Colour clusters draw from a second BGRA page of the same bounded side — 16 MiB rather than 4, so it is
+  allocated only for a frame that reports it may sample the page (`TextFrame.usesColourPage`) and dropped on any
+  atlas reset, which means an emoji-free epoch never pays for it. A colour tile is the whole cell box rather than
+  cropped ink, so its instance maps the tile with no offset arithmetic, and it shares the fitted path's CoreText
+  placement so it lands exactly where the equivalent mask would. One page suffices because a cluster is a single
+  CoreText line and cannot be split across the two; the tile key still carries the foreground colour, because a
+  COLR palette may reference it. Only the rows the core marked dirty are
   re-encoded and uploaded; while a frame is still on the GPU the upload publishes a complete replacement buffer
   from a bounded pool instead of rewriting the one it may read, so a frame never samples a half-updated revision.
   The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
@@ -140,7 +150,8 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   alone, since it does not depend on the column count; a full analysis cache is dropped and rebuilt rather than
   refused, so a large CJK repertoire cannot pin the path to the software rasterizer for the rest of the epoch.
   Fitted text masks are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
-  reproduce pixel-for-pixel (wide geometric glyphs, decorations on wide cells, multi-scalar or color glyph clusters,
+  reproduce pixel-for-pixel (wide geometric glyphs, decorations on wide cells, multi-scalar text, colour clusters
+  that join cells or exceed the bounded scalar count,
   complex underline styles, IME composition, Kitty images, backing scales outside 1x-3x) keeps the software
   rasterizer unchanged. A successful full
   content scan certifies
