@@ -76,8 +76,15 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     private var retiredTextBuffers: [(buffer: MTLBuffer, frame: UInt64)] = []
     private static let maxRetiredTextBuffers = 2
     private var textRows = 0, textRowCapacity = 0, textInstanceCount = 0
+    /// Atlas pages dropped by a reset, tagged with the last frame that could still sample them. Both pages are
+    /// a compile-time constant 2048x2048, and a live drag-resize resets the atlas every frame, so without reuse
+    /// each such frame allocates 4 MiB plus, once the pane has shown an emoji, 16 MiB.
+    private var retiredAtlases: [(texture: MTLTexture, frame: UInt64)] = []
+    private static let maxRetiredAtlases = 4
     /// Bounded observations for tests and probes: atlas generations, upload paths and uploaded instance rows.
     private(set) var textAtlasGenerations = 0
+    /// Real atlas texture allocations, as opposed to pages reused from the retired pool.
+    private(set) var atlasPageAllocations = 0
     private(set) var textAtlasUploads = 0
     private(set) var textRowUploads = 0
     /// Frames whose rows could not be written in place because the GPU was busy, so a whole buffer was published.
@@ -334,10 +341,14 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             textShadow = Array(repeating: .zero, count: max(1, frame.rows * capacity))
         }
         if frame.resetAtlas || textAtlas == nil {
-            guard let atlas = Self.makeAtlasTexture(device: device) else { throw AkittyError.core("Metal text atlas allocation failed") }
+            // A reset reuses atlas coordinates, so the outgoing pages must never be rewritten while an
+            // in-flight frame samples them. Retire them and take a page no frame can still read -- which is
+            // the same one whenever the GPU is idle, so a steady resize stops allocating altogether.
+            retireAtlas(textAtlas); retireAtlas(textColourAtlas)
+            guard let atlas = takeAtlas(.r8Unorm) else { throw AkittyError.core("Metal text atlas allocation failed") }
             textAtlas = atlas; textAtlasGenerations += 1
             // Both pages share one reset: a colour UV is as stale as a coverage UV after a rebuild. Dropping
-            // the reference rather than recreating it means an epoch with no colour tile never pays 16 MiB.
+            // the reference means an epoch with no colour tile never pays 16 MiB.
             textColourAtlas = nil
         }
         // Driven by the frame rather than by what happens to be resident: a warm frame redraws cached tiles
@@ -345,7 +356,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         // upload keeps a 16 MiB failure from leaving half-written pages behind; the coverage page above is
         // already replaced, but the throw disables Metal and the CPU rasterizer draws the frame instead.
         if frame.usesColourPage, textColourAtlas == nil {
-            guard let colour = Self.makeColourAtlasTexture(device: device) else { throw AkittyError.core("Metal colour atlas allocation failed") }
+            guard let colour = takeAtlas(.bgra8Unorm) else { throw AkittyError.core("Metal colour atlas allocation failed") }
             textColourAtlas = colour
         }
         // New masks only ever take atlas coordinates that were never written before, so appending cannot
@@ -410,6 +421,26 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         onUpload?(length, true, .textRows)
     }
     /// A single R8 texture holds every mask, so the GPU never allocates a texture per glyph or per cell.
+    /// Retires one page, keeping at most `maxRetiredAtlases` of them. The bound is on count rather than on
+    /// bytes because both formats are a fixed size: 4 x (4 MiB + 16 MiB) is the worst transient retention.
+    private func retireAtlas(_ texture: MTLTexture?) {
+        guard let texture else { return }
+        retiredAtlases.append((texture, pending.submitted))
+        if retiredAtlases.count > Self.maxRetiredAtlases {
+            retiredAtlases.removeFirst(retiredAtlases.count - Self.maxRetiredAtlases)
+        }
+    }
+    /// A page no in-flight frame can still sample, reused whenever one exists, freshly allocated otherwise.
+    /// Reuse is only safe under that condition: a reset reuses atlas coordinates, so a page the GPU is still
+    /// reading could otherwise be overwritten with a different glyph.
+    private func takeAtlas(_ pixelFormat: MTLPixelFormat) -> MTLTexture? {
+        let completed = pending.completed
+        if let index = retiredAtlases.firstIndex(where: { $0.frame <= completed && $0.texture.pixelFormat == pixelFormat }) {
+            return retiredAtlases.remove(at: index).texture
+        }
+        atlasPageAllocations += 1
+        return pixelFormat == .r8Unorm ? Self.makeAtlasTexture(device: device) : Self.makeColourAtlasTexture(device: device)
+    }
     static func makeAtlasTexture(device: MTLDevice) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: GlyphAtlas.textureSize,
                                                                   height: GlyphAtlas.textureSize, mipmapped: false)
@@ -450,6 +481,8 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     func releaseTextures() {
         texture = nil; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = []
         textAtlas = nil; textColourAtlas = nil; textInstances = nil; textShadow = []; retiredTextBuffers = []
+        // Leaving the window frees the pixels rather than parking them for reuse.
+        retiredAtlases = []
         textInstanceCount = 0; textRows = 0; textRowCapacity = 0
         layerSize = nil; mode = .none; view.needsDisplay = true
     }

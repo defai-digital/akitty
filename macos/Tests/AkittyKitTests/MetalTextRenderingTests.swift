@@ -1646,6 +1646,57 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertTrue(presenter.hasColourAtlas, "the page is reallocated for the frame that needs it")
     }
 
+    /// A live drag-resize is a layout change every frame, so every frame resets the atlas. Retired pages may
+    /// only be reused once no frame can still sample them: while one is in flight a reset must allocate, and
+    /// once it completes reuse must resume without a stale glyph surfacing.
+    @MainActor func testAtlasPagesAreReusedOnlyOnceNoFrameCanSampleThem() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        let snapshot = try snapshot(cells: line(0, "abc\u{1F600}"))
+        _ = try render(snapshot, scale: 2, presenter: presenter, composer: composer)
+        let allocations = presenter.atlasPageAllocations
+        XCTAssertEqual(allocations, 2, "one coverage page and one colour page")
+        waitUntilIdle(presenter)
+
+        let idle = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 3,
+                                                  fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                  appearance: .standard))
+        XCTAssertTrue(idle.resetAtlas, "a backing-scale change resets the atlas")
+        try presenter.updateText(idle, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 3))
+        XCTAssertEqual(presenter.atlasPageAllocations, allocations, "with the GPU idle both pages are reused")
+
+        // A frame still on the GPU is sampling the retired pages, so this reset has to allocate new ones.
+        let held = try presenter.holdFrameInFlight()
+        let busy = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 2,
+                                                  fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                  appearance: .standard))
+        try presenter.updateText(busy, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
+        XCTAssertEqual(presenter.atlasPageAllocations, allocations + 2, "an in-flight frame's pages cannot be reused")
+        held.release(); held.command.waitUntilCompleted()
+        waitUntilIdle(presenter)
+
+        let after = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 3,
+                                                   fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                   appearance: .standard))
+        try presenter.updateText(after, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 3))
+        XCTAssertEqual(presenter.atlasPageAllocations, allocations + 2, "completed pages come back into use")
+        let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 3, fontName: "Menlo", fontSize: 13,
+                                          cellSize: cell, composition: "")
+        let gpu = try presenter.renderOffscreen(width: bitmapSize(3).width, height: bitmapSize(3).height)
+        let result = compare(cpu, gpu)
+        XCTAssertLessThanOrEqual(result.max, 2, "a reused page holds no stale glyphs")
+        XCTAssertGreaterThan(result.exact, 0.95, "a reused page matches the CPU rasterizer")
+
+        // Leaving the window frees the pool rather than parking 20 MiB for a pane that may never return.
+        presenter.releaseTextures()
+        composer.releaseFrames()
+        XCTAssertFalse(presenter.hasColourAtlas)
+        let back = try XCTUnwrap(compose(snapshot, composer: composer, damage: nil))
+        try presenter.updateText(back, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
+        XCTAssertEqual(presenter.atlasPageAllocations, allocations + 4, "release empties the pool")
+    }
+
     /// No two masks may claim the same atlas region in one frame.
     private func assertDisjoint(_ uploads: [GlyphAtlas.Upload], entries: Int) {
         XCTAssertEqual(uploads.count, entries, "every recreated entry is uploaded exactly once")
