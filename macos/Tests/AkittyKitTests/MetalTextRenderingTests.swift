@@ -1675,6 +1675,14 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertEqual(presenter.atlasPageAllocations, allocations + 2, "an in-flight frame's pages cannot be reused")
         held.release(); held.command.waitUntilCompleted()
         waitUntilIdle(presenter)
+        // The busy-path frame allocated fresh pages rather than reusing them; check its pixels too, not only
+        // its allocation count, so both paths are held to the same reference.
+        let busyCPU = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+        let busyGPU = try presenter.renderOffscreen(width: bitmapSize(2).width, height: bitmapSize(2).height)
+        let busyResult = compare(busyCPU, busyGPU)
+        XCTAssertLessThanOrEqual(busyResult.max, 2, "freshly allocated busy-path pages match the CPU rasterizer")
+        XCTAssertGreaterThan(busyResult.exact, 0.95)
 
         let after = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 3,
                                                    fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
@@ -1695,6 +1703,46 @@ final class MetalTextRenderingTests: XCTestCase {
         let back = try XCTUnwrap(compose(snapshot, composer: composer, damage: nil))
         try presenter.updateText(back, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
         XCTAssertEqual(presenter.atlasPageAllocations, allocations + 4, "release empties the pool")
+    }
+
+    /// Two frames in flight is the normal drag-resize pipeline, and with emoji every reset parks two pages,
+    /// so the pool reaches its cap. Taking both pages before retiring either is what stops the cap evicting
+    /// the page that has just become reusable. Without that ordering reuse collapses to zero here.
+    @MainActor func testAtlasReuseSurvivesTwoFramesInFlightAndPrunesWhenIdle() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let composer = TextComposer()
+        let snapshot = try snapshot(cells: line(0, "abc\u{1F600}"))
+        _ = try render(snapshot, scale: 2, presenter: presenter, composer: composer)
+        waitUntilIdle(presenter)
+        var held: [(command: MTLCommandBuffer, release: () -> Void)] = []
+        defer { held.forEach { $0.release(); $0.command.waitUntilCompleted() } }
+        for scale: CGFloat in [3, 2, 3] {
+            let frame = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard))
+            XCTAssertTrue(frame.resetAtlas, "a scale change resets the atlas")
+            try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            held.append(try presenter.holdFrameInFlight())
+        }
+        let allocations = presenter.atlasPageAllocations
+        XCTAssertGreaterThan(presenter.retiredAtlasCount, 0, "the busy resets parked pages")
+        // Let the oldest held frame finish: its pages are now reusable, and the pool is at its cap, so this
+        // reset is exactly the case where retiring first would evict them before they could be taken.
+        held.removeFirst().release()
+        let reused = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 2,
+                                                    fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                    appearance: .standard))
+        try presenter.updateText(reused, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
+        XCTAssertEqual(presenter.atlasPageAllocations, allocations, "completed pages are reused, not evicted by the cap")
+
+        held.forEach { $0.release() }
+        held.removeAll()
+        waitUntilIdle(presenter)
+        // Steady-state frames must not keep the burst's pages alive forever.
+        let steady = try XCTUnwrap(compose(snapshot, composer: composer, damage: []))
+        try presenter.updateText(steady, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
+        XCTAssertEqual(presenter.retiredAtlasCount, 0, "completed pages are pruned once the burst is over")
     }
 
     /// No two masks may claim the same atlas region in one frame.
