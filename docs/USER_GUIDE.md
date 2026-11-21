@@ -8,7 +8,17 @@ for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-star
 
 - **Open a folder.** Drop it onto the AkiTTY Dock icon or run
   `open -a Akitty /path/to/project` from a shell. AkiTTY opens a window
-  in that folder.
+  in that folder. An ordinary file, including a script that is not marked
+  executable, opens in its folder. One request opens at most 8 folders and
+  programs.
+- **Open a program from Finder.** Choose **Akitty → Make Akitty the Default Terminal**.
+  macOS then opens Unix executables, and executable `.command` and `.tool`
+  files, with AkiTTY. AkiTTY asks before running the program, waits for the
+  prompt, then runs it in a shell in its folder. The shell stays open so you
+  can read the output. Choose **Cancel** to leave the file alone.
+- **Start from the Dock.** Control-click the AkiTTY icon and choose **New Window**
+  or **New Tab**. **New Tab** opens in the frontmost terminal window and leaves
+  a hidden Quick Terminal hidden. With no terminal open, it opens a window.
 - **Keep related tasks together.** Open a tab for each project or split a
   tab into side-by-side panes for a shell, a build, or a log. Click a pane
   to focus it. **⌘W** closes the active pane.

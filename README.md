@@ -45,6 +45,8 @@ installation, run `bash install.sh --system` with write access to **/Application
 | Open a shell with project settings | Save a profile with its own font, colours, shell, starting folder, and scrollback under **Settings → Profiles**. |
 | Return to a workspace | Save named window layouts with **Shell → Window Layouts**. Reopening starts fresh shells. You can include a short scrollback excerpt when saving. |
 | Reach a shell from another app | Enable the global shortcut in **Settings → Keyboard**. Hiding the Quick Terminal keeps its shells running. |
+| Start a window from the Dock | Control-click the Dock icon and choose **New Window** or **New Tab**. New Tab uses the frontmost terminal. |
+| Open Unix executables from Finder | Choose **Akitty → Make Akitty the Default Terminal**. AkiTTY asks before it runs a Unix executable or an executable `.command` or `.tool` file. |
 | Find an app command | Press **⇧⌘P** to open the command palette. |
 
 <a id="folder-command-history"></a>

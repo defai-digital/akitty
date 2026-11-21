@@ -1,11 +1,13 @@
 import AppKit
 import AgentIPC
 import AppIntents
+import UniformTypeIdentifiers
 
 /// Folders requested by an open-documents event: Finder "Open With", a Dock drop, or `open -a Akitty <path>` (how
-/// AX Code Desktop hands a project over). A file opens in its folder, as in Terminal. Missing paths, non-file URLs and
-/// anything past `limit` are counted as skipped rather than dropped silently, and the limit keeps one event from
-/// starting an unbounded number of shells.
+/// AX Code Desktop hands a project over). An ordinary file opens in its folder, including a `.command` or `.tool`
+/// file that is not executable. `documentOpen` offers to run a Unix executable or an executable script. Missing
+/// paths, non-file URLs and anything past `limit` are counted as skipped rather than dropped silently, and the limit
+/// keeps one event from starting an unbounded number of shells.
 struct FolderOpenRequest: Equatable {
     var directories: [String] = []
     var skipped = 0
@@ -149,6 +151,12 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
+    /// Reads the current Unix-executable handler. Tests replace this; the menu action still changes the real handler.
+    var defaultTerminalApplication: () -> URL? = { NSWorkspace.shared.urlForApplication(toOpen: .unixExecutable) }
+    /// Programs and skipped-item counts delivered before the app finished launching. Shown after the menu exists.
+    private var pendingOpen: DocumentOpen?
+    /// Timers that type an approved program once its shell prompt is up.
+    private var launchTimers: [Timer] = []
     /// Delegates that rebuild the profile submenus each time they open, so they always list the saved profiles.
     private var profileMenus: [ProfileMenu] = []
     /// Opens a window, or a tab in the key terminal window, whose first pane uses `profile` (nil: defaults).
@@ -211,6 +219,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         // activate themselves through showIntentWindow.
         if Self.shouldActivateAfterLaunch(windowCount: windows.count) { NSApp.activate(ignoringOtherApps: true) }
         updates.start()
+        finishPendingOpens()
     }
     /// A default launch or a folder opened before launch owns a window and still
     /// activates. A background intent launch has no window and stays in place.
@@ -227,16 +236,119 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         return true
     }
     public func application(_ sender: NSApplication, open urls: [URL]) {
-        let request = folderOpenRequest(from: urls)
-        for directory in request.directories { newWindow(directory: directory) }
-        if !launched, !windows.isEmpty { openedFolderAtLaunch = true }
-        if request.skipped > 0 {
-            let alert = NSAlert(); alert.messageText = request.skipped == 1 ? "One item was not opened." : "\(request.skipped) items were not opened."
-            alert.informativeText = "Akitty opens existing folders, at most 8 at a time."; alert.runModal()
+        let request = documentOpen(from: urls)
+        for directory in request.folders.directories { newWindow(directory: directory) }
+        // A confirmation during launch runs before the menu and the Dock exist, and the alert can sit behind Finder.
+        // Hold programs until didFinishLaunching has activated the app.
+        if !launched {
+            var pending = pendingOpen ?? DocumentOpen()
+            pending.runnable.append(contentsOf: request.runnable)
+            pending.skippedRunnables += request.skippedRunnables
+            pending.folders.skipped += request.folders.skipped
+            pendingOpen = pending
+            if !request.runnable.isEmpty { openedFolderAtLaunch = true }
+            return
         }
-        if launched { NSApp.activate(ignoringOtherApps: true) }
+        NSApp.activate(ignoringOtherApps: true)
+        presentOpens(request.runnable, skipped: request.folders.skipped + request.skippedRunnables, openWindowIfNone: false)
+    }
+    /// Confirms each program, then offers a normal window when a cold launch was cancelled and nothing else opened.
+    private func presentOpens(_ paths: [String], skipped: Int, openWindowIfNone: Bool) {
+        let before = windows.count
+        for path in paths { openRunnable(at: path) }
+        if skipped > 0 {
+            let alert = NSAlert(); alert.messageText = skipped == 1 ? "One item was not opened." : "\(skipped) items were not opened."
+            alert.informativeText = "Akitty opens at most 8 folders and programs from one request."; alert.runModal()
+        }
+        if openWindowIfNone, windows.count == before, windows.isEmpty { _ = openUntitledWindow() }
+    }
+    private func finishPendingOpens() {
+        guard let pending = pendingOpen else { return }
+        pendingOpen = nil
+        NSApp.activate(ignoringOtherApps: true)
+        presentOpens(pending.runnable, skipped: pending.folders.skipped + pending.skippedRunnables, openWindowIfNone: true)
+    }
+    /// Asks before running a program Finder opened, then types its quoted path into a new shell in its folder.
+    private func openRunnable(at path: String) {
+        guard let line = DefaultTerminal.launchLine(for: path) else {
+            let alert = NSAlert()
+            alert.messageText = "Cannot Run This File"
+            alert.informativeText = "This file's path contains hidden characters, so Akitty will not run it."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        guard let identity = DefaultTerminal.fileIdentity(path) else {
+            let alert = NSAlert()
+            alert.messageText = "Cannot Run This File"
+            alert.informativeText = "Akitty cannot find this file."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Allow Akitty to run “\((path as NSString).lastPathComponent)”?"
+        alert.informativeText = "A new terminal will start in this file's folder and run it after the prompt. The shell stays open afterward.\n\n\(path)"
+        alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Cancel"); alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard DefaultTerminal.fileIdentity(path) == identity else {
+            let changed = NSAlert()
+            changed.messageText = "The File Changed"
+            changed.informativeText = "Akitty did not run it, because the file changed while the confirmation was open."
+            changed.alertStyle = .warning
+            changed.runModal()
+            return
+        }
+        do {
+            let controller = try createTerminalWindow(directory: (path as NSString).deletingLastPathComponent)
+            guard let terminal = controller.active else { return }
+            sendLaunchLine(line, to: terminal)
+        } catch { NSAlert(error: error).runModal() }
+    }
+    /// Types `line` once shell integration reports a prompt, or after two seconds when integration is off.
+    private func sendLaunchLine(_ line: String, to terminal: TerminalView) {
+        let started = Date()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak terminal] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                guard let terminal else { timer.invalidate(); self.launchTimers.removeAll { $0 === timer }; return }
+                let ready = (try? terminal.session.shellState())?.shell?.ready == true
+                guard DefaultTerminal.shouldSendLaunchCommand(ready: ready, elapsed: Date().timeIntervalSince(started)) else { return }
+                timer.invalidate()
+                self.launchTimers.removeAll { $0 === timer }
+                terminal.send(line)
+            }
+        }
+        launchTimers.append(timer)
+        RunLoop.main.add(timer, forMode: .common)
     }
     @objc public func newWindow(_ sender: Any?) { newWindow(directory: nil) }
+    /// Dock menu. macOS adds the open-window list, Options, Show All Windows, Hide and Quit after these items.
+    public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        let window = menu.addItem(withTitle: "New Window", action: #selector(newWindowFromDock(_:)), keyEquivalent: "")
+        window.target = self
+        let tab = menu.addItem(withTitle: "New Tab", action: #selector(newTabFromDock(_:)), keyEquivalent: "")
+        tab.target = self
+        return menu
+    }
+    @objc func newWindowFromDock(_ sender: Any?) { newWindow(nil); NSApp.activate(ignoringOtherApps: true) }
+    /// A tab in the frontmost terminal. Settings and Agent Overview are skipped. A hidden quick terminal is not revealed.
+    /// With none open, this is a new window.
+    @objc func newTabFromDock(_ sender: Any?) {
+        let ordered = NSApp.orderedWindows.compactMap { $0.windowController as? TerminalWindow }
+        if let window = Self.dockTabWindow(orderedFrontToBack: ordered, quick: quickTerminal.terminalWindow) {
+            do { try window.newTab(); window.showWindow(nil); window.window?.makeKeyAndOrderFront(nil) }
+            catch { NSAlert(error: error).runModal() }
+        } else { newWindow(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    /// `orderedFrontToBack` is the app's terminal windows, front first. The first visible one wins.
+    /// When every regular window is minimized, the frontmost regular window is still used so the tab is not lost.
+    static func dockTabWindow(orderedFrontToBack: [TerminalWindow], quick: TerminalWindow?) -> TerminalWindow? {
+        if let visible = orderedFrontToBack.first(where: { $0.window?.isVisible == true }) { return visible }
+        return orderedFrontToBack.first { $0 !== quick }
+    }
     func createInitialWindowIfNeeded(defaultLaunch: Bool, headless: Bool = false) throws {
         if !openedFolderAtLaunch && defaultLaunch, !(try restoreWorkspaceIfEnabled(headless: headless)) { try createTerminalWindow(headless: headless) }
     }
@@ -346,6 +458,30 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func restartTerminal(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.restartFocusedPane() }
     @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
     @objc private func settings(_ sender: Any?) { showSettings() }
+    /// Sets this app as the handler for Unix executables and Terminal shell scripts.
+    /// macOS asks the user to confirm each change.
+    @objc func setAsDefaultTerminal(_ sender: Any?) {
+        var types: [UTType] = [.unixExecutable]
+        if let scripts = DefaultTerminal.shellScriptType { types.append(scripts) }
+        setDefaultTerminal(types, at: Bundle.main.bundleURL, failures: [])
+    }
+    private func setDefaultTerminal(_ types: [UTType], at bundle: URL, failures: [String]) {
+        guard let type = types.first else {
+            guard !failures.isEmpty else { return }
+            let alert = NSAlert()
+            alert.messageText = "Failed to Set Default Terminal"
+            alert.informativeText = "Akitty could not be set as the default terminal.\n\n\(failures.joined(separator: "\n"))"
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        NSWorkspace.shared.setDefaultApplication(at: bundle, toOpen: type) { [weak self] error in
+            let failure = error?.localizedDescription
+            DispatchQueue.main.async {
+                self?.setDefaultTerminal(Array(types.dropFirst()), at: bundle, failures: failures + (failure.map { [$0] } ?? []))
+            }
+        }
+    }
     func showSettings(tab: SettingsTab? = nil) {
         if settingsWindow == nil { settingsWindow = PreferencesWindow(updater: updates) }
         if let tab { settingsWindow?.select(tab) }
@@ -472,6 +608,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let integrations = app.addItem(withTitle: "Agent Integrations…", action: #selector(showAgentIntegrations(_:)), keyEquivalent: ""); integrations.target = self
         eventMenuItem = timeline
         let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
+        let defaultTerminal = app.addItem(withTitle: "Make Akitty the Default Terminal", action: #selector(setAsDefaultTerminal(_:)), keyEquivalent: "")
+        defaultTerminal.target = self
         app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("Shell"), edit = menu("Edit"), view = menu("View")
         func add(_ command: NativeCommand, key: String, modifiers: NSEvent.ModifierFlags = [.command], to menu: NSMenu) {
@@ -511,6 +649,17 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         add(.agentOverview, key: "a", modifiers: [.command, .option], to: window)
         window.addItem(.separator())
         for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
+    }
+}
+
+extension AkittyApplication: NSMenuItemValidation {
+    /// The app menu keeps automatic validation on, so Check for Updates and the rest still validate themselves.
+    /// Only the default-terminal item is decided here. Every other item keeps the enabled state its menu already set.
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(setAsDefaultTerminal(_:)) {
+            return !DefaultTerminal.isHandler(defaultTerminalApplication(), for: Bundle.main.bundleURL)
+        }
+        return item.isEnabled
     }
 }
 
