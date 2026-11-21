@@ -9,7 +9,7 @@ import os
 private let hiddenPollInterval: Double = 0.25
 
 /// Opt-in observations for the native pipeline probe; no terminal contents are recorded.
-enum NativeUploadResource: String { case bitmap, atlasMask, textRows, imageTexture }
+enum NativeUploadResource: String { case bitmap, atlasMask, colourTile, textRows, imageTexture }
 /// A frame terminates on the path that produced it: the CPU bitmap path reports `rasterCompleted`,
 /// while atlas and layered frames have no CPU terminal and end at `gpuCompleted`. The probe picks
 /// one per renderer mode, so it never mixes the two semantics in a comparison.

@@ -4,6 +4,7 @@ import Foundation
 
 /// One quad of a GPU text frame. `uv.zw` of zero makes the quad a solid fill; otherwise it samples the glyph
 /// atlas and multiplies the coverage by `rgba`. Colours are device-RGB, premultiplied in the fragment shader.
+/// A negative `a` is a sentinel: the quad samples the colour page instead and is not tinted, so `rgb` is unused.
 struct TextInstance: Equatable {
     var destX: Float, destY: Float, destW: Float, destH: Float
     var u: Float, v: Float, uw: Float, uh: Float
@@ -79,12 +80,15 @@ enum TextEligibility {
         // one-column tile that the instance then stretches across two columns, and a wide cell holding
         // printable ASCII is a synthetic state the fitted path must not adopt.
         if cell.wide {
-            guard cell.fg.count == 3, fittedScalar(cell) != nil else { return .wideCell }
+            guard cell.fg.count == 3, fittedScalar(cell) != nil || colourCluster(cell) else { return .wideCell }
             return nil
         }
         if text.utf8.count == 1, let byte = text.utf8.first, (0x20...0x7e).contains(byte) { return nil }
         if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, CellGlyphs.handles(scalar) { return nil }
         if cell.fg.count == 3, fittedScalar(cell) != nil { return nil }
+        // A colour cluster is only a candidate here; whether the resolved font really is a colour face is
+        // decided by the font-aware scan, which refuses the frame if it is not.
+        if cell.fg.count == 3, colourCluster(cell) { return nil }
         return .nonASCII
     }
     /// One standalone scalar that can be fitted into its cell without merging with a neighbour. A wide
@@ -104,6 +108,35 @@ enum TextEligibility {
         case .nonspacingMark, .enclosingMark, .spacingMark, .format: return nil
         default: return scalar
         }
+    }
+    /// Longest cell text treated as one colour cluster. A real cluster is a base plus a few modifiers, so
+    /// this only bounds the work a hostile snapshot could ask for.
+    static let maxClusterScalars = 8
+
+    /// Whether a cell's text could be a single-cell colour cluster: an emoji-presentation scalar, a variation
+    /// selector, a skin-tone modifier or a combining enclosing keycap.
+    ///
+    /// It refuses any text holding a ZWJ or a regional indicator — a strict superset of what
+    /// `GlyphClusters.merge` joins on, which is a *trailing* ZWJ or a regional-indicator *pair*. Every join
+    /// merge can make starts at a cell carrying one of those scalars, so refusing the wider set means a frame
+    /// holding any joinable cluster fails eligibility as a whole. That is what keeps the composer's raw-cell
+    /// iteration equal to the merged clusters the CPU rasterizer draws, the invariant the whole text path
+    /// rests on. A ZWJ sequence's tail (`👧` on its own) does pass this test; that is safe only because its
+    /// leading cell never does and eligibility is per frame, not per cell. Whether the resolved font is
+    /// actually a colour face is a separate, font-aware question.
+    static func colourCluster(_ cell: Cell) -> Bool {
+        let text = cell.text
+        guard !text.isEmpty, text != " " else { return false }
+        var scalars = 0, emojiish = false
+        for scalar in text.unicodeScalars {
+            scalars += 1
+            guard scalars <= maxClusterScalars else { return false }
+            let value = scalar.value
+            if value == 0x200d || (0x1f1e6...0x1f1ff).contains(value) { return false }
+            if scalar.properties.isEmojiPresentation || (0xfe00...0xfe0f).contains(value)
+                || (0x1f3fb...0x1f3ff).contains(value) || value == 0x20e3 { emojiish = true }
+        }
+        return emojiish
     }
     /// Content the atlas cannot draw identically. Kept separate from geometry so the routing decision is a
     /// pure snapshot scan that costs one pass over the cells the frame already carries.
@@ -155,6 +188,12 @@ struct TextFrame {
     let dirtyRows: [Int]
     let content: [[TextInstance]]
     let uploads: [GlyphAtlas.Upload]
+    /// New colour tiles for the separate BGRA page; empty for a frame with no colour glyph.
+    let colourUploads: [GlyphAtlas.ColourUpload]
+    /// The frame may sample the colour page, so the presenter must have one bound. True whenever a colour
+    /// tile is cached, which is a superset of "this frame draws one": a warm frame redraws cached tiles and
+    /// carries no uploads at all, so the uploads alone cannot drive the allocation.
+    let usesColourPage: Bool
     /// The atlas must be recreated: every row was re-encoded because earlier UVs are gone.
     let resetAtlas: Bool
 }
@@ -168,6 +207,8 @@ struct TextFrame {
 /// recovers by being recreated when it fills; callers then re-encode every row.
 final class GlyphAtlas: @unchecked Sendable {
     struct Upload { let x: Int, y: Int, width: Int, height: Int; let coverage: [UInt8] }
+    /// A premultiplied BGRA tile from the colour page, in the byte order `.bgra8Unorm` expects.
+    struct ColourUpload { let x: Int, y: Int, width: Int, height: Int; let pixels: [UInt8] }
     struct Entry {
         let u: Float, v: Float
         let width: Int, height: Int
@@ -176,30 +217,43 @@ final class GlyphAtlas: @unchecked Sendable {
     }
     enum Fitted { case blank, entry(Entry) }
     enum Decoration { case underline, strike }
-    /// Keyed by scalar, not text: Swift hashes strings by canonical equivalence, so a compatibility
-    /// ideograph (U+FA10) collides with its unified form (U+585A) and one glyph's line would be drawn for
-    /// the other. Fitted text is always a single scalar, so the scalar is a complete key.
-    private struct LineKey: Hashable { let style: UInt8, scalar: UInt32 }
+    /// Keyed by scalar values, not by text: Swift hashes strings by canonical equivalence, so a
+    /// compatibility ideograph (U+FA10) collides with its unified form (U+585A) and one glyph's line would
+    /// be drawn for the other. The single-scalar case is split out because it is every fitted cell, and an
+    /// array per cell per frame is a heap allocation the CJK hot path cannot afford.
+    private enum LineKey: Hashable {
+        case one(style: UInt8, scalar: UInt32)
+        case many(style: UInt8, scalars: [UInt32])
+    }
+    /// A shaped line and its standardised glyph-path bounds; both rasterizers place from this one rect.
     private struct FittedLine { let line: CTLine, ink: CGRect }
-    private enum FittedAnalysis { case unsupported, blank, monochrome(FittedLine) }
+    private enum FittedAnalysis { case unsupported, blank, monochrome(FittedLine), colour(FittedLine) }
     private enum Key: Hashable {
         /// Reached only by printable ASCII, which has no canonical-equivalence collisions. If eligibility
         /// is ever widened to multi-scalar or non-ASCII text, this must stop keying by `String`: Swift
         /// would then alias U+212A (Kelvin sign) with "K" and serve the wrong mask.
         case text(style: UInt8, text: String, fg: UInt32)
-        /// Keyed by scalar rather than text: Swift compares strings by canonical equivalence, so a CJK
-        /// compatibility ideograph (U+FA10) equals its unified form (U+585A) and hashes the same, while
-        /// CoreText draws different ink for each. Columns are part of the key because one column
-        /// left-aligns and may shrink the ink, while two columns centre it at full size.
+        /// Keyed by scalar rather than text for the same canonical-equivalence reason as `LineKey`. Columns
+        /// are part of the key because one column left-aligns and may shrink the ink, while two columns centre
+        /// it at full size. Only a single scalar reaches this path, so the key stays inline.
         case fitted(style: UInt8, scalar: UInt32, columns: UInt8, fg: UInt32)
+        /// Colour tiles carry their own pixels, but the key still includes the foreground: a COLR palette
+        /// can reference the text colour, so the same cluster in two colours is two tiles.
+        case colour(style: UInt8, scalars: [UInt32], columns: UInt8, fg: UInt32)
         case decoration(Decoration)
         case cell(scalar: UInt32, width: Int, height: Int, scale: Int)
     }
 
-    /// Side of the single atlas texture: 4 MiB of R8 coverage.
+    /// Side of both atlas textures: 4 MiB of R8 coverage and, once a pane shows a colour glyph, 16 MiB of
+    /// premultiplied BGRA. Sharing one side keeps the two shelf packers and the UV denominators identical.
     static let textureSize = 2048
     /// Hard entry cap, independent of packing; bounds the dictionary and the mask count under eviction churn.
     static let maxEntries = 4096
+    /// Cap for the colour page. Tiles are whole cell boxes rather than cropped ink, so which bound bites
+    /// first depends on the backing scale: at 3x an 8x18 cell's tiles fill the page area before 4096 of
+    /// them exist, at 1x and 2x the cap bites first. Either way both pages reset and every row re-encodes,
+    /// so this only bounds the dictionary.
+    static let maxColourEntries = 4096
     /// Transparent device pixels around a mask so antialiased ink never touches a neighbouring entry.
     private static let pad = 2
     private static let colorFromContext = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
@@ -207,18 +261,26 @@ final class GlyphAtlas: @unchecked Sendable {
     private var entries: [Key: Entry] = [:]
     private var analyses: [LineKey: FittedAnalysis] = [:]
     private var shelfTop = 0, shelfBottom = 0, cursorX = 0
+    /// The colour page packs independently but shares the reset budget: resetting one page invalidates
+    /// every row's UVs either way, so there is nothing to gain by tracking them separately.
+    private var colourEntries: [Key: Entry] = [:]
+    private var colourShelfTop = 0, colourShelfBottom = 0, colourCursorX = 0
     private(set) var resets = 0
-    /// The last lookup ran out of atlas space; the caller resets and retries.
+    /// The last lookup ran out of space on either page; the caller resets and retries.
     private(set) var exhausted = false
     var count: Int { entries.count }
+    var colourCount: Int { colourEntries.count }
 
     /// Every entry is invalid after a layout change, so the atlas starts over rather than reusing stale UVs.
     func reset() {
         entries.removeAll(keepingCapacity: true)
+        colourEntries.removeAll(keepingCapacity: true)
         // Coverage queued by the attempt that filled the atlas belongs to the old packing and must not reach
         // the new texture, where it could overwrite a live entry at the same coordinates.
         pending.removeAll(keepingCapacity: true)
+        colourPending.removeAll(keepingCapacity: true)
         shelfTop = 0; shelfBottom = 0; cursorX = 0
+        colourShelfTop = 0; colourShelfBottom = 0; colourCursorX = 0
         resets += 1; exhausted = false
     }
     func resetAnalysis() { analyses.removeAll(keepingCapacity: true) }
@@ -234,23 +296,31 @@ final class GlyphAtlas: @unchecked Sendable {
         return insert(mask, key: key)
     }
 
-    func canFit(style: UInt8, scalar: Unicode.Scalar, face: CTFont) -> Bool {
-        switch fittedAnalysis(style: style, scalar: scalar, face: face) {
+    /// Whether the monochrome fitted path can draw this text.
+    func canFit(style: UInt8, text: String, face: CTFont) -> Bool {
+        switch fittedAnalysis(style: style, text: text, face: face) {
         case .blank, .monochrome: return true
-        case .unsupported: return false
+        case .unsupported, .colour: return false
         }
     }
-    func fittedEntry(style: UInt8, scalar: Unicode.Scalar, columns: Int, fg: [UInt8], face: CTFont,
+    /// Whether the colour page can draw this text. A cluster with any colour run is drawn whole from the
+    /// colour page, since it is one CTLine and cannot be split between pages.
+    func canFitColour(style: UInt8, text: String, face: CTFont) -> Bool {
+        if case .colour = fittedAnalysis(style: style, text: text, face: face) { return true }
+        return false
+    }
+    func fittedEntry(style: UInt8, text: String, columns: Int, fg: [UInt8], face: CTFont,
                      geometry: TextGeometry) -> Fitted? {
-        guard fg.count == 3, columns == 1 || columns == 2 else { return nil }
-        let key = Key.fitted(style: style, scalar: scalar.value, columns: UInt8(columns),
-                             fg: UInt32(fg[0]) << 16 | UInt32(fg[1]) << 8 | UInt32(fg[2]))
+        var iterator = text.unicodeScalars.makeIterator()
+        guard fg.count == 3, columns == 1 || columns == 2,
+              let scalar = iterator.next(), iterator.next() == nil else { return nil }
+        let key = Key.fitted(style: style, scalar: scalar.value, columns: UInt8(columns), fg: Self.pack(fg))
         // A cached entry was already proven monochrome under the current face, and the face only changes
         // with a layout change that resets the atlas. Answering from the cache must not pay for a CoreText
         // analysis, which matters once the analysis cache has stopped taking residents.
         if let cached = entries[key] { return .entry(cached) }
-        switch fittedAnalysis(style: style, scalar: scalar, face: face) {
-        case .unsupported: return nil
+        switch fittedAnalysis(style: style, text: text, face: face) {
+        case .unsupported, .colour: return nil
         case .blank: return .blank
         case .monochrome(let fitted):
             guard entries.count < Self.maxEntries else { exhausted = true; return nil }
@@ -258,6 +328,40 @@ final class GlyphAtlas: @unchecked Sendable {
                                                   columns: columns) else { return nil }
             return insert(mask, key: key).map { .entry($0) }
         }
+    }
+
+    /// A colour cluster's tile, or nil if it cannot be drawn. The tile covers the whole cell box, so the
+    /// caller maps it onto the box with no offset.
+    func colourEntry(style: UInt8, text: String, columns: Int, fg: [UInt8], face: CTFont,
+                     geometry: TextGeometry) -> Entry? {
+        guard fg.count == 3, columns == 1 || columns == 2,
+              let scalars = Self.boundedScalars(text) else { return nil }
+        let key = Key.colour(style: style, scalars: scalars, columns: UInt8(columns), fg: Self.pack(fg))
+        if let cached = colourEntries[key] { return cached }
+        guard case .colour(let fitted) = fittedAnalysis(style: style, text: text, face: face) else { return nil }
+        guard colourEntries.count < Self.maxColourEntries else { exhausted = true; return nil }
+        guard let tile = Self.rasterizeColour(line: fitted.line, ink: fitted.ink, fg: fg, geometry: geometry,
+                                              columns: columns) else { return nil }
+        guard let origin = allocateColour(tile.width, tile.height) else { exhausted = true; return nil }
+        let entry = Entry(u: Float(origin.x) / Float(Self.textureSize), v: Float(origin.y) / Float(Self.textureSize),
+                          width: tile.width, height: tile.height, dx: 0, dy: 0)
+        colourEntries[key] = entry
+        colourPending.append(ColourUpload(x: origin.x, y: origin.y, width: tile.width, height: tile.height,
+                                          pixels: tile.pixels))
+        return entry
+    }
+
+    private static func pack(_ fg: [UInt8]) -> UInt32 { UInt32(fg[0]) << 16 | UInt32(fg[1]) << 8 | UInt32(fg[2]) }
+
+    /// A cluster's scalars, or nil past the cap. `colourCluster` already refused longer text, but the bound
+    /// belongs here too: this is the one colour-path key built by allocation rather than by a counted walk.
+    private static func boundedScalars(_ text: String) -> [UInt32]? {
+        var values: [UInt32] = []
+        for scalar in text.unicodeScalars {
+            guard values.count < TextEligibility.maxClusterScalars else { return nil }
+            values.append(scalar.value)
+        }
+        return values
     }
 
     /// Geometric glyphs need no font, style or colour key: the same white coverage is tinted by each instance.
@@ -290,7 +394,9 @@ final class GlyphAtlas: @unchecked Sendable {
     }
     /// Masks rasterised since the last call; the presenter uploads them before the next draw.
     private(set) var pending: [Upload] = []
-    func clearPending() { pending.removeAll(keepingCapacity: true) }
+    /// Colour tiles rasterised since the last call, for the separate BGRA page.
+    private(set) var colourPending: [ColourUpload] = []
+    func clearPending() { pending.removeAll(keepingCapacity: true); colourPending.removeAll(keepingCapacity: true) }
 
     private func allocate(_ width: Int, _ height: Int) -> (x: Int, y: Int)? {
         let size = Self.textureSize
@@ -301,6 +407,20 @@ final class GlyphAtlas: @unchecked Sendable {
         else if top + height > bottom { top = bottom; x = 0; bottom = top + height }
         guard bottom <= size, top >= 0 else { return nil }
         shelfTop = top; shelfBottom = bottom; cursorX = x + width
+        return (x, top)
+    }
+
+    /// The colour page packs with the same shelf algorithm over its own cursor, so a full coverage page and
+    /// a full colour page are independent until one of them sets `exhausted` and both are reset together.
+    private func allocateColour(_ width: Int, _ height: Int) -> (x: Int, y: Int)? {
+        let size = Self.textureSize
+        guard width > 0, height > 0, width <= size, height <= size else { return nil }
+        var top = colourShelfTop, bottom = colourShelfBottom, x = colourCursorX
+        if x + width > size { top = bottom; x = 0 }
+        if x == 0 { bottom = top + height }
+        else if top + height > bottom { top = bottom; x = 0; bottom = top + height }
+        guard bottom <= size, top >= 0 else { return nil }
+        colourShelfTop = top; colourShelfBottom = bottom; colourCursorX = x + width
         return (x, top)
     }
 
@@ -331,11 +451,25 @@ final class GlyphAtlas: @unchecked Sendable {
     /// rather than evicting them or refusing the glyph: the result is re-derivable, clearing would drop
     /// every hot entry and refill within a few frames on a CJK repertoire larger than the cap, and
     /// refusing would pin the path to the software rasterizer for the rest of the epoch.
-    private func fittedAnalysis(style: UInt8, scalar: Unicode.Scalar, face: CTFont) -> FittedAnalysis {
-        let key = LineKey(style: style, scalar: scalar.value)
+    private func fittedAnalysis(style: UInt8, text: String, face: CTFont) -> FittedAnalysis {
+        // Walk the scalars once, without allocating when there is only one: that is every fitted cell, and
+        // a CJK screen builds this key thousands of times a frame. The same walk enforces the cluster bound
+        // at the CoreText boundary, so no caller can hand the shaper an unbounded string.
+        var iterator = text.unicodeScalars.makeIterator()
+        guard let first = iterator.next() else { return .unsupported }
+        let key: LineKey
+        if let second = iterator.next() {
+            var values: [UInt32] = [first.value, second.value]
+            while let next = iterator.next() {
+                guard values.count < TextEligibility.maxClusterScalars else { return .unsupported }
+                values.append(next.value)
+            }
+            key = .many(style: style, scalars: values)
+        } else {
+            key = .one(style: style, scalar: first.value)
+        }
         if let cached = analyses[key] { return cached }
-        // Fitted text is exactly one scalar, so the scalar is both the key and the whole analysis input.
-        let result = Self.analyse(text: String(scalar), face: face)
+        let result = Self.analyse(text: text, face: face)
         if analyses.count < Self.maxEntries { analyses[key] = result }
         return result
     }
@@ -346,43 +480,44 @@ final class GlyphAtlas: @unchecked Sendable {
         guard CTLineGetGlyphCount(line) > 0, let runs = CTLineGetGlyphRuns(line) as? [CTRun], !runs.isEmpty else {
             return .unsupported
         }
+        // One colour run makes the whole cluster a colour tile: it is drawn as a single line, exactly as the
+        // CPU draws it, so a mixed cluster cannot be split across the two pages.
+        var colour = false
         for run in runs {
             guard let raw = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] else { return .unsupported }
             let font = raw as! CTFont
-            if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) { return .unsupported }
+            if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) { colour = true }
         }
-        let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
         // A non-finite ink box would poison the placement arithmetic, so it is refused here rather than
-        // failing later inside rasterizeFitted after other cells already grew the atlas.
-        guard !ink.isNull, ink.minX.isFinite, ink.minY.isFinite, ink.width.isFinite, ink.height.isFinite else {
-            return .unsupported
-        }
+        // failing later inside a rasterizer after other cells already grew the atlas.
+        guard !bounds.isNull, bounds.minX.isFinite, bounds.minY.isFinite, bounds.width.isFinite,
+              bounds.height.isFinite else { return .unsupported }
+        // Standardised once, here, so the fitted crop and the colour tile are placed from the same rect and
+        // a font reporting a negative extent cannot make them disagree.
+        let ink = bounds.standardized
+        if colour { return ink.isEmpty ? .unsupported : .colour(FittedLine(line: line, ink: ink)) }
         return ink.isEmpty ? .blank : .monochrome(FittedLine(line: line, ink: ink))
     }
 
     private struct Mask { let width: Int, height: Int; let dx: Int, dy: Int; let coverage: [UInt8] }
+    private struct ColourTile { let width: Int, height: Int; let pixels: [UInt8] }
 
-    /// A non-ASCII line fitted into its cell exactly as GridRasterizer fits it, then cropped to that cell.
-    /// `columns` is 2 for a wide cell: its box is twice as wide and the CPU path centres the ink in it.
-    private static func rasterizeFitted(line: CTLine, ink: CGRect, fg: [UInt8], geometry: TextGeometry,
-                                        columns: Int) -> Mask? {
-        guard columns == 1 || columns == 2 else { return nil }
-        // One product feeds the placement box, the clip and the device-pixel clamp so all three agree.
+    /// Rasterises a fitted line into the device-pixel window `(dx, dy, width, height)` of a cell box that is
+    /// `columns` wide, with exactly the placement and clip the CPU rasterizer uses. Returns premultiplied BGRA
+    /// rows in the order both atlas textures expect; the coverage path keeps the alpha byte, the colour path
+    /// keeps all four. Sharing one transform is what makes a colour tile land where the mask would.
+    private static func rasterizeWindow(line: CTLine, ink: CGRect, fg: [UInt8], geometry: TextGeometry,
+                                        columns: Int, dx: Int, dy: Int, width: Int, height: Int) -> [UInt8]? {
         let boxWidth = geometry.cell.width * CGFloat(columns)
         let localBox = CGRect(origin: .zero, size: CGSize(width: boxWidth, height: geometry.cell.height))
         let place = GlyphFonts.placement(ink: ink, box: localBox, baseline: geometry.baseline, centre: columns == 2)
-        let ink = ink.standardized
-        let placed = CGRect(x: place.origin.x + place.scale * ink.minX, y: place.origin.y + place.scale * ink.minY,
-                            width: place.scale * ink.width, height: place.scale * ink.height)
-        guard placed.minX.isFinite, placed.minY.isFinite, placed.width.isFinite, placed.height.isFinite, !placed.isEmpty else { return nil }
+        // Fail closed on a non-finite placement: CTLineDraw into an invalid CTM is a silent no-op, and a
+        // context that still reports success would cache an all-zero tile and hide the glyph for the epoch
+        // instead of handing the frame to the rasterizer.
+        guard place.origin.x.isFinite, place.origin.y.isFinite, place.scale.isFinite else { return nil }
         let backing = geometry.scale
-        let cellW = Int((boxWidth * backing).rounded()), cellH = Int((geometry.cell.height * backing).rounded())
-        let dx = max(0, Int(floor(placed.minX * backing)) - pad)
-        let maxX = min(cellW, Int(ceil(placed.maxX * backing)) + pad)
-        let dy = max(0, Int(floor(CGFloat(cellH) - placed.maxY * backing)) - pad)
-        let maxY = min(cellH, Int(ceil(CGFloat(cellH) - placed.minY * backing)) + pad)
-        let width = maxX - dx, height = maxY - dy
-        guard width > 0, height > 0, width <= cellW, height <= cellH else { return nil }
+        let cellH = Int((geometry.cell.height * backing).rounded())
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
             guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
@@ -398,7 +533,49 @@ final class GlyphAtlas: @unchecked Sendable {
             CTLineDraw(line, context)
             return true
         }
-        guard drawn else { return nil }
+        return drawn ? pixels : nil
+    }
+
+    /// A colour cluster drawn into a tile exactly the size of its cell box, so the instance maps the whole
+    /// tile onto the box with no cropping or offset arithmetic.
+    ///
+    /// Coverage masks need `pad` because their quad is a tight ink crop; a colour tile needs none because it
+    /// is 1:1 with its destination. `TextGeometry` admits only integral device pixels and `deviceBox` sizes a
+    /// box with the same two rounded products used here, so `destW == width` and `destH == height` exactly and
+    /// nearest sampling lands on texel centres. Relaxing either integrality or the nearest sampler would make
+    /// an unpadded tile sample its neighbour's edge column.
+    private static func rasterizeColour(line: CTLine, ink: CGRect, fg: [UInt8], geometry: TextGeometry,
+                                        columns: Int) -> ColourTile? {
+        let boxWidth = geometry.cell.width * CGFloat(columns)
+        let width = Int((boxWidth * geometry.scale).rounded()), height = Int((geometry.cell.height * geometry.scale).rounded())
+        guard width > 0, height > 0, width <= textureSize, height <= textureSize else { return nil }
+        guard let pixels = rasterizeWindow(line: line, ink: ink, fg: fg, geometry: geometry, columns: columns,
+                                           dx: 0, dy: 0, width: width, height: height) else { return nil }
+        return ColourTile(width: width, height: height, pixels: pixels)
+    }
+
+    /// A non-ASCII line fitted into its cell exactly as GridRasterizer fits it, then cropped to that cell.
+    /// `columns` is 2 for a wide cell: its box is twice as wide and the CPU path centres the ink in it.
+    private static func rasterizeFitted(line: CTLine, ink: CGRect, fg: [UInt8], geometry: TextGeometry,
+                                        columns: Int) -> Mask? {
+        guard columns == 1 || columns == 2 else { return nil }
+        // One product feeds the placement box, the clip and the device-pixel clamp so all three agree.
+        let boxWidth = geometry.cell.width * CGFloat(columns)
+        let place = GlyphFonts.placement(ink: ink, box: CGRect(origin: .zero, size: CGSize(width: boxWidth, height: geometry.cell.height)),
+                                         baseline: geometry.baseline, centre: columns == 2)
+        let placed = CGRect(x: place.origin.x + place.scale * ink.minX, y: place.origin.y + place.scale * ink.minY,
+                            width: place.scale * ink.width, height: place.scale * ink.height)
+        guard placed.minX.isFinite, placed.minY.isFinite, placed.width.isFinite, placed.height.isFinite, !placed.isEmpty else { return nil }
+        let backing = geometry.scale
+        let cellW = Int((boxWidth * backing).rounded()), cellH = Int((geometry.cell.height * backing).rounded())
+        let dx = max(0, Int(floor(placed.minX * backing)) - pad)
+        let maxX = min(cellW, Int(ceil(placed.maxX * backing)) + pad)
+        let dy = max(0, Int(floor(CGFloat(cellH) - placed.maxY * backing)) - pad)
+        let maxY = min(cellH, Int(ceil(CGFloat(cellH) - placed.minY * backing)) + pad)
+        let width = maxX - dx, height = maxY - dy
+        guard width > 0, height > 0, width <= cellW, height <= cellH else { return nil }
+        guard let pixels = rasterizeWindow(line: line, ink: ink, fg: fg, geometry: geometry, columns: columns,
+                                           dx: dx, dy: dy, width: width, height: height) else { return nil }
         var coverage = [UInt8](repeating: 0, count: width * height)
         for index in 0..<(width * height) { coverage[index] = pixels[index * 4 + 3] }
         return Mask(width: width, height: height, dx: dx, dy: dy, coverage: coverage)
@@ -407,6 +584,14 @@ final class GlyphAtlas: @unchecked Sendable {
     /// Rasterises one line at the exact device position the CPU path draws it, so an integer-offset blit of
     /// this coverage is the same pixels.
     private static func rasterize(text: String, face: CTFont, fg: [UInt8], geometry: TextGeometry) -> Mask? {
+        // The bound belongs at the CoreText boundary as well as in eligibility: an eligible frame only ever
+        // reaches here with a single ASCII scalar, so a longer string means a stale eligibility certificate
+        // and must be refused rather than shaped.
+        var scalars = 0
+        for _ in text.unicodeScalars {
+            scalars += 1
+            if scalars > TextEligibility.maxClusterScalars { return nil }
+        }
         let attributes: [NSAttributedString.Key: Any] = [.font: face, colorFromContext: true, .ligature: 0]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
         let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
@@ -503,6 +688,7 @@ final class TextComposer: @unchecked Sendable {
     private var resetPending = false, recoveryPending = false
     private(set) var isSuspended = false
     private(set) var atlasEntries = 0
+    private(set) var colourTiles = 0
     private(set) var atlasResets = 0
     private(set) var translatedRowCount = 0
     private(set) var reencodedRowCount = 0
@@ -513,7 +699,7 @@ final class TextComposer: @unchecked Sendable {
         eligibleContentRows = nil; eligibilityScannedRows = 0
         epoch = nil; rebuilds = 0; isSuspended = false; suspendedFrames = 0
         resetPending = false; recoveryPending = false
-        atlas.reset(); atlas.resetAnalysis(); atlasEntries = 0; atlasResets = atlas.resets
+        atlas.reset(); atlas.resetAnalysis(); atlasEntries = 0; colourTiles = 0; atlasResets = atlas.resets
     }
 
     /// Builds one frame, or nil when the atlas cannot represent it (the caller then keeps the CPU rasterizer).
@@ -575,7 +761,7 @@ final class TextComposer: @unchecked Sendable {
             // The atlas filled: recreate it and re-encode everything, up to the per-epoch budget.
             guard rebuilds < Self.maxRebuildsPerEpoch else {
                 // The probation interval counts from the moment of standing down, not from earlier refusals.
-                isSuspended = true; suspendedFrames = 0; atlasEntries = atlas.count; atlasResets = atlas.resets; return nil
+                isSuspended = true; suspendedFrames = 0; atlasEntries = atlas.count; colourTiles = atlas.colourCount; atlasResets = atlas.resets; return nil
             }
             rebuilds += 1
             atlas.reset()
@@ -585,22 +771,34 @@ final class TextComposer: @unchecked Sendable {
             result = build(snapshot: snapshot, damage: nil, geometry: geometry, appearance: appearance, resetAtlas: true, scroll: 0)
         }
         guard let result else {
-            recoveryPending = true; atlasEntries = atlas.count; atlasResets = atlas.resets; return nil
+            // The attempt's entries and uploads are deliberately kept. `pending` only ever holds uploads for
+            // entries that exist, `recoveryPending` forces a full re-encode that draws exactly what is cached,
+            // and those coordinates were never written before, so a later frame republishing them is
+            // idempotent. Resetting here instead would turn every repeated build failure — a cell whose `fg`
+            // is not three bytes, say — into a cold CoreText re-rasterisation of the whole grid per frame.
+            recoveryPending = true; atlasEntries = atlas.count; colourTiles = atlas.colourCount; atlasResets = atlas.resets; return nil
         }
-        atlasEntries = atlas.count; atlasResets = atlas.resets
+        atlasEntries = atlas.count; colourTiles = atlas.colourCount; atlasResets = atlas.resets
         let frame = TextFrame(rows: snapshot.rows, dirtyRows: result.rows, content: result.content,
-                              uploads: atlas.pending, resetAtlas: resetAtlas)
+                              uploads: atlas.pending, colourUploads: atlas.colourPending,
+                              usesColourPage: atlas.colourCount > 0, resetAtlas: resetAtlas)
         if !deferPublication { acknowledgePublication() }
         return frame
     }
 
     private func unsupportedContentCell(_ cell: Cell, faces: [CTFont], analysisAtlas: GlyphAtlas) -> TextFallback? {
         if let reason = TextEligibility.unsupportedCell(cell) { return reason }
-        guard let scalar = TextEligibility.fittedScalar(cell) else { return nil }
+        let fitted = TextEligibility.fittedScalar(cell) != nil
+        // ASCII, geometric and blank cells need no font; only fitted and colour candidates do. The two are
+        // disjoint: `fittedScalar` takes exactly one scalar and refuses every scalar that would make a cluster
+        // a colour one, so a cell is never a candidate for both pages.
+        guard fitted || TextEligibility.colourCluster(cell) else { return nil }
         let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))
-        guard let face = faces[safe: Int(style)],
-              analysisAtlas.canFit(style: style, scalar: scalar, face: face) else { return .nonASCII }
-        return nil
+        guard let face = faces[safe: Int(style)] else { return .nonASCII }
+        let drawable = fitted
+            ? analysisAtlas.canFit(style: style, text: cell.text, face: face)
+            : analysisAtlas.canFitColour(style: style, text: cell.text, face: face)
+        return drawable ? nil : .nonASCII
     }
 
     private func contentEligible(snapshot: Snapshot, damage: Set<Int>?, scroll: Int, faces: [CTFont], analysisAtlas: GlyphAtlas) -> Bool {
@@ -757,8 +955,8 @@ final class TextComposer: @unchecked Sendable {
                                           destW: Float(box.width), destH: Float(box.height),
                                           r: color.0, g: color.1, b: color.2))
         }
-        // Eligibility refuses every cluster joiner and joinee — a ZWJ tail, a regional indicator, or
-        // multi-scalar text — so on an eligible frame GlyphClusters.merge is the identity: each cell is
+        // Every join `GlyphClusters.merge` can make starts at a cell holding a ZWJ or a regional indicator,
+        // and eligibility refuses any such cell, so on an eligible frame merge is the identity: each cell is
         // its own Drawn with columns == (cell.wide ? 2 : 1), and a wide spacer is blank and draws nothing.
         // That identity is what lets this loop iterate raw cells instead of merged clusters.
         for cell in cells {
@@ -775,10 +973,10 @@ final class TextComposer: @unchecked Sendable {
                                               r: color.0, g: color.1, b: color.2))
                 continue
             }
-            if let scalar = TextEligibility.fittedScalar(cell) {
+            if TextEligibility.fittedScalar(cell) != nil {
                 let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)), fg = cell.fg
                 guard let face = faces[safe: Int(style)],
-                      let fitted = atlas.fittedEntry(style: style, scalar: scalar, columns: cell.wide ? 2 : 1,
+                      let fitted = atlas.fittedEntry(style: style, text: text, columns: cell.wide ? 2 : 1,
                                                      fg: fg, face: face, geometry: geometry) else { return nil }
                 if case .blank = fitted { continue }
                 guard case .entry(let entry) = fitted else { return nil }
@@ -793,6 +991,22 @@ final class TextComposer: @unchecked Sendable {
                                               u: entry.u + (left - quadX) / tile, v: entry.v + (top - quadY) / tile,
                                               uw: (right - left) / tile, uh: (bottom - top) / tile,
                                               r: color.0, g: color.1, b: color.2))
+                continue
+            }
+            // A colour cluster is one tile covering its whole cell box, so there is no crop to clamp. The
+            // negative alpha selects the colour page in the shader and suppresses tinting: the tile already
+            // carries premultiplied BGRA, and its foreground was baked in when it was rasterised.
+            if TextEligibility.colourCluster(cell) {
+                let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0)), fg = cell.fg
+                guard fg.count == 3, let face = faces[safe: Int(style)],
+                      let entry = atlas.colourEntry(style: style, text: text, columns: cell.wide ? 2 : 1,
+                                                    fg: fg, face: face, geometry: geometry) else { return nil }
+                let box = geometry.deviceBox(geometry.box(cell)), tile = Float(GlyphAtlas.textureSize)
+                instances.append(TextInstance(destX: Float(box.minX), destY: Float(box.minY),
+                                              destW: Float(box.width), destH: Float(box.height),
+                                              u: entry.u, v: entry.v,
+                                              uw: Float(entry.width) / tile, uh: Float(entry.height) / tile,
+                                              r: 0, g: 0, b: 0, a: -1))
                 continue
             }
             let style = UInt8((cell.bold ? 1 : 0) + (cell.italic ? 2 : 0))

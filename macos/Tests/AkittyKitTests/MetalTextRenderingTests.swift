@@ -89,6 +89,249 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
+    /// Single-cell colour clusters at every validated backing scale. Each is one cell the composer can draw
+    /// as a single unit: a plain emoji-presentation scalar, a text scalar promoted by VS16, a skin-tone
+    /// modifier, a keycap sequence, narrow and wide, beside ASCII and beside a wide CJK cell.
+    @MainActor func testColourEmojiFrameMatchesTheCpuRasterizerAtEveryValidatedScale() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(0, "😀🙂🫠🧡") + line(1, "❤️⚠️✅☑️", Style(fg: [240, 180, 90]))
+            + line(2, "👍🏽👋🏿👶🏻") + line(3, "#️⃣0️⃣a") + line(4, "x😀y")
+            + wideLine(5, "😀🧡") + wideCell(6, 0, text: "👍🏽") + line(6, "z", col: 2)
+            + wideCell(7, 0, text: "漢") + wideCell(7, 2, text: "⭐")
+            + line(8, "™", Style(bold: true)) + line(9, "😀", Style(italic: true))
+            + line(10, "\u{1F600}\u{0301}abc")
+            + line(11, "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E007F}x")
+            + [wire(11, 2, text: "\u{1F600}", Style(underline: true, strike: true, underlineColor: [90, 200, 90]))]
+        let snapshot = try snapshot(cells: cells)
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (frame, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            XCTAssertGreaterThan(paintedPixels(cpu), 1000, "\(scale)x colour CPU reference painted \(paintedPixels(cpu)) pixels")
+            XCTAssertFalse(frame.colourUploads.isEmpty, "\(scale)x colour clusters rasterised at least one tile")
+            XCTAssertGreaterThan(composer.colourTiles, 0, "\(scale)x colour page grew")
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x colour max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.95, "\(scale)x colour identical pixels \(result.exact)")
+            XCTAssertFalse(composer.isSuspended, "\(scale)x colour emoji must not exhaust either page")
+        }
+    }
+
+    /// A dense field of colour clusters. With most of the grid painted, the identical-pixel fraction measures
+    /// the tiles themselves rather than the background they sit in, so a wrong channel order, a flipped tile or
+    /// a one-cell offset all fail here instead of hiding under a sparse screen's empty majority.
+    @MainActor func testADenseColourEmojiFieldMatchesTheCpuRasterizer() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let glyphs = ["\u{1F600}", "\u{1F642}", "\u{1F9E1}", "\u{2764}\u{FE0F}", "\u{26A0}\u{FE0F}", "\u{2705}",
+                      "\u{1F44D}\u{1F3FD}", "\u{1F44B}\u{1F3FF}", "#\u{FE0F}\u{20E3}", "0\u{FE0F}\u{20E3}",
+                      "\u{2B50}", "\u{1FAE0}"]
+        for scale: CGFloat in [1, 2] {
+            var cells: [[Any]] = []
+            for row in 0..<rows {
+                let wide = row % 2 == 1
+                var col = 0
+                while col < cols {
+                    let text = glyphs[(row * cols + col) % glyphs.count]
+                    if wide, col + 1 < cols { cells += wideCell(row, col, text: text); col += 2 }
+                    else { cells.append(wire(row, col, text: text)); col += 1 }
+                }
+            }
+            let snapshot = try snapshot(cells: cells)
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            let (frame, gpu) = try render(snapshot, scale: scale, presenter: presenter, composer: composer)
+            let painted = paintedPixels(cpu)
+            XCTAssertGreaterThan(painted, 10_000, "\(scale)x dense colour field painted \(painted) pixels")
+            XCTAssertFalse(frame.colourUploads.isEmpty, "\(scale)x dense field rasterised colour tiles")
+            XCTAssertFalse(composer.isSuspended, "\(scale)x a dozen distinct clusters cannot exhaust the colour page")
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(scale)x dense colour max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.95, "\(scale)x dense colour identical pixels \(result.exact)")
+        }
+    }
+
+    /// Colour tiles are whole cell boxes packed on their own shelf, so a warm frame uploads nothing, a
+    /// recreate frame uploads every tile exactly once, and no two tiles may claim the same region.
+    @MainActor func testColourTilesAreUploadedOnceAndPackedDisjointly() throws {
+        let composer = TextComposer()
+        let cells = line(0, "\u{1F600}\u{1F642}\u{1F9E1}") + wideLine(1, "\u{2764}\u{FE0F}\u{2B50}")
+            + line(2, "#\u{FE0F}\u{20E3}\u{1F44D}\u{1F3FD}")
+        let snapshot = try snapshot(cells: cells)
+        let first = try XCTUnwrap(compose(snapshot, composer: composer, damage: nil))
+        XCTAssertGreaterThan(first.colourUploads.count, 0, "the first frame rasterises every distinct cluster")
+        for upload in first.colourUploads {
+            XCTAssertEqual(upload.pixels.count, upload.width * upload.height * 4, "a tile carries premultiplied BGRA")
+            XCTAssertGreaterThan(upload.width, 0); XCTAssertGreaterThan(upload.height, 0)
+            XCTAssertLessThanOrEqual(upload.x + upload.width, GlyphAtlas.textureSize)
+            XCTAssertLessThanOrEqual(upload.y + upload.height, GlyphAtlas.textureSize)
+        }
+        assertColourDisjoint(first.colourUploads, entries: composer.colourTiles)
+        for _ in 0..<10 {
+            let again = try XCTUnwrap(compose(snapshot, composer: composer, damage: Set(0..<rows)))
+            XCTAssertTrue(again.colourUploads.isEmpty, "a static emoji screen uploads nothing once warm")
+            XCTAssertTrue(again.uploads.isEmpty, "a static emoji screen uploads no coverage either")
+            XCTAssertFalse(again.resetAtlas)
+        }
+        // A layout change drops both pages; the recreate frame must re-upload every tile it re-packs.
+        let resized = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 3,
+                                                     fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                     appearance: .standard))
+        XCTAssertTrue(resized.resetAtlas, "a backing-scale change recreates both atlas pages")
+        XCTAssertTrue(resized.usesColourPage, "the resized frame still draws colour clusters")
+        assertColourDisjoint(resized.colourUploads, entries: composer.colourTiles)
+        // Dropping back to an emoji-free screen resets both pages, so the frame must not ask the presenter
+        // for 16 MiB it will never sample.
+        let plain = try XCTUnwrap(composer.compose(snapshot: try self.snapshot(cells: line(0, "ascii")), damage: nil,
+                                                   size: size, scale: 1, fontName: "Menlo", fontSize: 13, cell: cell,
+                                                   cjkFontName: "", appearance: .standard))
+        XCTAssertTrue(plain.resetAtlas, "a scale change recreates both atlas pages")
+        XCTAssertTrue(plain.colourUploads.isEmpty, "no colour cluster, no tile")
+        XCTAssertFalse(plain.usesColourPage, "an emoji-free epoch must not allocate the colour page")
+        XCTAssertEqual(composer.colourTiles, 0, "the reset dropped every colour entry")
+    }
+
+    /// What the colour page still refuses: a cluster the composer cannot draw as one unit, and one longer than
+    /// the bounded scalar count. Refusal must not grow either page or burn a reset.
+    func testRefusedColourClustersGrowNeitherAtlasPage() throws {
+        let composer = TextComposer()
+        _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "\u{1F600}")), composer: composer, damage: nil))
+        let entries = composer.atlasEntries, tiles = composer.colourTiles, resets = composer.atlasResets
+        XCTAssertGreaterThan(tiles, 0, "the supported cluster opened the colour page")
+        // The last is a hostile one-cell cluster: eight variation selectors keep it a single grapheme while
+        // pushing it past the bounded scalar count, so the composer refuses it instead of rasterising it.
+        let refused = ["\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F1EF}\u{1F1F5}", "\u{1F1FA}\u{200D}\u{1F1F8}",
+                       "\u{1F600}\u{200D}",
+                       "\u{1F600}" + String(repeating: "\u{FE0F}", count: TextEligibility.maxClusterScalars)]
+        for text in refused {
+            XCTAssertNil(compose(try snapshot(cells: line(0, text)), composer: composer, damage: nil), text)
+            XCTAssertEqual(composer.atlasEntries, entries, text)
+            XCTAssertEqual(composer.colourTiles, tiles, text)
+            XCTAssertEqual(composer.atlasResets, resets, text)
+            XCTAssertFalse(composer.isSuspended, text)
+        }
+    }
+
+    /// The cursor draws over a colour tile exactly as it does over coverage: the tile carries its own colour,
+    /// so the cursor band must not tint it and the translucent block must still match the CPU reference.
+    @MainActor func testCursorOverColourEmojiMatchesTheCpuRasterizer() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let cells = line(2, "\u{1F600}ab", col: 3) + wideCell(2, 8, text: "\u{1F9E1}")
+        for style in CursorStyle.allCases {
+            var appearance = RenderAppearance.standard
+            appearance.cursorStyle = style
+            // Once over the narrow cluster and once over the wide one: the band must cover a two-column tile
+            // without tinting it, and the block must still composite at its own opacity.
+            for column in [3, 8] {
+            let snapshot = try snapshot(cells: cells, cursor: ["row": 2, "col": column, "visible": true])
+            let composer = TextComposer()
+            let cpu = try GridRasterizer.make(snapshot: snapshot, size: size, scale: 2, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "", appearance: appearance)
+            let (_, gpu) = try render(snapshot, scale: 2, presenter: presenter, composer: composer, appearance: appearance)
+            let result = compare(cpu, gpu)
+            XCTAssertLessThanOrEqual(result.max, 2, "\(style) col \(column) max channel difference \(result.max)")
+            XCTAssertGreaterThan(result.exact, 0.95, "\(style) col \(column) identical pixels \(result.exact)")
+            }
+        }
+    }
+
+    /// The composer iterates raw cells, which is only valid while `GlyphClusters.merge` is the identity on an
+    /// eligible frame. Pin the coupling from this side: for both of merge's triggers, a cell that could take
+    /// part in a join must be refused. A third trigger added to merge without widening the refusal set fails here.
+    func testEveryCellMergeWouldJoinIsRefusedByEligibility() throws {
+        let bases = ["", "a", "\u{4E2D}", "\u{1F600}", "\u{2764}\u{FE0F}", "\u{1F44D}\u{1F3FD}", "#\u{FE0F}\u{20E3}"]
+        var joins = 0
+        // Trigger 1: a cell whose text ends in a ZWJ absorbs the next non-blank cell in its row.
+        for base in bases {
+            let pair = try cellPair(base + "\u{200D}", "\u{1F600}")
+            guard GlyphClusters.merge(pair).count < pair.count else { continue }
+            joins += 1
+            XCTAssertNotNil(TextEligibility.unsupportedCell(pair[0]), "'\(base)' + ZWJ must be refused")
+        }
+        // Trigger 2: a regional indicator absorbs the next regional indicator.
+        for value: UInt32 in 0x1F1E6...0x1F1FF {
+            let indicator = String(UnicodeScalar(value)!)
+            let pair = try cellPair(indicator, indicator)
+            guard GlyphClusters.merge(pair).count < pair.count else { continue }
+            joins += 1
+            XCTAssertNotNil(TextEligibility.unsupportedCell(pair[0]),
+                            "U+\(String(value, radix: 16, uppercase: true)) must be refused")
+        }
+        XCTAssertEqual(joins, bases.count + 26, "merge really would have joined every pair above")
+    }
+
+    /// Scrolling translates retained rows by whole cells; a colour tile's UVs travel with its row, so a
+    /// translated emoji row must equal a full re-encode of the same snapshot and the CPU reference.
+    @MainActor func testScrollTranslatesAColourEmojiRowAndMatchesFullEncoding() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let source = (0..<rows).map { $0 % 2 == 0 ? "\u{1F600} row \($0)" : "row \($0) \u{2764}\u{FE0F}" }
+        let shifted = Array(source.dropFirst(2)) + ["new \u{1F9E1} ten", "new eleven \u{2B50}"]
+        for scale: CGFloat in [1, 2, 3] {
+            let composer = TextComposer()
+            let initial = try snapshot(cells: source.enumerated().flatMap { line($0.offset, $0.element) },
+                                       cursor: ["row": 4, "col": 2, "visible": true])
+            let initialFrame = try XCTUnwrap(composer.compose(snapshot: initial, damage: nil, size: size, scale: scale,
+                                                              fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                              appearance: .standard))
+            XCTAssertFalse(initialFrame.colourUploads.isEmpty, "scale \(scale) rasterised colour tiles")
+            try presenter.updateText(initialFrame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let next = try snapshot(cells: shifted.enumerated().flatMap { line($0.offset, $0.element) },
+                                    cursor: ["row": 3, "col": 1, "visible": true])
+            let frame = try XCTUnwrap(composer.compose(snapshot: next, damage: [10, 11], size: size, scale: scale,
+                                                       fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                       appearance: .standard, scroll: 2))
+            XCTAssertEqual(composer.translatedRowCount, rows - 4, "scale \(scale)")
+            try presenter.updateText(frame, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let actual = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
+
+            let full = try XCTUnwrap(TextComposer().compose(snapshot: next, damage: nil, size: size, scale: scale,
+                                                            fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                                            appearance: .standard))
+            try presenter.updateText(full, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: scale))
+            let expected = try presenter.renderOffscreen(width: bitmapSize(scale).width, height: bitmapSize(scale).height)
+            XCTAssertEqual(actual, expected, "scale \(scale) a translated colour row matches a full atlas encode")
+            let cpu = try GridRasterizer.make(snapshot: next, size: size, scale: scale, fontName: "Menlo", fontSize: 13,
+                                              cellSize: cell, composition: "")
+            XCTAssertLessThanOrEqual(compare(cpu, actual).max, 2, "scale \(scale) matches the CPU rasterizer")
+        }
+    }
+
+    /// Distinct colour clusters accumulate like distinct coverage colours: the entry cap must engage the
+    /// bounded rebuild, and a recreate frame may upload none of the discarded attempt's tiles.
+    @MainActor func testAtlasStaysBoundedUnderAColourClusterStorm() throws {
+        let composer = TextComposer()
+        var completed = 0
+        for frame in 0..<12 {
+            var cells: [[Any]] = []
+            for row in 0..<rows {
+                for col in 0..<cols {
+                    let key = frame * rows * cols + row * cols + col
+                    let fg = [key % 251, (key / 251) % 251, (key / 63_001) % 251]
+                    let glyph = ["\u{1F600}", "\u{1F642}", "\u{1F9E1}", "\u{2B50}"][key % 4]
+                    cells.append(self.wire(row, col, text: glyph, Style(fg: fg)))
+                }
+            }
+            let result = composer.compose(snapshot: try snapshot(cells: cells), damage: nil, size: size, scale: 1,
+                                          fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
+                                          appearance: .standard)
+            if result != nil { completed += 1 }
+            XCTAssertLessThanOrEqual(composer.colourTiles, GlyphAtlas.maxColourEntries, "the colour entry cap holds")
+            XCTAssertLessThanOrEqual(composer.atlasEntries, GlyphAtlas.maxEntries, "the coverage entry cap holds")
+            if let result, result.resetAtlas {
+                assertColourDisjoint(result.colourUploads, entries: composer.colourTiles)
+                assertDisjoint(result.uploads, entries: composer.atlasEntries)
+            }
+        }
+        XCTAssertEqual(completed, 12, "each current frame fits after old colour tiles are discarded")
+        XCTAssertGreaterThan(composer.atlasResets, 1, "the entry cap engages the bounded rebuild path")
+        XCTAssertLessThanOrEqual(GlyphAtlas.maxColourEntries, 4096, "the colour entry cap is bounded")
+    }
+
     /// A face larger than its cell forces `placement` to shrink the ink, which exercises the two-column
     /// scale factor, the overflow slides and the mask clamp that a 13 pt face never reaches.
     @MainActor func testWideGlyphsThatMustShrinkToFitTwoColumnsMatchTheCpuRasterizer() throws {
@@ -138,9 +381,9 @@ final class MetalTextRenderingTests: XCTestCase {
         let atlas = GlyphAtlas()
         let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo",
                                                               fontSize: 13, cols: cols, rows: rows))
-        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil), han = try XCTUnwrap("漢".unicodeScalars.first)
+        let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
         for columns in [-1, 0, 3, 4] {
-            XCTAssertNil(atlas.fittedEntry(style: 0, scalar: han, columns: columns,
+            XCTAssertNil(atlas.fittedEntry(style: 0, text: "漢", columns: columns,
                                            fg: [218, 226, 239], face: face, geometry: geometry),
                          "\(columns) columns is not a terminal width")
         }
@@ -172,12 +415,12 @@ final class MetalTextRenderingTests: XCTestCase {
         let geometry = try XCTUnwrap(TextEligibility.geometry(size: size, scale: 2, cell: cell, fontName: "Menlo",
                                                               fontSize: 13, cols: cols, rows: rows))
         let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
-        let fg: [UInt8] = [218, 226, 239], han = try XCTUnwrap("漢".unicodeScalars.first)
+        let fg: [UInt8] = [218, 226, 239]
         for wideFirst in [false, true] {
             let atlas = GlyphAtlas()
             var narrow: GlyphAtlas.Entry?, wide: GlyphAtlas.Entry?
             for columns in wideFirst ? [2, 1] : [1, 2] {
-                guard case .entry(let entry)? = atlas.fittedEntry(style: 0, scalar: han, columns: columns,
+                guard case .entry(let entry)? = atlas.fittedEntry(style: 0, text: "漢", columns: columns,
                                                                   fg: fg, face: face, geometry: geometry) else {
                     return XCTFail("漢 must be fitted at \(columns) column(s)")
                 }
@@ -201,13 +444,11 @@ final class MetalTextRenderingTests: XCTestCase {
                                                               fontSize: 13, cols: cols, rows: rows))
         let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
         let fg: [UInt8] = [218, 226, 239]
-        let compatibility = try XCTUnwrap("\u{FA10}".unicodeScalars.first)
-        let unified = try XCTUnwrap("\u{585A}".unicodeScalars.first)
-        guard case .entry? = atlas.fittedEntry(style: 0, scalar: compatibility, columns: 2,
+        guard case .entry? = atlas.fittedEntry(style: 0, text: "\u{FA10}", columns: 2,
                                                fg: fg, face: face, geometry: geometry) else {
             return XCTFail("U+FA10 must be fitted")
         }
-        guard case .entry? = atlas.fittedEntry(style: 0, scalar: unified, columns: 2,
+        guard case .entry? = atlas.fittedEntry(style: 0, text: "\u{585A}", columns: 2,
                                                fg: fg, face: face, geometry: geometry) else {
             return XCTFail("U+585A must be fitted")
         }
@@ -226,16 +467,16 @@ final class MetalTextRenderingTests: XCTestCase {
     /// epoch, and clearing would oscillate once the repertoire exceeds the cap.
     func testAFullAnalysisCacheStillFitsLaterGlyphs() throws {
         let face = CTFontCreateWithName("Menlo" as CFString, 13, nil)
-        let probe = try XCTUnwrap("漢".unicodeScalars.first)
-        XCTAssertTrue(GlyphAtlas().canFit(style: 0, scalar: probe, face: face),
+        let probe = "漢"
+        XCTAssertTrue(GlyphAtlas().canFit(style: 0, text: probe, face: face),
                       "the probe glyph is fittable when cold")
         let atlas = GlyphAtlas()
         // Distinct ideographs below the probe's codepoint, so filling the cache never warms the probe.
         for offset in 0..<(GlyphAtlas.maxEntries + 16) {
             let scalar = try XCTUnwrap(Unicode.Scalar(0x4E00 + UInt32(offset)))
-            _ = atlas.canFit(style: 0, scalar: scalar, face: face)
+            _ = atlas.canFit(style: 0, text: String(scalar), face: face)
         }
-        XCTAssertTrue(atlas.canFit(style: 0, scalar: probe, face: face),
+        XCTAssertTrue(atlas.canFit(style: 0, text: probe, face: face),
                       "a full analysis cache must still analyse a later glyph")
     }
 
@@ -304,7 +545,10 @@ final class MetalTextRenderingTests: XCTestCase {
         let composer = TextComposer()
         _ = try XCTUnwrap(compose(try snapshot(cells: line(0, "x")), composer: composer, damage: nil))
         let entries = composer.atlasEntries, resets = composer.atlasResets
-        for text in ["😀", "🇺", "\u{200d}", "e\u{0301}"] {
+        // A single-cell colour cluster now draws from the colour page, even with a combining mark on it. What
+        // still refuses: a ZWJ or a regional indicator, either of which could take part in a
+        // `GlyphClusters.merge` join, and a multi-scalar cell with no colour scalar in it at all.
+        for text in ["🇺🇸", "👨\u{200d}👩\u{200d}👧", "🇺", "\u{200d}", "e\u{0301}"] {
             XCTAssertNil(compose(try snapshot(cells: line(0, text)), composer: composer, damage: nil), text)
             XCTAssertEqual(composer.atlasEntries, entries, text)
             XCTAssertEqual(composer.atlasResets, resets, text)
@@ -555,7 +799,7 @@ final class MetalTextRenderingTests: XCTestCase {
         // One instance beyond the capacity is a programming error, not something to truncate silently.
         let overflowing = TextFrame(rows: 1, dirtyRows: [0],
                                     content: [Array(repeating: .zero, count: capacity + 1)],
-                                    uploads: [], resetAtlas: true)
+                                    uploads: [], colourUploads: [], usesColourPage: false, resetAtlas: true)
         XCTAssertThrowsError(try presenter.updateText(overflowing, grid: GridGeometry(cols: cols, rows: 1, cell: cell, scale: 2)),
                              "a row that does not fit must fail over, never drop instances")
     }
@@ -755,7 +999,14 @@ final class MetalTextRenderingTests: XCTestCase {
         // Width is decided before the geometric test: a wide box glyph would rasterise a one-column
         // tile that the instance then stretches across two columns.
         XCTAssertEqual(try fallback([wire(0, 0, text: "█", Style(wide: true))]), .wideCell, "wide geometry keeps the CPU path")
-        XCTAssertEqual(try fallback([wire(0, 0, text: "😀", Style(wide: true))]), .wideCell, "wide emoji keeps the CPU path")
+        XCTAssertNil(try fallback([wire(0, 0, text: "😀", Style(wide: true))]),
+                     "a single-cell colour cluster fits even when it is marked wide")
+        XCTAssertNil(try fallback([wire(0, 0, text: "😀", Style(underline: true, strike: true))]),
+                     "a narrow colour cell carries its single underline and strikethrough from the atlas")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "😀", Style(underline: true, wide: true))]), .wideCell,
+                       "a decorated wide colour cell keeps the CPU path like any other decorated wide cell")
+        XCTAssertEqual(try fallback([wire(0, 0, text: "👨\u{200d}👩\u{200d}👧")]), .nonASCII,
+                       "a ZWJ cluster the composer cannot draw as one unit keeps the CPU path")
         XCTAssertEqual(try fallback([wire(0, 0, text: "│", Style(underline: true, underlineStyle: 2))]), .decoratedCell,
                        "decorated geometry keeps the CPU path")
         XCTAssertEqual(try fallback(line(0, "x"), composition: "ab"), .composition, "IME composition keeps the CPU path")
@@ -802,7 +1053,7 @@ final class MetalTextRenderingTests: XCTestCase {
 
     func testDirtyUnsupportedCellsInvalidateEligibilityAndFullDamageRecovers() throws {
         let unsupported = [
-            [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")], [wire(3, 0, text: "😀")],
+            [wire(3, 0, text: "e\u{0301}")], [wire(3, 0, text: "👨‍👩‍👧")], [wire(3, 0, text: "\u{1F1EF}\u{1F1F5}")],
             [wire(3, 0, text: "中", Style(underline: true, wide: true))],
             line(3, "und", Style(underline: true, underlineStyle: 2)),
             line(3, "gone", Style(underline: true, underlineStyle: 5)),
@@ -1374,19 +1625,25 @@ final class MetalTextRenderingTests: XCTestCase {
         let presenter: MetalPresenter
         do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
         let composer = TextComposer()
-        let snapshot = try snapshot(cells: line(0, "release"))
+        // One colour cluster, so the release is proven to drop the 16 MiB page and not only the 4 MiB one.
+        let snapshot = try snapshot(cells: line(0, "release\u{1F600}"))
         _ = try render(snapshot, scale: 2, presenter: presenter, composer: composer)
         XCTAssertTrue(presenter.textMode)
         XCTAssertTrue(presenter.hasTextResources)
+        XCTAssertTrue(presenter.hasColourAtlas, "an emoji frame allocated the colour page")
         presenter.releaseTextures()
         composer.releaseFrames()
         XCTAssertFalse(presenter.textMode)
         XCTAssertFalse(presenter.hasTextResources)
+        XCTAssertFalse(presenter.hasColourAtlas, "the colour page is released with the coverage atlas")
         // A fresh frame after the release rebuilds the buffer without throwing.
         let again = try XCTUnwrap(compose(snapshot, composer: composer, damage: nil))
         XCTAssertEqual(again.dirtyRows.count, rows)
+        XCTAssertTrue(again.resetAtlas, "a released composer rebuilds rather than reusing stale UVs")
+        XCTAssertTrue(again.usesColourPage, "the rebuilt frame draws its colour cluster again")
         try presenter.updateText(again, grid: GridGeometry(cols: cols, rows: rows, cell: cell, scale: 2))
         XCTAssertTrue(presenter.hasTextResources)
+        XCTAssertTrue(presenter.hasColourAtlas, "the page is reallocated for the frame that needs it")
     }
 
     /// No two masks may claim the same atlas region in one frame.
@@ -1401,6 +1658,18 @@ final class MetalTextRenderingTests: XCTestCase {
         }
     }
 
+    /// No two colour tiles may claim the same region of the colour page in one frame.
+    private func assertColourDisjoint(_ uploads: [GlyphAtlas.ColourUpload], entries: Int) {
+        XCTAssertEqual(uploads.count, entries, "every recreated colour tile is uploaded exactly once")
+        for first in uploads.indices {
+            for second in uploads.indices where second > first {
+                let a = uploads[first], b = uploads[second]
+                let overlaps = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+                XCTAssertFalse(overlaps, "colour tile regions overlap")
+            }
+        }
+    }
+
     /// The instance layout the shader indexes must stay 48 bytes: three float4s.
     func testInstanceLayoutMatchesTheShaderStruct() {
         XCTAssertEqual(MemoryLayout<TextInstance>.stride, 48)
@@ -1409,6 +1678,11 @@ final class MetalTextRenderingTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    /// Two adjacent cells decoded the way the core sends them, for exercising `GlyphClusters.merge`.
+    private func cellPair(_ first: String, _ second: String) throws -> [Cell] {
+        try snapshot(cells: [wire(0, 0, text: first), wire(0, 1, text: second)]).cells
+    }
 
     private func compose(_ snapshot: Snapshot, composer: TextComposer, damage: Set<Int>?) -> TextFrame? {
         composer.compose(snapshot: snapshot, damage: damage, size: size, scale: 2, fontName: "Menlo", fontSize: 13,

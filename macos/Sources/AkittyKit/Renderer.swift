@@ -66,6 +66,8 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     private var mode: FrameMode = .none
     /// Coverage atlas and the row-sliced instance buffer of the GPU text path.
     private var textAtlas: MTLTexture?
+    /// Colour emoji tiles live on their own premultiplied BGRA page, allocated only once a frame needs it.
+    private var textColourAtlas: MTLTexture?
     /// The instance buffer the next draw reads. Replaced, never rewritten, while a frame may still read it.
     private var textInstances: MTLBuffer?
     /// CPU mirror of `textInstances`, so a busy frame can publish a complete replacement buffer.
@@ -97,7 +99,10 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     /// Whether frames draw from the glyph atlas instead of a CPU bitmap.
     var textMode: Bool { mode == .text }
     /// Whether any GPU text resource (atlas texture or instance buffer) is currently retained.
-    var hasTextResources: Bool { textAtlas != nil || textInstances != nil }
+    var hasTextResources: Bool { textAtlas != nil || textColourAtlas != nil || textInstances != nil }
+    /// Whether the 16 MiB colour page is resident; observable so a test can prove it is allocated only for a
+    /// pane that draws a colour tile and released with the rest.
+    var hasColourAtlas: Bool { textColourAtlas != nil }
     var onFailure: ((String) -> Void)?
     var frameRevision: UInt64 = 0
     private var drawID: UInt64 = 0
@@ -139,7 +144,8 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             return image.sample(s,in.uv);
         }
         struct TextInstance { float4 dest; float4 uv; float4 color; };
-        struct TextOut { float4 position [[position]]; float2 uv; float4 color; float solid; };
+        // mode 0 samples the coverage atlas and tints it, 1 is a solid fill, 2 samples the colour page.
+        struct TextOut { float4 position [[position]]; float2 uv; float4 color; [[flat]] float mode; };
         vertex TextOut text_vertex(uint id [[vertex_id]], uint iid [[instance_id]],
                                    constant TextInstance *items [[buffer(0)]], constant float2 &size [[buffer(1)]]) {
             TextInstance item = items[iid];
@@ -148,13 +154,23 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
             TextOut o;
             o.position = float4(px.x / size.x * 2.0 - 1.0, 1.0 - px.y / size.y * 2.0, 0.0, 1.0);
             o.uv = item.uv.xy + corner * item.uv.zw;
-            o.color = item.color;
-            o.solid = (item.uv.z > 0.0 && item.uv.w > 0.0) ? 0.0 : 1.0;
+            // A negative alpha selects the colour page without growing the instance struct, and abs() turns
+            // that sentinel back into the opaque alpha a tile wants: it already carries premultiplied BGRA, so
+            // the instance colour must not tint it. Nothing else produces a negative alpha -- fills and cursors
+            // are in [0, 1], and the translucent block cursor's 0.55 passes through abs() unchanged.
+            float alpha = item.color.a;
+            o.color = float4(item.color.rgb, abs(alpha));
+            o.mode = alpha < 0.0 ? 2.0 : ((item.uv.z > 0.0 && item.uv.w > 0.0) ? 0.0 : 1.0);
             if (item.dest.z <= 0.0 || item.dest.w <= 0.0) { o.position = float4(2.0, 2.0, 2.0, 1.0); }
             return o;
         }
-        fragment float4 text_fragment(TextOut in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]]) {
-            float mask = in.solid > 0.5 ? 1.0 : atlas.sample(s, in.uv).r;
+        fragment float4 text_fragment(TextOut in [[stage_in]], texture2d<float> atlas [[texture(0)]],
+                                      texture2d<float> colour [[texture(1)]], sampler s [[sampler(0)]]) {
+            if (in.mode > 1.5) {
+                float4 tile = colour.sample(s, in.uv);
+                return float4(tile.rgb * in.color.a, tile.a * in.color.a);
+            }
+            float mask = in.mode > 0.5 ? 1.0 : atlas.sample(s, in.uv).r;
             float alpha = in.color.a * mask;
             return float4(in.color.rgb * alpha, alpha);
         }
@@ -320,6 +336,17 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         if frame.resetAtlas || textAtlas == nil {
             guard let atlas = Self.makeAtlasTexture(device: device) else { throw AkittyError.core("Metal text atlas allocation failed") }
             textAtlas = atlas; textAtlasGenerations += 1
+            // Both pages share one reset: a colour UV is as stale as a coverage UV after a rebuild. Dropping
+            // the reference rather than recreating it means an epoch with no colour tile never pays 16 MiB.
+            textColourAtlas = nil
+        }
+        // Driven by the frame rather than by what happens to be resident: a warm frame redraws cached tiles
+        // and carries no uploads at all, so the uploads cannot be what decides this. Allocating before any
+        // upload keeps a 16 MiB failure from leaving half-written pages behind; the coverage page above is
+        // already replaced, but the throw disables Metal and the CPU rasterizer draws the frame instead.
+        if frame.usesColourPage, textColourAtlas == nil {
+            guard let colour = Self.makeColourAtlasTexture(device: device) else { throw AkittyError.core("Metal colour atlas allocation failed") }
+            textColourAtlas = colour
         }
         // New masks only ever take atlas coordinates that were never written before, so appending cannot
         // disturb a texture a frame in flight is sampling.
@@ -328,6 +355,14 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
                                withBytes: upload.coverage, bytesPerRow: upload.width)
             textAtlasUploads += 1
             onUpload?(upload.coverage.count, false, .atlasMask)
+        }
+        if !frame.colourUploads.isEmpty {
+            for upload in frame.colourUploads {
+                textColourAtlas?.replace(region: MTLRegionMake2D(upload.x, upload.y, upload.width, upload.height),
+                                         mipmapLevel: 0, withBytes: upload.pixels, bytesPerRow: upload.width * 4)
+                textAtlasUploads += 1
+                onUpload?(upload.pixels.count, false, .colourTile)
+            }
         }
         guard textShadow.count * stride >= length else { return }
         // Stage into the CPU mirror first. Every row bound is an invariant, not a truncation: silently dropping
@@ -381,6 +416,13 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         descriptor.usage = .shaderRead; descriptor.storageMode = .shared
         return device.makeTexture(descriptor: descriptor)
     }
+    /// The colour page: 16 MiB of premultiplied BGRA, the byte order `rasterizeColour` already produces.
+    static func makeColourAtlasTexture(device: MTLDevice) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: GlyphAtlas.textureSize,
+                                                                  height: GlyphAtlas.textureSize, mipmapped: false)
+        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
+        return device.makeTexture(descriptor: descriptor)
+    }
     /// Test hook: commits a frame that blocks on a shared event and registers it exactly as `draw(in:)` does, so a
     /// test can hold a real frame in flight until `release` and prove the next upload never rewrites the instance
     /// buffer it may still read.
@@ -407,7 +449,7 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     /// samples, so dropping our references is safe; the next `update`/`updateLayers` uploads a fresh full frame.
     func releaseTextures() {
         texture = nil; backgroundLayer = nil; foregroundLayer = nil; imageTextures = [:]; placements = []; retired = []
-        textAtlas = nil; textInstances = nil; textShadow = []; retiredTextBuffers = []
+        textAtlas = nil; textColourAtlas = nil; textInstances = nil; textShadow = []; retiredTextBuffers = []
         textInstanceCount = 0; textRows = 0; textRowCapacity = 0
         layerSize = nil; mode = .none; view.needsDisplay = true
     }
@@ -542,6 +584,10 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
         var size = SIMD2<Float>(Float(width), Float(height))
         encoder.setVertexBytes(&size, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
         encoder.setFragmentTexture(textAtlas, index: 0)
+        // The fragment shader always has a texture bound at index 1. A frame that draws a colour tile always
+        // has the page (syncText allocates it from `usesColourPage`), so the coverage page is bound only where
+        // no instance can select it -- it keeps the binding non-nil without allocating 16 MiB.
+        encoder.setFragmentTexture(textColourAtlas ?? textAtlas, index: 1)
         encoder.setFragmentSamplerState(nearest, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: textInstanceCount)
     }
