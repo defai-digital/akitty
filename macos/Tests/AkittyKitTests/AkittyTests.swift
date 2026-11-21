@@ -137,6 +137,25 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(Set(commands.search("").map(\.id)), Set(NativeCommand.allCases))
         XCTAssertNil(commands.warning)
     }
+    @MainActor func testPalettePrefersCommandNamesOverLaterMatches() {
+        let commands = CommandProvider()
+        XCTAssertEqual(commands.search("a").first?.id, .agentOverview)
+        XCTAssertEqual(commands.search("s").first?.id, .split)
+    }
+    @MainActor func testPaletteTrimsPaddingAndBoundsUTF8AtAScalarBoundary() {
+        let commands = CommandProvider()
+        let padded = String(repeating: " ", count: 600) + "split"
+        XCTAssertEqual(commands.search(padded).first?.id, .split)
+
+        var received: String?
+        let capture = CommandProvider { request in
+            received = request["query"] as? String
+            return Data(#"{"version":1,"commands":[]}"#.utf8)
+        }
+        let prefix = String(repeating: "x", count: 510)
+        _ = capture.search(prefix + "🚀")
+        XCTAssertEqual(received, prefix)
+    }
     @MainActor func testCommandProviderFailureFallsBackToNativeCommands() {
         let commands = CommandProvider { _ in throw AkittyError.core("test") }
         XCTAssertEqual(commands.search("split").first?.id,.split)

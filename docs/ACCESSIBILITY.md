@@ -1,11 +1,11 @@
 # Accessibility in AkiTTY
 
-AkiTTY 2.2.0 exposes terminal text, selected text and ranges,
+AkiTTY 2.2.1 exposes terminal text, selected text and ranges,
 UTF-16 character counts, line and index queries, range reads and the cursor's row
 through AppKit accessibility. Tabs have accessible labels and selection actions.
 Agent Overview lists panes across windows, tabs, splits and the quick terminal,
 including when hidden. **VoiceOver user validation remains in progress.**
-[Release notes](releases/2.2.0.md)
+[Release notes](releases/2.2.1.md)
 
 ## Agent Overview
 

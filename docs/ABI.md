@@ -73,8 +73,9 @@ selects the request. Session operations use the nonreused integer `id` returned 
 `title`, `shortcut`, and `keywords` for each descriptor. `query` is at most 512
 UTF-8 bytes; ranking uses its first 128 Unicode scalar values after replacing
 control/line-separator characters with spaces, trimming, NFKC normalization, and
-lowercasing. Contiguous matches outrank sparse ordered-character matches; equal
-scores retain declaration order. An empty query returns the complete catalog.
+lowercasing. Contiguous matches outrank sparse ordered-character matches.
+Earlier contiguous matches and fewer skips in sparse matches rank higher.
+Equal scores retain declaration order. An empty query returns the complete catalog.
 The host must validate the closed command IDs before dispatching an action.
 
 Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64

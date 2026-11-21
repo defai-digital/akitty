@@ -40,17 +40,17 @@ pub fn search(input: &str) -> Result<Value, String> {
     for (index, command) in COMMANDS.iter().enumerate() {
         let searchable = format!("{} {} {}", command.title, command.id, command.keywords.join(" "));
         let haystack = normalize(&searchable);
-        let score = if haystack.contains(&contiguous) {
-            0
+        let (sparse, distance) = if let Some(offset) = haystack.find(&contiguous) {
+            (false, offset)
         } else {
             let haystack = haystack.chars().collect::<Vec<_>>();
             let Some(skipped) = alignment_score(&needle, &haystack) else { continue; };
-            skipped + 1
+            (true, skipped)
         };
-        ranked.push((score, index, command));
+        ranked.push(((sparse, distance, index), command));
     }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    Ok(envelope(ranked.into_iter().map(|(_, _, command)| command).collect()))
+    ranked.sort_by_key(|(rank, _)| *rank);
+    Ok(envelope(ranked.into_iter().map(|(_, command)| command).collect()))
 }
 
 fn envelope(commands: Vec<&Command>) -> Value {

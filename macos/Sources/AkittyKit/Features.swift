@@ -53,8 +53,11 @@ private struct CommandEnvelope: Codable { let version: Int; let commands: [Comma
         return envelope.commands
     }
     public func search(_ query: String) -> [CommandDescriptor] {
-        var query = String(query.prefix(128))
-        while query.utf8.count > 512 { query.removeLast() }
+        let utf8 = query.trimmingCharacters(in: .whitespacesAndNewlines).utf8
+        var end = utf8.index(utf8.startIndex, offsetBy: 512, limitedBy: utf8.endIndex) ?? utf8.endIndex
+        // If the ABI byte limit cuts a scalar, leave that scalar out. Rust bounds the normalized query.
+        while end != utf8.endIndex && utf8[end] & 0xc0 == 0x80 { utf8.formIndex(before: &end) }
+        let query = String(decoding: utf8[..<end], as: UTF8.self)
         do {
             let entries = try Self.decode(try request(["op": "command_palette", "query": query]))
             warning = nil

@@ -6,8 +6,8 @@ bundled. `wasm-provenance.json` records the exact artifact SHA-256, pinned compi
 and source/build input hashes. `scripts/build-wasm.sh` builds those local sources;
 it does not fetch a terminal project or apply an upstream patch.
 
-The native 2.2.0 workspace version rebuilds the artifact with Rust 1.99.1. Its SHA-256 is
-`2a0991430819581850880c64e69e603afeef82fefc451da2de09a194054855d0`;
+The native 2.2.1 workspace version rebuilds the artifact with Rust 1.99.1. Its SHA-256 is
+`bca3dd930396e117cc2492b8ea8d53cfdc73f58e906121f549b1d394c7934968`;
 the matching workspace and engine input hashes are in `wasm-provenance.json`.
 
 ## Current implementation
