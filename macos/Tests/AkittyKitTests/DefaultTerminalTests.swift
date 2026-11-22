@@ -5,18 +5,114 @@ import UniformTypeIdentifiers
 
 final class DefaultTerminalTests: XCTestCase {
     func testLaunchLineQuotesThePathAndRefusesHiddenCharacters() {
-        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/tool"), "'/tmp/tool' || true\n")
-        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/my file"), "'/tmp/my file' || true\n")
-        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/it's"), "'/tmp/it'\\''s' || true\n")
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/tool"), "'/tmp/tool' || true\r")
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/my file"), "'/tmp/my file' || true\r")
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/it's"), "'/tmp/it'\\''s' || true\r")
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/a\\'b"), "'/tmp/a\\'\\''b' || true\r")
         XCTAssertNil(DefaultTerminal.launchLine(for: "/tmp/Foo\u{15}ls"))
         XCTAssertNil(DefaultTerminal.launchLine(for: "/tmp/photo\u{202E}gnp.command"))
         XCTAssertNil(DefaultTerminal.launchLine(for: "/tmp/run\u{200B}.command"))
         XCTAssertNil(DefaultTerminal.launchLine(for: "/tmp/line\u{2028}break"))
         XCTAssertNil(DefaultTerminal.launchLine(for: "relative"))
-        XCTAssertFalse(DefaultTerminal.shouldSendLaunchCommand(ready: false, elapsed: 0))
-        XCTAssertTrue(DefaultTerminal.shouldSendLaunchCommand(ready: true, elapsed: 0))
-        XCTAssertFalse(DefaultTerminal.shouldSendLaunchCommand(ready: false, elapsed: 1.9))
-        XCTAssertTrue(DefaultTerminal.shouldSendLaunchCommand(ready: false, elapsed: 2))
+        XCTAssertNil(DefaultTerminal.launchLine(for: "/tmp/x\r", shell: .fish))
+        // A combining mark after the quote makes one grapheme cluster. The quote is still escaped.
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/a'\u{0301}; echo x; #"), "'/tmp/a'\\''\u{0301}; echo x; #' || true\r")
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/a\\\u{0301}'\u{0301}", shell: .fish), "'/tmp/a\\\\\u{0301}\\'\u{0301}' || true\r")
+    }
+
+    func testPosixLaunchLinePassesAdversarialPathsAsOneWord() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-quote-\(UUID().uuidString)")
+        // File names cannot hold "/", so the payload touches a relative marker; each shell runs in `root`.
+        let marker = root.appendingPathComponent("injected")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let names = ["it's", "a'\u{0301}; touch injected; #", "Tools\\'; touch injected; #", "$(touch injected) `touch injected` 中文", "é'\u{0301}\u{0301}"]
+        for (index, name) in names.enumerated() {
+            let folder = root.appendingPathComponent("\(index)")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let program = folder.appendingPathComponent(name)
+            try Data("#!/bin/sh\necho ran-\(index)\n".utf8).write(to: program)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: program.path)
+            let line = try XCTUnwrap(DefaultTerminal.launchLine(for: program.path))
+            for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+                let process = Process()
+                let output = Pipe()
+                process.executableURL = URL(fileURLWithPath: shell)
+                process.currentDirectoryURL = root
+                process.arguments = ["-c", String(line.dropLast())]
+                process.standardOutput = output
+                try process.run(); process.waitUntilExit()
+                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                XCTAssertEqual(text, "ran-\(index)\n", "\(shell) \(name)")
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testFishLaunchLineEscapesBackslashAndQuote() {
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/it's", shell: .fish), "'/tmp/it\\'s' || true\r")
+        // A backslash before a quote cannot end fish's single-quoted string.
+        XCTAssertEqual(DefaultTerminal.launchLine(for: "/tmp/Tools\\'; curl x|sh; #/tool", shell: .fish),
+                       "'/tmp/Tools\\\\\\'; curl x|sh; #/tool' || true\r")
+        XCTAssertEqual(DefaultTerminal.launchShell("/bin/zsh"), .posix)
+        XCTAssertEqual(DefaultTerminal.launchShell("/bin/bash"), .posix)
+        XCTAssertEqual(DefaultTerminal.launchShell("/bin/sh"), .posix)
+        XCTAssertEqual(DefaultTerminal.launchShell("/bin/dash"), .posix)
+        XCTAssertEqual(DefaultTerminal.launchShell("/bin/ksh"), .posix)
+        XCTAssertEqual(DefaultTerminal.launchShell("/opt/homebrew/bin/fish"), .fish)
+        XCTAssertNil(DefaultTerminal.launchShell("/opt/homebrew/bin/nu"))
+        XCTAssertNil(DefaultTerminal.launchShell("/usr/local/bin/xonsh"))
+        XCTAssertEqual(DefaultTerminal.resolvedShell("", environment: ["SHELL": "/opt/homebrew/bin/fish"]), "/opt/homebrew/bin/fish")
+        XCTAssertEqual(DefaultTerminal.resolvedShell("", environment: [:]), "/bin/zsh")
+        XCTAssertEqual(DefaultTerminal.resolvedShell("/bin/bash", environment: ["SHELL": "/bin/zsh"]), "/bin/bash")
+    }
+
+    func testIntegratedLaunchWaitsForThePromptAndTimesOutPlainLaunchSendsAfterTwoSeconds() {
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: true, integrated: true, elapsed: 0), .send)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: true, elapsed: 2), .wait)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: true, elapsed: 29.9), .wait)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: true, elapsed: 30), .timedOut)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: false, elapsed: 0), .wait)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: false, elapsed: 1.9), .wait)
+        XCTAssertEqual(DefaultTerminal.launchStep(ready: false, integrated: false, elapsed: 2), .send)
+    }
+
+    func testLaunchClockPausesWhileHeld() {
+        var clock = DefaultTerminal.LaunchClock(now: 100)
+        XCTAssertEqual(clock.tick(now: 101, paused: false), 1)
+        XCTAssertEqual(clock.tick(now: 160, paused: true), 1)
+        XCTAssertEqual(clock.tick(now: 161.5, paused: false), 2.5)
+        XCTAssertEqual(clock.tick(now: 150, paused: false), 2.5)
+    }
+
+    func testDuplicateKeyFollowsLinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-dup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let program = root.appendingPathComponent("run.command")
+        try Data("echo hi\n".utf8).write(to: program)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: program.path)
+        let link = root.appendingPathComponent("link.command")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: program)
+        XCTAssertEqual(DefaultTerminal.duplicateKey(link.path), DefaultTerminal.duplicateKey(program.path))
+        let viaTmp = "/tmp/akitty-dup-\(UUID().uuidString)"
+        try Data().write(to: URL(fileURLWithPath: viaTmp))
+        defer { try? FileManager.default.removeItem(atPath: viaTmp) }
+        XCTAssertEqual(DefaultTerminal.duplicateKey(viaTmp), DefaultTerminal.duplicateKey("/private" + viaTmp))
+        XCTAssertEqual(DefaultTerminal.duplicateKey("/missing/./a"), "/missing/a")
+        let open = documentOpen(from: [program, link])
+        XCTAssertEqual(open.runnable, [program.standardizedFileURL.path])
+    }
+
+    func testUserCancelIsRecognised() {
+        XCTAssertTrue(DefaultTerminal.isUserCancel(CocoaError(.userCancelled)))
+        XCTAssertTrue(DefaultTerminal.isUserCancel(NSError(domain: NSOSStatusErrorDomain, code: -128)))
+        XCTAssertFalse(DefaultTerminal.isUserCancel(CocoaError(.fileNoSuchFile)))
+        let wrapped = NSError(domain: "com.apple.LaunchServices", code: -54, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSOSStatusErrorDomain, code: -128)])
+        XCTAssertTrue(DefaultTerminal.isUserCancel(wrapped))
+        XCTAssertFalse(DefaultTerminal.isUserCancel(NSError(domain: NSOSStatusErrorDomain, code: -10814)))
+    }
+
+    func testHandlerIdentity() {
         XCTAssertFalse(DefaultTerminal.isHandler(nil, for: URL(fileURLWithPath: "/Applications/Akitty.app")))
         let app = URL(fileURLWithPath: "/Applications/Akitty.app")
         XCTAssertTrue(DefaultTerminal.isHandler(app, for: app))
@@ -53,6 +149,9 @@ final class DefaultTerminalTests: XCTestCase {
         XCTAssertEqual(opened.folders.directories, [folder.standardizedFileURL.path])
         XCTAssertEqual(opened.runnable, [command.standardizedFileURL.path])
         XCTAssertTrue(DefaultTerminal.isRunnable(command))
+        let repeated = documentOpen(from: [command, command, folder.appendingPathComponent("./run.command")])
+        XCTAssertEqual(repeated.runnable, [command.standardizedFileURL.path])
+        XCTAssertEqual(repeated.skippedRunnables, 0)
         let before = try XCTUnwrap(DefaultTerminal.fileIdentity(command.path))
         try Data("echo changed\n".utf8).write(to: command)
         let after = try XCTUnwrap(DefaultTerminal.fileIdentity(command.path))
@@ -96,7 +195,7 @@ final class DefaultTerminalTests: XCTestCase {
         let scripts = try XCTUnwrap(shells.first { ($0["LSItemContentTypes"] as? [String])?.contains("com.apple.terminal.shell-script") == true })
         XCTAssertEqual(scripts["LSHandlerRank"] as? String, "Alternate")
         let executables = try XCTUnwrap(shells.first { ($0["LSItemContentTypes"] as? [String])?.contains("public.unix-executable") == true })
-        XCTAssertNil(executables["LSHandlerRank"])
+        XCTAssertEqual(executables["LSHandlerRank"] as? String, "Alternate")
     }
 
     @MainActor func testDockMenuAndDefaultTerminalItem() throws {
@@ -112,10 +211,19 @@ final class DefaultTerminalTests: XCTestCase {
         let menu = try XCTUnwrap(NSApp.mainMenu?.items.compactMap(\.submenu).first { $0.title == "Akitty" })
         XCTAssertTrue(menu.autoenablesItems)
         let item = try XCTUnwrap(menu.items.first { $0.title == "Make Akitty the Default Terminal" })
-        app.defaultTerminalApplication = { URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app") }
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        app.defaultTerminalApplication = { _ in terminal }
         XCTAssertTrue(app.validateMenuItem(item))
-        app.defaultTerminalApplication = { Bundle.main.bundleURL }
+        // Half done: Unix executables changed, shell scripts did not. The item stays available to finish it.
+        app.defaultTerminalApplication = { $0 == .unixExecutable ? Bundle.main.bundleURL : terminal }
+        XCTAssertTrue(app.validateMenuItem(item))
+        app.defaultTerminalApplication = { $0 == .unixExecutable ? terminal : Bundle.main.bundleURL }
+        XCTAssertTrue(app.validateMenuItem(item))
+        app.defaultTerminalApplication = { $0 == .unixExecutable ? Bundle.main.bundleURL : terminal }
+        XCTAssertEqual(app.defaultTerminalTypesToChange().map(\.identifier), ["com.apple.terminal.shell-script"])
+        app.defaultTerminalApplication = { _ in Bundle.main.bundleURL }
         XCTAssertFalse(app.validateMenuItem(item))
+        XCTAssertEqual(app.defaultTerminalTypesToChange(), [])
         let about = try XCTUnwrap(menu.items.first { $0.title == "About Akitty" })
         XCTAssertTrue(app.validateMenuItem(about))
         about.isEnabled = false
@@ -127,23 +235,19 @@ final class DefaultTerminalTests: XCTestCase {
         let app = AkittyApplication()
         let quick = try TerminalWindow(app: app, headless: true)
         let front = try TerminalWindow(app: app, headless: true)
+        let back = try TerminalWindow(app: app, headless: true)
+        let all = [quick, front, back]
         defer {
-            quick.panes.forEach { $0.terminal.shutdown() }
-            front.panes.forEach { $0.terminal.shutdown() }
-            quick.window?.close()
-            front.window?.close()
+            for window in all { window.panes.forEach { $0.terminal.shutdown() }; window.window?.close() }
         }
-        quick.window?.orderOut(nil)
-        front.window?.orderFrontRegardless()
-        if front.window?.isVisible == true, quick.window?.isVisible != true {
-            let visible = AkittyApplication.dockTabWindow(orderedFrontToBack: [quick, front], quick: quick)
-            XCTAssertTrue(visible === front)
-        }
-        quick.window?.orderOut(nil)
-        front.window?.orderOut(nil)
-        XCTAssertNotEqual(quick.window?.isVisible, true)
-        XCTAssertNotEqual(front.window?.isVisible, true)
-        let minimized = AkittyApplication.dockTabWindow(orderedFrontToBack: [quick, front], quick: quick)
+        // Visibility is injected, so the check runs the same without a window server.
+        let visible = AkittyApplication.dockTabWindow(orderedFrontToBack: all, quick: quick, isVisible: { $0 === front || $0 === back })
+        XCTAssertTrue(visible === front)
+        let behind = AkittyApplication.dockTabWindow(orderedFrontToBack: all, quick: quick, isVisible: { $0 === back })
+        XCTAssertTrue(behind === back)
+        let minimized = AkittyApplication.dockTabWindow(orderedFrontToBack: all, quick: quick, isVisible: { _ in false })
         XCTAssertTrue(minimized === front)
+        XCTAssertNil(AkittyApplication.dockTabWindow(orderedFrontToBack: [quick], quick: quick, isVisible: { _ in false }))
+        XCTAssertNil(AkittyApplication.dockTabWindow(orderedFrontToBack: [], quick: nil))
     }
 }

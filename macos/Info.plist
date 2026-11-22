@@ -25,6 +25,8 @@
 			<string>Unix executable</string>
 			<key>CFBundleTypeRole</key>
 			<string>Shell</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.unix-executable</string>

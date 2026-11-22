@@ -151,12 +151,14 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     let updates = UpdateController()
     private var settingsWindow: PreferencesWindow?
-    /// Reads the current Unix-executable handler. Tests replace this; the menu action still changes the real handler.
-    var defaultTerminalApplication: () -> URL? = { NSWorkspace.shared.urlForApplication(toOpen: .unixExecutable) }
+    /// Reads the current handler for a type. Tests replace this; the menu action still changes the real handler.
+    var defaultTerminalApplication: (UTType) -> URL? = { NSWorkspace.shared.urlForApplication(toOpen: $0) }
     /// Programs and skipped-item counts delivered before the app finished launching. Shown after the menu exists.
     private var pendingOpen: DocumentOpen?
     /// Timers that type an approved program once its shell prompt is up.
     private var launchTimers: [Timer] = []
+    /// True while the default-terminal change waits for the macOS confirmations.
+    private(set) var settingDefaultTerminal = false
     /// Delegates that rebuild the profile submenus each time they open, so they always list the saved profiles.
     private var profileMenus: [ProfileMenu] = []
     /// Opens a window, or a tab in the key terminal window, whose first pane uses `profile` (nil: defaults).
@@ -255,7 +257,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// Confirms each program, then offers a normal window when a cold launch was cancelled and nothing else opened.
     private func presentOpens(_ paths: [String], skipped: Int, openWindowIfNone: Bool) {
         let before = windows.count
-        for path in paths { openRunnable(at: path) }
+        // Events delivered before launch are merged, so the same program can arrive twice.
+        var seen: Set<String> = []
+        for path in paths where seen.insert(DefaultTerminal.duplicateKey(path)).inserted { openRunnable(at: path) }
         if skipped > 0 {
             let alert = NSAlert(); alert.messageText = skipped == 1 ? "One item was not opened." : "\(skipped) items were not opened."
             alert.informativeText = "Akitty opens at most 8 folders and programs from one request."; alert.runModal()
@@ -269,54 +273,102 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         presentOpens(pending.runnable, skipped: pending.folders.skipped + pending.skippedRunnables, openWindowIfNone: true)
     }
     /// Asks before running a program Finder opened, then types its quoted path into a new shell in its folder.
+    /// Open Folder starts the same shell without running anything, as `open -a Akitty <file>` did for other files.
     private func openRunnable(at path: String) {
-        guard let line = DefaultTerminal.launchLine(for: path) else {
-            let alert = NSAlert()
-            alert.messageText = "Cannot Run This File"
-            alert.informativeText = "This file's path contains hidden characters, so Akitty will not run it."
-            alert.alertStyle = .warning
-            alert.runModal()
-            return
+        let folder = (path as NSString).deletingLastPathComponent
+        // When the file cannot be run, its folder can still be opened, as before this file type was handled.
+        guard DefaultTerminal.launchLine(for: path) != nil else {
+            // The path is not shown: the characters that made it unsafe would rewrite this alert too.
+            return offerFolder(folder, "Cannot Run This File", "This file's path contains hidden or control characters, so Akitty will not run it or show its name.")
+        }
+        let shell = DefaultTerminal.resolvedShell(TerminalPreferences.load().effective(profile: nil).shell)
+        guard DefaultTerminal.launchShell(shell) != nil else {
+            return offerFolder(folder, "Cannot Run This File", "Akitty runs programs from Finder in sh, bash, zsh, dash, ksh or fish. The shell in Settings is \((shell as NSString).lastPathComponent).\n\n\(path)")
         }
         guard let identity = DefaultTerminal.fileIdentity(path) else {
-            let alert = NSAlert()
-            alert.messageText = "Cannot Run This File"
-            alert.informativeText = "Akitty cannot find this file."
-            alert.alertStyle = .warning
-            alert.runModal()
-            return
+            return warn("Cannot Run This File", "Akitty cannot find this file.")
         }
         let alert = NSAlert()
         alert.messageText = "Allow Akitty to run “\((path as NSString).lastPathComponent)”?"
         alert.informativeText = "A new terminal will start in this file's folder and run it after the prompt. The shell stays open afterward.\n\n\(path)"
-        alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Cancel"); alert.alertStyle = .warning
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Open Folder"); alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: break
+        case .alertSecondButtonReturn: newWindow(directory: folder); return
+        default: return
+        }
         guard DefaultTerminal.fileIdentity(path) == identity else {
-            let changed = NSAlert()
-            changed.messageText = "The File Changed"
-            changed.informativeText = "Akitty did not run it, because the file changed while the confirmation was open."
-            changed.alertStyle = .warning
-            changed.runModal()
-            return
+            return warn("The File Changed", "Akitty did not run it, because the file changed while the confirmation was open.")
         }
         do {
-            let controller = try createTerminalWindow(directory: (path as NSString).deletingLastPathComponent)
+            let controller = try createTerminalWindow(directory: folder)
             guard let terminal = controller.active else { return }
-            sendLaunchLine(line, to: terminal)
+            // The pane's own shell decides the quoting. Settings could have changed while the alert was open.
+            guard let kind = DefaultTerminal.launchShell(terminal.shellPath), let line = DefaultTerminal.launchLine(for: path, shell: kind) else {
+                return warn("Cannot Run This File", "Akitty does not type programs into \((terminal.shellPath as NSString).lastPathComponent). The shell is open in the file's folder.")
+            }
+            sendLaunchLine(line, path: path, identity: identity, to: terminal)
         } catch { NSAlert(error: error).runModal() }
     }
+    /// Mutable state for one pending launch. Main-actor isolated so the timer closure can hold it.
+    @MainActor private final class LaunchWait {
+        var clock: DefaultTerminal.LaunchClock
+        init(now: TimeInterval) { clock = DefaultTerminal.LaunchClock(now: now) }
+    }
+    private func offerFolder(_ folder: String, _ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Folder"); alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { newWindow(directory: folder) }
+    }
+    private func warn(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
     /// Types `line` once shell integration reports a prompt, or after two seconds when integration is off.
-    private func sendLaunchLine(_ line: String, to terminal: TerminalView) {
-        let started = Date()
+    /// Nothing is sent when the person has typed in the pane, the prompt was edited, or the file changed since Run.
+    private func sendLaunchLine(_ line: String, path: String, identity: DefaultTerminal.FileIdentity, to terminal: TerminalView) {
+        let wait = LaunchWait(now: ProcessInfo.processInfo.systemUptime)
+        let typed = terminal.inputCount
+        let name = (path as NSString).lastPathComponent
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak terminal] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
-                guard let terminal else { timer.invalidate(); self.launchTimers.removeAll { $0 === timer }; return }
-                let ready = (try? terminal.session.shellState())?.shell?.ready == true
-                guard DefaultTerminal.shouldSendLaunchCommand(ready: ready, elapsed: Date().timeIntervalSince(started)) else { return }
-                timer.invalidate()
-                self.launchTimers.removeAll { $0 === timer }
-                terminal.send(line)
+                @MainActor func finish() { timer.invalidate(); self.launchTimers.removeAll { $0 === timer } }
+                guard let terminal, !terminal.isShutdown else { finish(); return }
+                // Another confirmation, or a sheet on this window such as Close, holds the launch and pauses its clock.
+                // Nothing is sent into a closing pane, and no notice stacks on top of another alert.
+                let held = NSApp.modalWindow != nil || terminal.window?.attachedSheet != nil
+                let elapsed = wait.clock.tick(now: ProcessInfo.processInfo.systemUptime, paused: held)
+                if held { return }
+                let state = try? terminal.session.shellState()
+                if state?.exited == true {
+                    finish()
+                    return self.warn("“\(name)” Did Not Run", "The shell exited before its prompt was ready, so Akitty did not type the command.")
+                }
+                let step = DefaultTerminal.launchStep(ready: state?.shell?.ready == true, integrated: terminal.shellIntegrated, elapsed: elapsed)
+                switch step {
+                case .wait: return
+                case .timedOut:
+                    finish()
+                    self.warn("“\(name)” Did Not Run", "The shell did not report its prompt within \(Int(DefaultTerminal.integratedTimeout)) seconds, so Akitty did not type the command. A startup question may be waiting, or shell integration may be unavailable in this shell (for example, another DEBUG trap). The shell is open in the file's folder.")
+                case .send:
+                    finish()
+                    guard terminal.inputCount == typed, !terminal.hasMarkedText(), state?.control?.prompt_edited != true else {
+                        return self.warn("“\(name)” Did Not Run", "Text was typed in the new terminal before its prompt was ready, so Akitty did not add the command to it.")
+                    }
+                    guard DefaultTerminal.fileIdentity(path) == identity else {
+                        return self.warn("“\(name)” Did Not Run", "The file changed after you chose Run, so Akitty did not run it.")
+                    }
+                    // Ctrl-U first, as agent commands do: a terminal report that reached the line editor cannot prefix the path.
+                    terminal.send("\u{15}" + line)
+                }
             }
         }
         launchTimers.append(timer)
@@ -345,8 +397,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     /// `orderedFrontToBack` is the app's terminal windows, front first. The first visible one wins.
     /// When every regular window is minimized, the frontmost regular window is still used so the tab is not lost.
-    static func dockTabWindow(orderedFrontToBack: [TerminalWindow], quick: TerminalWindow?) -> TerminalWindow? {
-        if let visible = orderedFrontToBack.first(where: { $0.window?.isVisible == true }) { return visible }
+    static func dockTabWindow(orderedFrontToBack: [TerminalWindow], quick: TerminalWindow?,
+                              isVisible: @MainActor (TerminalWindow) -> Bool = { $0.window?.isVisible == true }) -> TerminalWindow? {
+        if let visible = orderedFrontToBack.first(where: isVisible) { return visible }
         return orderedFrontToBack.first { $0 !== quick }
     }
     func createInitialWindowIfNeeded(defaultLaunch: Bool, headless: Bool = false) throws {
@@ -460,13 +513,21 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     @objc private func settings(_ sender: Any?) { showSettings() }
     /// Sets this app as the handler for Unix executables and Terminal shell scripts.
     /// macOS asks the user to confirm each change.
+    /// Only types another app still handles are changed. The item is disabled while a change is in progress.
     @objc func setAsDefaultTerminal(_ sender: Any?) {
-        var types: [UTType] = [.unixExecutable]
-        if let scripts = DefaultTerminal.shellScriptType { types.append(scripts) }
+        guard !settingDefaultTerminal else { return }
+        let types = defaultTerminalTypesToChange()
+        guard !types.isEmpty else { return }
+        settingDefaultTerminal = true
         setDefaultTerminal(types, at: Bundle.main.bundleURL, failures: [])
+    }
+    func defaultTerminalTypesToChange() -> [UTType] {
+        let types = [UTType.unixExecutable] + (DefaultTerminal.shellScriptType.map { [$0] } ?? [])
+        return types.filter { !DefaultTerminal.isHandler(defaultTerminalApplication($0), for: Bundle.main.bundleURL) }
     }
     private func setDefaultTerminal(_ types: [UTType], at bundle: URL, failures: [String]) {
         guard let type = types.first else {
+            settingDefaultTerminal = false
             guard !failures.isEmpty else { return }
             let alert = NSAlert()
             alert.messageText = "Failed to Set Default Terminal"
@@ -476,8 +537,11 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             return
         }
         NSWorkspace.shared.setDefaultApplication(at: bundle, toOpen: type) { [weak self] error in
+            // Declining one confirmation declines the change: no further prompt and no failure alert.
+            let cancelled = error.map(DefaultTerminal.isUserCancel) ?? false
             let failure = error?.localizedDescription
             DispatchQueue.main.async {
+                guard !cancelled else { self?.settingDefaultTerminal = false; return }
                 self?.setDefaultTerminal(Array(types.dropFirst()), at: bundle, failures: failures + (failure.map { [$0] } ?? []))
             }
         }
@@ -657,7 +721,8 @@ extension AkittyApplication: NSMenuItemValidation {
     /// Only the default-terminal item is decided here. Every other item keeps the enabled state its menu already set.
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(setAsDefaultTerminal(_:)) {
-            return !DefaultTerminal.isHandler(defaultTerminalApplication(), for: Bundle.main.bundleURL)
+            // Enabled until both types are handled here, so a half-finished change can be completed.
+            return !settingDefaultTerminal && !defaultTerminalTypesToChange().isEmpty
         }
         return item.isEnabled
     }

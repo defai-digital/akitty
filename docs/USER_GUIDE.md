@@ -13,9 +13,15 @@ for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-star
   programs.
 - **Open a program from Finder.** Choose **Akitty → Make Akitty the Default Terminal**.
   macOS then opens Unix executables, and executable `.command` and `.tool`
-  files, with AkiTTY. AkiTTY asks before running the program, waits for the
-  prompt, then runs it in a shell in its folder. The shell stays open so you
-  can read the output. Choose **Cancel** to leave the file alone.
+  files, with AkiTTY. AkiTTY asks before running the program, then runs it
+  in a new shell in its folder. With shell integration (bash and zsh) it
+  waits for the prompt, up to 30 seconds. Other shells get the command after
+  two seconds, so a startup question in your shell profile could receive it.
+  The shell stays open so you can read the output. Choose **Open Folder** to
+  start a shell in its folder without running it, or **Cancel** to leave the
+  file alone. If you type in the new window before the command is sent,
+  AkiTTY does not run the program. It works with sh, bash, zsh, dash, ksh
+  and fish; with another shell you can still open the folder.
 - **Start from the Dock.** Control-click the AkiTTY icon and choose **New Window**
   or **New Tab**. **New Tab** opens in the frontmost terminal window and leaves
   a hidden Quick Terminal hidden. With no terminal open, it opens a window.

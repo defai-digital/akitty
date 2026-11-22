@@ -156,6 +156,12 @@ struct RenderReuse: Equatable {
     let profileID: UUID?
     /// The resolved starting folder stays with this session even if its profile or Settings later change.
     let startingDirectory: String
+    /// The shell the core launched for this pane, resolved as the core does: the configured path, `$SHELL`, `/bin/zsh`.
+    let shellPath: String
+    /// True when this pane started with shell integration, so the shell reports when its prompt is ready.
+    let shellIntegrated: Bool
+    /// Counts writes of typed or pasted input, not terminal reports. A launch line waiting for the prompt checks it so it never joins typed text.
+    private(set) var inputCount = 0
     /// The colours and cursor the rasterizer draws with, from the effective theme.
     var renderAppearance: RenderAppearance { TerminalTheme.named(preferences.theme).appearance(cursorStyle: preferences.cursorStyle) }
     private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
@@ -207,10 +213,12 @@ struct RenderReuse: Equatable {
     init(headless: Bool, forceSoftware: Bool, forceShaderFailure: Bool, initial: TerminalPreferences, defaults: UserDefaults = .standard, profile: UUID? = nil, restoredText: String? = nil) throws {
         preferenceDefaults = defaults; profileID = profile
         startingDirectory = initial.directory.isEmpty ? ProcessInfo.processInfo.environment["HOME"] ?? "/" : initial.directory
-        super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-        // NSView must be initialized before a throwing operation can unwind it.
+        shellPath = DefaultTerminal.resolvedShell(initial.shell)
         let integrationDirectory = initial.shellIntegration && !headless
             ? Self.integrationDirectory(shell: initial.shell, resources: Bundle.main.resourceURL) : nil
+        shellIntegrated = integrationDirectory != nil
+        super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        // NSView must be initialized before a throwing operation can unwind it.
         sessionStorage = try TerminalSession(headless: headless, shell: initial.shell, directory: initial.directory, scrollback: restoredText == nil ? initial.scrollback : max(500, initial.scrollback), shellIntegrationDirectory: integrationDirectory, folderHistory: initial.folderHistory, restoredText: restoredText)
         preferences = initial; fontSize = initial.fontSize
         try syncCoreSettings()
@@ -312,9 +320,9 @@ struct RenderReuse: Equatable {
         if note.name == NSWindow.didResignKeyNotification {
             // Key-ups for held keys go to whatever took focus; release them now so none stay stuck.
             releaseHeldKittyKeys()
-            if snapshot?.focus_reporting == true { send("\u{1b}[O") }
+            if snapshot?.focus_reporting == true { send("\u{1b}[O", report: true) }
         } else {
-            if snapshot?.focus_reporting == true { send("\u{1b}[I") }
+            if snapshot?.focus_reporting == true { send("\u{1b}[I", report: true) }
             lastLocalInteraction = ProcessInfo.processInfo.systemUptime; requestAutomaticRefresh()
         }
     }
@@ -704,8 +712,10 @@ struct RenderReuse: Equatable {
         guard !preferences.silentMode, now - lastErrorBeep >= 1 else { return }
         lastErrorBeep = now; playAlertSound()
     }
-    public func send(_ text: String, paste: Bool = false) {
+    /// `report` marks bytes the terminal reports on its own (focus changes, key and modifier releases), not typed input.
+    public func send(_ text: String, paste: Bool = false, report: Bool = false) {
         guard !stopped else { return }
+        if !report { inputCount &+= 1 }
         // One serial queue keeps keystrokes and pastes in order without blocking main on the model lock.
         lastLocalInteraction = ProcessInfo.processInfo.systemUptime
         let session = self.session
@@ -737,7 +747,7 @@ struct RenderReuse: Equatable {
         return KittyKeyEncoder.encode(input, flags: flags)
     }
     public override func keyUp(with event: NSEvent) {
-        if kittyDown.removeValue(forKey: event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self)) }
+        if kittyDown.removeValue(forKey: event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self), report: true) }
         else { super.keyUp(with: event) }
     }
     public override func flagsChanged(with event: NSEvent) {
@@ -751,7 +761,7 @@ struct RenderReuse: Equatable {
         else { pressed = event.modifierFlags.contains(Self.nativeFlag(for: modifier)); if pressed { heldModifierKeys.insert(event.keyCode) } }
         guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText() else { super.flagsChanged(with: event); return }
         if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: pressed, flags: flags) {
-            send(String(decoding: bytes, as: UTF8.self))
+            send(String(decoding: bytes, as: UTF8.self), report: true)
         }
     }
     private static func nativeFlag(for modifier: KittyModifiers) -> NSEvent.ModifierFlags {
@@ -766,11 +776,11 @@ struct RenderReuse: Equatable {
         if flags & KittyKeyEncoder.reportEvents != 0 {
             for var input in kittyDown.values {
                 input.event = .release
-                if case let .bytes(bytes) = KittyKeyEncoder.encode(input, flags: flags) { send(String(decoding: bytes, as: UTF8.self)) }
+                if case let .bytes(bytes) = KittyKeyEncoder.encode(input, flags: flags) { send(String(decoding: bytes, as: UTF8.self), report: true) }
             }
             if flags & KittyKeyEncoder.reportAllKeys != 0 {
                 for code in heldModifierKeys {
-                    if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: code, modifiers: [], pressed: false, flags: flags) { send(String(decoding: bytes, as: UTF8.self)) }
+                    if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: code, modifiers: [], pressed: false, flags: flags) { send(String(decoding: bytes, as: UTF8.self), report: true) }
                 }
             }
         }
@@ -946,12 +956,12 @@ struct RenderReuse: Equatable {
     }
     public override func becomeFirstResponder() -> Bool {
         lastLocalInteraction = ProcessInfo.processInfo.systemUptime; requestAutomaticRefresh()
-        if snapshot?.focus_reporting == true { send("\u{1b}[I") }
+        if snapshot?.focus_reporting == true { send("\u{1b}[I", report: true) }
         return true
     }
     public override func resignFirstResponder() -> Bool {
         releaseHeldKittyKeys()
-        if snapshot?.focus_reporting == true { send("\u{1b}[O") }
+        if snapshot?.focus_reporting == true { send("\u{1b}[O", report: true) }
         return true
     }
     /// Drops the host selection, its copy/accessibility text, and the cached highlight.
