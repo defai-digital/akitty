@@ -169,6 +169,58 @@ class ShellIntegrationTests(unittest.TestCase):
                 for name, value in files.items():
                     self.assertEqual((home / name).read_text(), value)
 
+    def test_zsh_first_prompt_is_ready_only_after_later_precmd_hooks(self):
+        # A user precmd hook that asks a question on the first prompt (an update check) runs after the wrapper's
+        # deferred init. The ready mark must wait for it, or a host typing at the "ready" prompt answers the question.
+        resources = SCRIPT.parent
+        with tempfile.TemporaryDirectory(prefix='akitty-zsh-first-') as directory:
+            home = pathlib.Path(directory)
+            (home / '.zshrc').write_text("PS1='USER> '\nautoload -Uz add-zsh-hook\n"
+                                         "function ask() { add-zsh-hook -d precmd ask; read -k 1 'REPLY?UPDATE? '; print \"ANSWER=$REPLY\" }\n"
+                                         "add-zsh-hook precmd ask\n")
+            env = shell_environment(directory, TERM='xterm-256color', ZDOTDIR=str(resources),
+                                    AKITTY_INTEGRATION_DIR=str(resources), AKITTY_USER_ZDOTDIR=directory)
+            pid, fd = pty.fork()
+            if pid == 0:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
+                os.chdir(directory)
+                os.execve(ZSH, [ZSH, '-d', '-l', '-i'], env)
+            output = bytearray()
+            def read_until(marker, seconds=10):
+                deadline = time.monotonic() + seconds
+                while marker not in output and time.monotonic() < deadline:
+                    if select.select([fd], [], [], 0.05)[0]:
+                        try: output.extend(os.read(fd, 65536))
+                        except OSError: return
+            try:
+                read_until(b'UPDATE? ')
+                read_until(b'\x1b]133;A\x07', 0.5)
+                self.assertIn(b'UPDATE? ', output, repr(bytes(output)))
+                self.assertNotIn(b'\x1b]133;A\x07', output, 'no ready mark while a precmd hook reads the terminal')
+                os.write(fd, b'n')
+                read_until(b'\x1b]133;A\x07')
+                text = bytes(output)
+                self.assertIn(b'ANSWER=n', text)
+                self.assertIn(b'\x1b]133;A\x07', text)
+                self.assertLess(text.index(b'ANSWER=n'), text.index(b'\x1b]133;A\x07'))
+                self.assertEqual(text.count(b'\x1b]133;A\x07'), 1, 'the first prompt is marked once')
+                output.clear()
+                os.write(fd, b'echo NEXT\r')
+                read_until(b'\x1b]133;A\x07')
+                self.assertIn(b'\x1b]133;D;0\x07', output, repr(bytes(output)))
+                self.assertIn(b'\x1b]133;A\x07', output, 'later prompts are still marked from precmd')
+            finally:
+                os.close(fd)
+                for termination in (signal.SIGHUP, signal.SIGKILL):
+                    try: os.kill(pid, termination)
+                    except ProcessLookupError: pass
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        if os.waitpid(pid, os.WNOHANG)[0]: break
+                        time.sleep(0.01)
+                    else: continue
+                    break
+
     def app_bash(self, profile, commands):
         """Starts bash the way the app does, with `profile` as the user's login profile."""
         resources = SCRIPT.parent

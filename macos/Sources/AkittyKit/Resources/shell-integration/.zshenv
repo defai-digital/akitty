@@ -11,8 +11,20 @@ if [[ -o interactive ]]; then
         unfunction __akitty_deferred_init
         source "$__akitty_integration"
         unset __akitty_integration
-        # Hooks added while precmd runs start with the next prompt; mark this one directly.
-        (( ! $+functions[__akitty_precmd] )) || __akitty_precmd
+        (( $+functions[__akitty_precmd] )) || return 0
+        # Hooks added while precmd runs start with the next prompt, so this prompt is marked here. This hook was added
+        # before the user's startup files, so their precmd hooks still run after it. The ready mark waits for the line
+        # editor's first start, after those hooks and the prompt: a hook still reading the terminal (an update
+        # question) must not look like an idle prompt. Without the line editor the mark is printed now.
+        if [[ -o zle ]] && autoload -Uz add-zle-hook-widget 2>/dev/null \
+            && add-zle-hook-widget line-init __akitty_first_line 2>/dev/null; then
+            local __akitty_defer_mark=1
+        fi
+        __akitty_precmd
+    }
+    function __akitty_first_line() {
+        add-zle-hook-widget -d line-init __akitty_first_line
+        printf '\e]133;A\a'
     }
     autoload -Uz add-zsh-hook
     add-zsh-hook precmd __akitty_deferred_init

@@ -8,7 +8,9 @@ function __akitty_precmd() {
     local path=${PWD//\%/%25}
     path=${path// /%20}; path=${path//$'\n'/%0A}; path=${path//$'\r'/%0D}
     path=${path//\#/%23}; path=${path//\?/%3F}; path=${path//$'\e'/%1B}; path=${path//$'\a'/%07}
-    printf '\e]7;file://localhost%s\a\e]133;A\a' "$path"
+    printf '\e]7;file://localhost%s\a' "$path"
+    # The first prompt from the app wrapper is marked ready when the line editor starts (see .zshenv).
+    [[ -n ${__akitty_defer_mark-} ]] || printf '\e]133;A\a'
     # The tab names where the shell is, as Ghostty's title feature does: the last three directories, since the tab
     # keeps the end of a long title. AKITTY_SHELL_TITLE=0 leaves the title to the user's own hooks.
     [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${${(%):-%(4~|…/%3~|%~)}//[[:cntrl:]]/}"
