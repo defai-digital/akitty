@@ -182,6 +182,31 @@ final class DefaultTerminalTests: XCTestCase {
         XCTAssertEqual(programFirst.folders.skipped, 1)
     }
 
+    func testOnlyAnAppRequestRunsAProgram() throws {
+        XCTAssertTrue(DefaultTerminal.isAppSender(bundleIdentifier: "com.apple.finder", bundleURL: URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")))
+        XCTAssertFalse(DefaultTerminal.isAppSender(bundleIdentifier: nil, bundleURL: nil), "the open tool")
+        XCTAssertFalse(DefaultTerminal.isAppSender(bundleIdentifier: "com.example.tool", bundleURL: URL(fileURLWithPath: "/usr/local/bin")))
+        // The sender PID is set by the system when an event is sent, so the process check is tested directly.
+        XCTAssertFalse(DefaultTerminal.isOpenedByApp(nil))
+        XCTAssertFalse(DefaultTerminal.isApp(0))
+        XCTAssertFalse(DefaultTerminal.isApp(Int32.max), "a sender that already exited")
+        XCTAssertFalse(DefaultTerminal.isApp(ProcessInfo.processInfo.processIdentifier), "a test runner outside an app bundle")
+        if let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first {
+            XCTAssertTrue(DefaultTerminal.isApp(finder.processIdentifier))
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("akitty-sender-\(UUID().uuidString)")
+        let command = root.appendingPathComponent("gradlew")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("#!/bin/sh\n".utf8).write(to: command)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: command.path)
+        XCTAssertEqual(documentOpen(from: [command]).runnable, [command.standardizedFileURL.path])
+        let commandLine = documentOpen(from: [command], runPrograms: false)
+        XCTAssertEqual(commandLine.runnable, [])
+        XCTAssertEqual(commandLine.folders.directories, [root.standardizedFileURL.path], "a command line opens the program's folder")
+    }
+
     func testPendingOpensKeepOneCapAndAskAboutAProgramOnce() {
         func programs(_ range: Range<Int>) -> [String] { range.map { "/missing/akitty-merge/run-\($0).command" } }
         var pending = DocumentOpen()

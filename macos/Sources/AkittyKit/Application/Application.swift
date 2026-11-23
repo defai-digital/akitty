@@ -241,7 +241,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         return true
     }
     public func application(_ sender: NSApplication, open urls: [URL]) {
-        let request = documentOpen(from: urls)
+        let request = documentOpen(from: urls, runPrograms: DefaultTerminal.isOpenedByApp(NSAppleEventManager.shared().currentAppleEvent))
         for directory in request.folders.directories { newWindow(directory: directory) }
         // A confirmation during launch runs before the menu and the Dock exist, and the alert can sit behind Finder.
         // Hold programs until didFinishLaunching has activated the app.
@@ -280,7 +280,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         presentOpens(pending.runnable, skipped: pending.folders.skipped + pending.skippedRunnables, openWindowIfNone: true)
     }
     /// Asks before running a program Finder opened, then types its quoted path into a new shell in its folder.
-    /// Open Folder starts the same shell without running anything, as `open -a Akitty <file>` did for other files.
+    /// Open Folder starts the same shell without running anything, as `open -a Akitty <file>` does.
     private func openRunnable(at path: String, key: String) {
         let folder = (path as NSString).deletingLastPathComponent
         // When the file cannot be run, its folder can still be opened, as before this file type was handled.

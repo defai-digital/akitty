@@ -16,7 +16,7 @@ enum DefaultTerminal {
     }
 
     /// A Unix executable or an executable Terminal script. A file without the executable bit stays on the
-    /// folder-open path, including a project file AX Code opens with `open -a Akitty`.
+    /// folder-open path.
     static func isRunnable(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
         var directory = ObjCBool(false)
@@ -25,6 +25,24 @@ enum DefaultTerminal {
         guard FileManager.default.isExecutableFile(atPath: path) else { return false }
         let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
         return isRunnableFile(url, contentType: type)
+    }
+
+    /// True when an app asked to open the items: Finder, the Dock or a launcher. Launch Services puts the requesting
+    /// process in the event, so a command line (`open -a Akitty <path>`, a script, AX Code's hand-over) names the
+    /// `open` tool instead, and its executables open their folder rather than asking to run.
+    static func isOpenedByApp(_ event: NSAppleEventDescriptor?) -> Bool {
+        guard let pid = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value else { return false }
+        return isApp(pid)
+    }
+
+    /// A process that already exited, or one outside an app bundle (the `open` tool), is not an app.
+    static func isApp(_ pid: pid_t) -> Bool {
+        guard pid > 0, let process = NSRunningApplication(processIdentifier: pid) else { return false }
+        return isAppSender(bundleIdentifier: process.bundleIdentifier, bundleURL: process.bundleURL)
+    }
+
+    static func isAppSender(bundleIdentifier: String?, bundleURL: URL?) -> Bool {
+        bundleIdentifier != nil && bundleURL?.pathExtension.lowercased() == "app"
     }
 
     static func isRunnableFile(_ url: URL, contentType: UTType?) -> Bool {
@@ -173,13 +191,14 @@ struct DocumentOpen: Equatable {
     }
 }
 
-func documentOpen(from urls: [URL], limit: Int = 8) -> DocumentOpen {
+/// `runPrograms` is false for a command-line request: a program then opens its folder, as any other file does.
+func documentOpen(from urls: [URL], limit: Int = 8, runPrograms: Bool = true) -> DocumentOpen {
     var open = DocumentOpen()
     var slots = limit
     var seen: Set<String> = []
     var seenRunnable: Set<String> = []
     for url in urls {
-        if DefaultTerminal.isRunnable(url) {
+        if runPrograms, DefaultTerminal.isRunnable(url) {
             // A repeated program is asked about and run once.
             guard seenRunnable.insert(DefaultTerminal.duplicateKey(url.standardizedFileURL.path)).inserted else { continue }
             if slots > 0 { open.runnable.append(url.standardizedFileURL.path); slots -= 1 }

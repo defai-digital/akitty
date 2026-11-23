@@ -8,12 +8,13 @@ for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-star
 
 - **Open a folder.** Drop it onto the AkiTTY Dock icon or run
   `open -a Akitty /path/to/project` from a shell. AkiTTY opens a window
-  in that folder. An ordinary file, including a script that is not marked
-  executable, opens in its folder. One request opens at most 8 folders and
-  programs.
+  in that folder. A file opens in its folder. `open -a` never runs a
+  program, even an executable one; it opens the program's folder. One
+  request opens at most 8 folders and programs.
 - **Open a program from Finder.** Choose **Akitty → Make Akitty the Default Terminal**.
   macOS then opens Unix executables, and executable `.command` and `.tool`
-  files, with AkiTTY. AkiTTY asks before running the program, then runs it
+  files, with AkiTTY. When you open one from Finder, the Dock or a launcher
+  app, AkiTTY asks before running the program, then runs it
   in a new shell in its folder. With shell integration (bash and zsh) it
   waits for the prompt, up to 30 seconds. Other shells get the command after
   two seconds, so a startup question in your shell profile could receive it.
