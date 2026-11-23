@@ -9,8 +9,7 @@ function __akitty_precmd() {
     path=${path// /%20}; path=${path//$'\n'/%0A}; path=${path//$'\r'/%0D}
     path=${path//\#/%23}; path=${path//\?/%3F}; path=${path//$'\e'/%1B}; path=${path//$'\a'/%07}
     printf '\e]7;file://localhost%s\a' "$path"
-    # The first prompt from the app wrapper is marked ready when the line editor starts (see .zshenv).
-    [[ -n ${__akitty_defer_mark-} ]] || printf '\e]133;A\a'
+    __akitty_mark_ready
     # The tab names where the shell is, as Ghostty's title feature does: the last three directories, since the tab
     # keeps the end of a long title. AKITTY_SHELL_TITLE=0 leaves the title to the user's own hooks.
     [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${${(%):-%(4~|…/%3~|%~)}//[[:cntrl:]]/}"
@@ -23,6 +22,26 @@ function __akitty_preexec() {
     [[ ${AKITTY_SHELL_TITLE-} == 0 ]] || printf '\e]2;%s\a' "${command//[[:cntrl:]]/}"
     __akitty_running=1
 }
+# OSC 133 A says the prompt is idle, so it waits for every precmd hook, including those after this one: a hook that
+# asks a question (an update check) must not look like an idle prompt that a host may type into. A sched event runs
+# just before the prompt, after all precmd hooks, without relying on zle-line-init (a framework may replace that
+# widget). An event that fires inside a hook instead (vared waiting for input) tries again a second later. The event's
+# status becomes $?, so it returns the command's status for `exit` and the prompt. Without zsh/sched the mark is
+# printed at once.
+if zmodload -F zsh/sched b:sched p:zsh_scheduled_events 2>/dev/null; then
+    function __akitty_ready() {
+        local code=$?
+        if [[ ${(j.:.)zsh_eval_context} == sched:shfunc ]]; then printf '\e]133;A\a'
+        else sched +1 __akitty_ready; fi
+        return $code
+    }
+    # One mark per prompt, even when this precmd hook is registered twice.
+    function __akitty_mark_ready() {
+        (( ${#${(M)zsh_scheduled_events:#*:__akitty_ready}} )) || sched +0 __akitty_ready
+    }
+else
+    function __akitty_mark_ready() { printf '\e]133;A\a' }
+fi
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __akitty_precmd
 add-zsh-hook preexec __akitty_preexec

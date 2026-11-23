@@ -157,6 +157,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private var pendingOpen: DocumentOpen?
     /// Timers that type an approved program once its shell prompt is up.
     private var launchTimers: [Timer] = []
+    /// `duplicateKey`s of programs whose Run confirmation is open, and of those waiting to be typed into their shell.
+    private var confirmingRunnables: Set<String> = []
+    private var launchingRunnables: Set<String> = []
     /// True while the default-terminal change waits for the macOS confirmations.
     private(set) var settingDefaultTerminal = false
     /// Delegates that rebuild the profile submenus each time they open, so they always list the saved profiles.
@@ -244,9 +247,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         // Hold programs until didFinishLaunching has activated the app.
         if !launched {
             var pending = pendingOpen ?? DocumentOpen()
-            pending.runnable.append(contentsOf: request.runnable)
-            pending.skippedRunnables += request.skippedRunnables
-            pending.folders.skipped += request.folders.skipped
+            pending.merge(request)
             pendingOpen = pending
             if !request.runnable.isEmpty { openedFolderAtLaunch = true }
             return
@@ -257,12 +258,18 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     /// Confirms each program, then offers a normal window when a cold launch was cancelled and nothing else opened.
     private func presentOpens(_ paths: [String], skipped: Int, openWindowIfNone: Bool) {
         let before = windows.count
-        // Events delivered before launch are merged, so the same program can arrive twice.
-        var seen: Set<String> = []
-        for path in paths where seen.insert(DefaultTerminal.duplicateKey(path)).inserted { openRunnable(at: path) }
+        for path in paths {
+            // A program opened again while it is being confirmed or waits for its prompt (a repeated double-click)
+            // is asked about and run once.
+            let key = DefaultTerminal.duplicateKey(path)
+            guard !confirmingRunnables.contains(key), !launchingRunnables.contains(key) else { continue }
+            confirmingRunnables.insert(key)
+            openRunnable(at: path, key: key)
+            confirmingRunnables.remove(key)
+        }
         if skipped > 0 {
             let alert = NSAlert(); alert.messageText = skipped == 1 ? "One item was not opened." : "\(skipped) items were not opened."
-            alert.informativeText = "Akitty opens at most 8 folders and programs from one request."; alert.runModal()
+            alert.informativeText = "Akitty opens existing folders and programs, at most 8 from one request."; alert.runModal()
         }
         if openWindowIfNone, windows.count == before, windows.isEmpty { _ = openUntitledWindow() }
     }
@@ -274,7 +281,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     /// Asks before running a program Finder opened, then types its quoted path into a new shell in its folder.
     /// Open Folder starts the same shell without running anything, as `open -a Akitty <file>` did for other files.
-    private func openRunnable(at path: String) {
+    private func openRunnable(at path: String, key: String) {
         let folder = (path as NSString).deletingLastPathComponent
         // When the file cannot be run, its folder can still be opened, as before this file type was handled.
         guard DefaultTerminal.launchLine(for: path) != nil else {
@@ -308,7 +315,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             guard let kind = DefaultTerminal.launchShell(terminal.shellPath), let line = DefaultTerminal.launchLine(for: path, shell: kind) else {
                 return warn("Cannot Run This File", "Akitty does not type programs into \((terminal.shellPath as NSString).lastPathComponent). The shell is open in the file's folder.")
             }
-            sendLaunchLine(line, path: path, identity: identity, to: terminal)
+            sendLaunchLine(line, path: path, key: key, identity: identity, to: terminal)
         } catch { NSAlert(error: error).runModal() }
     }
     /// Mutable state for one pending launch. Main-actor isolated so the timer closure can hold it.
@@ -333,14 +340,17 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     /// Types `line` once shell integration reports a prompt, or after two seconds when integration is off.
     /// Nothing is sent when the person has typed in the pane, the prompt was edited, or the file changed since Run.
-    private func sendLaunchLine(_ line: String, path: String, identity: DefaultTerminal.FileIdentity, to terminal: TerminalView) {
+    private func sendLaunchLine(_ line: String, path: String, key: String, identity: DefaultTerminal.FileIdentity, to terminal: TerminalView) {
         let wait = LaunchWait(now: ProcessInfo.processInfo.systemUptime)
+        launchingRunnables.insert(key)
         let typed = terminal.inputCount
         let name = (path as NSString).lastPathComponent
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak terminal] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
-                @MainActor func finish() { timer.invalidate(); self.launchTimers.removeAll { $0 === timer } }
+                @MainActor func finish() {
+                    timer.invalidate(); self.launchTimers.removeAll { $0 === timer }; self.launchingRunnables.remove(key)
+                }
                 guard let terminal, !terminal.isShutdown else { finish(); return }
                 // Another confirmation, or a sheet on this window such as Close, holds the launch and pauses its clock.
                 // Nothing is sent into a closing pane, and no notice stacks on top of another alert.

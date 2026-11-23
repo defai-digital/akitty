@@ -46,10 +46,10 @@ Zsh runs as an interactive login shell. A bundled ZDOTDIR `.zshenv` restores the
 user's ZDOTDIR and sources their `.zshenv`, so the system and user `.zprofile`,
 `.zshrc` and `.zlogin` run as usual (a system `compinit` or `HISTFILE` default never
 writes into the app bundle); the hooks load at the first prompt, after those files, from
-`precmd_functions`. That first prompt is marked ready (OSC 133 A) when the line editor
-first starts, after every user precmd hook, so a hook that asks a question on the first
-prompt is not taken for an idle prompt; without the line editor it is marked from the
-loader. A `.zshrc` that assigns that array instead of appending to it drops
+`precmd_functions`. Each prompt is marked ready (OSC 133 A) by a `zsh/sched` event that
+runs just before the prompt, after every precmd hook, so a hook that asks a question (with
+`read` or `vared`) is not taken for an idle prompt; without `zsh/sched` the mark is printed
+from the integration's own precmd hook. A `.zshrc` that assigns that array instead of appending to it drops
 the loader and should source `akitty.zsh` itself. Bash uses an interactive `--rcfile` wrapper and explicitly sources
 `/etc/profile` and the first user login profile; its `login_shell` flag is not set.
 A bashrc sourced by that profile still runs normally. When bash-preexec (used by

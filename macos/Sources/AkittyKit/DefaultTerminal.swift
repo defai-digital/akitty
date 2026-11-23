@@ -119,7 +119,6 @@ enum DefaultTerminal {
         return elapsed >= plainTimeout ? .send : .wait
     }
 
-    /// True when declining the macOS confirmation produced `error`. The rest of the change is then skipped quietly.
     /// Time a launch has waited, not counting time a confirmation or a sheet held it, so a slow second
     /// confirmation does not use up the first launch's wait.
     struct LaunchClock: Equatable {
@@ -141,6 +140,7 @@ enum DefaultTerminal {
         return String(cString: resolved)
     }
 
+    /// True when declining the macOS confirmation produced `error`. The rest of the change is then skipped quietly.
     /// A wrapped cancel (`NSUnderlyingErrorKey`) counts too, up to four levels deep.
     static func isUserCancel(_ error: Error) -> Bool {
         var current: NSError? = error as NSError
@@ -160,6 +160,17 @@ struct DocumentOpen: Equatable {
     var folders = FolderOpenRequest()
     var runnable: [String] = []
     var skippedRunnables = 0
+
+    /// Adds a delivery that arrived before launch, while programs wait for the app to come to the front. The held
+    /// programs keep one cap across deliveries, and one that is already held is asked about once.
+    mutating func merge(_ other: DocumentOpen, limit: Int = 8) {
+        var held = Set(runnable.map(DefaultTerminal.duplicateKey))
+        for path in other.runnable where held.insert(DefaultTerminal.duplicateKey(path)).inserted {
+            if runnable.count < limit { runnable.append(path) } else { skippedRunnables += 1 }
+        }
+        skippedRunnables += other.skippedRunnables
+        folders.skipped += other.folders.skipped
+    }
 }
 
 func documentOpen(from urls: [URL], limit: Int = 8) -> DocumentOpen {

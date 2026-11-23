@@ -169,17 +169,15 @@ class ShellIntegrationTests(unittest.TestCase):
                 for name, value in files.items():
                     self.assertEqual((home / name).read_text(), value)
 
-    def test_zsh_first_prompt_is_ready_only_after_later_precmd_hooks(self):
-        # A user precmd hook that asks a question on the first prompt (an update check) runs after the wrapper's
-        # deferred init. The ready mark must wait for it, or a host typing at the "ready" prompt answers the question.
+    @contextlib.contextmanager
+    def app_zsh(self, zshrc, **extra):
+        """Starts zsh the way the app does, with `zshrc` as the user's .zshrc. Yields (send, read_until, output)."""
         resources = SCRIPT.parent
         with tempfile.TemporaryDirectory(prefix='akitty-zsh-first-') as directory:
             home = pathlib.Path(directory)
-            (home / '.zshrc').write_text("PS1='USER> '\nautoload -Uz add-zsh-hook\n"
-                                         "function ask() { add-zsh-hook -d precmd ask; read -k 1 'REPLY?UPDATE? '; print \"ANSWER=$REPLY\" }\n"
-                                         "add-zsh-hook precmd ask\n")
+            (home / '.zshrc').write_text("PS1='USER> '\nautoload -Uz add-zsh-hook\n" + zshrc)
             env = shell_environment(directory, TERM='xterm-256color', ZDOTDIR=str(resources),
-                                    AKITTY_INTEGRATION_DIR=str(resources), AKITTY_USER_ZDOTDIR=directory)
+                                    AKITTY_INTEGRATION_DIR=str(resources), AKITTY_USER_ZDOTDIR=directory, **extra)
             pid, fd = pty.fork()
             if pid == 0:
                 fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
@@ -193,22 +191,7 @@ class ShellIntegrationTests(unittest.TestCase):
                         try: output.extend(os.read(fd, 65536))
                         except OSError: return
             try:
-                read_until(b'UPDATE? ')
-                read_until(b'\x1b]133;A\x07', 0.5)
-                self.assertIn(b'UPDATE? ', output, repr(bytes(output)))
-                self.assertNotIn(b'\x1b]133;A\x07', output, 'no ready mark while a precmd hook reads the terminal')
-                os.write(fd, b'n')
-                read_until(b'\x1b]133;A\x07')
-                text = bytes(output)
-                self.assertIn(b'ANSWER=n', text)
-                self.assertIn(b'\x1b]133;A\x07', text)
-                self.assertLess(text.index(b'ANSWER=n'), text.index(b'\x1b]133;A\x07'))
-                self.assertEqual(text.count(b'\x1b]133;A\x07'), 1, 'the first prompt is marked once')
-                output.clear()
-                os.write(fd, b'echo NEXT\r')
-                read_until(b'\x1b]133;A\x07')
-                self.assertIn(b'\x1b]133;D;0\x07', output, repr(bytes(output)))
-                self.assertIn(b'\x1b]133;A\x07', output, 'later prompts are still marked from precmd')
+                yield (lambda data: os.write(fd, data)), read_until, output
             finally:
                 os.close(fd)
                 for termination in (signal.SIGHUP, signal.SIGKILL):
@@ -220,6 +203,58 @@ class ShellIntegrationTests(unittest.TestCase):
                         time.sleep(0.01)
                     else: continue
                     break
+
+    def test_zsh_first_prompt_is_ready_only_after_later_precmd_hooks(self):
+        # A user precmd hook that asks a question on the first prompt (an update check) runs after the wrapper's
+        # deferred init. The ready mark must wait for it, or a host typing at the "ready" prompt answers the question.
+        # `vared` starts the line editor, `read -k` does not; sourcing akitty.zsh from .zshrc registers its hook twice.
+        ready = b'\x1b]133;A\x07'
+        source = f"source {shlex.quote(str(SCRIPT.parent / 'akitty.zsh'))}\n"
+        read, vared = "read -k 1 'REPLY?UPDATE? '", "REPLY=; vared -p 'UPDATE? ' REPLY"
+        # name: (question, lines before the hook, environment)
+        cases = {'read': (read, '', {}), 'vared': (vared, '', {}), 'sourced': (read, source, {}),
+                 'no line editor': (read, 'unsetopt zle\n', {}),
+                 'no folder history': (read, '', {'AKITTY_FOLDER_HISTORY': '0'})}
+        for name, (ask, before, extra) in cases.items():
+            with self.subTest(name):
+                rc = before + f"function ask() {{ add-zsh-hook -d precmd ask; {ask}; print \"ANSWER=$REPLY\" }}\n" \
+                    + 'add-zsh-hook precmd ask\n'
+                with self.app_zsh(rc, **extra) as (send, read_until, output):
+                    read_until(b'UPDATE? ')
+                    # vared's event retries each second; wait past one retry.
+                    read_until(ready, 1.5)
+                    self.assertIn(b'UPDATE? ', output, repr(bytes(output)))
+                    self.assertNotIn(ready, output, 'no ready mark while a precmd hook reads the terminal')
+                    send(b'n\r' if ask == vared else b'n')
+                    read_until(ready)
+                    read_until(b'\x00', 0.5)
+                    text = bytes(output)
+                    self.assertIn(b'ANSWER=n', text)
+                    self.assertIn(ready, text)
+                    self.assertLess(text.index(b'ANSWER=n'), text.index(ready))
+                    self.assertEqual(text.count(ready), 1, 'the first prompt is marked once')
+                    output.clear()
+                    send(b'echo NEXT\r')
+                    read_until(ready)
+                    read_until(b'\x00', 0.5)
+                    self.assertIn(b'\x1b]133;D;0\x07', output, repr(bytes(output)))
+                    self.assertEqual(bytes(output).count(ready), 1, 'later prompts are marked once')
+                    self.assertLess(bytes(output).index(b'\x1b]133;D;0\x07'), bytes(output).index(ready))
+                    # The mark runs after the command's status is set and must not replace $?.
+                    send(b'false\r')
+                    read_until(b'\x1b]133;D;1\x07')
+                    send(b'echo STATUS=$?\r')
+                    read_until(b'STATUS=1', 5)
+                    self.assertIn(b'STATUS=1', output, repr(bytes(output)))
+
+    def test_zsh_first_prompt_is_ready_when_a_hook_replaces_zle_line_init(self):
+        # A framework that defines zle-line-init from its first precmd hook replaces any add-zle-hook-widget hook.
+        rc = ("function my-line-init() { : }\n"
+              "function lazy() { add-zsh-hook -d precmd lazy; zle -N zle-line-init my-line-init }\n"
+              "add-zsh-hook precmd lazy\n")
+        with self.app_zsh(rc) as (send, read_until, output):
+            read_until(b'\x1b]133;A\x07', 5)
+            self.assertIn(b'\x1b]133;A\x07', output, repr(bytes(output)))
 
     def app_bash(self, profile, commands):
         """Starts bash the way the app does, with `profile` as the user's login profile."""

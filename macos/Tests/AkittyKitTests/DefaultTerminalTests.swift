@@ -182,6 +182,19 @@ final class DefaultTerminalTests: XCTestCase {
         XCTAssertEqual(programFirst.folders.skipped, 1)
     }
 
+    func testPendingOpensKeepOneCapAndAskAboutAProgramOnce() {
+        func programs(_ range: Range<Int>) -> [String] { range.map { "/missing/akitty-merge/run-\($0).command" } }
+        var pending = DocumentOpen()
+        pending.merge(DocumentOpen(folders: FolderOpenRequest(directories: [], skipped: 1), runnable: programs(0..<6), skippedRunnables: 0))
+        pending.merge(DocumentOpen(runnable: programs(4..<10), skippedRunnables: 2))
+        XCTAssertEqual(pending.runnable, programs(0..<8), "a repeated program is held once and the cap spans deliveries")
+        XCTAssertEqual(pending.skippedRunnables, 2 + 2)
+        XCTAssertEqual(pending.folders.skipped, 1)
+        pending.merge(DocumentOpen(runnable: ["/missing/akitty-merge/./run-0.command"]))
+        XCTAssertEqual(pending.runnable.count, 8)
+        XCTAssertEqual(pending.skippedRunnables, 4, "a repeat is not counted as skipped")
+    }
+
     func testInfoPlistClaimsUnixExecutablesAndTerminalShellScripts() throws {
         let plist = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
