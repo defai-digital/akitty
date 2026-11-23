@@ -4,6 +4,8 @@
 
 **A native macOS terminal for everyday shell work and AI coding agents.**
 
+Designed for Macs with ProMotion displays. [Display setup](docs/USER_GUIDE.md#display-setup)
+
 Organize projects in windows, tabs, and split panes. Find output across open
 terminals, keep a quick terminal one shortcut away, and use Agent Overview to
 see activity reported by your coding agents. When an agent sends AkiTTY a

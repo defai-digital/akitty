@@ -101,6 +101,12 @@ shells, tabs, and scrollback available next time you show it.
 | Option-as-Alt and status messages from programs | **Settings → Keyboard** |
 | Update reminders | **Settings → Updates**, or **Akitty → Check for Updates…** for a manual check. |
 
+### Display setup
+
+AkiTTY is designed for Macs with ProMotion displays. On a supported MacBook Pro,
+open **System Settings → Displays** and choose **ProMotion** under **Refresh Rate**
+to enable adaptive refresh up to 120 Hz. [Apple display setup](https://support.apple.com/en-ie/102297)
+
 ### Folder-aware command history
 
 For folder-aware history in an integrated zsh 5.9+ shell, type the start of
