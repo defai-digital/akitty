@@ -136,7 +136,7 @@ AkiTTY 2.3.1 was measured on 2026-11-23. The other four columns use the
 the first payload write through the terminal's reply to a trailing
 cursor-position request. The table reports median throughput.
 
-<img src="docs/images/macos-pty-throughput.png" width="840" alt="Box plots of PTY throughput in MiB/s for five apps across four workloads. Dots show individual samples, boxes cover the middle 50%, solid lines mark medians, and dashed lines mark means. The table lists the exact medians.">
+<img src="docs/images/macos-pty-throughput.png" width="840" alt="Box plots of PTY throughput in MiB/s for five apps across four workloads. Dots show individual samples. Red lines label the highest median in each workload. The table lists all medians.">
 
 | Workload (median MiB/s) | AkiTTY 2.3.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
