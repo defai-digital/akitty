@@ -442,9 +442,6 @@ pub struct Screen {
     pub keyboard_flags: u8,
     pub region: std::ops::Range<usize>,
     pub tabs: Vec<bool>,
-    /// Whether `tabs` is exactly the default every-eighth-column layout, so
-    /// `clear` can skip verifying it column by column.
-    pub(crate) tabs_default: bool,
     pub cols: usize,
     history_limit: usize,
     history_bytes: usize,
@@ -510,7 +507,6 @@ impl Screen {
             keyboard_flags: 0,
             region: 0..rows,
             tabs: (0..cols).map(|c| c != 0 && c % 8 == 0).collect(),
-            tabs_default: true,
             cols,
             history_limit: history,
             history_bytes: 0,
@@ -569,12 +565,9 @@ impl Screen {
         self.keyboard_stack.clear();
         self.keyboard_flags = 0;
         self.region = 0..rows;
-        if !self.tabs_default {
-            if !default_tabs(&self.tabs) {
-                self.tabs.clear();
-                self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
-            }
-            self.tabs_default = true;
+        if self.tabs.len() != cols || !default_tabs(&self.tabs) {
+            self.tabs.clear();
+            self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
         }
     }
 
@@ -650,7 +643,7 @@ impl Screen {
         }).collect::<Vec<_>>();
         format!("{:?}{:?}{:?}{:?}", rows(&self.rows), rows(&self.history),
             (self.cursor, self.saved_cursor, self.offset, self.selection, &self.keyboard_stack,
-             self.keyboard_flags, &self.region, &self.tabs, self.tabs_default, self.cols),
+             self.keyboard_flags, &self.region, &self.tabs, self.cols),
             (self.history_limit, self.history_bytes, self.next_row_id,
              self.spare.as_ref().map(|(cells, _, bg, _)| (cells, bg))))
     }
@@ -1123,6 +1116,7 @@ mod tests {
         assert_ne!(ids, renewed, "a clear renews every row identity");
         let first = screen.rows[0].generation;
         screen.clear();
+        assert!(screen.rows.iter().zip(renewed).all(|(row, previous)| row.id != previous));
         assert_eq!(screen.rows[0].generation, first,
                    "a clear of an untouched screen advances no row generation");
         for row in &screen.rows {
@@ -1139,35 +1133,28 @@ mod tests {
         // Color::Background. Row 1: only the wrapped flag is stale.
         screen.rows[0].reset_cells(Color::rgb(1, 2, 3));
         screen.rows[1].wrapped = true;
-        let kept = screen.rows[2].generation;
+        let generations: Vec<u64> = screen.rows.iter().map(|row| row.generation).collect();
         screen.clear();
         for row in &screen.rows {
             assert!(row.is_blank(Color::Background));
             assert!(!row.wrapped && !row.wrap_padding);
         }
-        assert_ne!(screen.rows[0].generation, kept);
-        assert_ne!(screen.rows[1].generation, kept);
-        assert_eq!(screen.rows[2].generation, kept,
+        assert_ne!(screen.rows[0].generation, generations[0]);
+        assert_ne!(screen.rows[1].generation, generations[1]);
+        assert_eq!(screen.rows[2].generation, generations[2],
                    "a clean blank row keeps its certificates across a clear");
     }
 
     #[test]
-    fn clear_restores_default_tabs_and_the_flag() {
+    fn clear_restores_directly_modified_tab_stops() {
         let mut screen = Screen::new(20, 2, 0, false);
-        assert!(screen.tabs_default);
+        let defaults = screen.tabs.clone();
         screen.tabs[3] = true;
-        screen.tabs_default = false;
         screen.clear();
-        assert!(default_tabs(&screen.tabs));
-        assert!(screen.tabs_default);
-        // A layout that is non-default only according to the flag still clears.
-        screen.tabs_default = false;
+        assert_eq!(screen.tabs, defaults);
+        // A truncated layout can still have the default stops for its length.
+        screen.tabs.truncate(12);
         screen.clear();
-        assert!(default_tabs(&screen.tabs));
-        assert!(screen.tabs_default);
-        // After a resize the default layout holds and clear stays a no-op scan.
-        screen.resize(12, 2, true);
-        assert!(screen.tabs_default);
-        assert!(default_tabs(&screen.tabs));
+        assert_eq!(screen.tabs, defaults);
     }
 }

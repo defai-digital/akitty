@@ -1771,9 +1771,7 @@ impl Terminal {
             b'M' => self.reverse_index(emit),
             b'H' => {
                 let col = self.cursor().col;
-                let screen = self.screen_mut();
-                screen.tabs[col] = true;
-                screen.tabs_default = false;
+                self.screen_mut().tabs[col] = true;
             }
             b'=' => self.modes.app_keypad = true,
             b'>' => self.modes.app_keypad = false,
@@ -2039,16 +2037,8 @@ impl Terminal {
                 }
             }
             (None, b'g') => match c.value(0, 0) {
-                0 => {
-                    let screen = self.screen_mut();
-                    screen.tabs[pos.col] = false;
-                    screen.tabs_default = false;
-                }
-                3 => {
-                    let screen = self.screen_mut();
-                    screen.tabs.fill(false);
-                    screen.tabs_default = false;
-                }
+                0 => self.screen_mut().tabs[pos.col] = false,
+                3 => self.screen_mut().tabs.fill(false),
                 _ => {}
             },
             (None, b'm') => self.sgr(&c.params),
@@ -2574,7 +2564,6 @@ impl Terminal {
         self.main.keyboard_flags = 0;
         self.main.selection = None;
         self.main.tabs = (0..cols).map(|col| col != 0 && col % 8 == 0).collect();
-        self.main.tabs_default = true;
         self.alternate.clear();
         self.modes = Modes::default();
         self.style = Style::default();
@@ -4340,27 +4329,15 @@ mod tests {
         // non-default colour; leaving and re-entering must restore Color::Background
         // blanks even though the rows still hold "blank" certificates.
         let mut term = Terminal::new(20, 4, 100).unwrap();
-        feed(&mut term, b"\x1b[?1049h\x1b[48;2;1;2;3m\x1b[2Kx");
+        feed(&mut term, b"\x1b[?1049h\x1b[48;2;1;2;3m\x1b[2K");
         let styled = Color::rgb(1, 2, 3);
-        assert_eq!(term.screen().rows[0].cells[0].style().bg, styled);
+        assert!(term.screen().rows[0].is_blank(styled));
         feed(&mut term, b"\x1b[?1049l\x1b[?1049h");
         assert!(term.modes.alternate);
         for row in &term.screen().rows {
             assert!(row.is_blank(Color::Background));
             assert!(row.cells.iter().all(|c| c.style().bg == Color::Background));
         }
-    }
-
-    #[test]
-    fn alternate_reentry_restores_default_tabs() {
-        // Tab-stop edits on the alternate screen are undone by its clear on re-entry,
-        // through the tabs_default certificate as well as the explicit layout.
-        let mut term = Terminal::new(20, 4, 0).unwrap();
-        feed(&mut term, b"\x1b[?1049h\x1b[3g\x1b[3;H\x1bH");
-        assert!(!term.alternate.tabs_default);
-        feed(&mut term, b"\x1b[?1049l\x1b[?1049h");
-        assert!(term.alternate.tabs_default);
-        assert!(term.alternate.tabs.iter().enumerate().all(|(col, &stop)| stop == (col != 0 && col % 8 == 0)));
     }
 
     #[test]
