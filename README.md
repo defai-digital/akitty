@@ -132,11 +132,11 @@ the shell and connects its PTY to the terminal.
 ## Performance
 
 AkiTTY 2.3.1 was measured on 2026-11-23. The other four columns use the
-2026-11-19 comparison. Each rate uses the median elapsed time across 45 real
-PTY samples, from the first payload write through the terminal's reply to a
-trailing cursor-position request.
+2026-11-19 comparison. Each app has 45 timed PTY samples per workload, from
+the first payload write through the terminal's reply to a trailing
+cursor-position request. The table reports median throughput.
 
-<img src="docs/images/macos-pty-throughput.png" width="840" alt="Grouped bars of median PTY throughput in MiB/s across four workloads. AkiTTY 2.3.1 was measured on November 23. Ghostty, Alacritty, Kitty and cmux were measured on November 19. The exact rates follow in the table.">
+<img src="docs/images/macos-pty-throughput.png" width="840" alt="Box plots of PTY throughput in MiB/s for five apps across four workloads. Dots show individual samples, boxes cover the middle 50%, solid lines mark medians, and dashed lines mark means. The table lists the exact medians.">
 
 | Workload (median MiB/s) | AkiTTY 2.3.1 | Ghostty 1.4.0 | Alacritty 0.17.0 | Kitty 0.51.0 | cmux 0.65.2.2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
