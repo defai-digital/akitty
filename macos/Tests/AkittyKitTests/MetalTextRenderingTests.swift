@@ -1729,7 +1729,9 @@ final class MetalTextRenderingTests: XCTestCase {
         XCTAssertGreaterThan(presenter.retiredAtlasCount, 0, "the busy resets parked pages")
         // Let the oldest held frame finish: its pages are now reusable, and the pool is at its cap, so this
         // reset is exactly the case where retiring first would evict them before they could be taken.
-        held.removeFirst().release()
+        let oldest = held.removeFirst()
+        oldest.release()
+        oldest.command.waitUntilCompleted()
         let reused = try XCTUnwrap(composer.compose(snapshot: snapshot, damage: nil, size: size, scale: 2,
                                                     fontName: "Menlo", fontSize: 13, cell: cell, cjkFontName: "",
                                                     appearance: .standard))
