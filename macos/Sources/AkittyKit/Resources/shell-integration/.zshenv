@@ -13,7 +13,7 @@ if [[ -o interactive ]]; then
         local __akitty_sourced=${__akitty_installed-}
         source "$__akitty_integration"
         unset __akitty_integration
-        [[ -z $__akitty_sourced ]] && (( $+functions[__akitty_precmd] )) || return 0
+        [[ -z $__akitty_sourced ]] && (( ${+functions[__akitty_precmd]} )) || return 0
         # Hooks added while precmd runs start with the next prompt, so this prompt's hook runs here. Its ready mark
         # still waits for the user's precmd hooks, which run after this one (see akitty.zsh).
         __akitty_precmd

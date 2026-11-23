@@ -214,6 +214,7 @@ class ShellIntegrationTests(unittest.TestCase):
         # name: (question, lines before the hook, environment)
         cases = {'read': (read, '', {}), 'vared': (vared, '', {}), 'sourced': (read, source, {}),
                  'no line editor': (read, 'unsetopt zle\n', {}),
+                 'ksh arrays': (read, 'setopt ksharrays\n', {'AKITTY_FOLDER_HISTORY': '0'}),
                  'no folder history': (read, '', {'AKITTY_FOLDER_HISTORY': '0'})}
         for name, (ask, before, extra) in cases.items():
             with self.subTest(name):
@@ -241,8 +242,11 @@ class ShellIntegrationTests(unittest.TestCase):
                     self.assertEqual(bytes(output).count(ready), 1, 'later prompts are marked once')
                     self.assertLess(bytes(output).index(b'\x1b]133;D;0\x07'), bytes(output).index(ready))
                     # The mark runs after the command's status is set and must not replace $?.
+                    output.clear()
                     send(b'false\r')
                     read_until(b'\x1b]133;D;1\x07')
+                    read_until(ready)
+                    self.assertIn(ready, output)
                     send(b'echo STATUS=$?\r')
                     read_until(b'STATUS=1', 5)
                     self.assertIn(b'STATUS=1', output, repr(bytes(output)))

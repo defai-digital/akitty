@@ -150,7 +150,7 @@ import AppKit
     /// The pane focused commands act on: the firstResponder pane, or the find bar's target while
     /// the bar holds the focus (`active` would fall to the leftmost pane then), then the leftmost
     /// pane of the selected tab when nothing else answers (headless windows and tests).
-    private var commandTarget: TerminalView? { searchOwner }
+    private var commandTarget: TerminalView? { editingFind ? searchOwner : active }
     /// The focused pane's profile, even when that is the defaults (nil); the window's own profile only without a pane.
     private var inheritedProfile: UUID? { if let commandTarget { return commandTarget.profileID }; return profile }
     /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults). A tab chosen from New Tab with Profile
@@ -623,7 +623,7 @@ import AppKit
     }
     func showPalette() {
         guard let window else { return }
-        let target = editingFind ? findTarget ?? commandTarget : commandTarget
+        let target = commandTarget
         palette = PaletteController { [weak self, weak target] command in self?.perform(command, target: target) }
         if let panel = palette?.window { window.beginSheet(panel) }
     }

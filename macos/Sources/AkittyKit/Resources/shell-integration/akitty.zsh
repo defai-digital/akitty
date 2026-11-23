@@ -31,13 +31,15 @@ function __akitty_preexec() {
 if zmodload -F zsh/sched b:sched p:zsh_scheduled_events 2>/dev/null; then
     function __akitty_ready() {
         local code=$?
-        if [[ ${(j.:.)zsh_eval_context} == sched:shfunc ]]; then printf '\e]133;A\a'
-        else sched +1 __akitty_ready; fi
+        # A command accepted before a retry supersedes the pending prompt mark.
+        [[ -z ${__akitty_running-} ]] || return $code
+        if [[ ${(j.:.)zsh_eval_context[@]} == sched:shfunc ]]; then builtin printf '\e]133;A\a'
+        else builtin sched +1 __akitty_ready; fi
         return $code
     }
-    # One mark per prompt, even when this precmd hook is registered twice.
+    # Expand both arrays explicitly so KSH_ARRAYS does not change the scheduler checks.
     function __akitty_mark_ready() {
-        (( ${#${(M)zsh_scheduled_events:#*:__akitty_ready}} )) || sched +0 __akitty_ready
+        (( ${#${(M)zsh_scheduled_events[@]:#*:__akitty_ready}} )) || builtin sched +0 __akitty_ready
     }
 else
     function __akitty_mark_ready() { printf '\e]133;A\a' }
