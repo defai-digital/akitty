@@ -442,6 +442,9 @@ pub struct Screen {
     pub keyboard_flags: u8,
     pub region: std::ops::Range<usize>,
     pub tabs: Vec<bool>,
+    /// Whether `tabs` is exactly the default every-eighth-column layout, so
+    /// `clear` can skip verifying it column by column.
+    pub(crate) tabs_default: bool,
     pub cols: usize,
     history_limit: usize,
     history_bytes: usize,
@@ -507,6 +510,7 @@ impl Screen {
             keyboard_flags: 0,
             region: 0..rows,
             tabs: (0..cols).map(|c| c != 0 && c % 8 == 0).collect(),
+            tabs_default: true,
             cols,
             history_limit: history,
             history_bytes: 0,
@@ -539,9 +543,15 @@ impl Screen {
             if row.cells.len() != cols {
                 row.cells = vec![Cell::blank(Color::Background); cols];
                 row.charge_blank(Color::Background);
-            } else if !row.is_blank(Color::Background) {
+            } else if !row.is_blank(Color::Background) || row.wrapped || row.wrap_padding {
                 // A row still certified blank has its blank cells and charge already.
                 row.reset_cells(Color::Background);
+            } else {
+                // Already exactly a clean blank row: the blank, single and modified
+                // certificates stay valid without a generation advance because
+                // neither the cells nor the generation changed.
+                row.history_cost = 0;
+                continue;
             }
             row.wrapped = false;
             row.wrap_padding = false;
@@ -559,9 +569,12 @@ impl Screen {
         self.keyboard_stack.clear();
         self.keyboard_flags = 0;
         self.region = 0..rows;
-        if self.tabs.len() != cols || !default_tabs(&self.tabs) {
-            self.tabs.clear();
-            self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
+        if !self.tabs_default {
+            if !default_tabs(&self.tabs) {
+                self.tabs.clear();
+                self.tabs.extend((0..cols).map(|c| c != 0 && c % 8 == 0));
+            }
+            self.tabs_default = true;
         }
     }
 
@@ -637,7 +650,7 @@ impl Screen {
         }).collect::<Vec<_>>();
         format!("{:?}{:?}{:?}{:?}", rows(&self.rows), rows(&self.history),
             (self.cursor, self.saved_cursor, self.offset, self.selection, &self.keyboard_stack,
-             self.keyboard_flags, &self.region, &self.tabs, self.cols),
+             self.keyboard_flags, &self.region, &self.tabs, self.tabs_default, self.cols),
             (self.history_limit, self.history_bytes, self.next_row_id,
              self.spare.as_ref().map(|(cells, _, bg, _)| (cells, bg))))
     }
@@ -1099,5 +1112,62 @@ mod tests {
         screen.recycle(row);
         let row = screen.blank(Color::Background);
         assert!(row.cells.iter().all(|c| c == &Cell::default()));
+    }
+
+    #[test]
+    fn clear_renews_row_ids_and_keeps_certified_blank_rows() {
+        let mut screen = Screen::new(7, 3, 0, false);
+        let ids: Vec<u64> = screen.rows.iter().map(|r| r.id).collect();
+        screen.clear();
+        let renewed: Vec<u64> = screen.rows.iter().map(|r| r.id).collect();
+        assert_ne!(ids, renewed, "a clear renews every row identity");
+        let first = screen.rows[0].generation;
+        screen.clear();
+        assert_eq!(screen.rows[0].generation, first,
+                   "a clear of an untouched screen advances no row generation");
+        for row in &screen.rows {
+            assert!(row.is_blank(Color::Background));
+            assert!(!row.wrapped && !row.wrap_padding);
+            assert_eq!(row.history_cost, 0);
+        }
+    }
+
+    #[test]
+    fn clear_rewrites_styled_or_wrapped_rows_but_keeps_the_rest() {
+        let mut screen = Screen::new(5, 3, 0, false);
+        // Row 0: an RGB-blank erase leaves a styled blank that must go back to
+        // Color::Background. Row 1: only the wrapped flag is stale.
+        screen.rows[0].reset_cells(Color::rgb(1, 2, 3));
+        screen.rows[1].wrapped = true;
+        let kept = screen.rows[2].generation;
+        screen.clear();
+        for row in &screen.rows {
+            assert!(row.is_blank(Color::Background));
+            assert!(!row.wrapped && !row.wrap_padding);
+        }
+        assert_ne!(screen.rows[0].generation, kept);
+        assert_ne!(screen.rows[1].generation, kept);
+        assert_eq!(screen.rows[2].generation, kept,
+                   "a clean blank row keeps its certificates across a clear");
+    }
+
+    #[test]
+    fn clear_restores_default_tabs_and_the_flag() {
+        let mut screen = Screen::new(20, 2, 0, false);
+        assert!(screen.tabs_default);
+        screen.tabs[3] = true;
+        screen.tabs_default = false;
+        screen.clear();
+        assert!(default_tabs(&screen.tabs));
+        assert!(screen.tabs_default);
+        // A layout that is non-default only according to the flag still clears.
+        screen.tabs_default = false;
+        screen.clear();
+        assert!(default_tabs(&screen.tabs));
+        assert!(screen.tabs_default);
+        // After a resize the default layout holds and clear stays a no-op scan.
+        screen.resize(12, 2, true);
+        assert!(screen.tabs_default);
+        assert!(default_tabs(&screen.tabs));
     }
 }
