@@ -14,11 +14,11 @@ AkiTTY includes ten App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. System language, region, device support, and
 Siri settings affect discovery and speech recognition. The ten actions ship in
-[AkiTTY 2.3.0](releases/2.3.0.md).
+[AkiTTY 2.3.1](releases/2.3.1.md).
 
 ## Get started on macOS 27.2
 
-1. Install AkiTTY 2.3.0 and open **Akitty.app** once.
+1. Install AkiTTY 2.3.1 and open **Akitty.app** once.
    When building from source, use `bash scripts/build-app.sh debug` and open
    `build/Akitty.app`. The packaging script includes the required metadata;
    launching a standalone executable from `swift build` is not the setup path.
