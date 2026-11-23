@@ -1025,8 +1025,8 @@ impl Screen {
         };
         self.region = 0..rows;
         self.tabs.resize_with(cols, || false);
-        for col in old_cols..cols {
-            self.tabs[col] = col != 0 && col % 8 == 0;
+        for (col, tab) in self.tabs.iter_mut().enumerate().take(cols).skip(old_cols) {
+            *tab = col != 0 && col % 8 == 0;
         }
         self.offset = if scrolled {
             history_count

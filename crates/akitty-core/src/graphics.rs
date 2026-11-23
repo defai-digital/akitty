@@ -1096,9 +1096,14 @@ impl Graphics {
     /// Whether some placed animation is running, so the UI should poll at the display rate.
     pub fn animating(&self) -> bool {
         self.images.iter().any(|(id, image)| {
-            image.frames.len() > 1
+            let count = image.frames.len();
+            count > 1
                 && image.animation.as_ref().is_some_and(|animation| {
-                    animation.state >= 2 && (animation.max_loops == 0 || animation.loops_done < animation.max_loops)
+                    // A one-shot (state 2) animation parks on its last frame and never advances again;
+                    // reporting it as animating would poll at the display rate forever.
+                    animation.state >= 2
+                        && (animation.max_loops == 0 || animation.loops_done < animation.max_loops)
+                        && !(animation.state == 2 && animation.current == count - 1)
                 })
                 && self.placements.iter().any(|p| p.image == *id)
         })
@@ -2569,6 +2574,24 @@ mod tests {
         assert_eq!((graphics.images[&1].frame_count(), graphics.bytes()), (1, 8));
         graphics.handle(b"a=d,d=F,i=1", &context());
         assert!(graphics.images.is_empty() && graphics.placements.is_empty());
+    }
+
+    #[test]
+    fn one_shot_animation_parks_on_the_last_frame_and_stops_animating() {
+        let mut graphics = Graphics::default();
+        let red = encode(&[255, 0, 0, 255, 255, 0, 0, 255]);
+        graphics.handle(format!("a=T,f=32,s=2,v=1,i=1,q=2;{red}").as_bytes(), &context());
+        graphics.handle(format!("a=f,i=1,c=1,x=1,s=1,v=1,z=100,X=1;{}", encode(&[0, 255, 0, 255])).as_bytes(), &context());
+        graphics.handle(b"a=a,i=1,r=1,z=50", &context());
+        // State 2 plays through once and parks on the last frame; a parked one-shot is not animating.
+        graphics.handle(b"a=a,i=1,s=2", &context());
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        assert!(!graphics.tick(at(0)) && graphics.animating());
+        assert!(graphics.tick(at(50)) && graphics.images[&1].current() == 1);
+        assert!(!graphics.tick(at(150)), "state 2 parks on the last frame instead of wrapping");
+        assert!(!graphics.animating(), "a parked one-shot animation stops the display-rate poll");
+        assert!(!graphics.tick(at(10_000)) && !graphics.animating());
     }
 
     #[test]

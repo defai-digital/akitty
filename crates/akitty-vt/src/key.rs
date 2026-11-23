@@ -149,8 +149,15 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         };
         return format!("\x1b[{identity};{modifier}{event}{associated}u").into_bytes();
     }
-    if key.code == 9 && mods == SHIFT {
-        return b"\x1b[Z".to_vec();
+    if key.code == 9 && mods & SHIFT != 0 {
+        // Backtab is CSI Z; extra modifiers keep the Shift identity as CSI 1;{mod}Z instead of degrading
+        // to a bare Tab (Ctrl+Shift+Tab must never look like Tab). modifyOtherKeys=2 has its own form below.
+        if mods == SHIFT {
+            return b"\x1b[Z".to_vec();
+        }
+        if options.modify_other_keys != 2 {
+            return format!("\x1b[1;{modifier}Z").into_bytes();
+        }
     }
     // xterm's level 2 leaves Shift+printable text alone; only Space and Return are claimed.
     let shifted_text = mods == SHIFT && !key.text.is_empty() && key.text != " " && key.code != 13
@@ -298,6 +305,20 @@ mod tests {
             ),
             "\x1b[1;65D"
         );
+    }
+
+    #[test]
+    fn backtab_keeps_shift_with_other_modifiers() {
+        let options = Options { alt_escape: true, ..Options::default() };
+        assert_eq!(text(Key::press(9, SHIFT, ""), options), "\x1b[Z");
+        assert_eq!(text(Key::press(9, ALT | SHIFT, ""), options), "\x1b[1;4Z");
+        assert_eq!(text(Key::press(9, CTRL | SHIFT, ""), options), "\x1b[1;6Z");
+        assert_eq!(text(Key::press(9, SUPER | SHIFT, ""), options), "\x1b[1;10Z");
+        // modifyOtherKeys=2 spells modified Tab its own way, and disambiguated keys use CSI u.
+        let mok2 = Options { modify_other_keys: 2, ..Options::default() };
+        assert_eq!(text(Key::press(9, ALT | SHIFT, ""), mok2), "\x1b[27;4;9~");
+        let kitty = Options { kitty_flags: 1, ..Options::default() };
+        assert_eq!(text(Key::press(9, CTRL | SHIFT, ""), kitty), "\x1b[9;6u");
     }
 
     #[test]

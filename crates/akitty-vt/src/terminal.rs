@@ -2215,7 +2215,8 @@ impl Terminal {
                 screen.keyboard_flags = flags;
             }
             Some(b'<') => {
-                for _ in 0..c.count(0).min(17) {
+                // An explicit 0 pops nothing; count() would clamp it to 1 (that clamp is for cursor movement).
+                for _ in 0..usize::from(c.value(0, 1)).min(17) {
                     let screen = self.screen_mut();
                     screen.keyboard_flags = screen.keyboard_stack.pop().unwrap_or(0);
                 }
@@ -2550,11 +2551,11 @@ impl Terminal {
         let rows = self.rows();
         // RIS clears both screens, but keeps configured history capacity.
         self.main.clear_history();
-        for row in 0..rows {
-            self.main.rows[row].reset_cells(Color::Background);
-            self.main.rows[row].wrapped = false;
-            self.main.rows[row].generation = self.main.rows[row].generation.wrapping_add(1);
-            self.main.rows[row].mark_blank(Color::Background);
+        for row in self.main.rows.iter_mut().take(rows) {
+            row.reset_cells(Color::Background);
+            row.wrapped = false;
+            row.generation = row.generation.wrapping_add(1);
+            row.mark_blank(Color::Background);
         }
         self.main.cursor = Cursor::default();
         self.main.saved_cursor = Cursor::default();
@@ -3995,6 +3996,20 @@ mod tests {
         assert_eq!(term.cursor().col, 4);
         assert_eq!(term.screen().rows[0].text().trim_end(), "main");
     }
+    #[test]
+    fn keyboard_pop_count_treats_explicit_zero_as_none() {
+        let mut term = Terminal::new(10, 3, 10).unwrap();
+        feed(&mut term, b"\x1b[>5u\x1b[>8u");
+        assert_eq!(term.keyboard_flags(), 8);
+        // An explicit zero pops nothing; an omitted parameter pops one.
+        feed(&mut term, b"\x1b[<0u");
+        assert_eq!(term.keyboard_flags(), 8);
+        feed(&mut term, b"\x1b[<u");
+        assert_eq!(term.keyboard_flags(), 5);
+        feed(&mut term, b"\x1b[<2u");
+        assert_eq!(term.keyboard_flags(), 0);
+    }
+
     #[test]
     fn synchronized_output_flushes_queries_once_on_host_deadline() {
         let mut term = Terminal::new(10, 3, 10).unwrap();
