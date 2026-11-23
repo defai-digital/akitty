@@ -755,6 +755,31 @@ final class AkittyTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(second.session.snapshot()).cells.filter(\.search).isEmpty)
     }
 
+    @MainActor func testCommandsTargetTheFindBarPaneWhileItHoldsFocus() async throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
+        let first = try XCTUnwrap(controller.active)
+        controller.perform(.split)
+        let second = try XCTUnwrap(controller.panes.last?.terminal)
+        let cells = first.cellSize
+        window.makeFirstResponder(second)
+        // The find field takes first responder; commands must still act on the pane that opened the bar.
+        controller.perform(.find)
+        XCTAssertFalse(window.firstResponder === second)
+        controller.perform(.fontIncrease)
+        XCTAssertGreaterThan(second.cellSize.height, cells.height)
+        XCTAssertEqual(first.cellSize, cells, "font commands skip the leftmost-pane fallback")
+        // Close Pane asks about the find-targeted pane; approving removes it and keeps the left pane.
+        controller.perform(.closePane)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        for _ in 0..<50 where controller.panes.count != 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(controller.panes.count, 1)
+        XCTAssertTrue(controller.panes[0].terminal === first, "the find-targeted pane is closed, not the leftmost one")
+    }
+
     @MainActor func testVisibleFindRetargetsWhenAnotherPaneReceivesFocus() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)

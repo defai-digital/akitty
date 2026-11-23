@@ -147,8 +147,12 @@ import AppKit
     }
     required init?(coder: NSCoder) { nil }
     func newTab() throws { try newTab(profile: inheritedProfile, copyDirectory: true) }
+    /// The pane focused commands act on: the firstResponder pane, or the find bar's target while
+    /// the bar holds the focus (`active` would fall to the leftmost pane then), then the leftmost
+    /// pane of the selected tab when nothing else answers (headless windows and tests).
+    private var commandTarget: TerminalView? { searchOwner }
     /// The focused pane's profile, even when that is the defaults (nil); the window's own profile only without a pane.
-    private var inheritedProfile: UUID? { if let active { return active.profileID }; return profile }
+    private var inheritedProfile: UUID? { if let commandTarget { return commandTarget.profileID }; return profile }
     /// Opens a tab whose first pane uses `profile` (nil: the Settings defaults). A tab chosen from New Tab with Profile
     /// passes `copyDirectory: false`, so it starts in the profile's (or Settings') folder rather than the focused pane's.
     /// A restored layout passes its saved folder as `directory`; nil there falls back to this window's folder.
@@ -253,7 +257,7 @@ import AppKit
     /// The focused pane's current directory, copied at the moment the tab is created.
     /// A missing or non-directory report falls back to where that pane started, including profile tabs.
     private func directoryForNewTab() -> String? {
-        guard let terminal = active else { return directory }
+        guard let terminal = commandTarget else { return directory }
         let reported = (try? terminal.session.shellState())?.shell?.cwd
         if let reported, Self.existingDirectory(reported) { return reported }
         return Self.existingDirectory(terminal.startingDirectory) ? terminal.startingDirectory : nil
@@ -321,7 +325,7 @@ import AppKit
         return pane.terminal
     }
     /// Restart the focused pane, keeping its tab and index.
-    func restartFocusedPane() { if let terminal = active { restart(terminal) } }
+    func restartFocusedPane() { if let terminal = commandTarget { restart(terminal) } }
     /// Replaces a pane with a fresh shell in the same slot, so an engine failure is recoverable.
     private func restart(_ terminal: TerminalView) {
         guard panes.contains(where: { $0.terminal === terminal }) else { return }
@@ -597,7 +601,7 @@ import AppKit
         }
     }
     func perform(_ command: NativeCommand, target: TerminalView? = nil) {
-        let terminal = target ?? active
+        let terminal = target ?? commandTarget
         do {
             switch command {
             case .newWindow: app?.newWindow(nil)
@@ -619,7 +623,7 @@ import AppKit
     }
     func showPalette() {
         guard let window else { return }
-        let target = editingFind ? findTarget ?? active : active
+        let target = editingFind ? findTarget ?? commandTarget : commandTarget
         palette = PaletteController { [weak self, weak target] command in self?.perform(command, target: target) }
         if let panel = palette?.window { window.beginSheet(panel) }
     }

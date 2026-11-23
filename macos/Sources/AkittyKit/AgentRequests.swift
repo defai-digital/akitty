@@ -121,6 +121,21 @@ import AgentIPC
     static func isValidRequestID(_ value: String) -> Bool {
         (1...64).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "._:-".unicodeScalars.contains($0) }
     }
+    /// The leading characters of `text` whose JSON-escaped UTF-8 form fits `limit` bytes. JSON escaping
+    /// only expands bytes (`"` and `\` double, control characters become sequences), so bounding the
+    /// escaped form keeps a full 16-pane `list` page inside the local frame limit no matter what the
+    /// panes report: OSC 7 directories and titles are untrusted terminal output.
+    static func boundedField(_ text: String, escapedLimit: Int) -> String {
+        var budget = 0, end = text.startIndex
+        for character in text {
+            let cost = character.unicodeScalars.reduce(0) { cost, scalar in
+                cost + (scalar == "\"" || scalar == "\\" || scalar == "\n" || scalar == "\r" || scalar == "\t" ? 2 : scalar.value < 0x20 ? 6 : scalar.utf8.count)
+            }
+            if budget + cost > escapedLimit { break }
+            budget += cost; end = text.index(after: end)
+        }
+        return String(text[..<end])
+    }
     /// Leaves the pane's queue at once, so the next request does not wait behind this one's audit write.
     private func dequeue(_ id: String, state: String) {
         guard var record = records[id] else { return }
@@ -673,8 +688,8 @@ import AgentIPC
                 let callerPane = pane(for: peer)
                 result = ["panes": panes.dropFirst(offset).prefix(16).map { terminal -> [String: Any] in
                     let shell = try? terminal.session.shellState()
-                    return ["pane": paneID(terminal), "event_session": sessions[terminal.session.id] ?? "unknown", "title_untrusted": String(ProgramStatusRecord.displayText(terminal.snapshot?.title ?? "Terminal").prefix(32)),
-                     "directory_untrusted": shell?.shell?.cwd.map { String(ProgramStatusRecord.displayText($0).prefix(512)) } ?? NSNull(),
+                    return ["pane": paneID(terminal), "event_session": sessions[terminal.session.id] ?? "unknown", "title_untrusted": Self.boundedField(ProgramStatusRecord.displayText(terminal.snapshot?.title ?? "Terminal"), escapedLimit: 128),
+                     "directory_untrusted": shell?.shell?.cwd.map { Self.boundedField(ProgramStatusRecord.displayText($0), escapedLimit: 512) } ?? NSNull(),
                      "shell_ready": shell?.shell?.ready == true,
                      "input_agent_controlled": terminal.snapshot?.control?.agent == true,
                      "execution": "request_requires_human_approval", "ordinary_agent_operations": "observation_only"]

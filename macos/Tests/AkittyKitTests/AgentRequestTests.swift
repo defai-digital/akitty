@@ -360,6 +360,15 @@ final class AgentRequestTests: XCTestCase {
         XCTAssertEqual((scroll.documentView as? NSTextView)?.string, command)
     }
 
+    @MainActor func testBoundedFieldLimitsEscapedJSONBytes() {
+        XCTAssertEqual(AgentRequests.boundedField("abc", escapedLimit: 3), "abc")
+        XCTAssertEqual(AgentRequests.boundedField("abc", escapedLimit: 2), "ab")
+        // Quotes and backslashes double when escaped, so fewer characters fit the budget.
+        XCTAssertEqual(AgentRequests.boundedField("a\"b", escapedLimit: 3), "a\"")
+        XCTAssertEqual(AgentRequests.boundedField("🙂x", escapedLimit: 4), "🙂")
+        XCTAssertEqual(AgentRequests.boundedField("", escapedLimit: 10), "")
+    }
+
     @MainActor func testPaneListPaginatesWithoutLeakingOutput() async throws {
         _ = NSApplication.shared
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -379,6 +388,27 @@ final class AgentRequestTests: XCTestCase {
             if offset == 0 { XCTAssertEqual(result["next_offset"] as? Int, 16) }
             else { XCTAssertTrue(result["next_offset"] is NSNull) }
         }
+    }
+
+    @MainActor func testPaneListStaysWithinFrameLimitWithHostilePaneDirectories() async throws {
+        _ = NSApplication.shared
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let terminals = try (0..<16).map { _ in try TerminalView(headless: true, forceSoftware: true) }
+        // OSC 7 directories are untrusted terminal output; near-limit paths of 4-byte scalars and
+        // escape-expanding characters must not push a full 16-pane page past the local frame limit.
+        let hostile = "/tmp/" + String(repeating: "🙂", count: 400) + String(repeating: "\"", count: 400) + String(repeating: "\\", count: 400)
+        for terminal in terminals {
+            _ = try terminal.session.call("feed", ["text": "\u{1b}]7;file://\(hostile)\u{7}\u{1b}]133;A\u{7}"])
+        }
+        let path = root.appendingPathComponent("socket").path
+        let service = AgentRequests(source: { terminals }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: path)
+        try service.setEnabled(true)
+        defer { service.stop(); terminals.forEach { $0.shutdown() } }
+        let data = try JSONSerialization.data(withJSONObject: ["version": 1, "op": "list"])
+        let reply = try await Task.detached { try LocalSocket.request(data, path: path) }.value
+        XCTAssertLessThanOrEqual(reply.count, LocalSocket.frameLimit)
+        let result = (try JSONSerialization.jsonObject(with: reply) as! [String: Any])["data"] as! [String: Any]
+        XCTAssertEqual((result["panes"] as! [[String: Any]]).count, 16)
     }
 
     @MainActor func testUnknownDispatchReceiptPreservesLeaseWithoutRetry() async throws {
