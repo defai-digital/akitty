@@ -69,19 +69,25 @@ selects the request. Session operations use the nonreused integer `id` returned 
 | program_chrome | id, enabled | When false, `OSC 771` no longer changes the document |
 | theme | id; optional foreground, background, cursor (0xRRGGBB), ansi (up to 16 colours) | Host colour theme, the baseline OSC 104/110–112 reset to; omitted colours use the built-in defaults, and an empty request restores them. Program OSC 4/10/11/12 overrides still apply over it. Blank cells on the theme background are omitted from snapshots, so the host clears its frame to that background |
 
+<a id="command-palette"></a>
+
 `command_palette` returns `{ "version": 1, "commands": [...] }` with `id`,
 `title`, `shortcut`, and `keywords` for each descriptor. `query` is at most 512
 UTF-8 bytes; ranking uses its first 128 Unicode scalar values after replacing
 control/line-separator characters with spaces, trimming, NFKC normalization, and
 lowercasing. Contiguous matches outrank sparse ordered-character matches.
 Earlier contiguous matches and fewer skips in sparse matches rank higher.
-Equal scores retain declaration order. An empty query returns the complete catalog.
-The host must validate the closed command IDs before dispatching an action.
+The searchable text includes the title, command ID, and keywords. Equal scores
+retain declaration order. An empty query returns the complete catalog. The host
+must validate the closed command IDs before dispatching an action.
 
-Dimensions: 2–512 columns, 1–256 rows, at most 32,768 visible cells. At most 64
-sessions and 5,000 scrollback lines per session. Input/reply queues are bounded:
-when a program leaves more than 64 KiB of terminal replies (DSR, DA, ...) unread,
-further replies are dropped and the snapshot `error` says so; the session stays up.
+Dimensions are 2–512 columns and 1–256 rows, with at most 32,768 visible cells.
+The registry holds at most 64 sessions. Scrollback defaults to 5,000 lines and
+accepts up to 20,000 per session, subject to the 64 MiB history limit.
+Input and reply queues are bounded.
+When a program leaves more than 64 KiB of terminal replies (DSR, DA, ...) unread,
+the core drops further replies and reports the overflow in the snapshot `error`.
+The session stays up.
 A cell keeps at most 16 combining marks; later ones are dropped. A forwarded OSC body
 longer than 128 KiB is cancelled (the parser sees CAN) and its tail is discarded up to
 the terminator. A snapshot that would exceed the 8 MiB response limit is an error and

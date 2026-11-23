@@ -153,7 +153,8 @@ is gone. IDs are not secrets: any same-user process can query or reuse a
 guessable ID such as `job-1`, so prefer a random one such as a UUID.
 
 List pages contain at most 16 panes. If `next_offset` is an integer, use
-`akitty-agent list <offset>` to fetch the next page. Pane identifiers are scoped
+`akitty-agent list <offset>` to fetch the next page. Long titles and directories
+are shortened to fit the local response frame. Pane identifiers are scoped
 to the running app instance and become invalid after restart. A request for a
 closed pane, or an identifier from an earlier launch, fails with a message to run
 `list` again; older builds printed `\/` inside identifiers, which is still accepted. `--socket <path>`

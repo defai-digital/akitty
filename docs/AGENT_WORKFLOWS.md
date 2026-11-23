@@ -33,8 +33,8 @@ authorization and lifecycle integration separately.
 
 ## Local shell integration
 
-**Settings → Sessions → Shell integration** is on by default for new terminals and
-can be turned off there (preferences saved before 1.2.0 held the old off default and
+**Settings → Sessions → New Terminals → Shell integration (bash and zsh)** is on
+by default and can be turned off there (preferences saved before 1.2.0 held the old off default and
 move to on once). Only bash and zsh are integrated; the app starts any other
 shell as an ordinary login shell and does not pretend it is integrated. The app loads bundled resources;
 no user startup file is edited. Hosts using the ABI supply an absolute
@@ -46,11 +46,12 @@ Zsh runs as an interactive login shell. A bundled ZDOTDIR `.zshenv` restores the
 user's ZDOTDIR and sources their `.zshenv`, so the system and user `.zprofile`,
 `.zshrc` and `.zlogin` run as usual (a system `compinit` or `HISTFILE` default never
 writes into the app bundle); the hooks load at the first prompt, after those files, from
-`precmd_functions`. Each prompt is marked ready (OSC 133 A) by a `zsh/sched` event that
-runs just before the prompt, after every precmd hook, so a hook that asks a question (with
-`read` or `vared`) is not taken for an idle prompt; without `zsh/sched` the mark is printed
-from the integration's own precmd hook. A `.zshrc` that assigns that array instead of appending to it drops
-the loader and should source `akitty.zsh` itself. Bash uses an interactive `--rcfile` wrapper and explicitly sources
+`precmd_functions`. With `zsh/sched` available, a scheduled event emits OSC 133 A
+after the precmd hooks. A hook waiting in `read` or `vared` can finish before the
+shell reports readiness. The event preserves the command's exit status and
+supports `KSH_ARRAYS`. Without `zsh/sched`, the integration emits readiness from
+its own precmd hook. A `.zshrc` that replaces `precmd_functions` should source
+`akitty.zsh` itself. Bash uses an interactive `--rcfile` wrapper and explicitly sources
 `/etc/profile` and the first user login profile; its `login_shell` flag is not set.
 A bashrc sourced by that profile still runs normally. When bash-preexec (used by
 tools such as Atuin) is loaded before the hooks, as it is from any startup file in an
@@ -206,7 +207,8 @@ with no execution newline (up to 64 items / 64 KiB). Apostrophes, spaces and she
 metacharacters are quoted. Plain text drops use clipboard paste protection;
 control/multiline text follows the paste-confirmation preference (on by default). Remote file URLs and mixed file/text
 items are rejected. Agent ownership also blocks drops until human reclaim. A Dock
-or application drop instead opens a window in the folder; it does not paste a path.
+or application drop opens a folder window or offers to run an eligible program.
+[Open folders and programs](USER_GUIDE.md#open-folders-and-programs)
 The native default background is `#080A0D`; explicit application-selected ANSI
 background colors remain respected.
 

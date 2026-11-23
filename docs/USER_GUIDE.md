@@ -4,28 +4,30 @@ AkiTTY is a terminal for Apple Silicon Macs running macOS 27.2 or later.
 Open the app and start with your usual shell. Use **⌘T** for a tab, **⌘D**
 for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-start)
 
-## Organize a project
+## Open folders and programs
 
 - **Open a folder.** Drop it onto the AkiTTY Dock icon or run
-  `open -a Akitty /path/to/project` from a shell. AkiTTY opens a window
-  in that folder. A file opens in its folder. `open -a` never runs a
-  program, even an executable one; it opens the program's folder. One
-  request opens at most 8 folders and programs.
-- **Open a program from Finder.** Choose **Akitty → Make Akitty the Default Terminal**.
-  macOS then opens Unix executables, and executable `.command` and `.tool`
-  files, with AkiTTY. When you open one from Finder, the Dock or a launcher
-  app, AkiTTY asks before running the program, then runs it
-  in a new shell in its folder. With shell integration (bash and zsh) it
-  waits for the prompt, up to 30 seconds. Other shells get the command after
-  two seconds, so a startup question in your shell profile could receive it.
-  The shell stays open so you can read the output. Choose **Open Folder** to
-  start a shell in its folder without running it, or **Cancel** to leave the
-  file alone. If you type in the new window before the command is sent,
-  AkiTTY does not run the program. It works with sh, bash, zsh, dash, ksh
-  and fish; with another shell you can still open the folder.
+  `open -a Akitty /path/to/project`. Passing a file to `open -a` opens its
+  containing folder, including when the file is executable.
+- **Open a program from Finder.** Choose **Akitty → Make Akitty the Default
+  Terminal** and confirm the file associations in macOS. When Finder, the Dock,
+  or a launcher opens a Unix executable or an executable `.command` or `.tool`
+  file, AkiTTY offers **Run**, **Open Folder**, and **Cancel**. **Run** starts a
+  shell in the file's folder and keeps the shell open so you can read the output.
+  **Open Folder** starts a shell there with an empty command line.
 - **Start from the Dock.** Control-click the AkiTTY icon and choose **New Window**
   or **New Tab**. **New Tab** opens in the frontmost terminal window and leaves
   a hidden Quick Terminal hidden. With no terminal open, it opens a window.
+
+AkiTTY accepts up to eight folders and programs in one open request. **Run**
+supports sh, bash, zsh, dash, ksh, and fish. Integrated bash and zsh sessions
+wait up to 30 seconds for a ready prompt. With integration off or unavailable,
+AkiTTY sends the launch line after two seconds, so a shell startup question may
+receive it. Typing or pasting into the new pane first cancels the pending launch.
+[Shell startup and prompt hooks](AGENT_WORKFLOWS.md#local-shell-integration)
+
+## Organize a project
+
 - **Keep related tasks together.** Open a tab for each project or split a
   tab into side-by-side panes for a shell, a build, or a log. Click a pane
   to focus it. **⌘W** closes the active pane.
@@ -36,7 +38,10 @@ for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-star
   set the desired font, colours, shell, starting directory, and scrollback.
   Click **Apply**, then pick the profile under **Shell → New Window with
   Profile** or **New Tab with Profile**. Tabs and splits opened from a
-  profiled pane inherit its profile.
+  profiled pane inherit its profile. An ordinary new tab uses the pane's
+  reported working directory if it still exists, then falls back to the folder
+  the pane started in. **New Tab with Profile** uses the selected profile's
+  starting folder.
 
 ## Find and copy output
 
@@ -46,6 +51,11 @@ printed it, press **⌥⌘F**. Pick **This Window** or **All Terminals**, enter
 the text, and double-click a result or select it and press **Return** to open
 its pane at that match. Search covers retained output in open terminals; a
 result can expire as old output scrolls out.
+
+While the find field has focus, **⌘C** and **⌘V** edit the query. Pane commands
+such as **Close Pane**, **Restart Terminal**, and font size changes act on the
+pane being searched. New tabs use that pane for profile and directory
+inheritance, and new splits use its profile.
 
 Drag to select text, double-click to select a word, or triple-click to select
 a line. Hold **Option** to select locally when a terminal program handles
@@ -131,7 +141,9 @@ prompt, **Allow Once** returns the decision to the agent.
 | Increase / decrease / reset pane font size | ⌘+ / ⌘− / ⌘0 |
 | Agent Overview | ⌥⌘A |
 
-The command palette searches available commands by name. The accessibility
-guide covers keyboard and screen-reader use in Agent Overview, approval sheets,
-and terminal panes. [Accessibility](ACCESSIBILITY.md) · [Siri and Shortcuts](SIRI.md) ·
+The command palette searches command names and keywords. For example, type
+`zoom` to find the font size commands. Matches on consecutive letters rank
+before matches that skip letters. The accessibility guide covers keyboard and
+screen-reader use in Agent Overview, approval sheets, and terminal panes.
+[Accessibility](ACCESSIBILITY.md) · [Siri and Shortcuts](SIRI.md) ·
 [Terminal compatibility](COMPATIBILITY.md)

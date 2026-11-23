@@ -66,9 +66,10 @@ Establish repeatable baselines before changing hot paths. Priorities are:
 - Engine cells are 40 bytes (packed colours, boxed combining marks, one shared
   hyperlink record per OSC 8 target), so grid and scrollback memory halved and the
   64 MiB history cap retains twice as many rows. Printable ASCII bypasses the parser
-  state machine, the alternate screen is blanked in place, and snapshots resolve the
-  selection range once rather than per cell. Measured on the same Mac with the
-  committed benchmark: see `benchmarks/baseline-macos-arm64.json`.
+  state machine, and snapshots resolve the selection range once rather than per
+  cell. See the [committed benchmark baseline](../benchmarks/baseline-macos-arm64.json).
+  In 2.3.1, clearing the alternate screen renews row identities and reuses the
+  metadata of rows already known to be clean and blank.
 - Extend malformed-input and stream-chunking coverage, including graphics/chrome
   sequences, Unicode, resets, resize, and partial/full snapshot equivalence.
 - Stress repeated open/close, shell exit during output, resize/input bursts,
@@ -328,6 +329,12 @@ Find in All Terminals (⌥⌘F) searches retained output in the current window o
 terminal. Results are grouped by window, tab and pane, bounded to 100 hits, and choosing one
 reveals that pane. A closed pane or a row that has left scrollback is reported and does not
 move focus. [Issue 51](https://github.com/defai-digital/akitty/issues/51)
+
+The Dock menu offers **New Window** and **New Tab**. Finder can open supported
+executables with confirmation after the user selects AkiTTY as their file handler.
+Pane actions follow the find field's target while it holds focus. The native command
+palette ranks command names and keywords in Rust. [File and Dock behavior](ARCHITECTURE.md#macos-folder-opening) ·
+[Command palette contract](ABI.md#command-palette)
 
 Version 2.0.0 also ships opt-in workspace reopening with fresh shells and
 per-pane conversation resume for Claude Code, Codex and AX Code. Grok, Muse Code,

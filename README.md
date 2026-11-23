@@ -13,7 +13,7 @@ supported request, you can review the exact command before approving it.
 
 [Install](#quick-start) · [Terminal features](#everyday-terminal-features) ·
 [Agent integrations](#works-with-your-ai-agents) · [User guide](docs/USER_GUIDE.md) ·
-[What's new in 2.3.1](docs/releases/2.3.1.md)
+[2.3.1 release notes](docs/releases/2.3.1.md) · [What's new in 2.3.0](docs/releases/2.3.0.md)
 
 ## Quick start
 
@@ -46,8 +46,8 @@ installation, run `bash install.sh --system` with write access to **/Application
 | Return to a workspace | Save named window layouts with **Shell → Window Layouts**. Reopening starts fresh shells. You can include a short scrollback excerpt when saving. |
 | Reach a shell from another app | Enable the global shortcut in **Settings → Keyboard**. Hiding the Quick Terminal keeps its shells running. |
 | Start a window from the Dock | Control-click the Dock icon and choose **New Window** or **New Tab**. New Tab uses the frontmost terminal. |
-| Open Unix executables from Finder | Choose **Akitty → Make Akitty the Default Terminal**. AkiTTY asks before it runs a Unix executable or an executable `.command` or `.tool` file. |
-| Find an app command | Press **⇧⌘P** to open the command palette. |
+| Open Unix executables from Finder | Choose **Akitty → Make Akitty the Default Terminal**. AkiTTY asks before it runs a Unix executable or an executable `.command` or `.tool` file. [Open folders and programs](docs/USER_GUIDE.md#open-folders-and-programs) |
+| Find an app command | Press **⇧⌘P** and search by name or keyword. For example, `zoom` finds the font size commands. |
 
 <a id="folder-command-history"></a>
 
@@ -134,7 +134,8 @@ the shell and connects its PTY to the terminal.
 AkiTTY 2.3.1 was measured on 2026-11-23. The other four columns use the
 2026-11-19 comparison. Each app has 45 timed PTY samples per workload, from
 the first payload write through the terminal's reply to a trailing
-cursor-position request. The table reports median throughput.
+cursor-position request. The table reports medians. The red line marks the
+highest median in each panel, and the dashed lines inside the boxes show means.
 
 <img src="docs/images/macos-pty-throughput.png" width="840" alt="Box plots of PTY throughput in MiB/s for five apps across four workloads. Dots show individual samples. Red lines label the highest median in each workload. The table lists all medians.">
 

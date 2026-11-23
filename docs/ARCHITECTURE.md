@@ -304,10 +304,71 @@ normalized (`/C:/…` to `C:/…`); browsers load the module with `fetch`. There
 
 ## macOS folder opening
 
-Finder "Open With", Dock drops and `open -a Akitty <path>` create one window per existing folder. An ordinary file, including a `.command` or `.tool` file that is not executable, uses its parent folder. One request opens at most 8 folders and programs together, in the order they arrived. When an app asks (Finder, the Dock or a launcher), a Unix executable, or an executable `.command` or `.tool` file, is confirmed once the app is in front (Run, Open Folder or Cancel; Open Folder starts the shell in its folder without running it). A command line (`open -a Akitty <file>`, a script, AX Code's hand-over) never runs a program: it opens the program's folder, as for any other file. The open event names the process that asked, and for a command line that is the `open` tool, not an app; a sender that already exited counts as a command line. A repeated program, including the same file through a link, events merged at launch, or a second open while it is being confirmed or waits for its prompt, is asked about once. Programs from events merged at launch share the cap of 8. After Run it is typed into a new shell in its folder. With shell integration the line waits for the integrated prompt and is abandoned, with a notice, if no prompt appears within 30 seconds, so a startup question is never answered by it. Without integration it is sent after two seconds. It ends with CR, as the Return key does. Nothing is sent if text was typed or pasted in the pane first (terminal focus and key-release reports do not count), input-method text is being composed, or the integrated prompt was edited. The launch waits while another confirmation or a sheet on its window (such as Close) is open, and that time does not count toward its timeout. The line starts with Ctrl-U, as agent commands do, so a terminal report that reached the line editor cannot prefix it. A shell that exits first is reported. The zsh integration marks each prompt ready from a `zsh/sched` event that runs just before the prompt, after every precmd hook, so a question from a hook (an update check, through `read` or `vared`) holds the launch instead of receiving it. Bash marks the prompt after the user's prompt commands. The shell stays open so the output remains, including when the program exits non-zero. The typed line uses single quotes for the pane's shell: POSIX quoting for sh, bash, zsh, dash and ksh, and fish quoting (backslash and quote escaped) for fish. Quotes and backslashes are escaped per Unicode scalar, so a combining mark after a quote cannot hide it. Any other shell, or a path with a hidden character, cannot be run; the person can still open its folder. A path refused for hidden characters is not shown in the alert. A path that contains a control or format character is refused. The file's device, inode, size, modification time and status-change time are checked after the confirmation and again just before the line is typed; a change at either point stops the run. Missing paths and non-file URLs are counted and reported, not ignored silently.
-The first tab and every split start in that folder. A new tab is inserted after the current tab and starts in the focused pane's reported working directory when that path still exists; otherwise it uses that pane's starting folder. Restarting a pane uses the same fallback. A tab explicitly opened with a profile starts in the profile's folder (or Settings for the default profile), and retains that folder as its fallback even inside a window opened in another folder. When a remembered folder has been deleted, new tabs, splits and restarted panes use the profile's or Settings' validated starting folder instead.
+Finder's **Open With**, Dock drops, and `open -a Akitty <path>` can open a window
+for an existing folder. A file sent by `open -a` opens its containing folder.
+An ordinary file or a script without executable permission follows the same
+folder path. Each request admits up to eight folders and programs together.
+The app reports missing paths, non-file URLs, and items beyond the cap.
 
-**Akitty → Make Akitty the Default Terminal** sets this app as the Launch Services handler for `public.unix-executable` and for `com.apple.terminal.shell-script`, which is how Finder opens `.command` and `.tool` files. That is the macOS default terminal. macOS asks the user to confirm each change. The menu item stays enabled until AkiTTY handles both types, so a change that only partly succeeded can be finished. Only types another app still handles are changed, and the item is disabled while a change is in progress. Declining either macOS confirmation ends the change without a further prompt or a failure alert. Both types are declared as alternate handlers, so installing AkiTTY does not take Unix executables or `.command` files until the person chooses this menu item. The Dock menu adds **New Window** and **New Tab** above the system window list. New Tab uses the frontmost terminal window. A hidden quick terminal is not revealed. When every regular window is minimized, the frontmost regular window still receives the tab. With no terminal open, New Tab opens a window.
+### Program confirmation and shell startup
+
+A Unix executable or an executable `.command` or `.tool` file can take the
+program path when the open event identifies a live sender with an application
+bundle and bundle identifier. The `open` tool and an unavailable sender take
+the folder path. On cold launch, the app opens admitted folders and waits
+until it is active to present program confirmations. Pending programs share
+an eight-program cap across cold-launch deliveries. Repeated programs are
+deduplicated by resolved path while pending, being confirmed, or waiting for
+their shell.
+
+The prompt offers **Run**, **Open Folder**, and **Cancel**. **Run** opens a
+shell in the program's directory and queues a quoted launch line. The shell
+stays open after the program exits. The app checks device, inode, size,
+modification time, and status-change time after approval and again before
+sending the line. A change at either point cancels the launch.
+
+- Integrated bash and zsh wait for a ready prompt for up to 30 seconds. Without
+  integration, the launch line is sent after two seconds. An active modal
+  dialog or a sheet on the terminal window pauses the wait.
+- Typed input, a paste, active IME composition, or an edited integrated prompt
+  cancels the pending launch. Focus and key-release reports can arrive while
+  waiting. The launch line starts with Ctrl-U to clear the line editor and
+  ends with CR to submit it. A shell that exits while waiting is reported.
+- sh, bash, zsh, dash, and ksh use POSIX single-quote escaping. Fish also escapes
+  backslashes. Quoting operates on Unicode scalars. Unsupported shells and
+  paths with hidden control or format characters can still use **Open Folder**.
+  Refused paths with hidden characters are omitted from the alert.
+
+See the [shell integration contract](AGENT_WORKFLOWS.md#local-shell-integration)
+for prompt hook ordering, including the zsh scheduler fallback.
+
+### Launch Services and Dock commands
+
+**Akitty → Make Akitty the Default Terminal** configures the Launch Services
+handlers for `public.unix-executable` and `com.apple.terminal.shell-script`.
+Installing AkiTTY registers it as an alternate handler. The menu changes the
+types still handled by another app and stays enabled when a change only partly
+succeeds. macOS asks for confirmation. Declining a prompt ends the change.
+
+The Dock menu adds **New Window** and **New Tab** above the system window list.
+**New Tab** uses the frontmost visible terminal, including a visible Quick
+Terminal. If no terminal is visible, it uses the frontmost regular terminal
+when available. With no eligible terminal it opens a window. A hidden Quick
+Terminal stays hidden.
+
+### Pane targets and starting folders
+
+The first tab of a folder window starts in the opened folder. New splits inherit
+their source pane's profile and use the window's opened folder if it still
+exists. An ordinary new tab is inserted after the current one. It and a
+restarted pane use the target pane's existing reported directory, then its
+original starting folder, and finally its profile or Settings default. A tab
+opened explicitly with a profile starts in that profile's configured folder.
+
+While the find field holds focus, the pane being searched is the target for
+close, restart, and font actions. It also supplies the profile for a new tab
+or split and the directory for a new tab. Copy and paste follow the find
+field's text editing.
 
 ## Named window layouts
 
