@@ -33,6 +33,34 @@ enum TabTitle {
     static let defaultTitle = "Akitty"
     /// The product name as people see it in the menu bar, the Dock and titles.
     static let appName = "AkiTTY"
+    /// The title without the spinner frames programs put at its start or end while they work (Codex and Claude Code
+    /// among them). A frame changes several times a second, which made the tab title look like it was moving; the
+    /// chip's activity mark says a program is busy instead. A spinner glyph inside the title is left alone, since one
+    /// there is a separator such as "·" rather than a frame.
+    static func stable(_ title: String) -> String {
+        let scalars = Array(title.unicodeScalars)
+        func strippable(_ scalar: Unicode.Scalar) -> Bool { isSpinner(scalar) || scalar.properties.isWhitespace || scalar.value == 0xFE0F }
+        var start = 0, end = scalars.count, sawSpinner = false
+        while start < end, strippable(scalars[start]) { sawSpinner = sawSpinner || isSpinner(scalars[start]); start += 1 }
+        if !sawSpinner { start = 0 }
+        sawSpinner = false
+        var trailing = end
+        while trailing > start, strippable(scalars[trailing - 1]) { sawSpinner = sawSpinner || isSpinner(scalars[trailing - 1]); trailing -= 1 }
+        if sawSpinner { end = trailing }
+        guard start > 0 || end < scalars.count else { return title }
+        var kept = String.UnicodeScalarView(); kept.append(contentsOf: scalars[start..<end])
+        return String(kept)
+    }
+    /// Glyphs terminal programs animate as spinners: Braille dots, Claude Code's stars, dots, arcs and quarter
+    /// circles, hourglasses, clock faces and moon phases.
+    private static func isSpinner(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x2800...0x28FF, 0x00B7, 0x2022, 0x2219, 0x2722, 0x2733, 0x2736, 0x273B, 0x273D,
+             0x25D0...0x25D3, 0x25DC...0x25E1, 0x25F4...0x25F7, 0x231B, 0x23F3, 0x1F311...0x1F318, 0x1F550...0x1F567:
+            return true
+        default: return false
+        }
+    }
     static func label(_ title: String, bell: Bool) -> String {
         let shown = title == defaultTitle ? appName : title
         return bell ? "🔔 \(shown)" : shown
@@ -167,7 +195,14 @@ enum TabTitle {
     private var dragKeyMonitor: Any?
     private var dragDeactivateObserver: NSObjectProtocol?
     private weak var dragWindow: NSWindow?
-    var label: String { get { title.stringValue } set { title.stringValue = newValue; closeButton.setAccessibilityLabel("Close \(newValue)") } }
+    /// VoiceOver reads the chip by its title, so a new title refreshes the chip's own label too.
+    var label: String {
+        get { title.stringValue }
+        set {
+            guard newValue != title.stringValue else { return }
+            title.stringValue = newValue; closeButton.setAccessibilityLabel("Close \(newValue)"); refresh()
+        }
+    }
     var isSelected = false { didSet { refresh() } }
     /// A window's only tab reads as its title: no selected fill and no ⌘-number.
     var isSole = false { didSet { if isSole != oldValue { refresh() } } }

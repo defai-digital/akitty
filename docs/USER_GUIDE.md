@@ -34,8 +34,9 @@ receive it. Typing or pasting into the new pane first cancels the pending launch
 - **Keep related tasks together.** Open a tab for each project or split a
   tab into side-by-side panes for a shell, a build, or a log. Click a pane
   or press **⌥⌘→** / **⌥⌘←** to focus it. In a split tab the focused pane has a
-  thin accent outline and the others are lightly dimmed. **⇧⌘]** and **⇧⌘[**
-  move between tabs. **⌘W** closes the active pane.
+  thin accent outline and the others are lightly dimmed, and the tab shows the
+  focused pane's title. **⇧⌘]** and **⇧⌘[** move between tabs. **⌘W** closes
+  the active pane.
 - **Read pane status at a glance.** Tabs sit in the title bar. A pane has no
   status row; a small capsule appears at its top-right corner only when there is
   something to say: a program's progress, a copy or paste note, the new size

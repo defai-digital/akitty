@@ -876,7 +876,8 @@ final class AkittyTests: XCTestCase {
         let window = try XCTUnwrap(controller.window)
         defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
         try controller.newTab(); try controller.newTab()
-        for (index, name) in ["one", "two", "three"].enumerated() { controller.tabs.tabViewItems[index].label = name }
+        // A tab shows its pane's title; each tab here has one pane.
+        for (index, name) in ["one", "two", "three"].enumerated() { controller.panes[index].terminal.onTitle?(name) }
         controller.selectTab(at: 0)
         window.contentView?.layoutSubtreeIfNeeded()
         let terminal = try XCTUnwrap(controller.active)
@@ -910,7 +911,7 @@ final class AkittyTests: XCTestCase {
         let window = try XCTUnwrap(controller.window)
         defer { window.close(); controller.panes.forEach { $0.terminal.shutdown() } }
         for _ in 0..<9 { try controller.newTab() }
-        for (index, item) in controller.tabs.tabViewItems.enumerated() { item.label = "t\(index)" }
+        for (index, pane) in controller.panes.enumerated() { pane.terminal.onTitle?("t\(index)") }
         XCTAssertEqual(controller.tabChips.map(\.shortcut), ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "", "⌘9"])
         func choose(_ title: String, on index: Int) throws {
             let menu = try XCTUnwrap(controller.tabChips[index].contextMenu?())

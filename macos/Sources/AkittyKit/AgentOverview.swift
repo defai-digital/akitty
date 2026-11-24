@@ -35,7 +35,7 @@ struct AgentOverviewRow: Equatable {
         self.sessionID = sessionID
         self.agentSession = agentSession ?? "—"
         approvals = pending.map { "\($0.count) waiting · oldest \(Int($0.oldestWait.rounded(.down))) s" } ?? "None"
-        title = snapshot?.title ?? ""
+        title = TabTitle.stable(snapshot?.title ?? "")
         agentControlled = snapshot?.control?.agent == true
         controller = agentControlled ? "Agent: \(snapshot?.control?.owner ?? "unknown")" : "Human"
         var reported: [String] = []

@@ -82,7 +82,7 @@ extension AkittyApplication {
     }
     private func terminalEntity(for terminal: TerminalView, title rawTitle: String?, exited: Bool?, programStatus: ProgramStatus?,
                                 control: ControlSummary?, shell: ShellSummary?) -> TerminalEntity {
-        let title = String(ProgramStatusRecord.displayText(rawTitle ?? "Terminal").prefix(80))
+        let title = String(TabTitle.stable(ProgramStatusRecord.displayText(rawTitle ?? "Terminal")).prefix(80))
         let status = exited == true ? "Exited" : programStatus?.active.map {
             "Program reports \($0.state); result not verified"
         } ?? "No program status reported"

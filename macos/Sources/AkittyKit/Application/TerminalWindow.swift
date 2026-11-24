@@ -191,6 +191,8 @@ import AppKit
                 pane.setFocusState(state, animated: animated && item === tabs.selectedTabViewItem, recolour: recolour)
             }
         }
+        // Focus moving to another pane of the tab moves the tab's title with it.
+        if syncTabTitles() { refreshTabLabels() }
         refreshChrome()
     }
     /// The window takes the focused pane's background and the matching light or dark appearance, so labels, the
@@ -364,11 +366,11 @@ import AppKit
             guard let self, let pane else { return }
             self.close(pane.terminal)
         }
-        // The item keeps the raw title; the chip and the window add the bell prefix when they show it.
-        pane.terminal.onTitle = { [weak self, weak split] title in
-            guard let self else { return }
-            self.tabs.tabViewItems.first { $0.view === split }?.label = title
-            self.refreshTabs()
+        // The pane paces its program's titles; the tab takes one only from the pane it names (see `syncTabTitles`).
+        pane.terminal.onTitle = { [weak pane] title in pane?.receiveTitle(title) }
+        pane.onShownTitle = { [weak self] in
+            guard let self, self.syncTabTitles() else { return }
+            self.refreshTabLabels()
         }
         // A bell in view only beeps; out of view it marks the tab until the user looks, as Ghostty's bell title does.
         pane.terminal.onBell = { [weak self, weak split] in
@@ -424,7 +426,29 @@ import AppKit
         } catch { NSAlert(error: error).runModal() }
     }
     @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
+    /// Each tab names one pane: the focused one, or its first pane while focus is in another tab (selecting a tab
+    /// focuses its first pane). Every pane used to rename its tab, so programs in split panes took turns at the
+    /// title, several times a second when they animate it. The item keeps the pane's title, including the core's
+    /// default-title sentinel; the chip and the window add the bell prefix when they show it. True when a label
+    /// changed.
+    @discardableResult private func syncTabTitles() -> Bool {
+        let focused = focusedTerminal
+        var changed = false
+        for item in tabs.tabViewItems {
+            let tabPanes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
+            guard let named = tabPanes.first(where: { $0.terminal === focused }) ?? tabPanes.first else { continue }
+            let title = named.shownTitle ?? TabTitle.defaultTitle
+            if item.label != title { item.label = title; changed = true }
+        }
+        return changed
+    }
+    /// Shows the items' labels in their chips and the window title, without rebuilding the strip.
+    private func refreshTabLabels() {
+        for (chip, item) in zip(tabChips, tabs.tabViewItems) { chip.label = TabTitle.label(item.label, bell: belled(item)) }
+        refreshWindowTitle()
+    }
     private func refreshTabs() {
+        syncTabTitles()
         // Chips are reused, not rebuilt, so a title change under the pointer keeps the hover state.
         while tabChips.count > tabs.numberOfTabViewItems { tabChips.removeLast().removeFromSuperview() }
         while tabChips.count < tabs.numberOfTabViewItems {

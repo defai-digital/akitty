@@ -71,6 +71,48 @@ struct PaneStatusSchedule {
     }
 }
 
+/// The pace at which a pane's title reaches its tab and the window. A program can rename its pane many times a
+/// second (a progress count, a timer), which nobody can read. A new title shows at once unless two others already
+/// showed within `window` seconds; then it waits until the older of those is `window` seconds old, and any title
+/// sent meanwhile replaces it, so the latest wins. Pure value logic, so tests can drive the clock.
+struct PaneTitleSchedule {
+    static let window: TimeInterval = 1
+    static let burst = 2
+    enum Outcome: Equatable {
+        /// `shown` changed; the tab should show it now.
+        case shown
+        /// Nothing new to show: the title repeats the shown one, or replaced one already waiting.
+        case unchanged
+        /// The title waits; show it with `flush` at this time.
+        case held(until: TimeInterval)
+    }
+    private(set) var shown: String?
+    private(set) var pending: String?
+    private(set) var pendingUntil: TimeInterval?
+    private var recent: [TimeInterval] = []
+    mutating func receive(_ title: String, now: TimeInterval) -> Outcome {
+        if pending != nil { pending = title; return .unchanged }
+        guard title != shown else { return .unchanged }
+        recent.removeAll { now - $0 >= Self.window }
+        guard recent.count >= Self.burst, let oldest = recent.first else { show(title, at: now); return .shown }
+        pending = title; pendingUntil = oldest + Self.window
+        return .held(until: oldest + Self.window)
+    }
+    /// Shows the waiting title; true when that changed `shown` (a later title can return to the shown one).
+    mutating func flush(now: TimeInterval) -> Bool {
+        guard let title = pending else { return false }
+        pending = nil; pendingUntil = nil
+        guard title != shown else { return false }
+        recent.removeAll { now - $0 >= Self.window }
+        show(title, at: now)
+        return true
+    }
+    private mutating func show(_ title: String, at now: TimeInterval) {
+        shown = title; recent.append(now)
+        if recent.count > Self.burst { recent.removeFirst(recent.count - Self.burst) }
+    }
+}
+
 /// A small glass capsule at the pane's top-right corner. It floats over the terminal instead of taking a row from
 /// it, so a status appearing or clearing never resizes the PTY. Program reports and notes are click-through and
 /// fade while the pointer is over them, so the text beneath stays reachable; host state keeps its tint and stays
@@ -230,6 +272,13 @@ struct PaneStatusSchedule {
     let launchDirectory: String?
     private var schedule = PaneStatusSchedule()
     private var statusTimer: Timer?
+    private var titles = PaneTitleSchedule()
+    private var titleTimer: Timer?
+    /// The title the tab and the window show for this pane: the program's latest, without spinner frames and at a
+    /// readable pace. Nil until the program reports one.
+    var shownTitle: String? { titles.shown }
+    /// Called when `shownTitle` changes.
+    var onShownTitle: (() -> Void)?
     /// Tests replace the clock to step through held and transient states.
     var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     init(headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
@@ -254,7 +303,31 @@ struct PaneStatusSchedule {
     /// whatever is current.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { statusTimer?.invalidate(); statusTimer = nil } else { renderStatus() }
+        if window == nil {
+            statusTimer?.invalidate(); statusTimer = nil
+            titleTimer?.invalidate(); titleTimer = nil
+        } else { renderStatus(); scheduleTitleFlush() }
+    }
+    func receiveTitle(_ title: String) {
+        // A title that was only a spinner reads as cleared, which the core shows as its default title.
+        let stable = TabTitle.stable(title)
+        switch titles.receive(stable.isEmpty ? TabTitle.defaultTitle : stable, now: clock()) {
+        case .shown: onShownTitle?()
+        case .held: scheduleTitleFlush()
+        case .unchanged: break
+        }
+    }
+    /// Wakes once when a held title is due. A pane out of a window (its tab moving) waits until it arrives.
+    private func scheduleTitleFlush() {
+        guard titleTimer == nil, window != nil, let until = titles.pendingUntil else { return }
+        let timer = Timer(timeInterval: max(0.05, until - clock()), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.titleTimer = nil
+                if self.titles.flush(now: self.clock()) { self.onShownTitle?() }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common); titleTimer = timer
     }
     /// Increase Contrast or Reduce Transparency changed: restyle the veil and the capsule for the new options.
     func accessibilityDisplayChanged() { veil.refresh(); renderStatus() }
