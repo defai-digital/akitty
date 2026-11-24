@@ -10,3 +10,5 @@
   there instead of returning it to the window it came from.
 - The empty title bar of a background window moves the window on the first
   click and drag, as a standard title bar does.
+- Moving a split tab between windows keeps its last focused pane. The tab
+  revealed in the source window also returns focus to its last focused pane.

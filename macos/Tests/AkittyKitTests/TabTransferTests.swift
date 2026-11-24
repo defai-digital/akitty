@@ -120,6 +120,48 @@ final class TabTransferTests: XCTestCase {
         XCTAssertTrue(source.tabs.selectedTabViewItem === remaining)
     }
 
+    @MainActor func testMovingABackgroundSplitTabKeepsItsRememberedPaneAndTitle() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        let item = try XCTUnwrap(source.tabs.selectedTabViewItem)
+        let right = try source.splitPane(containing: source.selectedPane)
+        right.onTitle?("right pane")
+        source.window?.makeFirstResponder(right)
+        source.refreshPaneFocus()
+        try source.newTab()
+        XCTAssertEqual(source.tabChips[0].label, "right pane")
+
+        XCTAssertTrue(source.transferTab(item, to: target, at: 1))
+
+        XCTAssertTrue(target.window?.firstResponder === right)
+        XCTAssertEqual(target.tabChips[1].label, "right pane")
+        target.selectTab(at: 0); target.selectTab(at: 1)
+        XCTAssertTrue(target.window?.firstResponder === right)
+    }
+
+    @MainActor func testMovingTheSelectedTabRestoresBothWindowsRememberedFocus() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        let sourceRight = try source.splitPane(containing: source.selectedPane)
+        source.window?.makeFirstResponder(sourceRight)
+        source.refreshPaneFocus()
+        try source.newTab()
+        let moving = try XCTUnwrap(source.tabs.selectedTabViewItem)
+
+        let targetLeft = try XCTUnwrap(target.selectedPane)
+        let targetRight = try target.splitPane(containing: targetLeft)
+        target.window?.makeFirstResponder(targetLeft)
+        target.refreshPaneFocus()
+        target.window?.makeFirstResponder(targetRight)
+
+        XCTAssertTrue(source.transferTab(moving, to: target, at: 1))
+        XCTAssertTrue(source.window?.firstResponder === sourceRight)
+        target.selectTab(at: 0)
+        XCTAssertTrue(target.window?.firstResponder === targetRight)
+    }
+
     @MainActor func testMovingAnotherTabKeepsTheFindFieldFocused() throws {
         _ = NSApplication.shared
         let app = AkittyApplication(); defer { cleanUp(app) }

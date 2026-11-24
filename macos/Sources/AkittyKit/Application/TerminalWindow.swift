@@ -613,7 +613,8 @@ import AppKit
         // The Find target is the pane the user was searching, even when the field editor holds focus
         // or the tab is in the background, so it wins over the first responder.
         let searched = findTarget.flatMap { target in moved.contains { $0.terminal === target } ? target : nil }
-        let focused = searched ?? moved.first { $0.terminal === window?.firstResponder }?.terminal ?? moved.first?.terminal
+        let focused = searched ?? moved.first { $0.terminal === window?.firstResponder }?.terminal
+            ?? rememberedPane(in: split)?.terminal
         let movingSelected = tabs.selectedTabViewItem === item, keepFindFocus = editingFind && !movingSelected
         let remainingFocus = movingSelected ? nil : window?.firstResponder as? TerminalView
         if searched != nil { releaseFind(of: moved.map(\.terminal), hideBar: movingSelected) }
@@ -626,6 +627,13 @@ import AppKit
         if wasFinished { destination.finishedTabs.insert(key) }
         if wasBelled { destination.belledTabs.insert(key) }
         reorderingTabs = false; destination.reorderingTabs = false
+        // The normal selection callbacks were suppressed during the move. Restore focus before
+        // refreshing chrome, which records the focused pane and uses it for the tab title.
+        if let focused { destination.window?.makeFirstResponder(focused) }
+        if keepFindFocus { window?.makeFirstResponder(findBar.field) }
+        else if let next = remainingFocus ?? (tabs.selectedTabViewItem?.view as? NSSplitView).flatMap(rememberedPane(in:))?.terminal {
+            window?.makeFirstResponder(next)
+        }
         refreshTabs(); destination.refreshTabs()
         destination.window?.layoutIfNeeded()
         destination.restoreTabShares(shares, item: item, split: split)
@@ -634,13 +642,11 @@ import AppKit
             guard let destination, let split, let item, destination.tabs.indexOfTabViewItem(item) != NSNotFound else { return }
             destination.window?.layoutIfNeeded(); destination.restoreTabShares(shares, item: item, split: split)
         }
-        if let focused { destination.window?.makeFirstResponder(focused); if searched == nil { focused.poll() } }
+        if searched == nil { focused?.poll() }
         if destination.window?.isKeyWindow == true { destination.acknowledgeSelectedTab() }
         if tabs.numberOfTabViewItems == 0 { window?.close(); return true }
         // removeTabViewItem selected the next tab while didSelect was suppressed, so acknowledge it here.
         if window?.isKeyWindow == true { acknowledgeSelectedTab() }
-        if keepFindFocus { window?.makeFirstResponder(findBar.field) }
-        else { window?.makeFirstResponder(remainingFocus ?? selectedPane) }
         return true
     }
     private func restoreTabShares(_ shares: [Double], item: NSTabViewItem, split: NSSplitView) {

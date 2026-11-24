@@ -44,8 +44,9 @@ receive it. Typing or pasting into the new pane first cancels the pending launch
   the pointer is over them so you can read the text beneath. When an agent holds
   the pane's input, the capsule turns orange and offers **Reclaim**.
 - **Move a running shell.** Drag a tab to another AkiTTY window's tab bar.
-  The tab brings its split panes, processes, and scrollback. Drag above or
-  below the tab bar to detach it into its own window.
+  The tab brings its split panes, processes, and scrollback and returns focus
+  to its last focused pane. Drag above or below the tab bar to detach it into
+  its own window.
 - **Use project defaults.** In **Settings → Profiles**, click **+** and
   set the desired font, colours, shell, starting directory, and scrollback.
   Click **Apply**, then pick the profile under **Shell → New Window with
