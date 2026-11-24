@@ -275,6 +275,30 @@ final class TabTransferTests: XCTestCase {
         XCTAssertTrue(target.tabs.selectedTabViewItem === original[0])
     }
 
+    @MainActor func testDropOnTheFreeTitleBarPastAnotherWindowsTabsAppendsTheTab() throws {
+        _ = NSApplication.shared
+        let app = AkittyApplication(); defer { cleanUp(app) }
+        let source = try app.createTerminalWindow(headless: true), target = try app.createTerminalWindow(headless: true)
+        try source.newTab()
+        let window = try XCTUnwrap(source.window), targetWindow = try XCTUnwrap(target.window)
+        let origin = NSScreen.main?.visibleFrame.origin ?? .zero
+        window.setFrame(NSRect(x: origin.x + 20, y: origin.y + 20, width: 450, height: 300), display: true)
+        targetWindow.setFrame(NSRect(x: origin.x + 500, y: origin.y + 20, width: 600, height: 300), display: true)
+        let moved = try XCTUnwrap(source.tabs.tabViewItems.first), chip = source.tabChips[0]
+        let start = try chipPoint(chip), targetChip = try chipPoint(target.tabChips[0])
+        // Past the target's only tab and its + button: the free title bar, where a new tab would go.
+        let free = NSPoint(x: targetWindow.frame.maxX - 40, y: targetChip.y)
+        XCTAssertGreaterThan(free.x, targetWindow.convertPoint(toScreen: target.tabChips[0].convert(target.tabChips[0].bounds, to: nil).origin).x + TabChip.maximumWidth + 28)
+        XCTAssertEqual(target.tabInsertionIndex(at: free), 1)
+        XCTAssertNil(target.tabInsertionIndex(at: NSPoint(x: free.x, y: targetChip.y - 80)), "below the title bar is the terminal, not a drop target")
+        chip.mouseDown(with: try mouse(.leftMouseDown, in: window, at: start))
+        chip.mouseDragged(with: try mouse(.leftMouseDragged, in: window, at: free))
+        chip.mouseUp(with: try mouse(.leftMouseUp, in: window, at: free))
+        XCTAssertEqual(target.tabs.numberOfTabViewItems, 2)
+        XCTAssertTrue(target.tabs.tabViewItems.last === moved, "the tab joins the window after its tabs")
+        XCTAssertEqual(source.tabs.numberOfTabViewItems, 1)
+    }
+
     @MainActor func testRealShellKeepsEnvironmentAndAcceptsInputAfterLastTabMoves() async throws {
         _ = NSApplication.shared
         let app = AkittyApplication(); defer { cleanUp(app) }

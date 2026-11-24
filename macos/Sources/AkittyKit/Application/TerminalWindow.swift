@@ -527,11 +527,13 @@ import AppKit
     func canTransferTab(_ item: NSTabViewItem) -> Bool {
         allowsTabTransfer && tabs.indexOfTabViewItem(item) != NSNotFound && (item.view as? NSSplitView)?.arrangedSubviews.isEmpty == false
     }
-    /// The strip has vertical slack for slightly diagonal reordering, but accepts drops only over its width.
+    /// Drops land anywhere along the title-bar row, with vertical slack for a slightly diagonal drag. The strip is
+    /// only as wide as its tabs, so a drop on the free space past them (where a new tab would go) appends.
     func tabInsertionIndex(at point: NSPoint) -> Int? {
         guard allowsTabTransfer, let window else { return nil }
-        let local = tabStrip.convert(window.convertPoint(fromScreen: point), from: nil)
-        guard tabStrip.bounds.insetBy(dx: -12, dy: -16).contains(local) else { return nil }
+        let inWindow = window.convertPoint(fromScreen: point)
+        guard bar.bounds.insetBy(dx: -12, dy: -16).contains(bar.convert(inWindow, from: nil)) else { return nil }
+        let local = tabStrip.convert(inWindow, from: nil)
         return tabChips.firstIndex { local.x < $0.frame.midX } ?? tabs.numberOfTabViewItems
     }
     /// The strip's height plus slack, but only across this window: at strip height over another window

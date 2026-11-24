@@ -182,6 +182,7 @@ final class CalmChromeTests: XCTestCase {
         let hit = try XCTUnwrap(frameView.hitTest(frameView.convert(empty, from: nil)))
         XCTAssertTrue(hit is TitlebarDragArea || hit is TitlebarStrip, "hit \(hit)")
         XCTAssertFalse(hit.mouseDownCanMoveWindow, "the strip handles the drag so a double-click can zoom")
+        XCTAssertTrue(hit.acceptsFirstMouse(for: nil), "a background window moves on its first click, as with a title bar")
         // Many tabs share the bar and shrink below the cap.
         for _ in 0..<6 { try controller.newTab() }
         window.layoutIfNeeded()

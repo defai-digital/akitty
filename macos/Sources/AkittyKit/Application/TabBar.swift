@@ -86,6 +86,8 @@ enum TabTitle {
         }
     }
     override var mouseDownCanMoveWindow: Bool { false }
+    /// A title bar moves a background window in one motion; without this the first click only brings it forward.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
         guard event.clickCount == 2 else { window.performDrag(with: event); return }
@@ -103,6 +105,8 @@ enum TabTitle {
 /// Empty title-bar space after the tabs. Its clicks fall through to `TitlebarStrip`, which moves or zooms the window.
 @MainActor final class TitlebarDragArea: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
+    /// The click is hit-tested here, so the first-click answer has to be here too.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// The chip's activity mark: the program's own sprite while it works, a dot once work it did out of view ends, and a

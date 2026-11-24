@@ -6,3 +6,7 @@
   second updates the tab at most twice a second, ending on the latest.
 - Returning to a tab focuses the pane that was focused when you left it,
   instead of its first pane.
+- Dropping a tab on another window's title bar past its tabs adds the tab
+  there instead of returning it to the window it came from.
+- The empty title bar of a background window moves the window on the first
+  click and drag, as a standard title bar does.
