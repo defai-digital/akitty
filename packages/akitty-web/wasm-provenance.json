@@ -4,10 +4,10 @@
   "abi": 1,
   "rust": "1.99.1",
   "artifact": "akitty-vt.wasm",
-  "sha256": "9711d23519c0f5c79859c4d44e436edcdff29472d46297d99223ad081f2deda3",
+  "sha256": "ef062797c6730c8d0f39b6537aab38d9c82ac788f10e8fe5178f0b60198fb405",
   "inputs": {
-    "Cargo.lock": "67fd9464dbac93b7eda9b3c5c7fb73054e85058ada0dffbf486cb43d1fced7a9",
-    "Cargo.toml": "fb14c8f8d1c07add28b0d8ebf46c28765285ab2b710f8535311152cf62dfde6a",
+    "Cargo.lock": "557d3f49d83928444995af82b39ec70d404bc185c25b920be93f2b14a6ba160a",
+    "Cargo.toml": "8258d0c98ca512cf98145088989e9a69bd06f0bdf2e5f22358d4d90e151e2485",
     "crates/akitty-vt/Cargo.toml": "16c6833e8fed57d9a291ad2be1160a67754841960ece98b89ba5605f059012ad",
     "crates/akitty-vt/examples/benchmark.rs": "1eb1881470b3ef4455a35da9ef79585bce236955ba130da9ed5afc437cc71676",
     "crates/akitty-vt/src/cell.rs": "40c236942fc0780aa6dff6f817e1160f23b9faf337fc2d80daac4b4216556fcd",

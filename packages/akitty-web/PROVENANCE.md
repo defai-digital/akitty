@@ -1,13 +1,13 @@
 # AkiTTY Web provenance
 
-Version 0.6.16 uses the AkiTTY-owned Rust engine in `../../crates/akitty-vt`, compiled
+Version 0.6.17 uses the AkiTTY-owned Rust engine in `../../crates/akitty-vt`, compiled
 into `akitty-vt.wasm`. No Ghostty, Alacritty or VTE implementation is built or
 bundled. `wasm-provenance.json` records the exact artifact SHA-256, pinned compiler
 and source/build input hashes. `scripts/build-wasm.sh` builds those local sources;
 it does not fetch a terminal project or apply an upstream patch.
 
-The native 2.4.0 workspace version rebuilds the artifact with Rust 1.99.1. Its SHA-256 is
-`9711d23519c0f5c79859c4d44e436edcdff29472d46297d99223ad081f2deda3`;
+The native 2.4.1 workspace version rebuilds the artifact with Rust 1.99.1. Its SHA-256 is
+`ef062797c6730c8d0f39b6537aab38d9c82ac788f10e8fe5178f0b60198fb405`;
 the matching workspace and engine input hashes are in `wasm-provenance.json`.
 
 ## Current implementation
