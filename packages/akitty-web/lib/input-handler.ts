@@ -17,6 +17,11 @@ const punctuation: Readonly<Record<string, string>> = {
   Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
   Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', IntlBackslash: '<',
 };
+const keypadNavigation = new Map<string, Key>([
+  ['ArrowLeft', Key.KP_LEFT], ['ArrowRight', Key.KP_RIGHT], ['ArrowUp', Key.KP_UP], ['ArrowDown', Key.KP_DOWN],
+  ['PageUp', Key.KP_PAGE_UP], ['PageDown', Key.KP_PAGE_DOWN], ['Home', Key.KP_HOME], ['End', Key.KP_END],
+  ['Insert', Key.KP_INSERT], ['Delete', Key.KP_DELETE], ['Clear', Key.KP_BEGIN],
+]);
 const modifierKeys: Readonly<Record<string, Key>> = {
   ShiftLeft: Key.LEFT_SHIFT, ControlLeft: Key.LEFT_CONTROL, AltLeft: Key.LEFT_ALT, MetaLeft: Key.LEFT_SUPER,
   ShiftRight: Key.RIGHT_SHIFT, ControlRight: Key.RIGHT_CONTROL, AltRight: Key.RIGHT_ALT, MetaRight: Key.RIGHT_SUPER,
@@ -27,6 +32,10 @@ function baseLayout(code: string): number | undefined {
   return punctuation[code]?.codePointAt(0);
 }
 function identity(event: KeyboardEvent): Key | undefined {
+  if (event.code.startsWith('Numpad')) {
+    const navigation = keypadNavigation.get(event.key);
+    if (navigation !== undefined) return navigation;
+  }
   if (modifierKeys[event.code] !== undefined) return modifierKeys[event.code];
   if (functional[event.code] !== undefined) return functional[event.code];
   if (/^Numpad[0-9]$/.test(event.code)) return (57399 + Number(event.code.slice(6))) as Key;

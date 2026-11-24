@@ -19,6 +19,7 @@ pub const PAGE_DOWN: u32 = 57355;
 pub const HOME: u32 = 57356;
 pub const END: u32 = 57357;
 pub const F1: u32 = 57364;
+const KP_BEGIN: u32 = 57427;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
@@ -71,18 +72,20 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         return Vec::new();
     }
     let mods = key.modifiers & 0x3f;
-    let code = if flags & 8 == 0 {
+    let keypad_navigation = (57417..=KP_BEGIN).contains(&key.code);
+    let code = if flags & 8 == 0 && !(keypad_navigation && flags & 1 != 0) {
         keypad_legacy_code(key.code).unwrap_or(key.code)
     } else {
         key.code
     };
+    let functional_key = (57344..=63743).contains(&code);
     let kitty =
-        flags & 8 != 0 || flags & 1 != 0 && (code == 27 || mods & !SHIFT != 0 || code >= 57344);
+        flags & 8 != 0 || flags & 1 != 0 && (code == 27 || mods & !SHIFT != 0 || functional_key);
     let editing = matches!(key.code, 9 | 13 | 127 | 57414);
     if key.action == Action::Release && editing && flags & 8 == 0 {
         return Vec::new();
     }
-    let text_key = (32..57344).contains(&code) && code != 127;
+    let text_key = !functional_key && char::from_u32(code).is_some_and(|ch| !ch.is_control());
     let modifier = u16::from(if flags & 8 != 0 || !text_key && flags & 3 != 0 {
         key.modifiers
     } else {
@@ -97,7 +100,7 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
     } else {
         ""
     };
-    if let Some((number, final_byte, ss3)) = function(key.code) {
+    if let Some((number, final_byte, ss3)) = function(code) {
         if kitty
             || mods != 0
             || report_events && (key.action != Action::Press || key.modifiers != 0)
@@ -109,8 +112,8 @@ pub fn encode(key: &Key<'_>, options: Options) -> Vec<u8> {
         }
         if let Some(final_byte) = ss3 {
             let application = options.app_cursor
-                && matches!(key.code, LEFT | RIGHT | UP | DOWN | HOME | END)
-                || (F1..=57367).contains(&key.code);
+                && matches!(code, LEFT | RIGHT | UP | DOWN | HOME | END)
+                || (F1..=57367).contains(&code);
             return format!("\x1b{}{final_byte}", if application { "O" } else { "[" }).into_bytes();
         }
         return format!("\x1b[{number}{final_byte}").into_bytes();
@@ -224,6 +227,16 @@ fn keypad_legacy_code(code: u32) -> Option<u32> {
         57414 => 13,
         57415 => u32::from(b'='),
         57416 => u32::from(b','),
+        57417 => LEFT,
+        57418 => RIGHT,
+        57419 => UP,
+        57420 => DOWN,
+        57421 => PAGE_UP,
+        57422 => PAGE_DOWN,
+        57423 => HOME,
+        57424 => END,
+        57425 => INSERT,
+        57426 => DELETE,
         _ => return None,
     })
 }
@@ -240,6 +253,7 @@ fn function(code: u32) -> Option<(u16, char, Option<char>)> {
         DELETE => (3, '~', None),
         PAGE_UP => (5, '~', None),
         PAGE_DOWN => (6, '~', None),
+        KP_BEGIN => (1, 'E', Some('E')),
         57364 => (1, 'P', Some('P')),
         57365 => (1, 'Q', Some('Q')),
         57366 => (1, 'R', Some('R')),
@@ -377,6 +391,14 @@ mod tests {
                 .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn disambiguation_treats_supplementary_unicode_as_text() {
+        let options = Options { kitty_flags: 1, ..Options::default() };
+        let code = u32::from('𐐨');
+        assert_eq!(text(Key::press(code, SHIFT | 64, "𐐀"), options), "𐐀");
+        assert_eq!(text(Key::press(code, ALT | 64, "𐐨"), options), "\x1b[66600;3u");
     }
 
     #[test]

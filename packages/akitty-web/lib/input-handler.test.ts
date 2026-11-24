@@ -303,6 +303,29 @@ describe('InputHandler', () => {
       } finally { handler.dispose(); }
     });
 
+    test('keypad navigation follows the logical key and retains its enhanced identity on release', () => {
+      let flags = 0;
+      let applicationCursor = false;
+      const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
+        undefined, undefined, mode => mode === 1 && applicationCursor, undefined, () => flags);
+      try {
+        simulateKey(container, createKeyEvent('Numpad1', 'End'));
+        simulateKey(container, createKeyEvent('NumpadDecimal', 'Delete'));
+        simulateKey(container, createKeyEvent('Numpad5', 'Clear'));
+        applicationCursor = true;
+        simulateKey(container, createKeyEvent('Numpad8', 'ArrowUp'));
+        flags = 3;
+        simulateKey(container, createKeyEvent('Numpad4', 'ArrowLeft'));
+        container.dispatchEvent({ ...createKeyEvent('Numpad4', '4'), type: 'keyup' });
+        flags = 8;
+        simulateKey(container, createKeyEvent('Numpad1', 'End'));
+        expect(dataReceived).toEqual([
+          '\x1b[F', '\x1b[3~', '\x1b[E', '\x1bOA',
+          '\x1b[57417;1u', '\x1b[57417;1:3u', '\x1b[57424;1u',
+        ]);
+      } finally { handler.dispose(); }
+    });
+
     test('enhanced keyboard reports layout text instead of physical Latin identities', () => {
       const handler = new InputHandler(engine, container as any, data => dataReceived.push(data), () => {},
         undefined, undefined, undefined, undefined, () => 8);
