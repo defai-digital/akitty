@@ -143,6 +143,8 @@ import AppKit
         window.contentView = content
         layoutTitlebar()
         NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
+        // Increase Contrast and Reduce Transparency change the veil and capsule styles without changing appearance.
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(accessibilityDisplayChanged), name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         if createInitialTab { try newTab(profile: profile, restoredText: restoredText) }
         refreshUpdateReminder(app.updates.availableVersion)
         refreshChrome()
@@ -161,6 +163,7 @@ import AppKit
         }
         if barLeading.constant != max(8, leading) { barLeading.constant = max(8, leading) }
     }
+    @objc func accessibilityDisplayChanged() { panes.forEach { $0.accessibilityDisplayChanged() } }
     @objc private func preferencesChanged() {
         // Panes reload their own preferences from the same notification; read their themes after they have.
         DispatchQueue.main.async { [weak self] in self?.refreshPaneFocus(animated: false, recolour: true) }

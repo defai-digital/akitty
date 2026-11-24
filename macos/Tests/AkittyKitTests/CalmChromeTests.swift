@@ -76,6 +76,14 @@ final class CalmChromeTests: XCTestCase {
         XCTAssertEqual(pane.capsule.reclaimButton.action, #selector(TerminalView.reclaimAgentControl(_:)))
         XCTAssertEqual(pane.status.stringValue, "Controlled by codex")
         XCTAssertEqual(pane.status.accessibilityLabel(), "AkiTTY: Controlled by codex")
+        // The capsule sizes to its content: wide enough for the text and Reclaim, never the whole pane.
+        pane.layoutSubtreeIfNeeded()
+        let button = pane.capsule.reclaimButton.convert(pane.capsule.reclaimButton.bounds, to: pane.capsule)
+        XCTAssertGreaterThan(pane.capsule.frame.width, pane.status.intrinsicContentSize.width + pane.capsule.reclaimButton.intrinsicContentSize.width)
+        XCTAssertLessThanOrEqual(pane.capsule.frame.width, 440)
+        XCTAssertLessThan(pane.capsule.frame.width, pane.bounds.width - 16)
+        XCTAssertTrue(pane.capsule.bounds.insetBy(dx: -0.5, dy: -0.5).contains(button), "Reclaim \(button) inside \(pane.capsule.bounds)")
+        XCTAssertGreaterThan(button.width, 0)
     }
 
     func testReducedTransparencyAndContrastUseAnOpaqueCapsule() {
@@ -100,6 +108,11 @@ final class CalmChromeTests: XCTestCase {
         XCTAssertEqual(secondPane.veil.state, .focused)
         XCTAssertEqual(first.veil.state, .dimmed)
         XCTAssertNil(first.veil.hitTest(NSPoint(x: 5, y: 5)), "a click on a dimmed pane reaches the terminal")
+        // A change to Increase Contrast or Reduce Transparency restyles in place and keeps each pane's state.
+        controller.accessibilityDisplayChanged()
+        XCTAssertEqual(first.veil.state, .dimmed)
+        XCTAssertEqual(secondPane.veil.state, .focused)
+        XCTAssertEqual(secondPane.veil.layer?.borderWidth, NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 2 : 1)
         controller.perform(.nextPane)
         XCTAssertTrue(controller.window?.firstResponder === first.terminal, "next pane wraps to the first")
         XCTAssertEqual(first.veil.state, .focused)

@@ -202,6 +202,8 @@ struct PaneStatusSchedule {
         }
         layer?.borderWidth = state == .focused ? (contrast ? 2 : 1) : 0
     }
+    /// Re-reads the accessibility display options for the current state.
+    func refresh() { CATransaction.begin(); CATransaction.setDisableActions(true); updateLayer(for: state); CATransaction.commit() }
     func setState(_ value: State, animated: Bool) {
         guard value != state else { return }
         state = value
@@ -254,6 +256,8 @@ struct PaneStatusSchedule {
         super.viewDidMoveToWindow()
         if window == nil { statusTimer?.invalidate(); statusTimer = nil } else { renderStatus() }
     }
+    /// Increase Contrast or Reduce Transparency changed: restyle the veil and the capsule for the new options.
+    func accessibilityDisplayChanged() { veil.refresh(); renderStatus() }
     func receive(_ status: PaneStatus) {
         schedule.receive(status, now: clock())
         renderStatus()
