@@ -161,6 +161,11 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   so reentrant callbacks cannot render new cells with stale damage or eligibility. Frame-start observers run after the
   older frame has captured its state and damage, leaving newer snapshot damage intact for the queued redraw. Suspended
   atlases validate content before changing layout epochs, so an unsupported frame cannot re-arm their rebuild budget.
+- Window chrome stays out of the grid. Tabs share the title bar (full-size content view, hidden title text that
+  remains set for the Window menu and accessibility), and the window takes the focused pane's theme background and
+  matching light or dark appearance. Pane status is a floating capsule over the pane rather than a reserved row, so
+  a status appearing or clearing never resizes the PTY. Its style comes from the message source in Swift: program
+  reports are neutral and click-through, and only the core's control record produces the agent style.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status-bar note. Images are
@@ -344,7 +349,7 @@ for prompt hook ordering, including the zsh scheduler fallback.
 
 ### Launch Services and Dock commands
 
-**Akitty → Make Akitty the Default Terminal** configures the Launch Services
+**AkiTTY → Make AkiTTY the Default Terminal** configures the Launch Services
 handlers for `public.unix-executable` and `com.apple.terminal.shell-script`.
 Installing AkiTTY registers it as an alternate handler. The menu changes the
 types still handled by another app and stays enabled when a change only partly

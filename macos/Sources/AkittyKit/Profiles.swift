@@ -12,9 +12,14 @@ struct TerminalTheme: Identifiable, Equatable, Sendable {
     let ansi: [UInt32]
 
     static let defaultID = "akitty-dark"
+    static let lightID = "akitty-light"
+    /// "Match System" follows the system appearance: AkiTTY Light in light mode, AkiTTY Dark in dark mode. Its own
+    /// entry carries no colours; `resolved` picks the theme a pane draws with.
+    static let systemID = "system"
     static let all: [TerminalTheme] = [
+        TerminalTheme(id: systemID, name: "Match System (AkiTTY Light or Dark)", foreground: nil, background: nil, cursor: nil, selection: nil, ansi: []),
         TerminalTheme(id: defaultID, name: "AkiTTY Dark", foreground: nil, background: nil, cursor: nil, selection: nil, ansi: []),
-        TerminalTheme(id: "akitty-light", name: "AkiTTY Light", foreground: 0x1f2328, background: 0xfafafa, cursor: 0x0969da, selection: 0xb6d7ff,
+        TerminalTheme(id: lightID, name: "AkiTTY Light", foreground: 0x1f2328, background: 0xfafafa, cursor: 0x0969da, selection: 0xb6d7ff,
                       ansi: [0x24292f, 0xcf222e, 0x116329, 0x7d4e00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781,
                              0x57606a, 0xa40e26, 0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x8c959f]),
         TerminalTheme(id: "solarized-dark", name: "Solarized Dark", foreground: 0x839496, background: 0x002b36, cursor: 0x93a1a1, selection: 0x174652,
@@ -25,7 +30,16 @@ struct TerminalTheme: Identifiable, Equatable, Sendable {
                              0x7f7f7f, 0xff8080, 0x80ff80, 0xffff80, 0x9db4ff, 0xff80ff, 0x80ffff, 0xffffff])
     ]
     /// An unknown identifier (a theme removed in a later version) falls back to the default theme.
-    static func named(_ id: String) -> TerminalTheme { all.first { $0.id == id } ?? all[0] }
+    static func named(_ id: String) -> TerminalTheme { all.first { $0.id == id } ?? all.first { $0.id == defaultID }! }
+    /// The theme a pane draws with: Match System becomes the light or dark theme for the current appearance.
+    static func resolved(_ id: String, systemDark: Bool) -> TerminalTheme {
+        id == systemID ? named(systemDark ? defaultID : lightID) : named(id)
+    }
+    /// The system's light or dark choice. It reads the application's appearance, which follows System Settings;
+    /// the appearance AkiTTY gives each window to match its terminal never feeds back into it.
+    @MainActor static var systemPrefersDark: Bool {
+        NSApplication.shared.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
 
     /// The `theme` core request. The default theme sends no colours, which restores the built-in baseline.
     var request: [String: Any] {

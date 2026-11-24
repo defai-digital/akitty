@@ -34,12 +34,14 @@ final class PasteTests: XCTestCase {
             terminal.paste("first\nsecond")
         }
         let panel = try XCTUnwrap(palette.window)
-        window.beginSheet(panel, completionHandler: { _ in })
-        let search = try XCTUnwrap(panel.contentView?.subviews.compactMap { $0 as? NSSearchField }.first)
+        palette.present(over: window)
+        XCTAssertTrue(panel.parent === window, "the palette floats over its terminal window")
+        let search = palette.searchField
         search.stringValue = "Paste Text"
         palette.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
-        XCTAssertTrue(search.sendAction(try XCTUnwrap(search.action), to: search.target))
-        for _ in 0..<200 where window.attachedSheet == nil || window.attachedSheet === panel {
+        XCTAssertTrue(palette.control(search, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertFalse(panel.isVisible, "running a command dismisses the palette first")
+        for _ in 0..<200 where window.attachedSheet == nil {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         let confirmation = try XCTUnwrap(window.attachedSheet)

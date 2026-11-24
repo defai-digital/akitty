@@ -25,34 +25,20 @@ import AppKit
     }
 }
 
-@MainActor final class TerminalPane: NSView {
-    private var terminalStorage: TerminalView?
-    var terminal: TerminalView { terminalStorage! }
-    let status = NSTextField(labelWithString: "Starting shell…")
-    /// Directory passed at creation. Nil means the Settings directory.
-    let launchDirectory: String?
-    init(headless: Bool = false, directory: String? = nil, profile: UUID? = nil, restoredText: String? = nil) throws {
-        launchDirectory = directory
-        super.init(frame: .zero)
-        terminalStorage = try TerminalView(headless: headless, directory: directory, profile: profile, restoredText: restoredText)
-        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
-        terminal.translatesAutoresizingMaskIntoConstraints = false; status.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(terminal); addSubview(status)
-        NSLayoutConstraint.activate([
-            terminal.topAnchor.constraint(equalTo: topAnchor), terminal.leadingAnchor.constraint(equalTo: leadingAnchor), terminal.trailingAnchor.constraint(equalTo: trailingAnchor),
-            terminal.bottomAnchor.constraint(equalTo: status.topAnchor, constant: -2),
-            status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8), status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            status.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4), status.heightAnchor.constraint(equalToConstant: 16)
-        ])
-        terminal.onStatus = { [weak status] message in status?.stringValue = message }
-    }
-    required init?(coder: NSCoder) { nil }
-}
 @MainActor final class TerminalWindow: NSWindowController, NSWindowDelegate, NSTabViewDelegate {
     var quickDismiss: (() -> Void)?
     let tabs = NSTabView()
+    /// The title-bar row: the tab strip and the new-tab button, laid out where the title would be.
+    private let bar = TitlebarStrip()
     private let tabStrip = NSStackView()
+    private var barLeading: NSLayoutConstraint!
+    private var barTrailing: NSLayoutConstraint!
+    private var barHeight: NSLayoutConstraint!
+    /// The background the window chrome took from the focused pane's theme, so the title bar and the terminal
+    /// read as one surface.
+    private(set) var chromeBackground: NSColor?
+    /// The pane that most recently had keyboard focus here; it stays undimmed while focus is elsewhere.
+    private weak var lastFocusedTerminal: TerminalView?
     private(set) var tabChips: [TabChip] = []
     /// The tab being dragged. Chips are reused by position, so after a move the chip under the pointer shows a
     /// different tab; the drag follows the tab, not the chip.
@@ -101,8 +87,11 @@ import AppKit
         self.directory = directory
         self.profile = profile
         self.app = app
-        let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
-        window.title = "Akitty"; window.minSize = NSSize(width: 400,height: 250); window.center()
+        let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 650), styleMask: [.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView], backing: .buffered, defer: false)
+        window.title = TabTitle.appName; window.minSize = NSSize(width: 400,height: 250); window.center()
+        // The tabs take the title's place in the title bar; the title stays set for the Window menu,
+        // Mission Control and assistive technology.
+        window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
         // The controller owns the window and is itself released from windowWillClose; a window that also
         // releases itself on close risks an over-release, as every other window in the app already avoids.
         window.isReleasedWhenClosed = false
@@ -110,15 +99,23 @@ import AppKit
         super.init(window: window)
         window.delegate = self; tabs.delegate = self; tabs.tabViewType = .noTabsNoBorder
         let content = NSView()
-        let bar = NSStackView(); bar.orientation = .horizontal; bar.spacing = 6; bar.distribution = .fill
-        // Like native tabs, every tab gets an equal share of the bar and Auto Layout keeps it so as the window resizes.
+        bar.orientation = .horizontal; bar.spacing = 6; bar.distribution = .fill
+        // Every tab gets an equal share of the bar up to `TabChip.maximumWidth`, and Auto Layout keeps it so as the
+        // window resizes.
         tabStrip.orientation = .horizontal; tabStrip.spacing = 2; tabStrip.distribution = .fillEqually
         tabStrip.setHuggingPriority(.defaultLow, for: .horizontal)
         tabStrip.setAccessibilityElement(true); tabStrip.setAccessibilityRole(.tabGroup); tabStrip.setAccessibilityLabel("Terminal tabs")
         let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New terminal tab")!, target: self, action: #selector(addTab(_:)))
-        plus.bezelStyle = .circular; plus.contentTintColor = .labelColor; plus.toolTip = "New tab (⌘T)"; plus.setAccessibilityIdentifier("new-terminal-tab")
+        plus.isBordered = false; plus.contentTintColor = .secondaryLabelColor; plus.toolTip = "New tab (⌘T)"; plus.setAccessibilityIdentifier("new-terminal-tab")
         plus.setContentHuggingPriority(.required, for: .horizontal)
-        bar.addArrangedSubview(tabStrip); bar.addArrangedSubview(plus)
+        // Tabs stop at a comfortable width, leaving the rest of the title bar to move or zoom the window.
+        let dragArea = TitlebarDragArea()
+        dragArea.setContentHuggingPriority(.init(1), for: .horizontal)
+        dragArea.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        bar.addArrangedSubview(tabStrip); bar.addArrangedSubview(plus); bar.addArrangedSubview(dragArea)
+        let dragMinimum = dragArea.widthAnchor.constraint(greaterThanOrEqualToConstant: 40)
+        dragMinimum.priority = .init(740)
+        dragMinimum.isActive = true
         findBar.isHidden = true
         findBar.onChange = { [weak self] in self?.runSearch("latest") }
         findBar.onSubmit = { [weak self] shift in
@@ -132,18 +129,80 @@ import AppKit
         findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
         // A hidden bar adds nothing between the tab strip and the terminals.
         findBarGap = tabs.topAnchor.constraint(equalTo: findBar.bottomAnchor)
+        barLeading = bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 78)
+        barTrailing = bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8)
+        barHeight = bar.heightAnchor.constraint(equalToConstant: 28)
         NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: content.topAnchor, constant: 4), bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
-            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), bar.heightAnchor.constraint(equalToConstant: 28),
-            plus.widthAnchor.constraint(equalToConstant: 30), tabStrip.heightAnchor.constraint(equalTo: bar.heightAnchor),
-            findBar.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4), findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            bar.topAnchor.constraint(equalTo: content.topAnchor), barLeading, barTrailing, barHeight,
+            plus.widthAnchor.constraint(equalToConstant: 28), tabStrip.heightAnchor.constraint(equalToConstant: 26),
+            findBar.topAnchor.constraint(equalTo: bar.bottomAnchor), findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8), findBarHeight, findBarGap,
             tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor), tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         window.contentView = content
+        layoutTitlebar()
+        NotificationCenter.default.addObserver(self, selector: #selector(preferencesChanged), name: .terminalPreferencesChanged, object: nil)
         if createInitialTab { try newTab(profile: profile, restoredText: restoredText) }
         refreshUpdateReminder(app.updates.availableVersion)
+        refreshChrome()
+    }
+    /// Fits the tab row to the title bar: as tall as the title bar, clear of the window buttons, and flush left in
+    /// full screen where the buttons hide.
+    func layoutTitlebar() {
+        guard let window else { return }
+        let height = window.frame.height - window.contentLayoutRect.height
+        barHeight.constant = max(28, min(52, height.isFinite ? height : 28))
+        var leading: CGFloat = 8
+        if !window.styleMask.contains(.fullScreen) {
+            // Before the title bar is laid out the buttons can report an empty frame; assume the standard three.
+            let buttons = window.standardWindowButton(.zoomButton).flatMap { zoom in zoom.superview.map { $0.convert(zoom.frame, to: nil).maxX } } ?? 0
+            leading = buttons > 20 ? buttons + 10 : 78
+        }
+        if barLeading.constant != max(8, leading) { barLeading.constant = max(8, leading) }
+    }
+    @objc private func preferencesChanged() {
+        // Panes reload their own preferences from the same notification; read their themes after they have.
+        DispatchQueue.main.async { [weak self] in self?.refreshPaneFocus(animated: false, recolour: true) }
+    }
+    /// The pane with keyboard focus, the find bar's pane while its field is edited, then the pane that last had
+    /// focus, then the selected tab's first pane.
+    var focusedTerminal: TerminalView? {
+        let open = panes.map(\.terminal)
+        if let terminal = window?.firstResponder as? TerminalView, open.contains(where: { $0 === terminal }) { return terminal }
+        if editingFind, let owner = searchOwner { return owner }
+        if let last = lastFocusedTerminal, open.contains(where: { $0 === last }) { return last }
+        return selectedPane
+    }
+    /// Outlines the focused pane and dims the others in tabs that hold more than one, and recolours the chrome.
+    func refreshPaneFocus(animated: Bool = true, recolour: Bool = false) {
+        let focused = focusedTerminal
+        if let focused { lastFocusedTerminal = focused }
+        for item in tabs.tabViewItems {
+            let tabPanes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
+            for pane in tabPanes {
+                let state: PaneFocusVeil.State = tabPanes.count < 2 ? .plain : pane.terminal === focused ? .focused : .dimmed
+                pane.setFocusState(state, animated: animated && item === tabs.selectedTabViewItem, recolour: recolour)
+            }
+        }
+        refreshChrome()
+    }
+    /// The window takes the focused pane's background and the matching light or dark appearance, so labels, the
+    /// find bar and sheets stay legible on it.
+    private func refreshChrome() {
+        guard let window else { return }
+        let background = focusedTerminal.flatMap { NSColor(cgColor: $0.renderAppearance.backgroundColor) } ?? TerminalTheme.named(TerminalTheme.defaultID).backgroundColor
+        guard background != chromeBackground else { return }
+        chromeBackground = background
+        window.backgroundColor = background
+        window.appearance = NSAppearance(named: Self.isDark(background) ? .darkAqua : .aqua)
+    }
+    /// Relative luminance below the midpoint reads as a dark surface.
+    nonisolated static func isDark(_ color: NSColor) -> Bool {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return true }
+        func linear(_ value: CGFloat) -> CGFloat { value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4) }
+        let luminance = 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        return luminance < 0.18
     }
     required init?(coder: NSCoder) { nil }
     func newTab() throws { try newTab(profile: inheritedProfile, copyDirectory: true) }
@@ -279,6 +338,12 @@ import AppKit
         else { split.addArrangedSubview(pane) }
         app?.registerAgentTerminal(pane.terminal)
         bindPane(pane, in: split)
+        // Share the width at once, so a pane is never laid out at its minimum before the deferred pass below
+        // (for example when Find opens in the same turn). The deferred pass repeats it after the window settles.
+        if split.bounds.width > 0 {
+            split.adjustSubviews()
+            setShares(Array(repeating: 1, count: split.arrangedSubviews.count), of: split)
+        }
         DispatchQueue.main.async { [weak self, weak split] in
             guard let split else { return }
             split.adjustSubviews()
@@ -309,6 +374,7 @@ import AppKit
             guard let self, let split else { return }
             self.refreshActivity(of: split)
         }
+        pane.terminal.onFocusChange = { [weak self] in self?.refreshPaneFocus() }
     }
     /// Split the tab holding `terminal` (or the active pane) and return the new
     /// pane. Unlike the key command, a full tab reports why instead of doing nothing.
@@ -360,11 +426,15 @@ import AppKit
             chip.heightAnchor.constraint(equalToConstant: 26).isActive = true
             // Soft, so many tabs truncate their titles instead of forcing the window wider.
             let minimum = chip.widthAnchor.constraint(greaterThanOrEqualToConstant: 64); minimum.priority = .defaultHigh; minimum.isActive = true
+            chip.widthAnchor.constraint(lessThanOrEqualToConstant: TabChip.maximumWidth).isActive = true
+            let preferred = chip.widthAnchor.constraint(equalToConstant: TabChip.maximumWidth); preferred.priority = .init(260); preferred.isActive = true
             tabStrip.addArrangedSubview(chip); tabChips.append(chip)
         }
+        let sole = tabs.numberOfTabViewItems == 1
         for (index, (chip, item)) in zip(tabChips, tabs.tabViewItems).enumerated() {
             chip.label = TabTitle.label(item.label, bell: belled(item)); chip.isSelected = item === tabs.selectedTabViewItem; chip.activity = activity(of: item)
-            chip.shortcut = shortcut(forTab: index)
+            chip.isSole = sole
+            chip.shortcut = sole ? "" : shortcut(forTab: index)
             chip.onSelect = { [weak self, weak item] in
                 guard let self, let item else { return }
                 self.draggedTab = item; self.dragOriginalIndex = self.tabs.indexOfTabViewItem(item)
@@ -378,6 +448,7 @@ import AppKit
             chip.contextMenu = { [weak self, weak item] in self.flatMap { owner in item.map(owner.tabMenu) } ?? NSMenu() }
         }
         refreshWindowTitle()
+        refreshPaneFocus()
     }
     /// The window names the selected tab, so switching tabs or acknowledging its bell renames it at once.
     private func refreshWindowTitle() {
@@ -541,6 +612,24 @@ import AppKit
         showWindow(nil); window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(terminal)
     }
+    /// Moves to the tab `step` places away, wrapping at either end, as Safari and Terminal do.
+    func selectAdjacentTab(_ step: Int) {
+        let count = tabs.numberOfTabViewItems
+        guard count > 1, let selected = tabs.selectedTabViewItem else { return }
+        let index = tabs.indexOfTabViewItem(selected)
+        tabs.selectTabViewItem(at: ((index + step) % count + count) % count)
+    }
+    /// Focuses the pane `step` places away in the selected tab, wrapping at either end.
+    func focusAdjacentPane(_ step: Int, from terminal: TerminalView? = nil) {
+        guard let split = tabs.selectedTabViewItem?.view as? NSSplitView else { return }
+        let tabPanes = split.arrangedSubviews.compactMap { ($0 as? TerminalPane)?.terminal }
+        guard tabPanes.count > 1 else { return }
+        let origin = terminal ?? focusedTerminal
+        let current = origin.flatMap { focused in tabPanes.firstIndex { $0 === focused } } ?? 0
+        let next = tabPanes[((current + step) % tabPanes.count + tabPanes.count) % tabPanes.count]
+        window?.makeFirstResponder(next)
+        refreshPaneFocus()
+    }
     func selectTab(at index: Int) {
         let target = index == 8 ? tabs.numberOfTabViewItems - 1 : index
         if tabs.tabViewItems.indices.contains(target) { tabs.selectTabViewItem(at: target) }
@@ -549,6 +638,8 @@ import AppKit
         if let old = updateReminder, let index = window?.titlebarAccessoryViewControllers.firstIndex(of: old) { window?.removeTitlebarAccessoryViewController(at: index) }
         updateReminder = nil
         if let version, let updater = app?.updates { let reminder = UpdateReminder(version: version, updater: updater); window?.addTitlebarAccessoryViewController(reminder); updateReminder = reminder }
+        // The reminder sits at the title bar's trailing edge, over the tab row; keep the tabs clear of it.
+        barTrailing.constant = -(8 + (updateReminder.map { $0.view.frame.width + 8 } ?? 0))
     }
     /// The first pane in the split whose program reports work, if any.
     private func workingChrome(in split: NSSplitView) -> ChromeDocument? {
@@ -589,7 +680,7 @@ import AppKit
         let finished = finishedTabs.remove(id) != nil, belled = belledTabs.remove(id) != nil
         if finished || belled { refreshTabs() }
     }
-    func windowDidBecomeKey(_ notification: Notification) { acknowledgeSelectedTab() }
+    func windowDidBecomeKey(_ notification: Notification) { acknowledgeSelectedTab(); layoutTitlebar() }
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         guard !reorderingTabs else { return }
         if window?.isKeyWindow == true, let split = tabViewItem?.view as? NSSplitView {
@@ -599,6 +690,8 @@ import AppKit
         if let pane = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
             window?.makeFirstResponder(pane.terminal)
         }
+        // Settle the new tab's dimming at once, so its panes do not fade in after the switch.
+        refreshPaneFocus(animated: false)
     }
     func perform(_ command: NativeCommand, target: TerminalView? = nil) {
         let terminal = target ?? commandTarget
@@ -618,15 +711,27 @@ import AppKit
             case .fontDecrease: terminal?.changeFont(-1)
             case .fontReset: terminal?.changeFont(nil)
             case .agentOverview: app?.showAgentOverview(nil)
+            case .nextTab: selectAdjacentTab(1)
+            case .previousTab: selectAdjacentTab(-1)
+            case .nextPane: focusAdjacentPane(1, from: terminal)
+            case .previousPane: focusAdjacentPane(-1, from: terminal)
+            case .restartTerminal: if let terminal { restart(terminal) }
+            case .reclaimControl: terminal?.reclaimAgentControl(nil)
+            case .resumeAgent: if let terminal { app?.resumeAgent(in: terminal) }
+            case .toggleFullScreen: window?.toggleFullScreen(nil)
+            case .settings, .quickTerminal, .saveLayout, .agentIntegrations, .agentTimeline, .checkUpdates:
+                app?.performAppCommand(command, anchor: self)
             }
         } catch { NSAlert(error: error).runModal() }
     }
     func showPalette() {
-        guard let window else { return }
+        guard let window, window.attachedSheet == nil else { return }
+        if palette?.isPresented == true { palette?.dismiss(restoreFocus: true); return }
         let target = commandTarget
         palette = PaletteController { [weak self, weak target] command in self?.perform(command, target: target) }
-        if let panel = palette?.window { window.beginSheet(panel) }
+        palette?.present(over: window)
     }
+    var paletteController: PaletteController? { palette }
     private func close(_ terminal: TerminalView) {
         guard panes.contains(where: { $0.terminal === terminal }) else { return }
         if terminal.snapshot?.exited == true { remove(terminal); return }
@@ -755,6 +860,8 @@ import AppKit
             terminal.poll()
         } catch { findBar.status.stringValue = error.localizedDescription }
     }
+    func windowDidEnterFullScreen(_ notification: Notification) { layoutTitlebar() }
+    func windowDidExitFullScreen(_ notification: Notification) { layoutTitlebar() }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if let quickDismiss { quickDismiss(); return false }
         if panes.isEmpty || panes.allSatisfy({ $0.terminal.snapshot?.exited == true }) { return true }

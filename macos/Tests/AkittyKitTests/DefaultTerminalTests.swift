@@ -243,12 +243,25 @@ final class DefaultTerminalTests: XCTestCase {
         let app = AkittyApplication()
         app.makeMenu()
         let dock = app.applicationDockMenu(NSApp)
-        XCTAssertEqual(dock?.items.map(\.title), ["New Window", "New Tab"])
-        XCTAssertEqual(dock?.items.map { $0.target === app }, [true, true])
-        XCTAssertEqual(dock?.items.map(\.action), [#selector(AkittyApplication.newWindowFromDock(_:)), #selector(AkittyApplication.newTabFromDock(_:))])
-        let menu = try XCTUnwrap(NSApp.mainMenu?.items.compactMap(\.submenu).first { $0.title == "Akitty" })
+        XCTAssertEqual(dock?.items.map(\.title), ["New Window", "New Tab", "New Window with Profile", "", "Toggle Quick Terminal", "Agent Overview"])
+        let actions = dock?.items.filter { !$0.isSeparatorItem && $0.submenu == nil }
+        XCTAssertEqual(actions?.map { $0.target === app }, [true, true, true, true])
+        XCTAssertEqual(actions?.map(\.action), [#selector(AkittyApplication.newWindowFromDock(_:)), #selector(AkittyApplication.newTabFromDock(_:)),
+                                               #selector(AkittyApplication.toggleQuickTerminalFromDock(_:)), #selector(AkittyApplication.showAgentOverviewFromDock(_:))])
+        // The profile submenu fills itself when it opens, like the Shell menu's.
+        let profiles = try XCTUnwrap(dock?.items[2].submenu)
+        profiles.delegate?.menuNeedsUpdate?(profiles)
+        XCTAssertEqual(profiles.items.first?.title, "Default Settings")
+        XCTAssertEqual(profiles.items.last?.title, "Edit Profiles…")
+        // Nothing in the Dock menu decides an agent request; it only says how many wait.
+        XCTAssertEqual(AkittyApplication.dockOverviewTitle(pending: 0), "Agent Overview")
+        XCTAssertEqual(AkittyApplication.dockOverviewTitle(pending: 2), "Agent Overview — 2 waiting for approval")
+        XCTAssertFalse(dock?.items.contains { $0.title.localizedCaseInsensitiveContains("allow") || $0.title.localizedCaseInsensitiveContains("deny") } ?? true)
+        let menu = try XCTUnwrap(NSApp.mainMenu?.items.compactMap(\.submenu).first { $0.title == "AkiTTY" })
+        XCTAssertEqual(menu.items.first?.title, "About AkiTTY")
+        XCTAssertEqual(menu.items.last?.title, "Quit AkiTTY")
         XCTAssertTrue(menu.autoenablesItems)
-        let item = try XCTUnwrap(menu.items.first { $0.title == "Make Akitty the Default Terminal" })
+        let item = try XCTUnwrap(menu.items.first { $0.title == "Make AkiTTY the Default Terminal" })
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
         app.defaultTerminalApplication = { _ in terminal }
         XCTAssertTrue(app.validateMenuItem(item))
@@ -262,7 +275,7 @@ final class DefaultTerminalTests: XCTestCase {
         app.defaultTerminalApplication = { _ in Bundle.main.bundleURL }
         XCTAssertFalse(app.validateMenuItem(item))
         XCTAssertEqual(app.defaultTerminalTypesToChange(), [])
-        let about = try XCTUnwrap(menu.items.first { $0.title == "About Akitty" })
+        let about = try XCTUnwrap(menu.items.first { $0.title == "About AkiTTY" })
         XCTAssertTrue(app.validateMenuItem(about))
         about.isEnabled = false
         XCTAssertFalse(app.validateMenuItem(about))

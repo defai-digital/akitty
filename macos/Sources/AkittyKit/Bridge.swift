@@ -11,7 +11,7 @@ public enum AkittyError: Error, LocalizedError {
 public enum CoreBridge {
     /// The core's response envelope, after size and ABI checks, without any JSON parsing.
     static func raw(_ request: [String: Any]) throws -> Data {
-        guard akitty_abi_version() == 1 else { throw AkittyError.core("Incompatible Akitty core ABI") }
+        guard akitty_abi_version() == 1 else { throw AkittyError.core("Incompatible AkiTTY core ABI") }
         let bytes = try JSONSerialization.data(withJSONObject: request)
         guard bytes.count <= 1_048_576 else { throw AkittyError.core("Request too large") }
         let buffer = bytes.withUnsafeBytes { raw in

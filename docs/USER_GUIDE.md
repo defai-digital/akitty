@@ -9,15 +9,18 @@ for a split, and **⌘,** for Settings. [Install AkiTTY](../README.md#quick-star
 - **Open a folder.** Drop it onto the AkiTTY Dock icon or run
   `open -a Akitty /path/to/project`. Passing a file to `open -a` opens its
   containing folder, including when the file is executable.
-- **Open a program from Finder.** Choose **Akitty → Make Akitty the Default
+- **Open a program from Finder.** Choose **AkiTTY → Make AkiTTY the Default
   Terminal** and confirm the file associations in macOS. When Finder, the Dock,
   or a launcher opens a Unix executable or an executable `.command` or `.tool`
   file, AkiTTY offers **Run**, **Open Folder**, and **Cancel**. **Run** starts a
   shell in the file's folder and keeps the shell open so you can read the output.
   **Open Folder** starts a shell there with an empty command line.
-- **Start from the Dock.** Control-click the AkiTTY icon and choose **New Window**
-  or **New Tab**. **New Tab** opens in the frontmost terminal window and leaves
-  a hidden Quick Terminal hidden. With no terminal open, it opens a window.
+- **Start from the Dock.** Control-click the AkiTTY icon and choose **New Window**,
+  **New Tab**, **New Window with Profile**, **Toggle Quick Terminal** or
+  **Agent Overview**. **New Tab** opens in the frontmost terminal window and leaves
+  a hidden Quick Terminal hidden. With no terminal open, it opens a window. While
+  agent requests wait for your approval, the Dock icon shows how many, and the
+  Agent Overview item says so. Approve or deny them in AkiTTY itself.
 
 AkiTTY accepts up to eight folders and programs in one open request. **Run**
 supports sh, bash, zsh, dash, ksh, and fish. Integrated bash and zsh sessions
@@ -30,7 +33,15 @@ receive it. Typing or pasting into the new pane first cancels the pending launch
 
 - **Keep related tasks together.** Open a tab for each project or split a
   tab into side-by-side panes for a shell, a build, or a log. Click a pane
-  to focus it. **⌘W** closes the active pane.
+  or press **⌥⌘→** / **⌥⌘←** to focus it. In a split tab the focused pane has a
+  thin accent outline and the others are lightly dimmed. **⇧⌘]** and **⇧⌘[**
+  move between tabs. **⌘W** closes the active pane.
+- **Read pane status at a glance.** Tabs sit in the title bar. A pane has no
+  status row; a small capsule appears at its top-right corner only when there is
+  something to say: a program's progress, a copy or paste note, the new size
+  while you resize, or an error. Programs' reports are neutral and fade while
+  the pointer is over them so you can read the text beneath. When an agent holds
+  the pane's input, the capsule turns orange and offers **Reclaim**.
 - **Move a running shell.** Drag a tab to another AkiTTY window's tab bar.
   The tab brings its split panes, processes, and scrollback. Drag above or
   below the tab bar to detach it into its own window.
@@ -94,12 +105,12 @@ shells, tabs, and scrollback available next time you show it.
 
 | Setting | Where to find it |
 | --- | --- |
-| Default font, CJK font, size, colours, and cursor | **Settings → Appearance**. Use **⌘+**, **⌘−**, and **⌘0** for the current pane's zoom. |
+| Default font, CJK font, size, colours, and cursor | **Settings → Appearance**. **Match System** uses AkiTTY Light or Dark to follow macOS. Use **⌘+**, **⌘−**, and **⌘0** for the current pane's zoom. |
 | Shell, starting directory, and scrollback for new sessions | **Settings → Sessions → New Terminals** |
 | Shell integration and folder-aware command suggestions | **Settings → Sessions → New Terminals**. Shell integration supports bash and zsh. |
 | Terminal bell and clipboard prompts | **Settings → Sessions → Alerts** and **Clipboard** |
 | Option-as-Alt and status messages from programs | **Settings → Keyboard** |
-| Update reminders | **Settings → Updates**, or **Akitty → Check for Updates…** for a manual check. |
+| Update reminders | **Settings → Updates**, or **AkiTTY → Check for Updates…** for a manual check. |
 
 ### Display setup
 
@@ -118,7 +129,7 @@ a command and press **Tab**. Matches from this folder come first. Use
 
 ## Work with an agent
 
-Open **Akitty → Agent Integrations…** to install hooks or MCP setup for a
+Open **AkiTTY → Agent Integrations…** to install hooks or MCP setup for a
 supported CLI. Enable **Local Agent Requests**, then start the agent in a pane.
 Use **⌥⌘A** to open Agent Overview. Select a row and choose **Show Terminal**
 to see its output. The overview labels agent-reported status and enforced
@@ -139,6 +150,9 @@ prompt, **Allow Once** returns the decision to the agent.
 | New window / new tab | ⌘N / ⌘T |
 | Split / close pane | ⌘D / ⌘W |
 | Select tab 1–8 / select last tab | ⌘1–⌘8 / ⌘9 |
+| Next / previous tab | ⇧⌘] / ⇧⌘[ |
+| Next / previous pane | ⌥⌘→ / ⌥⌘← |
+| Enter or exit full screen | ⌃⌘F |
 | Restart terminal | ⇧⌘R |
 | Command palette | ⇧⌘P |
 | Find in current pane | ⌘F |
@@ -147,8 +161,10 @@ prompt, **Allow Once** returns the decision to the agent.
 | Increase / decrease / reset pane font size | ⌘+ / ⌘− / ⌘0 |
 | Agent Overview | ⌥⌘A |
 
-The command palette searches command names and keywords. For example, type
-`zoom` to find the font size commands. Matches on consecutive letters rank
+The command palette (**⇧⌘P**) floats over the window. It lists window, tab,
+pane, agent and app commands with their shortcuts; Return or a click runs one,
+and Escape closes it. It searches command names and keywords. For example, type
+`zoom` to find the font size commands or `theme` to open Settings. Matches on consecutive letters rank
 before matches that skip letters. The accessibility guide covers keyboard and
 screen-reader use in Agent Overview, approval sheets, and terminal panes.
 [Accessibility](ACCESSIBILITY.md) · [Siri and Shortcuts](SIRI.md) ·

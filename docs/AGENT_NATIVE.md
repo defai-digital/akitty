@@ -6,9 +6,9 @@ offer to resume a reported conversation when you reopen your workspace.
 
 ## Set up an agent
 
-1. Open **Akitty → Agent Integrations…**. Find your CLI and click **Install**
+1. Open **AkiTTY → Agent Integrations…**. Find your CLI and click **Install**
    in its row. If AkiTTY cannot find the CLI, use **Install Instructions…**.
-2. Choose **Akitty → Enable Local Agent Requests** or click **Turn On**
+2. Choose **AkiTTY → Enable Local Agent Requests** or click **Turn On**
    in **Settings → Agents**. To enable it on future launches, select
    **Turn on when AkiTTY starts**.
 3. Start a new agent session in an AkiTTY pane. For Codex, run `/hooks`
@@ -53,7 +53,9 @@ independently of OSC 771. A program can report `idle`, `working`, `blocked`, `do
 or `error`, with hierarchy, app identifier, description and progress. `clear` removes
 a record subtree. Reports are not authenticated identities or verified results.
 
-The pane status line prioritizes OSC 7501 reports, then falls back to OSC 771 text.
+The pane status capsule prioritizes OSC 7501 reports, then falls back to OSC 771 text.
+Program reports always use the capsule's neutral style; only the host's own input
+lease shows the orange agent style with a **Reclaim** button.
 Tabs show reported waiting, failure, completion or work. OSC 771 sprites remain
 available while work is reported. Agent Overview separates program reports,
 host input ownership, the execution-request entry and the shell's state. Its
@@ -77,7 +79,7 @@ The pane reports work for five seconds, then reports completion.
 
 ## Request a command from a local agent
 
-1. In the running native app, choose **Akitty → Enable Local Agent Requests**.
+1. In the running native app, choose **AkiTTY → Enable Local Agent Requests**.
    This is off at every app launch unless you choose **Turn on when AkiTTY
    starts** in **Settings → Agents** (off by default).
 2. Use the bundled companion to list panes:
@@ -162,7 +164,7 @@ before the subcommand selects a different local test/instance endpoint.
 
 ## Agent integrations
 
-**Settings → Agents** (**Akitty → Agent Integrations…**) lists Claude Code, Codex,
+**Settings → Agents** (**AkiTTY → Agent Integrations…**) lists Claude Code, Codex,
 AX Code, Grok, Muse Code, Kimi Code and AGY. For each it shows where the CLI was found (the inherited PATH, then
 the usual install folders such as `~/.local/bin` and `/opt/homebrew/bin`), the
 version `--version` prints, and the workflows available for that agent. A missing
@@ -236,7 +238,7 @@ permission rules; AkiTTY returns only allow or deny and never types into the pan
 or takes its input lease. This uses Claude Code's documented `PermissionRequest`,
 `SessionStart` and `SessionEnd` hooks.
 
-1. In **Settings → Agents** (**Akitty → Agent Integrations…**), choose
+1. In **Settings → Agents** (**AkiTTY → Agent Integrations…**), choose
    **Install** under Claude Code, or run
    `akitty-agent claude-hooks install`. This adds three hooks that run
    `akitty-agent claude-hook` to `~/.claude/settings.json`. Enabling twice keeps
@@ -404,7 +406,7 @@ receipt is specifically an input-dispatch receipt, not execution attestation.
 
 ## Timeline, storage and export
 
-Choose **Akitty → Agent Event Timeline** to inspect retained local events, or
+Choose **AkiTTY → Agent Event Timeline** to inspect retained local events, or
 **Export Agent Events** for JSONL. Recording runs locally while the app runs, even
 when local requests are disabled. It never makes the PTY session persistent.
 

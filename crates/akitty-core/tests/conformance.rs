@@ -36,7 +36,7 @@ impl Drop for Terminal {
 fn command_palette_is_bounded_deterministic_and_session_independent() {
     let all = call(json!({"op":"command_palette","query":""}));
     assert_eq!(all["version"], 1);
-    assert_eq!(all["commands"].as_array().unwrap().len(), 14);
+    assert_eq!(all["commands"].as_array().unwrap().len(), 28);
     assert_eq!(call(json!({"op":"command_palette","query":"split"})), call(json!({"op":"command_palette","query":"split"})));
     assert_eq!(call(json!({"op":"command_palette","query":"ｓｐｌｉｔ"}))["commands"][0]["id"], "split");
     assert_eq!(call(json!({"op":"command_palette","query":"nwtab"}))["commands"][0]["id"], "new-tab");

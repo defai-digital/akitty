@@ -16,7 +16,7 @@ AkiTTY 2.3.2 bundles the MCP companion with the macOS app. The examples use
 its approval queue, request IDs and request status.
 [Release notes](releases/2.3.2.md)
 
-1. Launch AkiTTY and choose **Akitty → Enable Local Agent Requests**. This grant
+1. Launch AkiTTY and choose **AkiTTY → Enable Local Agent Requests**. This grant
    is off again on every app launch unless you turn on **Turn on when AkiTTY
    starts** in **Settings → Agents**.
 2. Configure your agent to launch the bundled companion with the `mcp` argument.

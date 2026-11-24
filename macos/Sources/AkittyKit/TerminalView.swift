@@ -54,6 +54,10 @@ struct RenderReuse: Equatable {
     public private(set) var snapshot: Snapshot?
     public private(set) var health = RendererHealth()
     public var onStatus: ((String) -> Void)?
+    /// The same messages as `onStatus`, with the source that decides how the pane shows them.
+    var onPaneStatus: ((PaneStatus) -> Void)?
+    /// Keyboard focus entered or left this pane. Called after the responder change settles.
+    var onFocusChange: (() -> Void)?
     public var onTitle: ((String) -> Void)?
     /// The program rang the bell (`BEL`); called once per snapshot that carries it.
     public var onBell: (() -> Void)?
@@ -110,7 +114,9 @@ struct RenderReuse: Equatable {
     /// Trackpad points accumulated towards the next scroll line.
     private var scrollRemainder: CGFloat = 0
     /// Last string published through `onStatus`, so repeated frames do not rewrite the status line.
-    private var lastStatus: String?
+    /// The last status sent, compared as a whole: the same text from a different source must still go out, or a
+    /// program could leave its words wearing the host's style (or hide the host's) by matching its text.
+    private var lastStatus: PaneStatus?
     private let imageStore = ImageStore()
     private var lastCellPixels: (Int, Int) = (0, 0)
     /// Idle backstop for a missed wakeup; the core drives refreshes in between.
@@ -163,7 +169,9 @@ struct RenderReuse: Equatable {
     /// Counts writes of typed or pasted input, not terminal reports. A launch line waiting for the prompt checks it so it never joins typed text.
     private(set) var inputCount = 0
     /// The colours and cursor the rasterizer draws with, from the effective theme.
-    var renderAppearance: RenderAppearance { TerminalTheme.named(preferences.theme).appearance(cursorStyle: preferences.cursorStyle) }
+    var renderAppearance: RenderAppearance { theme.appearance(cursorStyle: preferences.cursorStyle) }
+    /// The effective theme, with Match System resolved against the current system appearance.
+    var theme: TerminalTheme { TerminalTheme.resolved(preferences.theme, systemDark: TerminalTheme.systemPrefersDark) }
     private var cachedFont: (name: String, size: CGFloat, font: NSFont, cell: CGSize)?
     private var fontLayout: (name: String, size: CGFloat, font: NSFont, cell: CGSize) {
         if let cachedFont, cachedFont.name == preferences.fontName, cachedFont.size == fontSize { return cachedFont }
@@ -481,7 +489,7 @@ struct RenderReuse: Equatable {
     /// Session settings the core owns: the program-chrome switch and the colour theme.
     private func syncCoreSettings() throws {
         _ = try session.call("program_chrome", ["enabled": preferences.programChrome])
-        _ = try session.call("theme", TerminalTheme.named(preferences.theme).request)
+        _ = try session.call("theme", theme.request)
         presenter?.clearColor = MetalPresenter.clearColor(for: renderAppearance.backgroundColor)
     }
     func applySnapshot(_ result: Result<Snapshot?, Error>) {
@@ -502,12 +510,12 @@ struct RenderReuse: Equatable {
                     exitHandled = true
                     DispatchQueue.main.async { [weak self] in self?.onExit?() }
                 }
-                if let error = next.error { publishStatus(error) }
-                else if let failure = health.failure { publishStatus("Software rendering: \(failure)") }
-                else if next.exited { publishStatus("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))") }
-                else if next.control?.agent == true { publishStatus("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control") }
-                else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { publishStatus(presentation) }
-                else { publishStatus("\(next.cols) cols × \(next.rows) rows") }
+                if let error = next.error { publishStatus(error, kind: .problem) }
+                else if let failure = health.failure { publishStatus("Software rendering: \(failure)", kind: .problem) }
+                else if next.exited { publishStatus("Shell exited (\(next.exit_code.map(String.init) ?? "closed"))", kind: .problem) }
+                else if next.control?.agent == true { publishStatus("Controlled by \(next.control?.owner ?? "agent") · Edit → Reclaim Terminal Control", kind: .agent, display: "Controlled by \(next.control?.owner ?? "agent")") }
+                else if let presentation = next.program_status?.presentation ?? next.chrome?.presentation { publishStatus(presentation, kind: .program) }
+                else { publishStatus("\(next.cols) cols × \(next.rows) rows", kind: .geometry) }
                 // A busy frame arrives at up to 60 Hz and usually repeats the same title and activity; only
                 // changes reach the tab strip, which rebuilds chips and the window title on every call.
                 if previous?.title != next.title { onTitle?(next.title) }
@@ -530,7 +538,7 @@ struct RenderReuse: Equatable {
         // shared reference so no image is made of a context another queue is mutating.
         bitmap = nil
         pendingDamage = nil
-        publishStatus("Software rendering: \(message)", force: true)
+        publishStatus("Software rendering: \(message)", kind: .problem, force: true)
         Logger(subsystem: "com.defai.akitty", category: "renderer").error("Metal disabled: \(message, privacy: .public)")
         needsDisplay = true
         // Ask for one full, non-reused software frame. A failure already on the software path must not
@@ -538,11 +546,14 @@ struct RenderReuse: Equatable {
         if replacingPresenter { redraw() }
     }
     /// Publishing is skipped when the text repeats: the status line is part of the per-frame hot path.
-    private func publishStatus(_ text: String, force: Bool = false) {
+    /// `display` is the shorter text the pane's status capsule shows when it differs from the full message.
+    private func publishStatus(_ text: String, kind: PaneStatus.Kind, display: String? = nil, force: Bool = false) {
         // Nothing was delivered before the host installed its callback, so a later identical message must still go out.
-        guard let onStatus, force || text != lastStatus else { return }
-        lastStatus = text
-        onStatus(text)
+        let status = PaneStatus(text: text, kind: kind, display: display ?? text)
+        guard onStatus != nil || onPaneStatus != nil, force || status != lastStatus else { return }
+        lastStatus = status
+        onStatus?(text)
+        onPaneStatus?(status)
     }
     /// A partial snapshot with no dirty rows and an identical cursor carries only image changes (a generation
     /// bump, placements moved, added or removed): the text layers are still valid, so no CPU raster is needed.
@@ -707,7 +718,7 @@ struct RenderReuse: Equatable {
     /// Reports a failure. The beep is rate-limited like the bell: a snapshot that keeps failing (an oversized
     /// screen, too many image fragments) fails on every display-rate poll and must not beep continuously.
     private func show(_ error: Error) {
-        publishStatus(error.localizedDescription, force: true)
+        publishStatus(error.localizedDescription, kind: .failure, force: true)
         let now = ProcessInfo.processInfo.systemUptime
         guard !preferences.silentMode, now - lastErrorBeep >= 1 else { return }
         lastErrorBeep = now; playAlertSound()
@@ -957,12 +968,19 @@ struct RenderReuse: Equatable {
     public override func becomeFirstResponder() -> Bool {
         lastLocalInteraction = ProcessInfo.processInfo.systemUptime; requestAutomaticRefresh()
         if snapshot?.focus_reporting == true { send("\u{1b}[I", report: true) }
+        notifyFocusChange()
         return true
     }
     public override func resignFirstResponder() -> Bool {
         releaseHeldKittyKeys()
         if snapshot?.focus_reporting == true { send("\u{1b}[O", report: true) }
+        notifyFocusChange()
         return true
+    }
+    /// The window's first responder changes only after these overrides return, so observers run on the next turn.
+    private func notifyFocusChange() {
+        guard onFocusChange != nil else { return }
+        DispatchQueue.main.async { [weak self] in self?.onFocusChange?() }
     }
     /// Drops the host selection, its copy/accessibility text, and the cached highlight.
     /// Schema 1 has no deselect request, so the cached snapshot's marks are cleared too;
@@ -1050,19 +1068,19 @@ struct RenderReuse: Equatable {
     }
     @objc public func paste(_ sender: Any?) {
         guard !stopped else { return }
-        guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { publishStatus("Paste requires plain text up to 64 KiB", force: true); return }
+        guard let text = NSPasteboard.general.string(forType: .string), ClipboardPolicy.acceptsText(text) else { publishStatus("Paste requires plain text up to 64 KiB", kind: .notice, force: true); return }
         paste(text)
     }
     /// Sends validated clipboard text. Confirmation defaults on and can be disabled by a saved user choice.
     func paste(_ text: String) {
         guard !stopped, ClipboardPolicy.acceptsText(text) else { return }
         if let sheet = window?.attachedSheet {
-            publishStatus("Finish the current dialog before pasting.", force: true)
+            publishStatus("Finish the current dialog before pasting.", kind: .notice, force: true)
             sheet.makeKeyAndOrderFront(nil)
             return
         }
         if preferences.confirmPaste && ClipboardPolicy.needsPasteConfirmation(text) {
-            guard let window else { publishStatus("Paste requires confirmation, but the terminal is not in a window", force: true); return }
+            guard let window else { publishStatus("Paste requires confirmation, but the terminal is not in a window", kind: .notice, force: true); return }
             let alert = NSAlert(); alert.messageText = "Paste text containing control characters?"
             alert.informativeText = "This text may execute commands in the terminal."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Paste")
@@ -1121,12 +1139,12 @@ struct RenderReuse: Equatable {
     private func writeClipboard(_ text: String) {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
         let characters = text.count
-        publishStatus("Copied \(characters) \(characters == 1 ? "character" : "characters") to the clipboard", force: true)
+        publishStatus("Copied \(characters) \(characters == 1 ? "character" : "characters") to the clipboard", kind: .notice, force: true)
     }
     public func changeFont(_ delta: CGFloat?) { fontSize = delta.map { min(36,max(9,fontSize + $0)) } ?? preferences.fontSize; resizeTerminal(); redraw() }
     public override func isAccessibilityElement() -> Bool { true }
     public override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
-    public override func accessibilityLabel() -> String? { "Akitty terminal" }
+    public override func accessibilityLabel() -> String? { "AkiTTY terminal" }
     public override func accessibilityValue() -> Any? { snapshot?.text ?? "" }
     public override func accessibilitySelectedText() -> String? { selectedText }
     public override func accessibilitySelectedTextRange() -> NSRange { selectedRange() }

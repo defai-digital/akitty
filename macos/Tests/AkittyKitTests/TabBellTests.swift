@@ -17,10 +17,12 @@ final class TabBellTests: XCTestCase {
     func testBellPrefixesTheTitleAndTheWindowNamesTheApp() {
         XCTAssertEqual(TabTitle.label("vim", bell: false), "vim")
         XCTAssertEqual(TabTitle.label("vim", bell: true), "🔔 vim")
-        XCTAssertEqual(TabTitle.window("vim", bell: false), "vim — Akitty")
-        XCTAssertEqual(TabTitle.window("vim", bell: true), "🔔 vim — Akitty")
-        XCTAssertEqual(TabTitle.window("Akitty", bell: false), "Akitty")
-        XCTAssertEqual(TabTitle.window("Akitty", bell: true), "🔔 Akitty")
+        XCTAssertEqual(TabTitle.window("vim", bell: false), "vim — AkiTTY")
+        XCTAssertEqual(TabTitle.window("vim", bell: true), "🔔 vim — AkiTTY")
+        // The core's default title "Akitty" is a sentinel; people see the product name.
+        XCTAssertEqual(TabTitle.window("Akitty", bell: false), "AkiTTY")
+        XCTAssertEqual(TabTitle.window("Akitty", bell: true), "🔔 AkiTTY")
+        XCTAssertEqual(TabTitle.label("Akitty", bell: false), "AkiTTY")
         XCTAssertEqual(TabActivity.bell.accessibilityName, "Bell")
         XCTAssertNil(TabActivity.none.accessibilityName)
     }
@@ -39,15 +41,15 @@ final class TabBellTests: XCTestCase {
         XCTAssertEqual(controller.tabChips[0].accessibilityLabel()?.hasSuffix(", bell"), true)
         XCTAssertFalse(controller.tabChips[0].activityMark.isHidden)
         XCTAssertEqual(controller.tabChips[1].activity, .none)
-        XCTAssertEqual(controller.window?.title, "Akitty", "the window names the selected tab, which did not ring")
+        XCTAssertEqual(controller.window?.title, "AkiTTY", "the window names the selected tab, which did not ring")
         // Selecting the tab renames the window at once; showing it in the key window acknowledges the bell.
         controller.selectTab(at: 0)
-        XCTAssertEqual(controller.window?.title, "🔔 build — Akitty")
+        XCTAssertEqual(controller.window?.title, "🔔 build — AkiTTY")
         controller.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
         XCTAssertEqual(controller.tabChips[0].activity, .none)
         XCTAssertTrue(controller.tabChips[0].activityMark.isHidden)
         XCTAssertEqual(controller.tabChips[0].label, "build")
-        XCTAssertEqual(controller.window?.title, "build — Akitty")
+        XCTAssertEqual(controller.window?.title, "build — AkiTTY")
     }
 
     @MainActor func testBellOutranksWorkAndReturnsItWhenAcknowledged() async throws {
@@ -72,10 +74,10 @@ final class TabBellTests: XCTestCase {
         let pane = try XCTUnwrap(controller.panes.first)
         _ = try pane.terminal.session.call("feed", ["text": "\u{1b}]2;AX-Code | ax-code\u{07}"])
         try await waitUntil(controller) { controller.tabChips[0].label == "AX-Code | ax-code" }
-        XCTAssertEqual(controller.window?.title, "AX-Code | ax-code — Akitty")
+        XCTAssertEqual(controller.window?.title, "AX-Code | ax-code — AkiTTY")
         // A program that clears its title on exit leaves a named tab, not a blank one.
         _ = try pane.terminal.session.call("feed", ["text": "\u{1b}]2;\u{07}"])
-        try await waitUntil(controller) { controller.tabChips[0].label == "Akitty" }
-        XCTAssertEqual(controller.window?.title, "Akitty")
+        try await waitUntil(controller) { controller.tabChips[0].label == "AkiTTY" }
+        XCTAssertEqual(controller.window?.title, "AkiTTY")
     }
 }

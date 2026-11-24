@@ -33,7 +33,7 @@ open "$HOME/Applications/Akitty.app"
 ```
 
 Use **⌘T** to open a tab, **⌘D** to split a pane, or **⌘,** to open Settings.
-Choose **Akitty → Check for Updates…** to check manually. For a system-wide
+Choose **AkiTTY → Check for Updates…** to check manually. For a system-wide
 installation, run `bash install.sh --system` with write access to **/Applications**.
 
 <a id="what-is-implemented"></a>
@@ -48,7 +48,7 @@ installation, run `bash install.sh --system` with write access to **/Application
 | Return to a workspace | Save named window layouts with **Shell → Window Layouts**. Reopening starts fresh shells. You can include a short scrollback excerpt when saving. |
 | Reach a shell from another app | Enable the global shortcut in **Settings → Keyboard**. Hiding the Quick Terminal keeps its shells running. |
 | Start a window from the Dock | Control-click the Dock icon and choose **New Window** or **New Tab**. New Tab uses the frontmost terminal. |
-| Open Unix executables from Finder | Choose **Akitty → Make Akitty the Default Terminal**. AkiTTY asks before it runs a Unix executable or an executable `.command` or `.tool` file. [Open folders and programs](docs/USER_GUIDE.md#open-folders-and-programs) |
+| Open Unix executables from Finder | Choose **AkiTTY → Make AkiTTY the Default Terminal**. AkiTTY asks before it runs a Unix executable or an executable `.command` or `.tool` file. [Open folders and programs](docs/USER_GUIDE.md#open-folders-and-programs) |
 | Find an app command | Press **⇧⌘P** and search by name or keyword. For example, `zoom` finds the font size commands. |
 
 <a id="folder-command-history"></a>
@@ -64,7 +64,7 @@ confirmation. [Terminal user guide](docs/USER_GUIDE.md) ·
 
 ## Works with your AI agents
 
-Run your usual agent CLI inside an AkiTTY pane. **Akitty → Agent Integrations…**
+Run your usual agent CLI inside an AkiTTY pane. **AkiTTY → Agent Integrations…**
 shows which CLIs it found and offers setup for these workflows.
 
 | Agent | What AkiTTY can show or approve |
@@ -81,7 +81,7 @@ shows which CLIs it found and offers setup for these workflows.
 ## Try the agent workflow
 
 1. **Connect.** Install the integration for your CLI, restart the agent, and
-   choose **Akitty → Enable Local Agent Requests**.
+   choose **AkiTTY → Enable Local Agent Requests**.
 2. **Observe.** Open **Window → Agent Overview** (**⌥⌘A**) to see reported
    activity, input ownership, and queued approvals. Use **Show Terminal**
    to jump to a pane.
@@ -89,7 +89,7 @@ shows which CLIs it found and offers setup for these workflows.
    target in the native sheet. **Deny** is selected by default.
 4. **Reclaim and inspect.** After approving a command sent to a pane, use
    **Edit → Reclaim Terminal Control** to return input to yourself. Running
-   commands continue. Use **Akitty → Agent Event Timeline…** to inspect local
+   commands continue. Use **AkiTTY → Agent Event Timeline…** to inspect local
    event metadata.
 
 Approval covers requests submitted to AkiTTY. The agent's ordinary subprocesses

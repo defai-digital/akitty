@@ -404,7 +404,7 @@ struct GlobalFindHit: Equatable {
                 sessionID: target.terminal.session.id, rowID: rowID, generation: generation, col: col, endCol: endCol,
                 query: query, snippet: snippet,
                 windowID: ObjectIdentifier(target.window), tabID: ObjectIdentifier(target.tab),
-                windowTitle: target.window.window?.title ?? "Akitty", tabTitle: target.tab.label,
+                windowTitle: target.window.window?.title ?? TabTitle.appName, tabTitle: target.tab.label,
                 paneTitle: paneTitle, folder: folder
             ))
         }

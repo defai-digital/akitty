@@ -36,9 +36,20 @@ Supported Bash permission prompts from Claude Code and Codex use
 
 ## Agents settings
 
-Open **Akitty → Agent Integrations…** to find CLI status, integration controls
+Open **AkiTTY → Agent Integrations…** to find CLI status, integration controls
 and the **Turn on when AkiTTY starts** switch. The switch has an explicit
 accessible name and defaults to off.
+
+## Pane status and focus
+
+A pane's status capsule names its source to assistive technology: program reports
+are read as "Program reports, unverified", and AkiTTY's own input-lease and error
+states as "AkiTTY". **Reclaim** in the capsule is a button with the same effect as
+**Edit → Reclaim Terminal Control**. With Reduce Transparency or Increase Contrast
+on, the capsule and the command palette use opaque backgrounds instead of glass.
+In a split tab the focused pane has an accent outline; Increase Contrast
+thickens it and removes the dimming of other panes, which would lower their text
+contrast. Reduce Motion turns off the dimming fade.
 
 ## Terminal reading
 

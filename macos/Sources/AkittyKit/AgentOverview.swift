@@ -101,7 +101,7 @@ struct AgentOverviewRow: Equatable {
         table.setAccessibilityLabel("Terminal panes and their controllers")
         table.setAccessibilityHelp("Select a terminal with the arrow keys. Show Terminal focuses it and its approval request, if one is waiting. Reclaim Control returns input to you without stopping its running process.")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
-        let note = NSTextField(wrappingLabelWithString: "Input control is enforced by Akitty. Local requests require human approval; ordinary program operations are observation only. Program reports and shell directories are unverified.")
+        let note = NSTextField(wrappingLabelWithString: "Input control is enforced by AkiTTY. Local requests require human approval; ordinary program operations are observation only. Program reports and shell directories are unverified.")
         note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor
         showButton.target = self; showButton.action = #selector(showSelected(_:))
         reclaimButton.target = self; reclaimButton.action = #selector(reclaimSelected(_:))

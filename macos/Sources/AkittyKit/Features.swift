@@ -5,6 +5,10 @@ public enum NativeCommand: String, CaseIterable, Codable {
     case copy, paste, find, findNext = "find-next", findPrevious = "find-previous", findAll = "find-all"
     case fontIncrease = "font-increase", fontDecrease = "font-decrease", fontReset = "font-reset"
     case agentOverview = "agent-overview"
+    case nextTab = "next-tab", previousTab = "previous-tab", nextPane = "next-pane", previousPane = "previous-pane"
+    case restartTerminal = "restart-terminal", quickTerminal = "quick-terminal", settings, saveLayout = "save-layout"
+    case reclaimControl = "reclaim-control", resumeAgent = "resume-agent", agentIntegrations = "agent-integrations"
+    case agentTimeline = "agent-timeline", checkUpdates = "check-updates", toggleFullScreen = "toggle-full-screen"
     public var title: String {
         switch self {
         case .newWindow: return "New Window"
@@ -21,6 +25,51 @@ public enum NativeCommand: String, CaseIterable, Codable {
         case .fontDecrease: return "Decrease Font Size"
         case .fontReset: return "Reset Font Size"
         case .agentOverview: return "Agent Overview"
+        case .nextTab: return "Show Next Tab"
+        case .previousTab: return "Show Previous Tab"
+        case .nextPane: return "Focus Next Pane"
+        case .previousPane: return "Focus Previous Pane"
+        case .restartTerminal: return "Restart Terminal"
+        case .quickTerminal: return "Toggle Quick Terminal"
+        case .settings: return "Settings…"
+        case .saveLayout: return "Save Windows as Layout…"
+        case .reclaimControl: return "Reclaim Terminal Control"
+        case .resumeAgent: return "Resume Agent Conversation"
+        case .agentIntegrations: return "Agent Integrations…"
+        case .agentTimeline: return "Agent Event Timeline…"
+        case .checkUpdates: return "Check for Updates…"
+        case .toggleFullScreen: return "Toggle Full Screen"
+        }
+    }
+    /// The SF Symbol the command palette shows beside the command.
+    var symbolName: String {
+        switch self {
+        case .newWindow: return "macwindow.badge.plus"
+        case .newTab: return "plus.square.on.square"
+        case .split: return "rectangle.split.2x1"
+        case .closePane: return "xmark.square"
+        case .copy: return "doc.on.doc"
+        case .paste: return "doc.on.clipboard"
+        case .find, .findNext, .findPrevious: return "magnifyingglass"
+        case .findAll: return "text.magnifyingglass"
+        case .fontIncrease: return "textformat.size.larger"
+        case .fontDecrease: return "textformat.size.smaller"
+        case .fontReset: return "textformat.size"
+        case .agentOverview: return "person.2.badge.gearshape"
+        case .nextTab: return "chevron.right.square"
+        case .previousTab: return "chevron.left.square"
+        case .nextPane: return "arrow.right.square"
+        case .previousPane: return "arrow.left.square"
+        case .restartTerminal: return "arrow.clockwise"
+        case .quickTerminal: return "rectangle.topthird.inset.filled"
+        case .settings: return "gearshape"
+        case .saveLayout: return "square.and.arrow.down.on.square"
+        case .reclaimControl: return "hand.raised"
+        case .resumeAgent: return "arrow.uturn.forward"
+        case .agentIntegrations: return "puzzlepiece.extension"
+        case .agentTimeline: return "list.bullet.rectangle"
+        case .checkUpdates: return "arrow.down.circle"
+        case .toggleFullScreen: return "arrow.up.left.and.arrow.down.right"
         }
     }
 }

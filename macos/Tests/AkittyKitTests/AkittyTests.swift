@@ -832,11 +832,12 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(controller.tabChips.map { $0.closeButton.alphaValue }, [0, 0, 1])
         XCTAssertEqual(controller.tabChips[0].closeButton.accessibilityIdentifier(), "close-terminal-tab")
         XCTAssertEqual(controller.tabChips.map(\.shortcut), ["⌘1", "⌘2", "⌘3"])
-        // Tabs share the bar equally, like native tabs, and follow the window's width.
+        // Tabs share the bar equally up to a comfortable width, leaving title-bar space to move the window, and
+        // shrink with the window's width.
         window.contentView?.layoutSubtreeIfNeeded()
         let widths = controller.tabChips.map(\.frame.width)
         XCTAssertEqual(widths.max()! - widths.min()!, 0, accuracy: 1)
-        XCTAssertGreaterThan(widths[0], 250)
+        XCTAssertEqual(widths[0], TabChip.maximumWidth, accuracy: 1)
         window.setContentSize(NSSize(width: 600, height: 400)); window.contentView?.layoutSubtreeIfNeeded()
         XCTAssertLessThan(controller.tabChips[0].frame.width, widths[0])
         controller.selectTab(at: 0); XCTAssertEqual(controller.tabChips.map(\.isSelected), [true, false, false])
@@ -1247,9 +1248,9 @@ final class AkittyTests: XCTestCase {
         let sequence = "\u{1b}[22t\u{1b}]2;vim\u{07}OK\u{1b}]771;{\"status\":{\"text\":\"building\",\"tone\":\"info\"},\"progress\":0.5}\u{07}"
         _ = try pane.terminal.session.call("feed", ["text": sequence])
         try await waitUntil(pane.terminal, timeout: 3) {
-            pane.status.stringValue.contains("building") && pane.status.stringValue.contains("50%") && controller.window?.title == "vim — Akitty"
+            pane.status.stringValue.contains("building") && pane.status.stringValue.contains("50%") && controller.window?.title == "vim — AkiTTY"
         }
-        XCTAssertEqual(controller.window?.title, "vim — Akitty")
+        XCTAssertEqual(controller.window?.title, "vim — AkiTTY")
         XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "vim")
         XCTAssertEqual(tabLabel(controller), "vim")
         XCTAssertFalse(controller.window?.title.contains("building") == true)
@@ -1258,10 +1259,10 @@ final class AkittyTests: XCTestCase {
         XCTAssertTrue(pane.terminal.snapshot?.text.hasPrefix("OK") == true)
         XCTAssertFalse(pane.terminal.snapshot?.text.contains("771") == true)
         _ = try pane.terminal.session.call("feed", ["text": "\u{1b}[23t"])
-        try await waitUntil(pane.terminal, timeout: 3) { controller.window?.title == "Akitty" }
-        XCTAssertEqual(controller.window?.title, "Akitty")
-        XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "Akitty")
-        XCTAssertEqual(tabLabel(controller), "Akitty")
+        try await waitUntil(pane.terminal, timeout: 3) { controller.window?.title == "AkiTTY" }
+        XCTAssertEqual(controller.window?.title, "AkiTTY")
+        XCTAssertEqual(controller.tabs.tabViewItems.first?.label, "Akitty", "the item keeps the core's default-title sentinel")
+        XCTAssertEqual(tabLabel(controller), "AkiTTY")
         XCTAssertEqual(pane.status.stringValue.contains("building"), true)
     }
 

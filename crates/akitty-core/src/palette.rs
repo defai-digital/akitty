@@ -28,6 +28,20 @@ const COMMANDS: &[Command] = &[
     Command { id: "font-decrease", title: "Decrease Font Size", shortcut: "⌘−", keywords: &["zoom", "smaller"] },
     Command { id: "font-reset", title: "Reset Font Size", shortcut: "⌘0", keywords: &["zoom", "default"] },
     Command { id: "agent-overview", title: "Agent Overview", shortcut: "⌥⌘A", keywords: &["agents", "control", "reclaim", "sessions"] },
+    Command { id: "next-tab", title: "Show Next Tab", shortcut: "⇧⌘]", keywords: &["tab", "switch", "right"] },
+    Command { id: "previous-tab", title: "Show Previous Tab", shortcut: "⇧⌘[", keywords: &["tab", "switch", "left"] },
+    Command { id: "next-pane", title: "Focus Next Pane", shortcut: "⌥⌘→", keywords: &["split", "pane", "switch", "right"] },
+    Command { id: "previous-pane", title: "Focus Previous Pane", shortcut: "⌥⌘←", keywords: &["split", "pane", "switch", "left"] },
+    Command { id: "restart-terminal", title: "Restart Terminal", shortcut: "⇧⌘R", keywords: &["reset", "relaunch", "shell"] },
+    Command { id: "quick-terminal", title: "Toggle Quick Terminal", shortcut: "", keywords: &["dropdown", "hotkey", "global"] },
+    Command { id: "settings", title: "Settings…", shortcut: "⌘,", keywords: &["preferences", "font", "theme", "colours", "colors", "profiles"] },
+    Command { id: "save-layout", title: "Save Windows as Layout…", shortcut: "", keywords: &["workspace", "session", "restore"] },
+    Command { id: "reclaim-control", title: "Reclaim Terminal Control", shortcut: "", keywords: &["agent", "lease", "input", "control"] },
+    Command { id: "resume-agent", title: "Resume Agent Conversation", shortcut: "", keywords: &["agent", "conversation", "continue"] },
+    Command { id: "agent-integrations", title: "Agent Integrations…", shortcut: "", keywords: &["agent", "hooks", "mcp", "setup", "install"] },
+    Command { id: "agent-timeline", title: "Agent Event Timeline…", shortcut: "", keywords: &["agent", "events", "log", "history"] },
+    Command { id: "check-updates", title: "Check for Updates…", shortcut: "", keywords: &["update", "version", "upgrade"] },
+    Command { id: "toggle-full-screen", title: "Toggle Full Screen", shortcut: "⌃⌘F", keywords: &["fullscreen", "window", "maximize"] },
 ];
 
 pub fn search(input: &str) -> Result<Value, String> {
@@ -94,7 +108,7 @@ mod tests {
     fn empty_query_returns_the_complete_catalog_in_declaration_order() {
         let result = search("").unwrap();
         assert_eq!(result["version"], 1);
-        assert_eq!(result["commands"].as_array().unwrap().len(), 14);
+        assert_eq!(result["commands"].as_array().unwrap().len(), 28);
         assert_eq!(ids("").first().map(String::as_str), Some("new-window"));
         assert_eq!(result["commands"][7]["shortcut"], "⌘G");
         assert_eq!(result["commands"][8]["shortcut"], "⌘⇧G");
@@ -109,7 +123,24 @@ mod tests {
         assert_eq!(ids("next").first().map(String::as_str), Some("find-next"));
         assert_eq!(ids("previous").first().map(String::as_str), Some("find-previous"));
         assert_eq!(ids("agent").first().map(String::as_str), Some("agent-overview"));
-        assert_eq!(ids("reclaim").first().map(String::as_str), Some("agent-overview"));
+        assert_eq!(ids("reclaim").first().map(String::as_str), Some("reclaim-control"));
+        assert!(ids("reclaim").contains(&"agent-overview".to_owned()));
+        assert_eq!(ids("settings").first().map(String::as_str), Some("settings"));
+        assert_eq!(ids("theme").first().map(String::as_str), Some("settings"));
+        assert_eq!(ids("next pane").first().map(String::as_str), Some("next-pane"));
+        assert_eq!(ids("quick").first().map(String::as_str), Some("quick-terminal"));
+    }
+
+    #[test]
+    fn every_descriptor_stays_inside_the_host_validation_bounds() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(COMMANDS.len() <= 64);
+        for command in COMMANDS {
+            assert!(seen.insert(command.id), "duplicate id {}", command.id);
+            assert!(!command.title.is_empty() && command.title.chars().count() <= 80);
+            assert!(command.shortcut.chars().count() <= 32 && command.keywords.len() <= 16);
+            assert!(command.keywords.iter().all(|keyword| keyword.chars().count() <= 64));
+        }
     }
 
     #[test]

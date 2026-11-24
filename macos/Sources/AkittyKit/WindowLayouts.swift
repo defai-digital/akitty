@@ -77,7 +77,7 @@ enum WindowLayoutError: LocalizedError, Equatable {
         switch self {
         case .noWindows: return "Open at least one terminal window before saving a layout."
         case .invalidName: return "Layout names must be 1–64 characters."
-        case .tooManyLayouts: return "Akitty saves at most 20 layouts."
+        case .tooManyLayouts: return "AkiTTY saves at most 20 layouts."
         case .tooLarge: return "The saved layouts exceed the local storage limit. Remove stored scrollback or a layout and try again."
         }
     }

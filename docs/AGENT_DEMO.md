@@ -1,6 +1,6 @@
 # Reproducible local agent approval demo
 
-Build the app (`bash scripts/build-app.sh debug`) and open it. Choose **Akitty → Enable Local Agent Requests**,
+Build the app (`bash scripts/build-app.sh debug`) and open it. Choose **AkiTTY → Enable Local Agent Requests**,
 then leave a local integrated bash/zsh pane at an unedited prompt. The service is off again after app restart.
 
 Find the target explicitly:

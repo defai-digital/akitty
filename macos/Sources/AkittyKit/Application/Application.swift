@@ -35,8 +35,14 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     private(set) lazy var agentRequests: AgentRequests = {
         let requests = AgentRequests(source: { [weak self] in self?.windows.flatMap(\.panes).map(\.terminal) ?? [] })
         requests.onFailure = { [weak self] message in self?.eventMenuItem?.title = "Agent Event Timeline (recording warning)…"; self?.eventMenuItem?.toolTip = message }
+        requests.onPendingChange = { count in Self.showPendingApprovals(count, on: NSApp.dockTile) }
         return requests
     }()
+    /// The Dock icon counts requests awaiting a human decision. It never offers to decide them.
+    static func showPendingApprovals(_ count: Int, on tile: NSDockTile) {
+        let label = count > 0 ? String(count) : nil
+        if tile.badgeLabel != label { tile.badgeLabel = label }
+    }
     func registerAgentTerminal(_ terminal: TerminalView) {
         agentRequests.register(terminal)
         terminal.appEntityIdentifier = EntityIdentifier(for: TerminalEntity.self, identifier: intentID(for: terminal))
@@ -140,6 +146,11 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     /// Clearing also turns the option off; otherwise the next autosave would write the workspace straight back.
     @objc private func clearSavedWorkspace(_ sender: Any?) { WorkspaceStore.setEnabled(false, workspaceDefaults) }
+    /// Resumes the conversation in a pane the palette was opened from. That pane had keyboard focus when the
+    /// person chose the command, so this is the same human-chosen target as the menu path below.
+    func resumeAgent(in terminal: TerminalView) {
+        do { try agentRequests.resume(in: terminal) } catch { NSAlert(error: error).runModal() }
+    }
     /// Resumes the focused pane's restored agent conversation, at the human's request.
     @objc func resumeAgentConversation(_ sender: Any?) {
         // Only the pane that has keyboard focus: never a guess at another pane in the tab.
@@ -225,6 +236,23 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         if Self.shouldActivateAfterLaunch(windowCount: windows.count) { NSApp.activate(ignoringOtherApps: true) }
         updates.start()
         finishPendingOpens()
+        observeSystemAppearance()
+    }
+    private var appearanceObservation: NSKeyValueObservation?
+    private var systemDark: Bool?
+    /// Panes using Match System redraw in the new theme when the system switches between light and dark.
+    func observeSystemAppearance() {
+        systemDark = TerminalTheme.systemPrefersDark
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.systemAppearanceChanged() }
+        }
+    }
+    func systemAppearanceChanged() {
+        let dark = TerminalTheme.systemPrefersDark
+        guard dark != systemDark else { return }
+        systemDark = dark
+        // Only panes whose theme is Match System change; the others reload unchanged settings.
+        NotificationCenter.default.post(name: .terminalPreferencesChanged, object: nil)
     }
     /// A default launch or a folder opened before launch owns a window and still
     /// activates. A background intent launch has no window and stays in place.
@@ -269,7 +297,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         if skipped > 0 {
             let alert = NSAlert(); alert.messageText = skipped == 1 ? "One item was not opened." : "\(skipped) items were not opened."
-            alert.informativeText = "Akitty opens existing folders and programs, at most 8 from one request."; alert.runModal()
+            alert.informativeText = "AkiTTY opens existing folders and programs, at most 8 from one request."; alert.runModal()
         }
         if openWindowIfNone, windows.count == before, windows.isEmpty { _ = openUntitledWindow() }
     }
@@ -286,17 +314,17 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         // When the file cannot be run, its folder can still be opened, as before this file type was handled.
         guard DefaultTerminal.launchLine(for: path) != nil else {
             // The path is not shown: the characters that made it unsafe would rewrite this alert too.
-            return offerFolder(folder, "Cannot Run This File", "This file's path contains hidden or control characters, so Akitty will not run it or show its name.")
+            return offerFolder(folder, "Cannot Run This File", "This file's path contains hidden or control characters, so AkiTTY will not run it or show its name.")
         }
         let shell = DefaultTerminal.resolvedShell(TerminalPreferences.load().effective(profile: nil).shell)
         guard DefaultTerminal.launchShell(shell) != nil else {
-            return offerFolder(folder, "Cannot Run This File", "Akitty runs programs from Finder in sh, bash, zsh, dash, ksh or fish. The shell in Settings is \((shell as NSString).lastPathComponent).\n\n\(path)")
+            return offerFolder(folder, "Cannot Run This File", "AkiTTY runs programs from Finder in sh, bash, zsh, dash, ksh or fish. The shell in Settings is \((shell as NSString).lastPathComponent).\n\n\(path)")
         }
         guard let identity = DefaultTerminal.fileIdentity(path) else {
-            return warn("Cannot Run This File", "Akitty cannot find this file.")
+            return warn("Cannot Run This File", "AkiTTY cannot find this file.")
         }
         let alert = NSAlert()
-        alert.messageText = "Allow Akitty to run “\((path as NSString).lastPathComponent)”?"
+        alert.messageText = "Allow AkiTTY to run “\((path as NSString).lastPathComponent)”?"
         alert.informativeText = "A new terminal will start in this file's folder and run it after the prompt. The shell stays open afterward.\n\n\(path)"
         alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Open Folder"); alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -306,14 +334,14 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         default: return
         }
         guard DefaultTerminal.fileIdentity(path) == identity else {
-            return warn("The File Changed", "Akitty did not run it, because the file changed while the confirmation was open.")
+            return warn("The File Changed", "AkiTTY did not run it, because the file changed while the confirmation was open.")
         }
         do {
             let controller = try createTerminalWindow(directory: folder)
             guard let terminal = controller.active else { return }
             // The pane's own shell decides the quoting. Settings could have changed while the alert was open.
             guard let kind = DefaultTerminal.launchShell(terminal.shellPath), let line = DefaultTerminal.launchLine(for: path, shell: kind) else {
-                return warn("Cannot Run This File", "Akitty does not type programs into \((terminal.shellPath as NSString).lastPathComponent). The shell is open in the file's folder.")
+                return warn("Cannot Run This File", "AkiTTY does not type programs into \((terminal.shellPath as NSString).lastPathComponent). The shell is open in the file's folder.")
             }
             sendLaunchLine(line, path: path, key: key, identity: identity, to: terminal)
         } catch { NSAlert(error: error).runModal() }
@@ -360,21 +388,21 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
                 let state = try? terminal.session.shellState()
                 if state?.exited == true {
                     finish()
-                    return self.warn("“\(name)” Did Not Run", "The shell exited before its prompt was ready, so Akitty did not type the command.")
+                    return self.warn("“\(name)” Did Not Run", "The shell exited before its prompt was ready, so AkiTTY did not type the command.")
                 }
                 let step = DefaultTerminal.launchStep(ready: state?.shell?.ready == true, integrated: terminal.shellIntegrated, elapsed: elapsed)
                 switch step {
                 case .wait: return
                 case .timedOut:
                     finish()
-                    self.warn("“\(name)” Did Not Run", "The shell did not report its prompt within \(Int(DefaultTerminal.integratedTimeout)) seconds, so Akitty did not type the command. A startup question may be waiting, or shell integration may be unavailable in this shell (for example, another DEBUG trap). The shell is open in the file's folder.")
+                    self.warn("“\(name)” Did Not Run", "The shell did not report its prompt within \(Int(DefaultTerminal.integratedTimeout)) seconds, so AkiTTY did not type the command. A startup question may be waiting, or shell integration may be unavailable in this shell (for example, another DEBUG trap). The shell is open in the file's folder.")
                 case .send:
                     finish()
                     guard terminal.inputCount == typed, !terminal.hasMarkedText(), state?.control?.prompt_edited != true else {
-                        return self.warn("“\(name)” Did Not Run", "Text was typed in the new terminal before its prompt was ready, so Akitty did not add the command to it.")
+                        return self.warn("“\(name)” Did Not Run", "Text was typed in the new terminal before its prompt was ready, so AkiTTY did not add the command to it.")
                     }
                     guard DefaultTerminal.fileIdentity(path) == identity else {
-                        return self.warn("“\(name)” Did Not Run", "The file changed after you chose Run, so Akitty did not run it.")
+                        return self.warn("“\(name)” Did Not Run", "The file changed after you chose Run, so AkiTTY did not run it.")
                     }
                     // Ctrl-U first, as agent commands do: a terminal report that reached the line editor cannot prefix the path.
                     terminal.send("\u{15}" + line)
@@ -386,14 +414,32 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
     }
     @objc public func newWindow(_ sender: Any?) { newWindow(directory: nil) }
     /// Dock menu. macOS adds the open-window list, Options, Show All Windows, Hide and Quit after these items.
+    /// Nothing here approves or denies an agent request; the overview item only shows where one is waiting.
     public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let window = menu.addItem(withTitle: "New Window", action: #selector(newWindowFromDock(_:)), keyEquivalent: "")
         window.target = self
         let tab = menu.addItem(withTitle: "New Tab", action: #selector(newTabFromDock(_:)), keyEquivalent: "")
         tab.target = self
+        let profiles = menu.addItem(withTitle: "New Window with Profile", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "New Window with Profile")
+        let owner = dockProfileMenu ?? ProfileMenu(app: self, kind: .window, activates: true)
+        dockProfileMenu = owner; submenu.delegate = owner; profiles.submenu = submenu
+        menu.addItem(.separator())
+        let quick = menu.addItem(withTitle: "Toggle Quick Terminal", action: #selector(toggleQuickTerminalFromDock(_:)), keyEquivalent: "")
+        quick.target = self
+        let pending = agentRequests.pendingCount
+        let overview = menu.addItem(withTitle: Self.dockOverviewTitle(pending: pending), action: #selector(showAgentOverviewFromDock(_:)), keyEquivalent: "")
+        overview.target = self
+        if pending > 0 { overview.image = NSImage(systemSymbolName: "exclamationmark.bubble.fill", accessibilityDescription: nil) }
         return menu
     }
+    private var dockProfileMenu: ProfileMenu?
+    nonisolated static func dockOverviewTitle(pending: Int) -> String {
+        pending == 0 ? "Agent Overview" : "Agent Overview — \(pending) waiting for approval"
+    }
+    @objc func toggleQuickTerminalFromDock(_ sender: Any?) { toggleQuickTerminal(sender) }
+    @objc func showAgentOverviewFromDock(_ sender: Any?) { NSApp.activate(ignoringOtherApps: true); showAgentOverview(sender) }
     @objc func newWindowFromDock(_ sender: Any?) { newWindow(nil); NSApp.activate(ignoringOtherApps: true) }
     /// A tab in the frontmost terminal. Settings and Agent Overview are skipped. A hidden quick terminal is not revealed.
     /// With none open, this is a new window.
@@ -482,7 +528,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             guard let window else { return .terminateCancel }
             if !window.isVisible { window.makeKeyAndOrderFront(nil) }
             terminationState = .confirming
-            let presented = quitConfirmation.present(in: window, title: "Quit Akitty?", message: "All running terminal processes will be stopped.", action: "Quit") { [self] approved in
+            let presented = quitConfirmation.present(in: window, title: "Quit AkiTTY?", message: "All running terminal processes will be stopped.", action: "Quit") { [self] approved in
                 if approved { shutdown() }
                 else { terminationState = .idle; reply(false) }
             }
@@ -498,13 +544,8 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         perform(command, in: NSApp.keyWindow, sender: sender)
     }
     func perform(_ command: NativeCommand, in keyWindow: NSWindow?, sender: NSMenuItem) {
-        if command == .newWindow { newWindow(nil); return }
-        // The overview is app-wide and opens from any key window, including itself.
-        if command == .agentOverview { showAgentOverview(nil); return }
-        if command == .findAll {
-            showGlobalFind(anchor: (keyWindow?.windowController as? TerminalWindow) ?? windows.first { $0.window?.isVisible == true })
-            return
-        }
+        // App-wide commands run from any key window, including the overview and Settings.
+        if performAppCommand(command, anchor: keyWindow?.windowController as? TerminalWindow) { return }
         guard let window = keyWindow?.windowController as? TerminalWindow else {
             // Utility windows keep native close and editing behavior; terminal panes retain their confirmation path.
             switch command {
@@ -517,9 +558,32 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         }
         window.perform(command)
     }
+    /// Runs a command that belongs to the app rather than to one terminal window. False for window commands.
+    @discardableResult func performAppCommand(_ command: NativeCommand, anchor: TerminalWindow?) -> Bool {
+        switch command {
+        case .newWindow: newWindow(nil)
+        case .agentOverview: showAgentOverview(nil)
+        case .findAll: showGlobalFind(anchor: anchor ?? windows.first { $0.window?.isVisible == true })
+        case .settings: showSettings()
+        case .quickTerminal: toggleQuickTerminal(nil)
+        case .saveLayout: saveLayoutFromMenu(nil)
+        case .agentIntegrations: showSettings(tab: .agents)
+        case .agentTimeline: showAgentTimeline(nil)
+        case .checkUpdates: updates.checkForUpdates(nil)
+        case .newTab, .split, .closePane, .copy, .paste, .find, .findNext, .findPrevious, .fontIncrease, .fontDecrease,
+             .fontReset, .nextTab, .previousTab, .nextPane, .previousPane, .restartTerminal, .reclaimControl, .resumeAgent,
+             .toggleFullScreen:
+            return false
+        }
+        return true
+    }
     @objc private func selectTab(_ sender: NSMenuItem) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.selectTab(at: sender.tag) }
     @objc private func restartTerminal(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.restartFocusedPane() }
-    @objc private func palette(_ sender: Any?) { (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette() }
+    /// The palette is key while it shows, so the same shortcut closes it from there.
+    @objc private func palette(_ sender: Any?) {
+        if let open = NSApp.keyWindow?.windowController as? PaletteController { open.dismiss(restoreFocus: true); return }
+        (NSApp.keyWindow?.windowController as? TerminalWindow)?.showPalette()
+    }
     @objc private func settings(_ sender: Any?) { showSettings() }
     /// Sets this app as the handler for Unix executables and Terminal shell scripts.
     /// macOS asks the user to confirm each change.
@@ -541,7 +605,7 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             guard !failures.isEmpty else { return }
             let alert = NSAlert()
             alert.messageText = "Failed to Set Default Terminal"
-            alert.informativeText = "Akitty could not be set as the default terminal.\n\n\(failures.joined(separator: "\n"))"
+            alert.informativeText = "AkiTTY could not be set as the default terminal.\n\n\(failures.joined(separator: "\n"))"
             alert.alertStyle = .warning
             alert.runModal()
             return
@@ -669,11 +733,12 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
             WindowLayoutStore.delete(named: name)
         }
     }
+    nonisolated static func arrowKey(_ code: Int) -> String { String(Character(UnicodeScalar(UInt16(code))!)) }
     func makeMenu() {
         let bar = NSMenu(); NSApp.mainMenu = bar
         func menu(_ title: String) -> NSMenu { let item = NSMenuItem(); let submenu = NSMenu(title: title); item.submenu = submenu; bar.addItem(item); return submenu }
-        let app = menu("Akitty")
-        app.addItem(withTitle: "About Akitty", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let app = menu("AkiTTY")
+        app.addItem(withTitle: "About AkiTTY", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         let settings = app.addItem(withTitle: "Settings…", action: #selector(self.settings(_:)), keyEquivalent: ","); settings.target = self
         let update = app.addItem(withTitle: "Check for Updates…", action: #selector(UpdateController.checkForUpdates(_:)), keyEquivalent: ""); update.target = updates
         let requests = app.addItem(withTitle: "Enable Local Agent Requests", action: #selector(toggleAgentRequests(_:)), keyEquivalent: ""); requests.target = self
@@ -682,9 +747,9 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         let integrations = app.addItem(withTitle: "Agent Integrations…", action: #selector(showAgentIntegrations(_:)), keyEquivalent: ""); integrations.target = self
         eventMenuItem = timeline
         let export = app.addItem(withTitle: "Export Agent Events…", action: #selector(exportAgentEvents(_:)), keyEquivalent: ""); export.target = self
-        let defaultTerminal = app.addItem(withTitle: "Make Akitty the Default Terminal", action: #selector(setAsDefaultTerminal(_:)), keyEquivalent: "")
+        let defaultTerminal = app.addItem(withTitle: "Make AkiTTY the Default Terminal", action: #selector(setAsDefaultTerminal(_:)), keyEquivalent: "")
         defaultTerminal.target = self
-        app.addItem(.separator()); app.addItem(withTitle: "Quit Akitty", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(.separator()); app.addItem(withTitle: "Quit AkiTTY", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("Shell"), edit = menu("Edit"), view = menu("View")
         func add(_ command: NativeCommand, key: String, modifiers: NSEvent.ModifierFlags = [.command], to menu: NSMenu) {
             let item = menu.addItem(withTitle: command.title, action: #selector(self.command(_:)), keyEquivalent: key)
@@ -719,8 +784,14 @@ func folderOpenRequest(from urls: [URL], limit: Int = 8) -> FolderOpenRequest {
         add(.fontIncrease,key: "+",to: view); add(.fontDecrease,key: "-",to: view); add(.fontReset,key: "0",to: view)
         let window = menu("Window"); NSApp.windowsMenu = window
         window.addItem(withTitle: "Minimize",action: #selector(NSWindow.performMiniaturize(_:)),keyEquivalent: "m")
-        window.addItem(withTitle: "Enter Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "")
+        let fullScreen = window.addItem(withTitle: "Enter Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.control, .command]
         add(.agentOverview, key: "a", modifiers: [.command, .option], to: window)
+        window.addItem(.separator())
+        // ⇧⌘[ and ⇧⌘] arrive as "{" and "}"; matching the typed character also works where they need no Shift.
+        add(.previousTab, key: "{", to: window); add(.nextTab, key: "}", to: window)
+        add(.previousPane, key: Self.arrowKey(NSLeftArrowFunctionKey), modifiers: [.command, .option], to: window)
+        add(.nextPane, key: Self.arrowKey(NSRightArrowFunctionKey), modifiers: [.command, .option], to: window)
         window.addItem(.separator())
         for index in 0..<9 { let item = window.addItem(withTitle: index == 8 ? "Show Last Tab" : "Show Tab \(index + 1)", action: #selector(selectTab(_:)), keyEquivalent: "\(index + 1)"); item.tag = index; item.target = self }
     }
@@ -743,7 +814,9 @@ extension AkittyApplication: NSMenuItemValidation {
     enum Kind { case window, tab }
     private weak var app: AkittyApplication?
     private let kind: Kind
-    init(app: AkittyApplication, kind: Kind) { self.app = app; self.kind = kind }
+    /// The Dock copy brings AkiTTY forward, since the app may be in the background when it is chosen.
+    private let activates: Bool
+    init(app: AkittyApplication, kind: Kind, activates: Bool = false) { self.app = app; self.kind = kind; self.activates = activates }
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let defaults = menu.addItem(withTitle: "Default Settings", action: #selector(choose(_:)), keyEquivalent: ""); defaults.target = self
@@ -756,6 +829,12 @@ extension AkittyApplication: NSMenuItemValidation {
         menu.addItem(.separator())
         let edit = menu.addItem(withTitle: "Edit Profiles…", action: #selector(editProfiles(_:)), keyEquivalent: ""); edit.target = self
     }
-    @objc private func choose(_ sender: NSMenuItem) { app?.open(profile: sender.representedObject as? UUID, asTab: kind == .tab) }
-    @objc private func editProfiles(_ sender: Any?) { app?.showSettings(tab: .profiles) }
+    @objc private func choose(_ sender: NSMenuItem) {
+        app?.open(profile: sender.representedObject as? UUID, asTab: kind == .tab)
+        if activates { NSApp.activate(ignoringOtherApps: true) }
+    }
+    @objc private func editProfiles(_ sender: Any?) {
+        app?.showSettings(tab: .profiles)
+        if activates { NSApp.activate(ignoringOtherApps: true) }
+    }
 }

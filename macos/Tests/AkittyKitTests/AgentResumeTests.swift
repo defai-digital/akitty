@@ -82,7 +82,9 @@ final class AgentResumeTests: XCTestCase {
         XCTAssertEqual(service.resumeOffer(for: restored[0].session.id)?.conversation, Self.claude)
         XCTAssertEqual(service.resumeOffer(for: restored[1].session.id)?.conversation, other)
         XCTAssertNil(service.resumeOffer(for: restored[2].session.id))
-        XCTAssertTrue(try restored[0].session.recentText().contains("conversation \(Self.claude.sessionID)"), "the pane says what it can resume")
+        // The note wraps at the pane's own width (a third of the window here); read it with the soft wraps joined.
+        let note = try restored[0].session.recentText().replacingOccurrences(of: "\n", with: "")
+        XCTAssertTrue(note.contains("conversation \(Self.claude.sessionID)"), "the pane says what it can resume")
         XCTAssertEqual(service.describeConversation(for: restored[0].session.id), "Claude Code · f9042739… (can resume)")
 
         var typed: [(UInt64, String)] = []

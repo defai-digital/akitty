@@ -21,7 +21,13 @@ import AgentIPC
     /// Per-window time before which the next sheet may not appear: a click meant for one sheet must not land on the next.
     private var windowReadyTime: [ObjectIdentifier: TimeInterval] = [:]
     /// FIFO request IDs per pane session. Only the head can be presented or approved.
-    private var queues: [UInt64: [String]] = [:]
+    private var queues: [UInt64: [String]] = [:] {
+        didSet { let count = pendingCount; if count != oldValue.values.reduce(0, { $0 + $1.count }) { onPendingChange?(count) } }
+    }
+    /// Requests awaiting approval across every pane, from the same queues that gate approval.
+    var pendingCount: Int { queues.values.reduce(0) { $0 + $1.count } }
+    /// Called on the main actor whenever `pendingCount` changes; the Dock badge follows it.
+    var onPendingChange: (@MainActor (Int) -> Void)?
     private var records: [String: RequestRecord] = [:]
     private var finishedOrder: [String] = []
     /// Every caller-chosen ID seen this launch, kept after its status record is evicted so an ID never dispatches twice.

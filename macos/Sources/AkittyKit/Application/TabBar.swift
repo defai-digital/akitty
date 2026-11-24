@@ -28,14 +28,53 @@ enum TabActivity: Equatable {
 /// What a tab and the window show for a shell title. Like Ghostty, a bell that rang while the tab was out of view
 /// prefixes the title with 🔔 until the tab is shown, so a window in the background says which tab wants attention.
 enum TabTitle {
-    /// The core's title before a program sets one and after it clears or resets it.
+    /// The core's title before a program sets one and after it clears or resets it. It is a protocol value shared
+    /// with the core (`DEFAULT_TITLE`), not the product name, so it is shown as `appName`.
     static let defaultTitle = "Akitty"
-    static func label(_ title: String, bell: Bool) -> String { bell ? "🔔 \(title)" : title }
+    /// The product name as people see it in the menu bar, the Dock and titles.
+    static let appName = "AkiTTY"
+    static func label(_ title: String, bell: Bool) -> String {
+        let shown = title == defaultTitle ? appName : title
+        return bell ? "🔔 \(shown)" : shown
+    }
     /// The window names its selected tab, then the app after an em dash unless the tab still has the default title.
     static func window(_ title: String, bell: Bool) -> String {
         let label = label(title, bell: bell)
-        return title == defaultTitle ? label : "\(label) — Akitty"
+        return title == defaultTitle ? label : "\(label) — \(appName)"
     }
+}
+
+/// The title-bar row that holds the tabs. Its empty space acts as a title bar: dragging moves the window and a
+/// double-click does what System Settings › Desktop & Dock asks for.
+@MainActor final class TitlebarStrip: NSStackView {
+    enum DoubleClickAction: Equatable { case zoom, minimize, none }
+    /// `AppleActionOnDoubleClick` is Maximize, Fill, Minimize or None; older systems used a Boolean for minimize.
+    nonisolated static func doubleClickAction(_ defaults: UserDefaults = .standard) -> DoubleClickAction {
+        switch defaults.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": return .minimize
+        case "None": return .none
+        case "Maximize", "Fill": return .zoom
+        default: return defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick") ? .minimize : .zoom
+        }
+    }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        guard event.clickCount == 2 else { window.performDrag(with: event); return }
+        Self.performDoubleClick(on: window)
+    }
+    static func performDoubleClick(on window: NSWindow) {
+        switch doubleClickAction() {
+        case .zoom: window.performZoom(nil)
+        case .minimize: window.performMiniaturize(nil)
+        case .none: break
+        }
+    }
+}
+
+/// Empty title-bar space after the tabs. Its clicks fall through to `TitlebarStrip`, which moves or zooms the window.
+@MainActor final class TitlebarDragArea: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
 }
 
 /// The chip's activity mark: the program's own sprite while it works, a dot once work it did out of view ends, and a
@@ -130,6 +169,10 @@ enum TabTitle {
     private weak var dragWindow: NSWindow?
     var label: String { get { title.stringValue } set { title.stringValue = newValue; closeButton.setAccessibilityLabel("Close \(newValue)") } }
     var isSelected = false { didSet { refresh() } }
+    /// A window's only tab reads as its title: no selected fill and no ⌘-number.
+    var isSole = false { didSet { if isSole != oldValue { refresh() } } }
+    /// Tabs share the bar up to this width; past it the bar's empty space stays free for moving the window.
+    static let maximumWidth: CGFloat = 240
     private var hovering = false { didSet { refresh() } }
     init() {
         super.init(frame: .zero)
@@ -159,7 +202,7 @@ enum TabTitle {
     }
     required init?(coder: NSCoder) { nil }
     private func refresh() {
-        closeButton.alphaValue = isSelected || hovering ? 1 : 0
+        closeButton.alphaValue = (isSelected && !isSole) || hovering ? 1 : 0
         // A narrow tab gives its room to the title first.
         shortcutLabel.isHidden = bounds.width < 120
         title.textColor = isSelected ? .labelColor : .secondaryLabelColor
@@ -168,8 +211,8 @@ enum TabTitle {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
-        guard isSelected || hovering else { return }
-        (isSelected ? NSColor.quaternaryLabelColor : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)).setFill()
+        guard (isSelected && !isSole) || hovering else { return }
+        (isSelected && !isSole ? NSColor.quaternaryLabelColor : NSColor.quaternaryLabelColor.withAlphaComponent(0.06)).setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
     }
     override func layout() { super.layout(); refresh() }
@@ -181,6 +224,8 @@ enum TabTitle {
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func mouseDown(with event: NSEvent) {
+        // The only tab stands in for the window title, so a double-click on it does what a title bar's would.
+        if isSole, event.clickCount == 2, let window { endDrag(); TitlebarStrip.performDoubleClick(on: window); return }
         endDrag(); dragWindow = window; dragStart = window?.convertPoint(toScreen: event.locationInWindow); onSelect?()
     }
     override func mouseDragged(with event: NSEvent) {
