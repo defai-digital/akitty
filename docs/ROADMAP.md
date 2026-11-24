@@ -1,6 +1,6 @@
 # AkiTTY implementation roadmap
 
-This roadmap records shipped behavior through [AkiTTY 2.3.2](releases/2.3.2.md)
+This roadmap records shipped behavior through [AkiTTY 2.4.0](releases/2.4.0.md)
 and the remaining qualification and feature work.
 Native and Web now share the independently authored `akitty-vt` Rust engine.
 The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses

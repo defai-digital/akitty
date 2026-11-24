@@ -2,7 +2,7 @@
 
 AkiTTY can show your agents' reported activity, ask you to review commands, and
 offer to resume a reported conversation when you reopen your workspace.
-[AkiTTY user guide](USER_GUIDE.md) · [AkiTTY 2.3.2 release notes](releases/2.3.2.md)
+[AkiTTY user guide](USER_GUIDE.md) · [AkiTTY 2.4.0 release notes](releases/2.4.0.md)
 
 ## Set up an agent
 

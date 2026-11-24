@@ -1,11 +1,11 @@
 # Accessibility in AkiTTY
 
-AkiTTY 2.3.2 exposes terminal text, selected text and ranges,
+AkiTTY 2.4.0 exposes terminal text, selected text and ranges,
 UTF-16 character counts, line and index queries, range reads and the cursor's row
 through AppKit accessibility. Tabs have accessible labels and selection actions.
 Agent Overview lists panes across windows, tabs, splits and the quick terminal,
 including when hidden. **VoiceOver user validation remains in progress.**
-[Release notes](releases/2.3.2.md)
+[Release notes](releases/2.4.0.md)
 
 ## Agent Overview
 
@@ -49,7 +49,8 @@ states as "AkiTTY". **Reclaim** in the capsule is a button with the same effect 
 on, the capsule and the command palette use opaque backgrounds instead of glass.
 In a split tab the focused pane has an accent outline; Increase Contrast
 thickens it and removes the dimming of other panes, which would lower their text
-contrast. Reduce Motion turns off the dimming fade.
+contrast. Reduce Motion turns off the dimming fade and shows the first frame of
+animated tab status icons. Changing Reduce Motion updates open tabs immediately.
 
 ## Terminal reading
 

@@ -171,7 +171,7 @@ final class PalettePanel: NSPanel {
         runSelected()
     }
     func runSelected() {
-        guard entries.indices.contains(table.selectedRow) else { return }
+        guard isPresented, entries.indices.contains(table.selectedRow) else { return }
         let id = entries[table.selectedRow].id
         dismiss(restoreFocus: true)
         execute(id)

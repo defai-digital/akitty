@@ -300,7 +300,34 @@ final class CalmChromeTests: XCTestCase {
         XCTAssertFalse(second.isPresented)
     }
 
+    @MainActor func testDismissedPaletteCannotRunAnotherCommand() throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let window = try XCTUnwrap(controller.window)
+        var commands: [NativeCommand] = []
+        let palette = PaletteController { commands.append($0) }
+        palette.present(over: window)
+        XCTAssertTrue(palette.isPresented)
+        palette.runSelected()
+        XCTAssertFalse(palette.isPresented)
+        XCTAssertEqual(commands, [.newWindow])
+        palette.runSelected()
+        XCTAssertEqual(commands, [.newWindow], "a queued action from the dismissed panel cannot dispatch again")
+    }
+
     // MARK: Attention and appearance
+
+    @MainActor func testAccessibilityDisplayChangeReloadsReduceMotionForOpenTabs() throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let workspace = NSWorkspace.shared
+        let current = workspace.accessibilityDisplayShouldReduceMotion
+        controller.reduceMotion = !current
+        workspace.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        XCTAssertEqual(controller.reduceMotion, current, "open windows refresh the setting used for every tab's sprite")
+    }
 
     @MainActor func testDockBadgeCountsPendingApprovals() {
         _ = NSApplication.shared

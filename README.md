@@ -15,12 +15,12 @@ supported request, you can review the exact command before approving it.
 
 [Install](#quick-start) · [Terminal features](#everyday-terminal-features) ·
 [Agent integrations](#works-with-your-ai-agents) · [User guide](docs/USER_GUIDE.md) ·
-[2.3.2 release notes](docs/releases/2.3.2.md) · [What's new in 2.3.0](docs/releases/2.3.0.md)
+[2.4.0 release notes](docs/releases/2.4.0.md) · [What's new in 2.3.0](docs/releases/2.3.0.md)
 
 ## Quick start
 
-Download **AkiTTY 2.3.2** for Apple Silicon, unzip it, and move **Akitty.app**
-to Applications. [Download ZIP](https://github.com/defai-digital/akitty/releases/download/v2.3.2/AkiTTY-2.3.2-macOS-arm64.zip) ·
+Download **AkiTTY 2.4.0** for Apple Silicon, unzip it, and move **Akitty.app**
+to Applications. [Download ZIP](https://github.com/defai-digital/akitty/releases/download/v2.4.0/AkiTTY-2.4.0-macOS-arm64.zip) ·
 [Latest release](https://github.com/defai-digital/akitty/releases/latest)
 
 Or use the installer. It verifies the checksum, code signature, and
@@ -158,7 +158,7 @@ It includes AkiTTY 1.4.1, libghostty-vt, Alacritty and Kitty.
 
 ## Build and run
 
-Source version **2.3.2** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
+Source version **2.4.0** requires Apple Silicon, macOS 27.2+, Xcode 27.2,
 Rust 1.99.1 and Node 22.18+. See the contributor guide for the repository layout
 and focused development commands. [Contributing](CONTRIBUTING.md)
 

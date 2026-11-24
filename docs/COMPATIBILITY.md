@@ -1,8 +1,8 @@
 # Compatibility and qualification
 
-This matrix records AkiTTY 2.3.2 behavior and its qualification limits.
+This matrix records AkiTTY 2.4.0 behavior and its qualification limits.
 The canonical [verification gate](../scripts/verify.sh) runs the required automated suites.
-[Release notes](releases/2.3.2.md)
+[Release notes](releases/2.4.0.md)
 
 | Capability | Evidence | Qualification boundary |
 | --- | --- | --- |

@@ -56,7 +56,7 @@ import AppKit
     /// window opened with a profile keeps it as it grows.
     let profile: UUID?
     /// Defaults to the system setting. Tests set this to force the sprite onto frame 0.
-    var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { refreshTabs() } }
+    var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { didSet { if reduceMotion != oldValue { refreshTabs() } } }
     /// Tabs (by their split view) whose programs reported work at the last chrome update.
     private var workingTabs: Set<ObjectIdentifier> = []
     /// Tabs whose work ended while they were out of view; each keeps a dot until it is shown.
@@ -163,7 +163,10 @@ import AppKit
         }
         if barLeading.constant != max(8, leading) { barLeading.constant = max(8, leading) }
     }
-    @objc func accessibilityDisplayChanged() { panes.forEach { $0.accessibilityDisplayChanged() } }
+    @objc func accessibilityDisplayChanged() {
+        reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        panes.forEach { $0.accessibilityDisplayChanged() }
+    }
     @objc private func preferencesChanged() {
         // Panes reload their own preferences from the same notification; read their themes after they have.
         DispatchQueue.main.async { [weak self] in self?.refreshPaneFocus(animated: false, recolour: true) }
