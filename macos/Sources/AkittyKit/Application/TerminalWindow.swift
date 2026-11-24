@@ -39,6 +39,8 @@ import AppKit
     private(set) var chromeBackground: NSColor?
     /// The pane that most recently had keyboard focus here; it stays undimmed while focus is elsewhere.
     private weak var lastFocusedTerminal: TerminalView?
+    /// The pane each tab last had focused, held weakly both ways, so returning to a tab types where the user left off.
+    private let tabFocus = NSMapTable<NSSplitView, TerminalView>.weakToWeakObjects()
     private(set) var tabChips: [TabChip] = []
     /// The tab being dragged. Chips are reused by position, so after a move the chip under the pointer shows a
     /// different tab; the drag follows the tab, not the chip.
@@ -183,7 +185,10 @@ import AppKit
     /// Outlines the focused pane and dims the others in tabs that hold more than one, and recolours the chrome.
     func refreshPaneFocus(animated: Bool = true, recolour: Bool = false) {
         let focused = focusedTerminal
-        if let focused { lastFocusedTerminal = focused }
+        if let focused {
+            lastFocusedTerminal = focused
+            if let split = focused.superview?.superview as? NSSplitView { tabFocus.setObject(focused, forKey: split) }
+        }
         for item in tabs.tabViewItems {
             let tabPanes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
             for pane in tabPanes {
@@ -426,8 +431,14 @@ import AppKit
         } catch { NSAlert(error: error).runModal() }
     }
     @objc private func addTab(_ sender: Any?) { do { try newTab() } catch { NSAlert(error: error).runModal() } }
-    /// Each tab names one pane: the focused one, or its first pane while focus is in another tab (selecting a tab
-    /// focuses its first pane). Every pane used to rename its tab, so programs in split panes took turns at the
+    /// The pane a tab last had focused while it is still there, else its first pane. Selecting the tab focuses it.
+    private func rememberedPane(in split: NSSplitView) -> TerminalPane? {
+        let tabPanes = split.arrangedSubviews.compactMap { $0 as? TerminalPane }
+        let remembered = tabFocus.object(forKey: split)
+        return tabPanes.first { $0.terminal === remembered } ?? tabPanes.first
+    }
+    /// Each tab names one pane: the focused one, or the one selecting the tab would focus while focus is in another
+    /// tab (`rememberedPane`). Every pane used to rename its tab, so programs in split panes took turns at the
     /// title, several times a second when they animate it. The item keeps the pane's title, including the core's
     /// default-title sentinel; the chip and the window add the bell prefix when they show it. True when a label
     /// changed.
@@ -435,8 +446,9 @@ import AppKit
         let focused = focusedTerminal
         var changed = false
         for item in tabs.tabViewItems {
-            let tabPanes = (item.view as? NSSplitView)?.arrangedSubviews.compactMap { $0 as? TerminalPane } ?? []
-            guard let named = tabPanes.first(where: { $0.terminal === focused }) ?? tabPanes.first else { continue }
+            guard let split = item.view as? NSSplitView,
+                  let named = split.arrangedSubviews.lazy.compactMap({ $0 as? TerminalPane }).first(where: { $0.terminal === focused })
+                    ?? rememberedPane(in: split) else { continue }
             let title = named.shownTitle ?? TabTitle.defaultTitle
             if item.label != title { item.label = title; changed = true }
         }
@@ -717,7 +729,7 @@ import AppKit
             finishedTabs.remove(ObjectIdentifier(split)); belledTabs.remove(ObjectIdentifier(split))
         }
         refreshTabs()
-        if let pane = (tabViewItem?.view as? NSSplitView)?.arrangedSubviews.compactMap({ $0 as? TerminalPane }).first {
+        if let pane = (tabViewItem?.view as? NSSplitView).flatMap(rememberedPane(in:)) {
             window?.makeFirstResponder(pane.terminal)
         }
         // Settle the new tab's dimming at once, so its panes do not fade in after the switch.

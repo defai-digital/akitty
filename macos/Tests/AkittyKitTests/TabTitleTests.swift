@@ -86,6 +86,27 @@ final class TabTitleTests: XCTestCase {
         XCTAssertEqual(controller.window?.title, "Inspect sglang | ax-engine — AkiTTY")
     }
 
+    @MainActor func testReturningToATabFocusesAndNamesThePaneLeftFocused() throws {
+        _ = NSApplication.shared
+        let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
+        defer { controller.panes.forEach { $0.terminal.shutdown() } }
+        let left = try XCTUnwrap(controller.panes.first)
+        let rightTerminal = try controller.splitPane(containing: left.terminal)
+        let right = try XCTUnwrap(controller.panes.first { $0.terminal === rightTerminal })
+        controller.window?.makeFirstResponder(rightTerminal); controller.refreshPaneFocus()
+        left.terminal.onTitle?("left"); right.terminal.onTitle?("right")
+        try controller.newTab()
+        XCTAssertFalse(controller.window?.firstResponder === rightTerminal)
+        XCTAssertEqual(controller.tabs.tabViewItems[0].label, "right", "a background tab keeps naming the pane it left focused")
+        controller.selectTab(at: 0)
+        XCTAssertTrue(controller.window?.firstResponder === rightTerminal, "returning to a tab must not redirect typing to its first split")
+        XCTAssertEqual(controller.tabChips[0].label, "right")
+        // The tab remembers whichever pane was focused last.
+        controller.window?.makeFirstResponder(left.terminal); controller.refreshPaneFocus()
+        controller.selectTab(at: 1); controller.selectTab(at: 0)
+        XCTAssertTrue(controller.window?.firstResponder === left.terminal)
+    }
+
     @MainActor func testAHeldTitleReachesTheTab() async throws {
         _ = NSApplication.shared
         let controller = try TerminalWindow(app: AkittyApplication(), headless: true)
