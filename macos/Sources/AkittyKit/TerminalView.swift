@@ -152,6 +152,7 @@ struct RenderReuse: Equatable {
     private var kittyDown: [UInt16: KittyKeyInput] = [:]
     /// Physical modifier keys currently down; a flags change alone cannot say which one moved.
     private var heldModifierKeys: Set<UInt16> = []
+    private var reportedModifierKeys: Set<UInt16> = []
     private var stopped = false
     var isShutdown: Bool { stopped }
     private let shutdownGroup = DispatchGroup()
@@ -758,8 +759,13 @@ struct RenderReuse: Equatable {
         return KittyKeyEncoder.encode(input, flags: flags)
     }
     public override func keyUp(with event: NSEvent) {
-        if kittyDown.removeValue(forKey: event.keyCode) != nil, case let .bytes(bytes) = kittyKey(event, type: .release) { send(String(decoding: bytes, as: UTF8.self), report: true) }
-        else { super.keyUp(with: event) }
+        guard var input = kittyDown.removeValue(forKey: event.keyCode) else { super.keyUp(with: event); return }
+        // A reported press still needs its release if the input method started composing in between.
+        input.event = .release
+        input.modifiers = KittyKeyInput.modifiers(of: event.modifierFlags, optionAsAlt: preferences.optionAsAlt)
+        if case let .bytes(bytes) = KittyKeyEncoder.encode(input, flags: Int(snapshot?.kitty_flags ?? 0)) {
+            send(String(decoding: bytes, as: UTF8.self), report: true)
+        } else { super.keyUp(with: event) }
     }
     public override func flagsChanged(with event: NSEvent) {
         let flags = Int(snapshot?.kitty_flags ?? 0)
@@ -770,8 +776,10 @@ struct RenderReuse: Equatable {
         let pressed: Bool
         if heldModifierKeys.remove(event.keyCode) != nil { pressed = false }
         else { pressed = event.modifierFlags.contains(Self.nativeFlag(for: modifier)); if pressed { heldModifierKeys.insert(event.keyCode) } }
-        guard flags & KittyKeyEncoder.reportAllKeys != 0, !hasMarkedText() else { super.flagsChanged(with: event); return }
+        let shouldReport = pressed ? !hasMarkedText() : reportedModifierKeys.remove(event.keyCode) != nil
+        guard flags & KittyKeyEncoder.reportAllKeys != 0, shouldReport else { super.flagsChanged(with: event); return }
         if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: event.keyCode, modifiers: mods, pressed: pressed, flags: flags) {
+            if pressed { reportedModifierKeys.insert(event.keyCode) }
             send(String(decoding: bytes, as: UTF8.self), report: true)
         }
     }
@@ -790,12 +798,12 @@ struct RenderReuse: Equatable {
                 if case let .bytes(bytes) = KittyKeyEncoder.encode(input, flags: flags) { send(String(decoding: bytes, as: UTF8.self), report: true) }
             }
             if flags & KittyKeyEncoder.reportAllKeys != 0 {
-                for code in heldModifierKeys {
+                for code in reportedModifierKeys {
                     if case let .bytes(bytes) = KittyKeyEncoder.encodeModifier(keyCode: code, modifiers: [], pressed: false, flags: flags) { send(String(decoding: bytes, as: UTF8.self), report: true) }
                 }
             }
         }
-        kittyDown.removeAll(); heldModifierKeys.removeAll()
+        kittyDown.removeAll(); heldModifierKeys.removeAll(); reportedModifierKeys.removeAll()
     }
     /// Host editing shortcuts take priority over the foreground program's keyboard protocol.
     private func performEditingShortcut(_ event: NSEvent) -> Bool {

@@ -1,8 +1,8 @@
 # Compatibility and qualification
 
-This matrix records AkiTTY 2.4.1 behavior and its qualification limits.
+This matrix records AkiTTY 2.4.2 behavior and its qualification limits.
 The canonical [verification gate](../scripts/verify.sh) runs the required automated suites.
-[Release notes](releases/2.4.1.md)
+[Release notes](releases/2.4.2.md)
 
 | Capability | Evidence | Qualification boundary |
 | --- | --- | --- |
@@ -12,7 +12,7 @@ The canonical [verification gate](../scripts/verify.sh) runs the required automa
 | CJK, combining marks and emoji | Native cell/grid and shared stream fixtures; browser glyph pixels | Native rendering and Web have distinct grapheme support profiles. Native mode 2027 is not advertised; the direct VT benchmark explicitly enables the same grapheme profile in both engines. |
 | Physical IME and VoiceOver | Composition and accessibility API regressions; [manual qualification](ACCESSIBILITY.md) | Unit tests do not establish physical input-method or VoiceOver user validation. |
 | Local bash/zsh prompt history | [Isolated interactive shell tests](../scripts/test_shell_integration.py), [workflow contract](AGENT_WORKFLOWS.md) | Qualified shell versions and remaining limitations are in [the roadmap](ROADMAP.md#bash-version-qualification-2026-10-31). Vendor prompt frameworks need separate qualification. |
-| Kitty keyboard and mouse protocols | Shared key encoder, Swift/Web input tests and browser keyboard events | Ctrl+Shift+Tab and Alt+Shift+Tab preserve Backtab modifiers. An explicit zero leaves the Kitty keyboard stack unchanged. Host shortcuts and IME policy remain host-specific. Base-layout alternate keys use the documented supported layouts. Alternate-screen wheel input sends cursor keys only while DEC mode 1007 is enabled. |
+| Kitty keyboard and mouse protocols | Shared key encoder, Swift/Web input tests and browser keyboard events | Ctrl+Shift+Tab and Alt+Shift+Tab preserve Backtab modifiers. An explicit zero leaves the Kitty keyboard stack unchanged. Host shortcuts and IME policy remain host-specific. A native PTY test checks press and release pairing across composition. Base-layout alternate keys use the documented supported layouts. Alternate-screen wheel input sends cursor keys only while DEC mode 1007 is enabled. |
 | Kitty graphics | Native conformance/graphics tests and [optional external clients](../crates/akitty-core/tests/real_tools.rs) | Bounded implementation with explicit limits. Missing optional clients are skipped and do not establish compatibility. |
 | Vim, Neovim, tmux and SSH workflows | Protocol fixtures cover constituent behaviors | No complete application/version/platform qualification matrix is claimed. Record actual versions and observed workflows before marking these qualified. |
 | Local command request, approval, denial and reclaim | [Native request tests](../macos/Tests/AkittyKitTests/AgentRequestTests.swift), [reproducible demo](AGENT_DEMO.md) | The receipt establishes queued input. Shell/program reports are untrusted; the demo checks one separate expected file effect. Ordinary agent subprocesses are outside this path. |

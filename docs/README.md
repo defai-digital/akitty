@@ -18,7 +18,7 @@
 - [Contributing](../CONTRIBUTING.md) for the repository map, build commands, and local file policy.
 - [Architecture](ARCHITECTURE.md), [compatibility](COMPATIBILITY.md), and [roadmap](ROADMAP.md) for implementation and qualification.
 - [Performance](PERFORMANCE.md) and [benchmark workloads](../benchmarks/README.md) for measurements and reproduction.
-- [Release process](RELEASING.md), [2.4.1 release notes](releases/2.4.1.md), and [unreleased changes](releases/unreleased.md).
+- [Release process](RELEASING.md), [2.4.2 release notes](releases/2.4.2.md), and [unreleased changes](releases/unreleased.md).
 
 ## Historical engineering notes
 

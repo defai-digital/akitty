@@ -179,6 +179,57 @@ final class AkittyTests: XCTestCase {
         ] { XCTAssertThrowsError(try CommandProvider.decode(JSONSerialization.data(withJSONObject:envelope))) }
         XCTAssertThrowsError(try CommandProvider.decode(Data(repeating:0,count:65537)))
     }
+    @MainActor func testKittyKeyboardPairsPressesAndReleasesAcrossComposition() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reader = root.appendingPathComponent("reader")
+        try """
+        #!/usr/bin/python3
+        import os, tty
+        tty.setraw(0)
+        os.write(1, b'\\x1b[>11u')
+        data = b''
+        while not data.endswith(b'!'):
+            data += os.read(0, 4096)
+        with open('received', 'wb') as output:
+            output.write(data[:-1])
+        """.write(to: reader, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: reader.path)
+        var preferences = TerminalPreferences()
+        preferences.shell = reader.path; preferences.directory = root.path; preferences.shellIntegration = false
+        let view = try TerminalView(headless: false, forceSoftware: true, forceShaderFailure: false, initial: preferences)
+        defer { view.shutdown() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while view.snapshot?.kitty_flags != 11, ContinuousClock.now < deadline {
+            view.poll()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(view.snapshot?.kitty_flags, 11)
+
+        func event(_ type: NSEvent.EventType, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags, _ text: String = "") throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                windowNumber: 0, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code))
+        }
+        view.flagsChanged(with: try event(.flagsChanged, 56, .shift))
+        view.keyDown(with: try event(.keyDown, 123, .shift, "\u{F702}"))
+        view.setMarkedText("中", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        view.keyUp(with: try event(.keyUp, 123, .shift, "\u{F702}"))
+        view.flagsChanged(with: try event(.flagsChanged, 56, []))
+        view.flagsChanged(with: try event(.flagsChanged, 60, .shift))
+        XCTAssertTrue(view.hasMarkedText())
+        view.unmarkText()
+        view.flagsChanged(with: try event(.flagsChanged, 60, []))
+        view.send("!")
+
+        let received = root.appendingPathComponent("received")
+        let reportDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while try view.session.snapshot()?.exited != true, ContinuousClock.now < reportDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(try String(contentsOf: received, encoding: .utf8), "\u{1b}[57441;2u\u{1b}[1;2D\u{1b}[1;2:3D\u{1b}[57441;1:3u")
+    }
     @MainActor func testActualRendererUnavailableFallsBackAndExposesAXText() async throws {
         _ = NSApplication.shared
         let view = try TerminalView(headless:true,forceSoftware:true)
