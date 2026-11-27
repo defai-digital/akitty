@@ -5,6 +5,7 @@
 
 import { describe, test } from 'vitest';
 import { AkittyEngine } from './engine';
+import { CanvasRenderer } from './renderer';
 
 const enabled = process.env.AKITTY_WEB_PROBE === '1';
 
@@ -13,7 +14,7 @@ function time(label: string, iterations: number, fn: () => void): void {
   const start = performance.now();
   for (let i = 0; i < iterations; i++) fn();
   const per = (performance.now() - start) / iterations;
-  process.stderr.write(`${label.padEnd(44)} ${per.toFixed(3)} ms\n`);
+  process.stderr.write(`${label.padEnd(44)} ${per.toFixed(4)} ms\n`);
 }
 
 describe.skipIf(!enabled)('web hot path probe', () => {
@@ -45,6 +46,10 @@ describe.skipIf(!enabled)('web hot path probe', () => {
     });
     const big = chunk.repeat(2000);
     time('write one 66 KB chunk', 200, () => term.write(big));
+    const cells = term.getLineView(0)!;
+    const renderer = new CanvasRenderer(document.createElement('canvas'));
+    const buffer = { getLineView: () => cells };
+    time('hash one 200-cell ASCII row', 100_000, () => { (renderer as any).rowHash(buffer, 0); });
     term.free();
   });
 });

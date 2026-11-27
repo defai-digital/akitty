@@ -104,9 +104,17 @@ export class CanvasRenderer {
       // Complex glyphs may overhang a row; a reported write repaints them even
       // when their logical contents are unchanged.
       if (cell.codepoint > 127 || cell.grapheme_len || cell.flags & CellFlags.ITALIC) return undefined;
-      for (const value of [cell.codepoint, cell.flags, cell.width, cell.fg_r, cell.fg_g, cell.fg_b, cell.bg_r, cell.bg_g, cell.bg_b, cell.underline_style ?? 0, cell.underline_color ?? 0]) {
-        hash = Math.imul(hash ^ value, 16777619);
-      }
+      hash = Math.imul(hash ^ cell.codepoint, 16777619);
+      hash = Math.imul(hash ^ cell.flags, 16777619);
+      hash = Math.imul(hash ^ cell.width, 16777619);
+      hash = Math.imul(hash ^ cell.fg_r, 16777619);
+      hash = Math.imul(hash ^ cell.fg_g, 16777619);
+      hash = Math.imul(hash ^ cell.fg_b, 16777619);
+      hash = Math.imul(hash ^ cell.bg_r, 16777619);
+      hash = Math.imul(hash ^ cell.bg_g, 16777619);
+      hash = Math.imul(hash ^ cell.bg_b, 16777619);
+      hash = Math.imul(hash ^ (cell.underline_style ?? 0), 16777619);
+      hash = Math.imul(hash ^ (cell.underline_color ?? 0), 16777619);
     }
     return hash >>> 0;
   }
