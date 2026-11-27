@@ -154,6 +154,174 @@ final class AgentIntegrationsTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: plugin), installed)
     }
 
+    func testAXCodePluginSequencesReportsAcrossDeletionExitAndReload() throws {
+        guard let node = AgentCLI.locate("node", in: AgentCLI.searchPath()) else {
+            throw XCTSkip("Node is needed to load the AX Code plugin")
+        }
+        let root = try directory()
+        let settings = AXCodeMCPSettings(path: root.appendingPathComponent("ax-code/ax-code.json").path, executable: "/unused")
+        let plugin = root.appendingPathComponent("akitty.js")
+        let driver = root.appendingPathComponent("drive.mjs")
+        try Data("""
+        const { AkittyConversationReport } = await import(process.argv[2]);
+        let dispose;
+        const lifecycle = { onDispose(callback) { dispose = callback; return () => {}; } };
+        const hooks = await AkittyConversationReport(["dispose", "owner"].includes(process.argv[3]) ? { lifecycle } : undefined);
+        let send = (type, properties) => hooks.event({ event: { type, properties } });
+        if (process.argv[3] === "blocked-child") {
+          await send("session.created", { info: { id: "ses_parent" } });
+          await send("session.status", { sessionID: "ses_parent", status: { type: "busy" } });
+          await send("session.created", { info: { id: "ses_child", parentID: "ses_parent" } });
+          const childBusy = send("session.status", { sessionID: "ses_child", status: { type: "busy" } });
+          await send("session.status", { sessionID: "ses_parent", status: { type: "idle" } });
+          await childBusy;
+          await send("session.created", { info: { id: "ses_root" } });
+          await send("session.deleted", { info: { id: "ses_root" } });
+        } else {
+        if (process.argv[3] === "fork") {
+          await send("session.created", { info: { id: "ses_old", parentID: "ses_parent" } });
+          await send("session.status", { sessionID: "ses_old", status: { type: "busy" } });
+          await send("session.status", { sessionID: "ses_old", status: { type: "idle" } });
+        } else await send("session.created", { info: { id: "ses_old" } });
+        if (process.argv[3] === "restart") await new Promise((resolve) => setTimeout(resolve, 500));
+        if (process.argv[3] === "reload" || process.argv[3] === "owner") {
+          const replacement = await AkittyConversationReport();
+          send = (type, properties) => replacement.event({ event: { type, properties } });
+          if (process.argv[3] === "owner") {
+            await send("session.created", { info: { id: "ses_old" } });
+            dispose();
+          } else await send("session.deleted", { info: { id: "ses_old" } });
+        }
+        await send("session.created", { info: { id: "ses_new" } });
+        if (process.argv[3] === "fork") {
+          await send("session.status", { sessionID: "ses_new", status: { type: "busy" } });
+          await send("session.created", { info: { id: "ses_child", parentID: "ses_new" } });
+          await send("session.status", { sessionID: "ses_child", status: { type: "busy" } });
+        }
+        if (process.argv[3] === "exit") process.exit(0);
+        if (process.argv[3] === "dispose") dispose();
+        await send("session.deleted", { info: { id: "ses_new" } });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        """.utf8).write(to: driver)
+        for mode in ["delete", "exit", "reload", "fork", "dispose", "owner", "retry", "blocked-child", "restart"] {
+            let log = root.appendingPathComponent("reports-\(mode)")
+            let companion = try script("akitty-agent-\(mode)", in: root, body: """
+            if [ "$1" = "ax-code-reporter" ]; then
+              attempts=0
+              if [ -f '\(root.appendingPathComponent("registration-count-\(mode)").path)' ]; then IFS= read -r attempts < '\(root.appendingPathComponent("registration-count-\(mode)").path)'; fi
+              attempts=$((attempts + 1))
+              printf '%s' "$attempts" > '\(root.appendingPathComponent("registration-count-\(mode)").path)'
+              if { [ "\(mode)" = "retry" ] && [ "$attempts" -eq 1 ]; } || { [ "\(mode)" = "blocked-child" ] && [ "$attempts" -le 4 ]; }; then
+                printf '{"version":1,"ok":false}\\n'; exit 0
+              fi
+              printf '{"version":1,"ok":true,"data":{"epoch":"1"}}\\n'; exit 0
+            fi
+            printf '%s %s %s %s %s\\n' "$2" "$3" "$4" "$5" "$6" >> '\(log.path)'
+            if [ "$3" = "ses_old" ]; then sleep 0.3; fi
+            if [ "\(mode)" = "restart" ] && [ "$3" = "ses_old" ]; then printf '{"version":1,"ok":false}\\n'; else printf '{"version":1,"ok":true}\\n'; fi
+            """)
+            let settings = AXCodeMCPSettings(path: settings.path, executable: companion)
+            try Data(settings.pluginSource.utf8).write(to: plugin)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: node)
+            process.arguments = [driver.path, plugin.absoluteString, mode]
+            try process.run()
+            let exitDeadline = Date().addingTimeInterval(5)
+            while process.isRunning, Date() < exitDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            if process.isRunning { process.terminate(); XCTFail("AX Code plugin did not exit in mode \(mode)") }
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, mode)
+            let expected: Set<String>
+            if mode == "reload" { expected = ["start ses_old 1", "end ses_old 2", "start ses_new 3", "end ses_new 4"] }
+            else if mode == "blocked-child" { expected = ["start ses_root 1", "end ses_root 2"] }
+            else { expected = ["start ses_old 1", "start ses_new 2", "end ses_new 3"] }
+            var reports: [String] = []
+            let deadline = Date().addingTimeInterval(5)
+            repeat {
+                reports = (try? String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)) ?? []
+                if reports.count == expected.count { break }
+                Thread.sleep(forTimeInterval: 0.01)
+            } while Date() < deadline
+            let fields = reports.map { $0.split(separator: " ").map(String.init) }
+            guard fields.allSatisfy({ $0.count == 5 }) else { XCTFail("Malformed reports in mode \(mode): \(reports)"); return }
+            XCTAssertEqual(Set(fields.map { [$0[0], $0[1], $0[3]].joined(separator: " ") }), expected, mode)
+            XCTAssertEqual(fields.map { $0[3] }.sorted(), (1...expected.count).map(String.init), mode)
+            let reporters = Set(fields.map { $0[2] })
+            XCTAssertTrue(reporters.count == 1 && reporters.first.flatMap({ UUID(uuidString: $0) }) != nil, mode)
+            let epochs = Set(fields.map { $0[4] })
+            XCTAssertTrue(epochs.count == 1 && (epochs.first.flatMap { UInt64($0) } ?? 0) > 0, mode)
+            if mode == "restart" {
+                XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("registration-count-restart"), encoding: .utf8), "2")
+            }
+        }
+    }
+
+    @MainActor func testSequencedAgentReportsRejectLateStartsAndOldReporterEnds() throws {
+        _ = NSApplication.shared
+        let root = try directory()
+        let panes = try (0..<2).map { _ in try TerminalView(headless: true, forceSoftware: true) }
+        let service = AgentRequests(source: { panes }, store: AgentEventStore(directory: root.appendingPathComponent("events")), path: root.appendingPathComponent("s.sock").path)
+        defer { service.stop(); panes.forEach { $0.shutdown() } }
+        let old = UUID().uuidString, replacement = UUID().uuidString, missing = UUID().uuidString
+        let pane = panes[0]
+        XCTAssertEqual(try service.beginAXCodeReport(reporter: old, in: pane), "1")
+        XCTAssertEqual(try service.beginAXCodeReport(reporter: replacement, in: pane), "2")
+        XCTAssertEqual(try service.beginAXCodeReport(reporter: old, in: pane), "1", "registration retries return the same epoch")
+        service.report(agent: "ax-code", event: "session_start", sessionID: "old", in: pane, reporter: (old, 1, 1))
+        service.report(agent: "ax-code", event: "session_start", sessionID: "new", in: pane, reporter: (old, 3, 1))
+        service.report(agent: "ax-code", event: "session_end", sessionID: "new", in: pane, reporter: (old, 4, 1))
+        service.report(agent: "ax-code", event: "session_start", sessionID: "old", in: pane, reporter: (old, 2, 1))
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.sessionID, "new")
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, true, "the delayed start must not reopen the old conversation")
+
+        service.report(agent: "ax-code", event: "session_start", sessionID: "new", in: pane, reporter: (replacement, 1, 2))
+        service.report(agent: "ax-code", event: "session_end", sessionID: "new", in: pane, reporter: (old, 5, 1))
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, false, "an old process cannot end a conversation resumed by a new one")
+        service.report(agent: "ax-code", event: "session_start", sessionID: "stale", in: pane, reporter: (old, 6, 1))
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.sessionID, "new", "a retired process cannot replace the new conversation")
+        service.report(agent: "ax-code", event: "session_end", sessionID: "new", in: pane, reporter: (replacement, 3, 2))
+        service.report(agent: "ax-code", event: "session_start", sessionID: "new", in: pane, reporter: (replacement, 2, 2))
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, true, "a newer end wins even when an earlier start arrives later")
+
+        for index in 0..<40 {
+            service.report(agent: "ax-code", event: "session_start", sessionID: "p\(index)", in: pane, reporter: (UUID().uuidString, 1, UInt64(index + 3)))
+        }
+        service.report(agent: "ax-code", event: "session_start", sessionID: "evicted", in: pane, reporter: (old, 7, 1))
+        service.report(agent: "ax-code", event: "session_start", sessionID: "unseen", in: pane, reporter: (UUID().uuidString, 1, 1))
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.sessionID, "p39", "epoch checks survive eviction and unseen old reporters")
+        service.report(agent: "ax-code", event: "session_end", sessionID: "p39", in: pane)
+        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, false, "a legacy end cannot close a sequenced reporter's conversation")
+
+        let other = panes[1]
+        service.report(agent: "ax-code", event: "session_start", sessionID: "previous", in: other, reporter: (old, 1, 1))
+        service.report(agent: "ax-code", event: "session_end", sessionID: "previous", in: other, reporter: (old, 2, 1))
+        service.offerResume(AgentConversation(agent: "ax-code", sessionID: "missing", reported: Date().timeIntervalSince1970), in: other)
+        XCTAssertTrue(service.canResume(other))
+        service.report(agent: "ax-code", event: "session_end", sessionID: "missing", in: other, reporter: (missing, 2, 2))
+        service.report(agent: "ax-code", event: "session_start", sessionID: "missing", in: other, reporter: (missing, 1, 2))
+        XCTAssertEqual(service.agentSessions[other.session.id]?.sessionID, "missing")
+        XCTAssertEqual(service.agentSessions[other.session.id]?.ended, true, "a new reporter's final end wins over the previous reporter and its own lost start")
+        XCTAssertFalse(service.canResume(other), "the authoritative end also confirms the resumed conversation")
+        service.report(agent: "claude-code", event: "session_start", sessionID: "shared", in: other)
+        service.report(agent: "ax-code", event: "session_end", sessionID: "previous", in: other, reporter: (old, 3, 1))
+        XCTAssertEqual(service.agentSessions[other.session.id]?.sessionID, "shared", "a legacy start retains the epoch floor against delayed sequenced reports")
+        service.report(agent: "ax-code", event: "session_end", sessionID: "shared", in: other)
+        XCTAssertEqual(service.agentSessions[other.session.id]?.agent, "claude-code")
+        XCTAssertEqual(service.agentSessions[other.session.id]?.ended, false, "a legacy end cannot change another agent's session")
+        service.report(agent: "claude-code", event: "session_end", sessionID: "shared", in: other)
+        XCTAssertEqual(service.agentSessions[other.session.id]?.ended, true)
+
+        let unrelated = UUID().uuidString
+        service.offerResume(AgentConversation(agent: "ax-code", sessionID: "chosen", reported: Date().timeIntervalSince1970), in: other)
+        service.report(agent: "ax-code", event: "session_end", sessionID: "unrelated", in: other, reporter: (unrelated, 1, 3))
+        XCTAssertTrue(service.canResume(other), "an unrelated end must not discard the pending resume offer")
+        service.report(agent: "claude-code", event: "session_start", sessionID: "another", in: other)
+        service.report(agent: "ax-code", event: "session_start", sessionID: "continued", in: other, reporter: (unrelated, 2, 3))
+        XCTAssertEqual(service.agentSessions[other.session.id]?.sessionID, "continued", "the same reporter may continue after a legacy session with a newer sequence")
+    }
+
     @MainActor func testLastReportShowsTheNewestConversationOfThatAgent() throws {
         _ = NSApplication.shared
         let root = try directory()

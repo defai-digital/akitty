@@ -188,31 +188,39 @@ final class AgentAcceptanceTests: XCTestCase {
         const { AkittyConversationReport } = await import(process.argv[2]);
         const hooks = await AkittyConversationReport();
         const send = (type, properties) => hooks.event({ event: { type, properties } });
+        const sessionID = process.argv[5] || "\(id)";
         // A fork the person continues is reported; a sub-agent that runs while its parent is busy is not.
         await send("session.created", { info: { id: "ses_fork", parentID: "ses_old" } });
         await send("session.status", { sessionID: "ses_fork", status: { type: "busy" } });
         await send("session.status", { sessionID: "ses_fork", status: { type: "idle" } });
         await new Promise((resolve) => setTimeout(resolve, 1500));
-        await send("session.created", { info: { id: "\(id)" } });
-        await send("session.status", { sessionID: "\(id)", status: { type: "busy" } });
-        await send("session.created", { info: { id: "ses_child", parentID: "\(id)" } });
+        await send("session.created", { info: { id: sessionID } });
+        await send("session.status", { sessionID, status: { type: "busy" } });
+        await send("session.created", { info: { id: "ses_child", parentID: sessionID } });
         await send("session.status", { sessionID: "ses_child", status: { type: "busy" } });
         await new Promise((resolve) => setTimeout(resolve, Number(process.argv[3])));
-        if (process.argv[4] === "delete") await send("session.deleted", { info: { id: "\(id)" } });
+        if (process.argv[4] === "delete") await send("session.deleted", { info: { id: sessionID } });
+        if (process.argv[4] === "exit") process.exit(0);
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         """.utf8).write(to: driver)
         try pane.session.input("'\(node)' '\(driver.path)' 'file://\(settings.pluginPath)' 3000 delete\r", paste: false)
-        try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.sessionID == "ses_fork" }
+        // A slow companion may arrive after the final state; sequenced reports intentionally drop that stale fork.
         try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.sessionID == id }
         XCTAssertTrue(service.lastReport(agent: "ax-code")?.hasPrefix("ses_-e5e") == true, service.lastReport(agent: "ax-code") ?? "")
         try await Task.sleep(nanoseconds: 500_000_000)
         XCTAssertEqual(service.agentSessions[pane.session.id]?.sessionID, id, "the sub-agent session is never reported")
-        XCTAssertEqual(service.agentSessions[pane.session.id]?.ended, false)
         try await waitUntil(timeout: 10) { service.agentSessions[pane.session.id]?.ended == true }
         let events = String(decoding: try service.store.export(), as: UTF8.self)
         XCTAssertTrue(events.contains("\"agent_reported\":\"ax-code\""), events)
         XCTAssertFalse(events.contains(id), "conversation IDs stay out of the event timeline")
+
+        // A forced AX Code exit sends a final higher-sequence end, even if an earlier start arrives afterwards.
+        let exitID = "ses_exit"
+        try pane.session.input("'\(node)' '\(driver.path)' 'file://\(settings.pluginPath)' 0 exit \(exitID)\r", paste: false)
+        try await waitUntil(timeout: 10) {
+            service.agentSessions[pane.session.id]?.sessionID == exitID && service.agentSessions[pane.session.id]?.ended == true
+        }
     }
 
     /// A program in pane A asks for a command in pane B: it queues on B, and B's sheet names A as the source.

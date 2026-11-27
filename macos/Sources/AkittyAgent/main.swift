@@ -44,11 +44,21 @@ do {
         }
         exit(0)
     }
-    if args.count == 3, args[0] == "ax-code-report", ["start", "end"].contains(args[1]) {
+    if args.count == 2, args[0] == "ax-code-reporter" {
+        let request: [String: Any] = ["version": 1, "op": "reporter_begin", "reporter_id": args[1]]
+        let reply = try LocalSocket.request(JSONSerialization.data(withJSONObject: request), path: path, timeout: 2)
+        FileHandle.standardOutput.write(reply); exit(0)
+    }
+    if (args.count == 3 || args.count == 6) && args[0] == "ax-code-report" && ["start", "end"].contains(args[1]) {
         // Started by AkiTTY's AX Code plugin. Never fail AX Code: report briefly and always exit 0 quietly.
-        let request: [String: Any] = ["version": 1, "op": "report", "agent": "ax-code",
+        var request: [String: Any] = ["version": 1, "op": "report", "agent": "ax-code",
                                       "event": args[1] == "start" ? "session_start" : "session_end", "session_id": args[2]]
-        if let payload = try? JSONSerialization.data(withJSONObject: request) { _ = try? LocalSocket.request(payload, path: path, timeout: 1.5) }
+        if args.count == 6 {
+            request["reporter_id"] = args[3]; request["reporter_sequence"] = args[4]; request["reporter_started"] = args[5]
+        }
+        if let payload = try? JSONSerialization.data(withJSONObject: request), let reply = try? LocalSocket.request(payload, path: path, timeout: 1.5) {
+            FileHandle.standardOutput.write(reply)
+        }
         exit(0)
     }
     if args.count >= 2, let agent = MCPIntegrationAgent.allCases.first(where: { $0.settingsCommand == args[0] }) {

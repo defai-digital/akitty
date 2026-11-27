@@ -86,6 +86,9 @@ import AgentIPC
             self.persist(event: "session_closed", id: id)
             self.cursors.removeValue(forKey: id); self.reports.removeValue(forKey: id); self.sessions.removeValue(forKey: id)
             self.agentSessions.removeValue(forKey: id); self.resumeOffers.removeValue(forKey: id)
+            self.reportOrders.removeValue(forKey: id); self.agentSessionReporters.removeValue(forKey: id)
+            self.agentReportEpochs.removeValue(forKey: id); self.reporterEpochCounter.removeValue(forKey: id)
+            self.issuedReporterEpochs.removeValue(forKey: id)
         }
         persist(event: "session_opened", id: id)
     }
@@ -561,6 +564,13 @@ import AgentIPC
         var reported: Date
     }
     private(set) var agentSessions: [UInt64: AgentSession] = [:]
+    private struct ReportOrder { let sequence: UInt64; let reported: Date }
+    private var reportOrders: [UInt64: [String: ReportOrder]] = [:]
+    private var agentSessionReporters: [UInt64: String] = [:]
+    private var agentReportEpochs: [UInt64: (started: UInt64, key: String)] = [:]
+    private var reporterEpochCounter: [UInt64: UInt64] = [:]
+    private var issuedReporterEpochs: [UInt64: [String: UInt64]] = [:]
+    private static let reportOrderLimit = 32
     func agentSession(for sessionID: UInt64) -> AgentSession? { agentSessions[sessionID] }
     nonisolated static func isValidAgentSessionID(_ value: String) -> Bool {
         (1...128).contains(value.utf8.count) && value.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || "-_.".unicodeScalars.contains($0) }
@@ -575,26 +585,69 @@ import AgentIPC
     }
     /// Called after each accepted session report, so a saved workspace keeps the newest conversation IDs.
     var onAgentSessionReport: (() -> Void)?
-    func report(agent: String, event: String, sessionID: String, in terminal: TerminalView) {
+    func beginAXCodeReport(reporter id: String, in terminal: TerminalView) throws -> String {
+        let pane = terminal.session.id, key = "ax-code/\(id)"
+        if let existing = issuedReporterEpochs[pane]?[key] { return String(existing) }
+        let current = reporterEpochCounter[pane] ?? 0
+        guard current < UInt64.max else { throw AkittyError.core("AX Code reporter epochs are exhausted for this pane.") }
+        var issued = issuedReporterEpochs[pane] ?? [:]
+        if issued.count >= Self.reportOrderLimit {
+            guard let oldest = issued.filter({ $0.key != agentSessionReporters[pane] }).min(by: { $0.value < $1.value }) else {
+                throw AkittyError.core("Too many active AX Code reporters in this pane.")
+            }
+            issued.removeValue(forKey: oldest.key)
+        }
+        let next = current + 1; reporterEpochCounter[pane] = next; issued[key] = next
+        issuedReporterEpochs[pane] = issued
+        return String(next)
+    }
+    func report(agent: String, event: String, sessionID: String, in terminal: TerminalView, reporter: (id: String, sequence: UInt64, started: UInt64)? = nil) {
         let pane = terminal.session.id
+        let reporterKey = reporter.map { "\(agent)/\($0.id)" }
+        if let reporter, let reporterKey {
+            if let floor = agentReportEpochs[pane] {
+                let candidate = (reporter.started, reporterKey)
+                let current = agentSessionReporters[pane]
+                if current == nil && candidate < floor || current != nil && current != reporterKey && candidate < floor { return }
+            }
+            var orders = reportOrders[pane] ?? [:]
+            if let previous = orders[reporterKey], reporter.sequence <= previous.sequence { return }
+            if orders[reporterKey] == nil, orders.count >= Self.reportOrderLimit {
+                // Epoch comparison still rejects an evicted reporter; keep the current reporter's sequence too.
+                guard let oldest = orders.filter({ $0.key != agentSessionReporters[pane] }).min(by: { $0.value.reported < $1.value.reported }) else { return }
+                orders.removeValue(forKey: oldest.key)
+            }
+            orders[reporterKey] = ReportOrder(sequence: reporter.sequence, reported: Date())
+            reportOrders[pane] = orders
+            // A newer reporter's end is authoritative even if its start was lost; an older one cannot end a resume.
+            agentSessionReporters[pane] = reporterKey
+            let candidate = (reporter.started, reporterKey)
+            if let floor = agentReportEpochs[pane] { agentReportEpochs[pane] = candidate < floor ? floor : candidate }
+            else { agentReportEpochs[pane] = candidate }
+        }
         if event == "session_end" {
-            guard agentSessions[pane]?.sessionID == sessionID else { return }
-            agentSessions[pane]?.ended = true; agentSessions[pane]?.reported = Date()
+            if reporter == nil {
+                guard let current = agentSessions[pane], current.sessionID == sessionID, current.agent == agent,
+                      agentSessionReporters[pane] == nil else { return }
+                agentSessions[pane]?.ended = true; agentSessions[pane]?.reported = Date()
+            } else { agentSessions[pane] = AgentSession(agent: agent, sessionID: sessionID, ended: true, reported: Date()) }
         } else {
             agentSessions[pane] = AgentSession(agent: agent, sessionID: sessionID, ended: false, reported: Date())
-            if let offer = resumeOffers[pane] {
-                // Only the conversation the human chose, reported by the same agent in this pane, counts as resumed,
-                // including a late report or one the human started by typing the command themselves.
-                if offer.conversation.agent == agent && offer.conversation.sessionID == sessionID {
-                    if offer.state != .resumed {
-                        resumeOffers[pane]?.state = .resumed
-                        persist(event: "agent_session_resumed", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
-                    }
-                } else if offer.state != .offered && offer.state != .resumed {
-                    // A different conversation started while (or after failing at) resuming: keep the chosen one to retry.
-                    resumeOffers[pane]?.state = .unconfirmed
-                } else { resumeOffers.removeValue(forKey: pane) }
-            }
+            if reporter == nil { agentSessionReporters[pane] = nil }
+        }
+        if event == "session_start" || reporter != nil && resumeOffers[pane]?.conversation.agent == agent && resumeOffers[pane]?.conversation.sessionID == sessionID,
+           let offer = resumeOffers[pane] {
+            // Only the conversation the human chose, reported by the same agent in this pane, counts as resumed,
+            // including a late report or one the human started by typing the command themselves.
+            if offer.conversation.agent == agent && offer.conversation.sessionID == sessionID {
+                if offer.state != .resumed {
+                    resumeOffers[pane]?.state = .resumed
+                    persist(event: "agent_session_resumed", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
+                }
+            } else if offer.state != .offered && offer.state != .resumed {
+                // A different conversation started while (or after failing at) resuming: keep the chosen one to retry.
+                resumeOffers[pane]?.state = .unconfirmed
+            } else { resumeOffers.removeValue(forKey: pane) }
         }
         persist(event: event == "session_end" ? "agent_session_ended" : "agent_session_reported", id: pane, provenance: "program_untrusted", fields: ["agent_reported": agent])
         onAgentSessionReport?()
@@ -731,15 +784,33 @@ import AgentIPC
                 }
                 result = try await decide(PermissionRequest(agent: agent, tool: tool, command: command, cwd: cwd as? String, reason: reason as? String),
                                           in: terminal, origin: .localProcess(peer), requestID: suppliedRequestID as? String)
-            } else if operation == "report", Set(input.keys).isSubset(of: ["version", "op", "agent", "event", "session_id"]),
+            } else if operation == "reporter_begin", Set(input.keys) == ["version", "op", "reporter_id"], let id = input["reporter_id"] as? String {
+                guard let uuid = UUID(uuidString: id) else { throw AkittyError.core("Invalid AX Code reporter ID.") }
+                guard let terminal = pane(for: peer) else { throw AkittyError.core("The caller is not running inside an AkiTTY pane.") }
+                result = ["epoch": try beginAXCodeReport(reporter: uuid.uuidString, in: terminal)]
+            } else if operation == "report", Set(input.keys).isSubset(of: ["version", "op", "agent", "event", "session_id", "reporter_id", "reporter_sequence", "reporter_started"]),
                       let agent = input["agent"] as? String, let event = input["event"] as? String, let sessionID = input["session_id"] as? String {
                 guard Self.agentNames[agent] != nil, ["session_start", "session_end"].contains(event), Self.isValidAgentSessionID(sessionID) else {
                     throw AkittyError.core("Invalid agent report.")
                 }
+                var reporter: (id: String, sequence: UInt64, started: UInt64)?
+                if input["reporter_id"] != nil || input["reporter_sequence"] != nil || input["reporter_started"] != nil {
+                    guard let id = input["reporter_id"] as? String, let uuid = UUID(uuidString: id),
+                          let text = input["reporter_sequence"] as? String, text.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                          let sequence = UInt64(text), sequence > 0,
+                          let epoch = input["reporter_started"] as? String, epoch.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                          let started = UInt64(epoch), started > 0 else {
+                        throw AkittyError.core("Invalid agent report ordering metadata.")
+                    }
+                    reporter = (uuid.uuidString, sequence, started)
+                }
                 guard let terminal = pane(for: peer) else { throw AkittyError.core("The caller is not running inside an AkiTTY pane.") }
-                report(agent: agent, event: event, sessionID: sessionID, in: terminal)
+                if let reporter, issuedReporterEpochs[terminal.session.id]?["\(agent)/\(reporter.id)"] != reporter.started {
+                    throw AkittyError.core("Agent report epoch was not issued to this reporter.")
+                }
+                report(agent: agent, event: event, sessionID: sessionID, in: terminal, reporter: reporter)
                 result = ["recorded": true, "pane": paneID(terminal)]
-            } else if ["request", "list", "status", "decide", "report"].contains(operation) {
+            } else if ["request", "list", "status", "decide", "report", "reporter_begin"].contains(operation) {
                 throw AkittyError.core("Unknown or missing fields for \(operation). See akitty-agent usage.")
             } else { throw AkittyError.core("Unsupported request operation.") }
             return try JSONSerialization.data(withJSONObject: ["version": 1, "ok": true, "data": result], options: [.sortedKeys, .withoutEscapingSlashes])

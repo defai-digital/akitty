@@ -30,8 +30,8 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
         URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("plugin/akitty.js").path
     }
     static let pluginMarker = "// Added by AkiTTY (akitty-agent ax-code-report)."
-    /// The plugin source. It only starts the companion with the conversation ID; the companion finds the pane from
-    /// its terminal, so the plugin carries no pane or socket details. Errors are ignored so AX Code is never affected.
+    /// The plugin source. It starts the companion with a sequenced conversation report; the companion finds the pane
+    /// from its terminal, so the plugin carries no pane or socket details. Errors are ignored so AX Code is never affected.
     public var pluginSource: String {
         let quoted = String(decoding: (try? JSONSerialization.data(withJSONObject: [executable], options: [.withoutEscapingSlashes])) ?? Data("[]".utf8), as: UTF8.self)
         return """
@@ -39,35 +39,82 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
         // Reports which AX Code conversation runs in this AkiTTY pane, so AkiTTY can offer to resume it after a
         // restart. Remove it in AkiTTY's Settings → Agents → AX Code, or with `akitty-agent ax-code-mcp uninstall`.
         import { spawn, spawnSync } from "node:child_process";
+        import { randomUUID } from "node:crypto";
         const [companion] = \(quoted);
         const valid = (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id);
-        export const AkittyConversationReport = async () => {
+        const reporter = randomUUID();
+        const register = () => new Promise((resolve) => {
+          let output = "";
+          try {
+            const child = spawn(companion, ["ax-code-reporter", reporter], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+            child.stdout.on("data", (chunk) => { if (output.length < 4096) output += chunk; });
+            child.on("error", () => resolve(null));
+            child.on("close", () => {
+              try {
+                const epoch = JSON.parse(output)?.data?.epoch;
+                resolve(typeof epoch === "string" && /^[1-9][0-9]*$/.test(epoch) ? epoch : null);
+              } catch { resolve(null); }
+            });
+          } catch { resolve(null); }
+        });
+        let sequence = 0, current = null, currentOwner = null, started = null, registration = null, generation = 0;
+        const ready = () => {
+          if (started) return Promise.resolve(true);
+          if (!registration) registration = register().then((epoch) => {
+            started = epoch; registration = null;
+            if (epoch !== null) generation += 1;
+            return epoch !== null;
+          });
+          return registration;
+        };
+        const report = (event, id) => {
+          sequence += 1;
+          const version = generation, invalidate = () => { if (generation === version) { started = null; current = null; currentOwner = null; } };
+          // Companions may finish in any order. AkiTTY orders each reporter's events and rejects older epochs.
+          try {
+            const child = spawn(companion, ["ax-code-report", event, id, reporter, String(sequence), started], { stdio: ["ignore", "pipe", "ignore"] });
+            let output = "";
+            child.stdout.on("data", (chunk) => { if (output.length < 4096) output += chunk; });
+            child.on("error", invalidate);
+            child.on("close", () => { try { if (JSON.parse(output)?.ok !== true) invalidate(); } catch { invalidate(); } });
+            child.unref(); child.stdout.unref();
+          } catch { invalidate(); }
+        };
+        const finish = (synchronous = false) => {
+          if (!current) return;
+          const id = current; current = null; currentOwner = null;
+          if (!synchronous) { report("end", id); return; }
+          try { spawnSync(companion, ["ax-code-report", "end", id, reporter, String(++sequence), started], { stdio: "ignore", timeout: 2000 }); } catch {}
+        };
+        process.once("exit", () => finish(true));
+        export const AkittyConversationReport = async (input) => {
+          await ready();
+          const owner = {};
+          input?.lifecycle?.onDispose?.(() => { if (currentOwner === owner) finish(); });
           // AX Code marks both sub-agent sessions and forks with parentID. A sub-agent runs while its parent is
           // busy; a fork is continued on its own. Only conversations the person works in are reported.
           const parents = new Map();
           const busy = new Set();
-          let current = null;
-          const report = (event, id) => {
-            try { const child = spawn(companion, ["ax-code-report", event, id], { stdio: "ignore" }); child.on("error", () => {}); child.unref(); } catch {}
+          const start = (id) => {
+            if (!valid(id)) return;
+            if (id === current) { currentOwner = owner; return; }
+            current = id; currentOwner = owner; report("start", id);
           };
-          process.once("exit", () => {
-            if (current) try { spawnSync(companion, ["ax-code-report", "end", current], { stdio: "ignore", timeout: 2000 }); } catch {}
-          });
-          const start = (id) => { if (valid(id) && id !== current) { current = id; report("start", id); } };
           return {
             event: async ({ event }) => {
               const properties = event?.properties ?? {};
               const info = properties.info ?? {};
               if (valid(info.id) && info.parentID && parents.size < 1000) parents.set(info.id, info.parentID);
+              if (event.type === "session.status") {
+                if (properties.status?.type !== "busy") { busy.delete(properties.sessionID); return; }
+                if (busy.size < 1000) busy.add(properties.sessionID);
+                const parent = parents.get(properties.sessionID);
+                if (parent && busy.has(parent)) return;
+              } else if (event.type === "session.idle") { busy.delete(properties.sessionID); return; }
+              if (!await ready()) return;
               if (event.type === "session.created" && !info.parentID) start(info.id);
-              else if (event.type === "session.status") {
-                const id = properties.sessionID;
-                if (properties.status?.type !== "busy") { busy.delete(id); return; }
-                if (busy.size < 1000) busy.add(id);
-                const parent = parents.get(id);
-                if (!(parent && busy.has(parent))) start(id);
-              } else if (event.type === "session.idle") busy.delete(properties.sessionID);
-              else if (event.type === "session.deleted" && info.id === current) { report("end", current); current = null; }
+              else if (event.type === "session.status") start(properties.sessionID);
+              else if (event.type === "session.deleted" && info.id === current) { report("end", current); current = null; currentOwner = null; }
             },
           };
         };

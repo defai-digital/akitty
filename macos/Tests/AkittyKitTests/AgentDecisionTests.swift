@@ -442,7 +442,9 @@ final class AgentDecisionTests: XCTestCase {
                                    ["version": 1, "op": "decide", "agent": "agy", "tool": "Bash", "command": "x"],
                                    ["version": 1, "op": "decide", "agent": "claude-code", "tool": "Edit", "command": "x"],
                                    ["version": 1, "op": "decide", "agent": "claude-code", "tool": "Bash", "command": "x", "pane": "p"],
-                                   ["version": 1, "op": "report", "agent": "claude-code", "event": "session_start", "session_id": "bad id"]] {
+                                   ["version": 1, "op": "report", "agent": "claude-code", "event": "session_start", "session_id": "bad id"],
+                                   ["version": 1, "op": "report", "agent": "ax-code", "event": "session_start", "session_id": "one", "reporter_id": UUID().uuidString],
+                                   ["version": 1, "op": "report", "agent": "ax-code", "event": "session_start", "session_id": "one", "reporter_id": UUID().uuidString, "reporter_sequence": "0"]] {
             let data = try JSONSerialization.data(withJSONObject: bad)
             let reply = try JSONSerialization.jsonObject(with: try await Task.detached { try LocalSocket.request(data, path: path) }.value) as? [String: Any]
             XCTAssertEqual(reply?["ok"] as? Bool, false, "\(bad)")
