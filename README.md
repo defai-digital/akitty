@@ -15,7 +15,7 @@ supported request, you can review the exact command before approving it.
 
 [Install](#quick-start) · [Terminal features](#everyday-terminal-features) ·
 [Agent integrations](#works-with-your-ai-agents) · [User guide](docs/USER_GUIDE.md) ·
-[2.4.1 release notes](docs/releases/2.4.1.md) · [What's new in 2.3.0](docs/releases/2.3.0.md)
+[2.4.1 release notes](docs/releases/2.4.1.md) · [All documentation](docs/README.md)
 
 ## Quick start
 
@@ -42,7 +42,7 @@ installation, run `bash install.sh --system` with write access to **/Application
 
 | When you want to… | Use… |
 | --- | --- |
-| Keep several tasks in view | Open windows and tabs, split a tab into side-by-side panes, or drag a tab to another window with its running shells. |
+| Keep several tasks in view | Split a tab into side-by-side panes. Switching tabs returns you to the last focused pane. Drag a tab onto another window's title bar to move its running shells. [Organize a project](docs/USER_GUIDE.md#organize-a-project) |
 | Find output you saw earlier | Use **⌘F** in the current pane or **⌥⌘F** to search retained output across open terminals and jump to a match. |
 | Open a shell with project settings | Save a profile with its own font, colours, shell, starting folder, and scrollback under **Settings → Profiles**. |
 | Return to a workspace | Save named window layouts with **Shell → Window Layouts**. Reopening starts fresh shells. You can include a short scrollback excerpt when saving. |
@@ -133,7 +133,7 @@ the shell and connects its PTY to the terminal.
 
 ## Performance
 
-AkiTTY 2.3.1 was measured on 2026-11-23. The other four columns use the
+The app comparison below measured AkiTTY 2.3.1 on 2026-11-23. The other four columns use the
 2026-11-19 comparison. Each app has 45 timed PTY samples per workload, from
 the first payload write through the terminal's reply to a trailing
 cursor-position request. The table reports medians. The red line marks the
@@ -167,6 +167,9 @@ rustup toolchain install 1.99.1 --profile minimal --component clippy --component
 scripts/build-app.sh release
 open build/Akitty.app
 ```
+
+Release builds require a clean, committed checkout. Use
+`scripts/build-app.sh debug` to try local changes.
 
 ### Verification and distribution
 

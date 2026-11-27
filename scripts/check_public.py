@@ -13,9 +13,28 @@ import re
 import subprocess
 import sys
 
-DENIED_DIRS = {'.internal', '.agents', '.agent', '.codex', '.claude', '.grok', '.muse', '.ax-code', '.ax-wiki', '.cursor', '.windsurf', 'node_modules', 'target', '.build'}
-DENIED_FILES = {'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', '.cursorrules', '.windsurfrules', '.ds_store', '.npmrc', '.netrc', '.cf', '.zsh_history', '.bash_history'}
-DENIED_SUFFIXES = {'.pem', '.key', '.p12', '.mobileprovision', '.dylib', '.a', '.log', '.jsonl'}
+DENIED_DIRS = {
+    '.internal', '.agents', '.agent', '.codex', '.claude', '.grok', '.muse',
+    '.ax-code', '.ax-wiki', '.cursor', '.windsurf', '.idea', '.vscode',
+    'xcuserdata', 'node_modules', 'target', '.build', '.pytest_cache',
+    '.ruff_cache', '__pycache__',
+}
+DENIED_FILES = {
+    'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md',
+    '.cursorrules', '.windsurfrules', '.ds_store', '.npmrc', '.netrc',
+    '.git-credentials', '.cf', '.zsh_history', '.bash_history',
+}
+DENIED_SUFFIXES = {
+    '.pem', '.key', '.p12', '.pfx', '.mobileprovision', '.sparkle-private-key',
+    '.dylib', '.a', '.log', '.jsonl', '.pyc', '.xcuserstate',
+}
+DENIED_BUNDLE_SUFFIXES = ('.app', '.dsym', '.xcresult')
+DENIED_ROOT_PATHS = {
+    ('build',), ('reference',), ('coverage',), ('.coverage',),
+    ('packages', 'akitty-sdk', 'dist'),
+    ('packages', 'akitty-web', 'test-results'),
+    ('packages', 'akitty-web', 'playwright-report'),
+}
 PATTERNS = [
     re.compile(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/'),
     re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
@@ -34,9 +53,17 @@ PUBLIC_NOTICE_HASHES = {
 
 def violations(name, data):
     path = pathlib.PurePosixPath(name)
-    parts = [p.lower() for p in path.parts]
+    parts = tuple(part.lower() for part in path.parts)
+    filename = path.name.lower()
     errors = []
-    if any(p in DENIED_DIRS for p in parts) or path.name.lower() in DENIED_FILES or path.suffix.lower() in DENIED_SUFFIXES or path.name.startswith('.env'):
+    if (
+        any(part in DENIED_DIRS or part.endswith(DENIED_BUNDLE_SUFFIXES) for part in parts)
+        or any(parts[:len(prefix)] == prefix for prefix in DENIED_ROOT_PATHS)
+        or filename in DENIED_FILES
+        or path.suffix.lower() in DENIED_SUFFIXES
+        or filename == '.env'
+        or filename.startswith('.env.')
+    ):
         errors.append('excluded private/generated filename')
     if path.suffix in {'.zig', '.zon'}:
         errors.append('Zig source is prohibited')

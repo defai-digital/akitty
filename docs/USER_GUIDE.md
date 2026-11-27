@@ -35,18 +35,22 @@ receive it. Typing or pasting into the new pane first cancels the pending launch
   tab into side-by-side panes for a shell, a build, or a log. Click a pane
   or press **⌥⌘→** / **⌥⌘←** to focus it. In a split tab the focused pane has a
   thin accent outline and the others are lightly dimmed, and the tab shows the
-  focused pane's title. **⇧⌘]** and **⇧⌘[** move between tabs; returning to a
-  tab focuses the pane you left. **⌘W** closes the active pane.
+  focused pane's title. AkiTTY removes common spinner frames from the ends
+  of titles and limits rapid program-driven title changes to two per second.
+  **⇧⌘]** and **⇧⌘[** move between tabs. Returning to a tab focuses the
+  pane you left. **⌘W** closes the active pane.
 - **Read pane status at a glance.** Tabs sit in the title bar. A pane has no
   status row; a small capsule appears at its top-right corner only when there is
   something to say: a program's progress, a copy or paste note, the new size
   while you resize, or an error. Programs' reports are neutral and fade while
   the pointer is over them so you can read the text beneath. When an agent holds
   the pane's input, the capsule turns orange and offers **Reclaim**.
-- **Move a running shell.** Drag a tab to another AkiTTY window's tab bar.
-  The tab brings its split panes, processes, and scrollback and returns focus
-  to its last focused pane. Drag above or below the tab bar to detach it into
-  its own window.
+- **Move a running shell.** Drag a tab onto another regular AkiTTY window's
+  title bar. Drop it between tabs to insert it, or on the empty space after
+  them to append it. The moved tab keeps its split panes, processes, scrollback,
+  and last focused pane. Drag above or below the tab bar to detach it into
+  its own window. Drag empty title-bar space to move the window itself, even
+  when it is in the background.
 - **Use project defaults.** In **Settings → Profiles**, click **+** and
   set the desired font, colours, shell, starting directory, and scrollback.
   Click **Apply**, then pick the profile under **Shell → New Window with

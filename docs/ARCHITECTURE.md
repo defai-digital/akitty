@@ -168,7 +168,7 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   reports are neutral and click-through, and only the core's control record produces the agent style.
 - Clipboard reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
-  Settings) lets later writes through with a status-bar note. Images are
+  Settings) lets later writes through with a status capsule note. Images are
   unsupported, so confirmation never decodes images.
 - Rust ranks native commands through the bounded `command_palette` ABI operation.
   Swift validates the closed command IDs and dispatches native actions, falling back
@@ -258,19 +258,24 @@ zsh command history, shell, starting directory and scrollback), keyboard behavio
 (quick terminal, Option-as-Alt and program status) and update checks. **Agents**
 shows the installed CLIs, configures their integrations, and controls whether
 Local Agent Requests starts with the app. Preferences remain in local UserDefaults.
-The tab bar follows native macOS tabs (as Ghostty uses): tabs share the bar's width
-equally, each has a close button (confirming when a process is running), drags to
-reorder, has a Close Tab / Close Other Tabs / Close Tabs to the Right menu, and shows
-its ⌘1–⌘8 shortcut (⌘9 is the last tab). The plus button and close buttons are
-accessible. Shell exit with a reported status closes
-the associated pane and any empty tab/window; failed startup remains visible.
-Dragging outside the strip above or below it detaches the tab; dropping on another regular window's
-strip transfers it there. The context menu also offers Move Tab to New Window. Transfers retain the
-same split tree, terminal views, session handles, profiles and agent control state. The destination
-rebinds window callbacks and restores divider shares; an empty source window closes without stopping
-the moved processes. A new destination starts empty, so no temporary shell is spawned. Escape or
-app deactivation cancels a drag. Quick terminals, attached dialogs, modal sessions and app termination
-block transfers. Custom tabs disable AppKit's separate native window tab groups.
+The title bar shares space between width-capped tab controls, a new-tab button,
+and a window drag area. Each tab remembers its last focused pane and uses that
+pane's title. Swift strips spinner frames at the title edges and coalesces
+rapid program updates to two displayed changes per second, keeping the latest
+pending title. Close buttons and tab labels are accessible. Shell exit with a
+reported status closes the pane and any empty tab or window. Failed startup
+remains visible.
+
+Drag a tab above or below the strip to detach it. Dropping anywhere along
+another regular window's title bar transfers it, with free space after the
+last tab appending the item. The context menu also offers **Move Tab to New
+Window**. Transfers retain the split tree, terminal views, session handles,
+profiles, and agent control state. The destination rebinds callbacks, restores
+divider shares, and focuses the moved tab's remembered pane. An active Find
+target in the moved tab takes precedence. The source window restores focus in
+the tab it reveals or closes when empty. Escape and app deactivation cancel
+the drag. Quick terminals, sheets, modal sessions, and app termination block
+transfers. Custom tabs disable AppKit's native window tab groups.
 
 Sparkle owns signed update verification and installation. A gentle titlebar reminder
 keeps scheduled checks out of the user's typing flow. Automatic downloads/installations
@@ -355,7 +360,9 @@ Installing AkiTTY registers it as an alternate handler. The menu changes the
 types still handled by another app and stays enabled when a change only partly
 succeeds. macOS asks for confirmation. Declining a prompt ends the change.
 
-The Dock menu adds **New Window** and **New Tab** above the system window list.
+The Dock menu adds **New Window**, **New Tab**, **New Window with Profile**,
+**Toggle Quick Terminal**, and **Agent Overview** above the system window list.
+The Dock badge reports how many approvals are waiting.
 **New Tab** uses the frontmost visible terminal, including a visible Quick
 Terminal. If no terminal is visible, it uses the frontmost regular terminal
 when available. With no eligible terminal it opens a window. A hidden Quick
@@ -432,7 +439,7 @@ including delayed wrap, and retains the scrolled viewport through height changes
 The shared keyboard encoder handles functional-key repeat/release events, keypad identities, lock modifiers
 and alternate keys according to the requested progressive flags. Legacy mouse releases retain modifier bits,
 UTF-8 mouse coordinates respect their encoding limit, and horizontal or stationary wheel events do not emit
-vertical reports. Regression evidence and protocol references are recorded in [the engine migration audit](ENGINE_MIGRATION.md#selection-resize-and-input-protocol-audit).
+vertical reports. Regression evidence and protocol references are recorded in [the engine migration audit](archive/ENGINE_MIGRATION.md#selection-resize-and-input-protocol-audit).
 
 The Web input adapter pairs enhanced key releases with presses it actually sent. Clipboard shortcuts and
 keys consumed by a host handler do not leak release events to the terminal. Release events retain the

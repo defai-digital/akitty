@@ -48,6 +48,6 @@ Coder-derived tests and test helpers retain their MIT notice; see
 licenses do not describe current engine authorship. Release notes describe past
 releases and are not rewritten to hide provenance.
 
-See `docs/ENGINE_MIGRATION.md` for scope and qualification and the Web README for
+See the [engine migration archive](../docs/archive/ENGINE_MIGRATION.md) for scope and qualification and the Web README for
 its 0.6 API migration. Complete terminal conformance and physical IME/platform
 qualification remain ongoing product work, as with the previous engine.

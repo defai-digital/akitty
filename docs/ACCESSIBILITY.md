@@ -42,6 +42,11 @@ accessible name and defaults to off.
 
 ## Pane status and focus
 
+Navigating back to a split tab restores its last focused pane. The tab's
+accessible label follows that pane's displayed title. Moving a tab to another
+window keeps its remembered pane, including when the moved tab was in the
+background.
+
 A pane's status capsule names its source to assistive technology: program reports
 are read as "Program reports, unverified", and AkiTTY's own input-lease and error
 states as "AkiTTY". **Reclaim** in the capsule is a button with the same effect as

@@ -1,5 +1,9 @@
 # Quality improvement plan
 
+This archived milestone records the original implementation and measurements.
+See the [current compatibility matrix](../COMPATIBILITY.md) and
+[performance documentation](../PERFORMANCE.md) for later qualification.
+
 This milestone turns the terminal-quality review into repeatable checks and inspectable evidence.
 It builds on the prompt-history and clipboard fixes without assigning comparative product scores.
 
@@ -13,7 +17,7 @@ It builds on the prompt-history and clipboard fixes without assigning comparativ
 ## Implementation sequence
 
 1. Add the paste dialog guard and regression tests.
-2. Publish [the compatibility matrix](COMPATIBILITY.md), with links to the existing CI suites and manual gaps.
+2. Publish [the compatibility matrix](../COMPATIBILITY.md), with links to the existing CI suites and manual gaps.
 3. Add the release-mode benchmark, a shared workload manifest, result validation and a small CI smoke run.
 4. Add a companion-driven demo and test its response handling and real native approval path.
 5. Run the canonical verification gate, benchmark smoke and measured baseline, then build/smoke the app and commit.
@@ -39,13 +43,10 @@ Those integrations need an explicit executor/decision/correlation contract and i
 
 ## Implemented and validated
 
-This milestone implements all four deliverables above. `scripts/verify.sh` passes, including 236 Rust tests,
+The milestone implemented all four deliverables above. That run of `scripts/verify.sh` passed, including 236 Rust tests,
 639 Web unit tests, 20 local browser tests, the Native/WASM benchmark smoke, companion-demo checks, Clippy,
-ABI/provenance, shell, release and installer checks. The current Swift suite executes 272 tests with one skip
+ABI/provenance, shell, release and installer checks. The Swift suite executed 272 tests with one skip
 and zero failures. Local Firefox retains the documented startup exception; its browser coverage remains required in CI.
-The [30-sample baseline](../benchmarks/baseline-macos-arm64.json) preserves the exact measured source,
+The [30-sample baseline](../../benchmarks/baseline-macos-arm64.json) preserves the exact measured source,
 workload and harness fingerprints. Physical IME, VoiceOver, UI latency and competitor benchmarks remain the
 separate qualification work described above.
-
-Those counts are that milestone's local run. Source 1.3.22 still uses `scripts/verify.sh`
-as the required gate. Treat a fresh run, not the numbers above, as the current suite size.

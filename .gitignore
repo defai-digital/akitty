@@ -1,10 +1,32 @@
+# Build, test and package output
 /target/
 /build/
 /macos/.build/
-/node_modules/
-/packages/*/node_modules/
+node_modules/
 /packages/akitty-sdk/dist/
+/packages/akitty-web/test-results/
+/packages/akitty-web/playwright-report/
+/.coverage
+/coverage/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.app/
+*.dSYM/
+*.xcresult/
+*.a
+*.dylib
+*.log
+*.jsonl
+
+# Local workspaces, editor state and reference checkouts
 .DS_Store
+.idea/
+.vscode/
+xcuserdata/
+*.xcuserstate
+/reference/
 .internal/
 .agents/
 .codex/
@@ -23,19 +45,20 @@
 [Cc][Oo][Pp][Ii][Ll][Oo][Tt]-[Ii][Nn][Ss][Tt][Rr][Uu][Cc][Tt][Ii][Oo][Nn][Ss].[Mm][Dd]
 .cursorrules
 .windsurfrules
+
+# Machine-local credentials and histories
 .env
 .env.*
+.npmrc
+.netrc
+.git-credentials
+.zsh_history
+.bash_history
+.cf
 *.pem
 *.key
 *.p12
+*.pfx
 *.mobileprovision
-
-__pycache__/
-*.pyc
-
-.cf
 *.sparkle-private-key
-
-/packages/akitty-web/test-results/
-/packages/akitty-web/playwright-report/
 

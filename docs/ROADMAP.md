@@ -1,12 +1,12 @@
 # AkiTTY implementation roadmap
 
-This roadmap records shipped behavior through [AkiTTY 2.4.0](releases/2.4.0.md)
+This roadmap records shipped behavior through [AkiTTY 2.4.1](releases/2.4.1.md)
 and the remaining qualification and feature work.
 Native and Web now share the independently authored `akitty-vt` Rust engine.
 The native app uses Rust/Swift integration and CoreText/Metal rendering; Web uses
 WASM and a reauthored Canvas frontend. Neither builds an upstream terminal engine.
 Performance must be measured separately for each host.
-The current [quality milestone](QUALITY_IMPROVEMENTS.md) adds a source-backed
+The [original quality milestone](archive/QUALITY_IMPROVEMENTS.md) introduced a source-backed
 [compatibility matrix](COMPATIBILITY.md), [Native/WASM benchmark](../benchmarks/README.md)
 and [reproducible agent approval demo](AGENT_DEMO.md).
 See [architecture](ARCHITECTURE.md) for the current implementation and
@@ -319,18 +319,19 @@ remote multiplexing, and result attestation remain follow-up areas.
 
 ## 6. Workspace usability
 
-Tab movement is implemented for regular native windows: drag above or below the strip to detach,
-drop on another window's tab strip to transfer, or use Move Tab to New Window in the context menu.
-The existing panes and PTYs move together. Escape and app deactivation cancel the drag; quick-terminal
-transfers and transfers during dialogs or termination are disabled. Regression tests cover split
-identity, control leases, callbacks, focus, cancellation and a real shell retaining its environment.
+Regular native windows support tab transfer along the entire title bar. Drop
+past the last tab to append, or drag above or below the strip to detach.
+The existing panes and PTYs move together, and both windows restore the
+remembered focus of their selected tabs. Escape and app deactivation cancel
+the drag. Quick terminals and windows with dialogs or pending termination
+block transfers. [Tab transfer regressions](../macos/Tests/AkittyKitTests/TabTransferTests.swift)
 
 Find in All Terminals (⌥⌘F) searches retained output in the current window or every open
 terminal. Results are grouped by window, tab and pane, bounded to 100 hits, and choosing one
 reveals that pane. A closed pane or a row that has left scrollback is reported and does not
 move focus. [Issue 51](https://github.com/defai-digital/akitty/issues/51)
 
-The Dock menu offers **New Window** and **New Tab**. Finder can open supported
+The Dock menu offers window, tab, Quick Terminal, and Agent Overview actions. Finder can open supported
 executables with confirmation after the user selects AkiTTY as their file handler.
 Pane actions follow the find field's target while it holds focus. The native command
 palette ranks command names and keywords in Rust. [File and Dock behavior](ARCHITECTURE.md#macos-folder-opening) ·
