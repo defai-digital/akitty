@@ -118,5 +118,6 @@ Use [ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership and design decisions,
 Keep refactors focused and preserve unrelated work. Avoid repository-wide
 formatting changes. New boundary behavior needs bounded validation and relevant
 regression coverage. Do not commit credentials, machine paths, private development
-notes, or build output; `scripts/check_public.py` audits the exact Git index or
-committed tree before publication.
+notes, or build output. Run `python3 scripts/check_public.py` before pushing to audit
+the staged content. The audit applies the staged `.gitignore` rules, including to
+files that were force-added. To check a commit, use `--revision HEAD`.

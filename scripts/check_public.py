@@ -5,7 +5,6 @@ With --messages, check commit messages and author/committer identities instead:
 history is published with the tree and is far harder to correct afterwards.
 """
 import argparse
-from fnmatch import fnmatchcase
 import getpass
 import hashlib
 import os
@@ -13,30 +12,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
-DENIED_DIRS = {
-    '.internal', '.agents', '.agent', '.codex', '.claude', '.grok', '.muse',
-    '.ax-code', '.ax-wiki', '.cursor', '.windsurf', '.idea', '.vscode',
-    'xcuserdata', 'node_modules', 'target', '.build', '.pytest_cache',
-    '.ruff_cache', '__pycache__',
-}
-DENIED_FILES = {
-    'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md',
-    '.cursorrules', '.windsurfrules', '.ds_store', 'thumbs.db', 'desktop.ini', '.npmrc', '.netrc',
-    '.git-credentials', '.cf', '.zsh_history', '.bash_history',
-}
-DENIED_SUFFIXES = {
-    '.pem', '.key', '.p12', '.pfx', '.mobileprovision', '.sparkle-private-key',
-    '.dylib', '.a', '.log', '.jsonl', '.pyc', '.xcuserstate',
-}
-DENIED_BUNDLE_SUFFIXES = ('.app', '.dsym', '.xcresult')
-DENIED_ROOT_PATHS = {
-    ('build',), ('reference',), ('coverage',), ('.coverage',),
-    ('install.sh',), ('akitty-macos.zip',), ('sha256sums',), ('appcast.xml',), ('release.json',),
-    ('packages', 'akitty-sdk', 'dist'),
-    ('packages', 'akitty-web', 'test-results'),
-    ('packages', 'akitty-web', 'playwright-report'),
-}
 PATTERNS = [
     re.compile(rb'/(?:Users|home)/[A-Za-z0-9_.-]+/'),
     re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
@@ -54,28 +31,36 @@ PUBLIC_NOTICE_HASHES = {
 }
 
 def violations(name, data):
-    path = pathlib.PurePosixPath(name)
-    parts = tuple(part.lower() for part in path.parts)
-    filename = path.name.lower()
     errors = []
-    if (
-        any(part in DENIED_DIRS or part.endswith(DENIED_BUNDLE_SUFFIXES) for part in parts)
-        or any(parts[:len(prefix)] == prefix for prefix in DENIED_ROOT_PATHS)
-        or filename in DENIED_FILES
-        or filename.startswith('._')
-        or (len(parts) == 1 and fnmatchcase(filename, 'akitty-*-macos-*.zip'))
-        or path.suffix.lower() in DENIED_SUFFIXES
-        or filename == '.env'
-        or filename.startswith('.env.')
-    ):
-        errors.append('excluded private/generated filename')
-    if path.suffix in {'.zig', '.zon'}:
+    if pathlib.PurePosixPath(name).suffix.lower() in {'.zig', '.zon'}:
         errors.append('Zig source is prohibited')
     public_notice = PUBLIC_NOTICE_HASHES.get(name) == hashlib.sha256(data).hexdigest()
     patterns = PATTERNS[:-1] if public_notice else PATTERNS
     if any(pattern.search(data) for pattern in patterns):
         errors.append('possible credential or private machine/account data')
     return errors
+
+
+def ignored_paths(files, rules):
+    """Apply the audited ignore files without using local checkout settings."""
+    with tempfile.TemporaryDirectory(prefix='akitty-public-audit-') as temporary:
+        root = pathlib.Path(temporary)
+        git = ['git', '-C', temporary, '--git-dir=.git', '--work-tree=.']
+        subprocess.run([*git, 'init', '--quiet', '--template='], check=True)
+        for name, data in rules.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        result = subprocess.run(
+            [*git, '-c', 'core.ignoreCase=true', '-c', f'core.excludesFile={os.devnull}',
+             'check-ignore', '--no-index', '-z', '--stdin'],
+            input=b''.join(b'./' + os.fsencode(name) + b'\0' for name in files),
+            stdout=subprocess.PIPE,
+        )
+        if result.returncode not in (0, 1):
+            result.check_returncode()
+        return {os.fsdecode(name.removeprefix(b'./')) for name in result.stdout.split(b'\0') if name}
+
 
 # Prose such as "a sibling such as /Users/alice2" names no real account, so a
 # message may mention a home directory only for these placeholder accounts.
@@ -129,20 +114,22 @@ def main():
     if args.messages:
         return audit_messages(args.messages)
     cmd = ['git', 'ls-tree', '-r', '--name-only', '-z', args.revision] if args.revision else ['git', 'ls-files', '--cached', '-z']
-    files = subprocess.check_output(cmd).decode().split('\0')
-    count = 0
+    files = [os.fsdecode(name) for name in subprocess.check_output(cmd).split(b'\0') if name]
+    if '.gitignore' not in files:
+        raise SystemExit('Public-file audit requires a tracked root .gitignore.')
+
+    def read_blob(name):
+        return subprocess.check_output(['git', 'show', f'{args.revision or ""}:{name}'])
+
+    rules = {name: read_blob(name) for name in files if pathlib.PurePosixPath(name).name == '.gitignore'}
+    ignored = ignored_paths(files, rules)
     failed = False
-    for name in filter(None, files):
-        spec = f'{args.revision}:{name}' if args.revision else f':{name}'
-        data = subprocess.check_output(['git', 'show', spec])
-        for error in violations(name, data):
+    for name in files:
+        errors = ['excluded private/generated filename'] if name in ignored else violations(name, read_blob(name))
+        for error in errors:
             print(f'{name}: {error}')
             failed = True
-        count += 1
-    if not count:
-        print('No staged/tracked files to audit; refusing an empty publication check.')
-        return 1
-    print(f'Public-file audit: {count} files; {"FAILED" if failed else "passed"}.')
+    print(f'Public-file audit: {len(files)} files; {"FAILED" if failed else "passed"}.')
     return int(failed)
 if __name__ == '__main__':
     sys.exit(main())

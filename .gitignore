@@ -1,7 +1,7 @@
 # Build, test and package output
-/target/
+target/
 /build/
-/macos/.build/
+.build/
 node_modules/
 /packages/akitty-sdk/dist/
 /packages/akitty-web/test-results/
