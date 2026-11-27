@@ -2758,3 +2758,31 @@ for both of `GlyphClusters.merge`'s two triggers, over a set of bases and all 26
 asserts that merge really would have joined the pair (33 joins, so the property is not vacuous) and that
 eligibility refuses the leading cell. A third trigger added to merge without widening the refusal set
 fails here, and `merge`'s doc comment now points back at it.
+
+## Bitmap texture reuse and backing-scale changes
+
+The native probe first measured four-pane Unicode scrolling and typing, plus a
+single-pane typing control. A four-second stack sample found CoreText drawing
+on the background raster queues. The first experiment removed temporary glyph
+arrays and repeated drawing setup. Across three alternating runs per version,
+scroll presentation p95 was 31.72 ms before and 32.18 ms after, and median
+process CPU was 35.03% and 39.00%. Single-pane CPU also varied across runs.
+The experiment was removed after it failed to show a repeatable improvement.
+
+The retained change reuses the same-sized bitmap texture for a full upload
+when no submitted GPU frame can sample it. An in-flight frame or a change in
+dimensions still requires a replacement texture. The offscreen Metal test
+checks texture identity and exact pixels while idle and with a held command.
+The backing-scale regression changes the scale between raster completion and
+publication, keeping the window size in points fixed. Metal and software both
+discard the old-scale frame and publish its replacement.
+
+On an Apple M5 Max at 2x, the `four-unicode-scroll` scene produced 511–513
+background bitmap uploads per 60-input baseline run. Every upload used the
+replacement path. The final candidate had 511 uploads and zero replacements.
+It copied approximately the same 2.5 GB of logical bitmap payload over the
+measurement window. Baseline presentation p95 pooled across three runs was
+31.72 ms, versus 32.43 ms for the final candidate's one complete 60-input run.
+Process CPU was 35.03% at the baseline median and 35.08% in the candidate run.
+These results quantify texture reuse. App-wide speed and physical key-to-paint
+latency require separate measurements.

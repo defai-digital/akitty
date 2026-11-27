@@ -511,11 +511,11 @@ enum CursorStyle: String, Codable, CaseIterable, Sendable {
     nonisolated static func ordered(_ placements: [ImagePlacement]) -> [ImagePlacement] {
         placements.enumerated().sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
     }
-    /// Same partial-upload rule as the single texture: replace damaged rows in place when the GPU is idle.
+    /// Update the existing bitmap texture when no submitted frame can still sample it.
     private func upload(into current: MTLTexture?, bitmap: CGContext, damage: Range<Int>?) throws -> MTLTexture {
         guard let data = bitmap.data else { throw AkittyError.core("Render bitmap unavailable") }
-        if let current, let damage, current.width == bitmap.width, current.height == bitmap.height, pending.count == 0 {
-            // Nothing on the GPU is reading the texture, so upload only the rows that changed.
+        if let current, current.width == bitmap.width, current.height == bitmap.height, pending.count == 0 {
+            let damage = damage ?? 0..<bitmap.height
             if !damage.isEmpty {
                 current.replace(region: MTLRegionMake2D(0, damage.lowerBound, bitmap.width, damage.count), mipmapLevel: 0,
                                 withBytes: data + damage.lowerBound * bitmap.bytesPerRow, bytesPerRow: bitmap.bytesPerRow)

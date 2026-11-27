@@ -108,8 +108,9 @@ with the shared protocols, authority primitives, and Unix child cleanup in
   become hidden, occluded, minimized, or detached stop rasterizing, release window-sized bitmap/texture retention,
   and force a full repaint when they become visible again. Focus/visibility changes re-evaluate the pending deadline,
   and shutdown invalidates it before closing the session.
-  The Metal texture is updated in place for the changed pixel rows when no GPU frame is pending. Software fallback
-  frames are always full.
+  Metal updates a same-sized bitmap texture in place when no GPU frame is pending, including when every pixel row
+  needs replacement. Software fallback frames are always full. A raster that finishes after the backing scale
+  changes is discarded and redrawn before publication.
   Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
   the cell box rather than through the font (rows are taller than glyphs, so font strokes leave gaps). Other
   non-ASCII text is fitted into its cell: wide glyphs are centred and shrunk to fit, and `GlyphClusters` joins emoji

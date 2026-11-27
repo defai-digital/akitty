@@ -343,12 +343,13 @@ struct RenderReuse: Equatable {
     }
     // A new backing scale changes the cell's device-pixel size even when the grid does not change.
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resizeTerminal(); redraw() }
+    private var backingScale: CGFloat { window?.backingScaleFactor ?? 2 }
     private func resizeTerminal() {
         guard bounds.width > 20, bounds.height > 20, !stopped else { return }
         let cols = min(512, max(2, Int((bounds.width - 16) / cellSize.width)))
         let rows = min(256, max(1, min(32768 / cols, Int((bounds.height - 16) / cellSize.height))))
         // Programs sizing graphics ask for cell pixels (CSI 16 t); report device pixels.
-        let scale = window?.backingScaleFactor ?? 2
+        let scale = backingScale
         let pixels = (min(256, max(1, Int((cellSize.width * scale).rounded()))), min(512, max(1, Int((cellSize.height * scale).rounded()))))
         if pixels != lastCellPixels, (try? session.call("cell_size", ["width": pixels.0, "height": pixels.1])) != nil { lastCellPixels = pixels }
         guard lastGrid != (cols, rows) else { return }
@@ -565,6 +566,17 @@ struct RenderReuse: Equatable {
               previous.cursor.visible == next.cursor.visible else { return false }
         return true
     }
+    private func canPublishRaster(appearance: RenderAppearance, generation: Int, scale: CGFloat) -> Bool {
+        // Theme, backing scale or texture ownership can change while the raster queue draws.
+        // Rebuild from full damage so the replacement has pixels and atlas entries for the new surface.
+        guard appearance == renderAppearance, generation == releaseGeneration, scale == backingScale else {
+            pendingDamage = nil
+            redraw()
+            flushDeferredPoll()
+            return false
+        }
+        return true
+    }
     private func redraw(imageOnly: Bool = false) {
         guard let snapshot, bounds.width > 0, bounds.height > 0, !stopped else { return }
         // Hidden panes still apply snapshot side effects, but retain no pixels and do no raster work.
@@ -575,14 +587,14 @@ struct RenderReuse: Equatable {
             do {
                 presenter.startFrame(revision: snapshot.revision)
                 try presenter.updateImages(placements: snapshot.images ?? [], pixels: imageStore.entries,
-                                           grid: GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cellSize, scale: window?.backingScaleFactor ?? 2))
+                                           grid: GridGeometry(cols: snapshot.cols, rows: snapshot.rows, cell: cellSize, scale: backingScale))
                 onNativeFrameEvent?(.handedOff(snapshot.revision))
             } catch { renderFailed(error.localizedDescription) }
             return
         }
         if rasterInFlight { rasterPending = true; return }
         rasterInFlight = true; rasterPending = false
-        let size = bounds.size, scale = window?.backingScaleFactor ?? 2
+        let size = bounds.size, scale = backingScale
         let fontName = font.fontName, fontSize = font.pointSize, cells = cellSize, cjkFontName = preferences.cjkFont, marked = composition.text
         // With Metal, frames that show images split the text into two layers and let the GPU composite each image from
         // its own texture, so an animation frame re-uploads one texture instead of repainting the window. Frames without
@@ -613,17 +625,7 @@ struct RenderReuse: Equatable {
                     guard let self else { return }
                     self.rasterInFlight = false
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
-                    guard !self.stopped else { return }
-                    guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
-                    // Textures were released while this frame was composed. For a text frame that means UVs
-                    // and instance rows into pages the presenter no longer owns: publishing would fail the
-                    // full-repaint guard, and renderFailed disables Metal for this pane for good. A bitmap or
-                    // layered frame would instead upload a whole window of pixels that is about to be
-                    // replaced anyway. Every handoff drops such a frame and composes again, which is always
-                    // recoverable because the composer's own release has already forced a full repaint.
-                    guard generation == self.releaseGeneration else {
-                        self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
-                    }
+                    guard !self.stopped, self.canPublishRaster(appearance: appearance, generation: generation, scale: scale) else { return }
                     if size == self.bounds.size, self.paneVisible, let presenter = self.presenter {
                         do {
                             presenter.startFrame(revision: snapshot.revision)
@@ -644,13 +646,7 @@ struct RenderReuse: Equatable {
                     guard let self else { return }
                     self.rasterInFlight = false; self.lastTextFramed = false
                     self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
-                    guard !self.stopped else { return }
-                    // A theme changed while this frame was drawn: its blank cells assume the old clear colour, so
-                    // presenting it would flash the new background behind them. Repaint fully instead.
-                    guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
-                    guard generation == self.releaseGeneration else {
-                        self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
-                    }
+                    guard !self.stopped, self.canPublishRaster(appearance: appearance, generation: generation, scale: scale) else { return }
                     do {
                         let frame = try result.get()
                         // A frame that finished after the pane left its window would re-retain the pixels just released.
@@ -672,11 +668,7 @@ struct RenderReuse: Equatable {
                 guard let self else { return }
                 self.rasterInFlight = false; self.lastTextFramed = false
                 self.onNativeFrameEvent?(.rasterReady(snapshot.revision))
-                guard !self.stopped else { return }
-                guard appearance == self.renderAppearance else { self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return }
-                guard generation == self.releaseGeneration else {
-                    self.pendingDamage = nil; self.redraw(); self.flushDeferredPoll(); return
-                }
+                guard !self.stopped, self.canPublishRaster(appearance: appearance, generation: generation, scale: scale) else { return }
                 do {
                     let frame = try result.get()
                     if size == self.bounds.size, self.paneVisible {

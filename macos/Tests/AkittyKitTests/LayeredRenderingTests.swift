@@ -144,7 +144,44 @@ final class LayeredRenderingTests: XCTestCase {
         XCTAssertFalse(TerminalView.isImageOnlyUpdate(previous: previous, next: scrolled), "a scrolled partial moved text rows")
     }
 
-    // MARK: Presenter image textures
+    // MARK: Presenter textures
+
+    @MainActor func testFullBitmapReusesTheTextureOnlyWhenTheGPUIsIdle() throws {
+        let presenter: MetalPresenter
+        do { presenter = try MetalPresenter() } catch { throw XCTSkip("Metal unavailable: \(error)") }
+        let redCell = try snapshot(cells: [cell(0, 0, bg: [255, 0, 0])])
+        let first = try GridRasterizer.make(snapshot: redCell, size: size,
+                                            scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        let second = try GridRasterizer.make(snapshot: snapshot(cells: [cell(2, 3, bg: [0, 0, 255])]), size: size,
+                                             scale: 2, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        try presenter.update(bitmap: first)
+        let texture = try XCTUnwrap(presenter.texture)
+        try presenter.update(bitmap: second)
+        XCTAssertTrue(presenter.texture === texture, "the second full upload should reuse the idle texture")
+        XCTAssertEqual(try presenter.renderOffscreen(width: second.width, height: second.height), bytes(second))
+
+        let held = try presenter.holdFrameInFlight()
+        do {
+            defer { held.release(); held.command.waitUntilCompleted() }
+            try presenter.update(bitmap: first)
+            XCTAssertFalse(presenter.texture === texture, "the in-flight frame must keep its original texture")
+        }
+        XCTAssertEqual(try presenter.renderOffscreen(width: first.width, height: first.height), bytes(first))
+
+        var originalPixels = Data(count: second.bytesPerRow * second.height)
+        originalPixels.withUnsafeMutableBytes { pixels in
+            texture.getBytes(pixels.baseAddress!, bytesPerRow: second.bytesPerRow,
+                             from: MTLRegionMake2D(0, 0, second.width, second.height), mipmapLevel: 0)
+        }
+        XCTAssertEqual(originalPixels, bytes(second), "the original texture's pixels must survive replacement")
+
+        let replacement = try XCTUnwrap(presenter.texture)
+        let resized = try GridRasterizer.make(snapshot: redCell, size: size,
+                                              scale: 1, fontName: "Menlo", fontSize: 13, cellSize: cell, composition: "")
+        try presenter.update(bitmap: resized)
+        XCTAssertFalse(presenter.texture === replacement, "an idle texture still needs replacement when its size changes")
+        XCTAssertEqual(try presenter.renderOffscreen(width: resized.width, height: resized.height), bytes(resized))
+    }
 
     @MainActor func testPresenterUpdatesOnlyTheChangedImageTexture() throws {
         let presenter: MetalPresenter

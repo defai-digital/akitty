@@ -7,6 +7,11 @@ private final class WeakTerminal {
     init(_ value: TerminalView) { self.value = value }
 }
 
+private final class BackingScaleWindow: NSWindow {
+    var simulatedScale: CGFloat = 2
+    override var backingScaleFactor: CGFloat { simulatedScale }
+}
+
 final class LifecycleStressTests: XCTestCase {
     @MainActor func testRealPanesResizePollAndReleaseAfterRepeatedShutdown() async throws {
         try await runRepeatedShutdownTest(forceSoftware: true, rounds: 4, resizeSteps: 8)
@@ -14,6 +19,49 @@ final class LifecycleStressTests: XCTestCase {
 
     @MainActor func testRealMetalPanesResizeHideRestoreAndReleaseAfterRepeatedShutdown() async throws {
         try await runRepeatedShutdownTest(forceSoftware: false, rounds: 2, resizeSteps: 4)
+    }
+
+    @MainActor func testBackingScaleChangeDiscardsTheInFlightFrameAtTheSamePointSize() async throws {
+        _ = NSApplication.shared
+        for forceSoftware in [true, false] {
+            let window = BackingScaleWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                                            styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            var preferences = TerminalPreferences()
+            preferences.fontName = "Menlo"
+            let pane = try TerminalView(headless: true, forceSoftware: forceSoftware, forceShaderFailure: false, initial: preferences)
+            defer { pane.onNativeFrameEvent = nil; pane.shutdown(); pane.removeFromSuperview(); window.close() }
+            if !forceSoftware { try XCTSkipIf(pane.health.usesSoftware, "Metal renderer unavailable") }
+
+            pane.frame = try XCTUnwrap(window.contentView).bounds
+            window.contentView?.addSubview(pane)
+            _ = try pane.session.call("feed", ["text": "backing scale"])
+
+            var readyFrames = 0
+            var firstPublication: Int?
+            pane.onNativeFrameEvent = { event in
+                switch event {
+                case .rasterReady:
+                    readyFrames += 1
+                    if readyFrames == 1 {
+                        let pointSize = pane.bounds.size
+                        window.simulatedScale = 1
+                        pane.viewDidChangeBackingProperties()
+                        XCTAssertEqual(pane.bounds.size, pointSize)
+                    }
+                case .handedOff, .rasterCompleted:
+                    if firstPublication == nil { firstPublication = readyFrames }
+                default: break
+                }
+            }
+            pane.poll()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while (firstPublication == nil || readyFrames < 2), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(firstPublication, 2, "the first publication must come from the replacement raster")
+            if !forceSoftware { XCTAssertFalse(pane.health.usesSoftware) }
+        }
     }
 
     /// `releaseRetainedFrames` drops the presenter's textures on the main thread while the composer is reset
