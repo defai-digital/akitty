@@ -6,6 +6,12 @@ node_modules/
 /packages/akitty-sdk/dist/
 /packages/akitty-web/test-results/
 /packages/akitty-web/playwright-report/
+/install.sh
+/AkiTTY-*-macOS-*.zip
+/Akitty-macOS.zip
+/SHA256SUMS
+/appcast.xml
+/release.json
 /.coverage
 /coverage/
 .pytest_cache/
@@ -22,6 +28,9 @@ __pycache__/
 
 # Local workspaces, editor state and reference checkouts
 .DS_Store
+._*
+Thumbs.db
+Desktop.ini
 .idea/
 .vscode/
 xcuserdata/

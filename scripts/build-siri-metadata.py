@@ -70,6 +70,13 @@ def module_constants(intermediates, module, anchor, architecture):
     return sorted(p for p in selected.parent.glob("*.swiftconstvalues") if not p.name.endswith("-primary.swiftconstvalues"))
 
 
+def module_sources(directory):
+    return sorted(
+        path for path in directory.rglob("*.swift")
+        if path.is_file() and path.relative_to(directory).parts[0] != "Resources"
+    )
+
+
 def extract(build_dir, configuration, resources, binary):
     root = Path(__file__).resolve().parents[1]
     # Swift's build engine emits constants as a supplemental compile output.
@@ -90,7 +97,7 @@ def extract(build_dir, configuration, resources, binary):
             module_values = module_constants(intermediates, module, anchor, architectures[0])
             sources = work / (module + ".sources")
             constants = work / (module + ".constants")
-            sources.write_text("".join(str(p) + "\n" for p in sorted((root / "macos/Sources" / module).glob("*.swift"))))
+            sources.write_text("".join(f"{path}\n" for path in module_sources(root / "macos/Sources" / module)))
             constants.write_text("".join(str(p) + "\n" for p in module_values))
             output = work / module if module == "AkittyKit" else resources
             command = [

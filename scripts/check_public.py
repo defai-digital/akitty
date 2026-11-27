@@ -5,6 +5,7 @@ With --messages, check commit messages and author/committer identities instead:
 history is published with the tree and is far harder to correct afterwards.
 """
 import argparse
+from fnmatch import fnmatchcase
 import getpass
 import hashlib
 import os
@@ -21,7 +22,7 @@ DENIED_DIRS = {
 }
 DENIED_FILES = {
     'agents.md', 'agent.md', 'claude.md', 'gemini.md', 'copilot-instructions.md',
-    '.cursorrules', '.windsurfrules', '.ds_store', '.npmrc', '.netrc',
+    '.cursorrules', '.windsurfrules', '.ds_store', 'thumbs.db', 'desktop.ini', '.npmrc', '.netrc',
     '.git-credentials', '.cf', '.zsh_history', '.bash_history',
 }
 DENIED_SUFFIXES = {
@@ -31,6 +32,7 @@ DENIED_SUFFIXES = {
 DENIED_BUNDLE_SUFFIXES = ('.app', '.dsym', '.xcresult')
 DENIED_ROOT_PATHS = {
     ('build',), ('reference',), ('coverage',), ('.coverage',),
+    ('install.sh',), ('akitty-macos.zip',), ('sha256sums',), ('appcast.xml',), ('release.json',),
     ('packages', 'akitty-sdk', 'dist'),
     ('packages', 'akitty-web', 'test-results'),
     ('packages', 'akitty-web', 'playwright-report'),
@@ -60,6 +62,8 @@ def violations(name, data):
         any(part in DENIED_DIRS or part.endswith(DENIED_BUNDLE_SUFFIXES) for part in parts)
         or any(parts[:len(prefix)] == prefix for prefix in DENIED_ROOT_PATHS)
         or filename in DENIED_FILES
+        or filename.startswith('._')
+        or (len(parts) == 1 and fnmatchcase(filename, 'akitty-*-macos-*.zip'))
         or path.suffix.lower() in DENIED_SUFFIXES
         or filename == '.env'
         or filename.startswith('.env.')

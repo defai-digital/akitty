@@ -96,6 +96,15 @@ class SiriMetadataTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Missing Swift intent constants"):
                     metadata.module_constants(root, module, anchor, "x86_64")
 
+    def test_source_list_includes_nested_swift_files_and_excludes_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = [root / "Application/Window.swift", root / "SiriIntents.swift"]
+            for path in [*sources, root / "Resources/example.swift", root / "Application/README.md"]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            self.assertEqual(metadata.module_sources(root), sources)
+
 
 if __name__ == "__main__":
     unittest.main()

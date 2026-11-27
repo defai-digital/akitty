@@ -21,6 +21,9 @@ class PublicationTests(unittest.TestCase):
             'packages/akitty-sdk/dist/index.js',
             'packages/akitty-web/test-results/trace.zip',
             'packages/akitty-web/playwright-report/index.html',
+            'install.sh', 'AkiTTY-2.4.1-macOS-arm64.zip', 'Akitty-macOS.zip',
+            'SHA256SUMS', 'appcast.xml', 'release.json',
+            'assets/._icon-source.png', 'assets/Thumbs.db', 'assets/Desktop.ini',
         }
         ignored = subprocess.check_output(
             ['git', 'check-ignore', '--no-index', '--stdin'],
@@ -46,6 +49,7 @@ class PublicationTests(unittest.TestCase):
         for path in (
             'src/main.rs', 'docs/reference/protocol.md',
             'benchmarks/results/example.json', 'packages/akitty-web/akitty-vt.wasm',
+            'scripts/install.sh', 'distribution/fixtures/release.json',
         ):
             self.assertEqual(violations(path, b''), [], path)
     def test_messages_reject_real_home_directories_and_private_identities(self):
