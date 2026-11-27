@@ -222,6 +222,28 @@ final class AkittyTests: XCTestCase {
         XCTAssertEqual(try view.session.snapshot()?.text,before)
         view.unmarkText(); XCTAssertFalse(view.hasMarkedText())
     }
+    @MainActor func testControlChordDoesNotBypassMarkedText() throws {
+        _ = NSApplication.shared
+        let view = try TerminalView(headless: true, forceSoftware: true)
+        defer { view.shutdown() }
+        view.setMarkedText("にほん", selectedRange: NSRange(location: 3, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        let input = view.inputCount
+        for (keyCode, characters, ignoring) in [(UInt16(40), "\u{b}", "k"), (4, "\u{8}", "h")] {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control], timestamp: 0,
+                windowNumber: 0, context: nil, characters: characters, charactersIgnoringModifiers: ignoring, isARepeat: false, keyCode: keyCode))
+            view.keyDown(with: event)
+            XCTAssertEqual(view.inputCount, input)
+            XCTAssertTrue(view.hasMarkedText())
+        }
+        view.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        XCTAssertEqual(view.inputCount, input)
+        XCTAssertFalse(view.hasMarkedText())
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.control], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\u{b}", charactersIgnoringModifiers: "k", isARepeat: false, keyCode: 40))
+        view.keyDown(with: event)
+        XCTAssertEqual(view.inputCount, input + 1)
+    }
     @MainActor func testWideCellRasterizationAndBitmapBounds() async throws {
         _ = NSApplication.shared
         let session = try TerminalSession(cols:20,rows:3,headless:true)

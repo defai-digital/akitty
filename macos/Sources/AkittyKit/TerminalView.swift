@@ -821,7 +821,7 @@ struct RenderReuse: Equatable {
         case .legacy: break
         }
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
-        if event.modifierFlags.contains(.control), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
+        if event.modifierFlags.contains(.control), !hasMarkedText(), let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
             // Ctrl+Backspace (DEL) is ^H, as in xterm and kitty; 0x7F & 0x1F would be ^_ (undo in readline).
             if value == 127 { send("\u{8}"); return }
@@ -862,6 +862,10 @@ struct RenderReuse: Equatable {
         return keyCode == 115 || keyCode == 119 ? "\u{1b}\(appCursor ? "O" : "[")\(final)" : "\u{1b}O\(final)"
     }
     public override func doCommand(by selector: Selector) {
+        if hasMarkedText() {
+            if selector == #selector(cancelOperation(_:)) { composition.cancel(); redraw() }
+            return
+        }
         switch selector {
         case #selector(insertNewline(_:)): send("\r")
         case #selector(deleteBackward(_:)): send("\u{7f}")
