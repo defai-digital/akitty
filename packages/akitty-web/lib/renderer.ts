@@ -219,10 +219,19 @@ export class CanvasRenderer {
       return selected(col) ? this.theme.selectionBackground : cell.flags & CellFlags.INVERSE
         ? css(cell.fg_r, cell.fg_g, cell.fg_b) : css(cell.bg_r, cell.bg_g, cell.bg_b);
     };
+    const sameBackground = (first: number, second: number): boolean => {
+      const firstSelected = selected(first), secondSelected = selected(second);
+      if (firstSelected !== secondSelected) return this.theme.selectionBackground === backgroundAt(firstSelected ? second : first);
+      if (firstSelected) return true;
+      const a = cells[first], b = cells[second], aInverse = a.flags & CellFlags.INVERSE, bInverse = b.flags & CellFlags.INVERSE;
+      const ar = aInverse ? a.fg_r : a.bg_r, ag = aInverse ? a.fg_g : a.bg_g, ab = aInverse ? a.fg_b : a.bg_b;
+      const br = bInverse ? b.fg_r : b.bg_r, bg = bInverse ? b.fg_g : b.bg_g, bb = bInverse ? b.fg_b : b.bg_b;
+      return ar === br && ag === bg && ab === bb;
+    };
     const count = Math.min(cols, cells.length);
     for (let col = 0; col < count;) {
-      const start = col, bg = backgroundAt(col++);
-      while (col < count && backgroundAt(col) === bg) col++;
+      const start = col++, bg = backgroundAt(start);
+      while (col < count && sameBackground(start, col)) col++;
       this.setFill(bg); this.ctx.fillRect(start * width, row * height, (col - start) * width, height);
     }
     for (let col = 0; col < Math.min(cols, cells.length); col++) {

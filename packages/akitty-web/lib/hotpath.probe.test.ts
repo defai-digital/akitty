@@ -50,6 +50,7 @@ describe.skipIf(!enabled)('web hot path probe', () => {
     const renderer = new CanvasRenderer(document.createElement('canvas'));
     const buffer = { getLineView: () => cells };
     time('hash one 200-cell ASCII row', 100_000, () => { (renderer as any).rowHash(buffer, 0); });
+    time('paint one 200-cell ASCII row', 10_000, () => { (renderer as any).paintRow(cells, 0, cells.length, null, () => ''); });
     term.free();
   });
 });

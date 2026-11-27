@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 import { CanvasRenderer, DEFAULT_THEME } from './renderer';
 import type { IRenderable, IScrollbackProvider } from './renderer';
 import { CellFlags, type TerminalCell } from './types';
+import type { SelectionCoordinates } from './selection-manager';
 
 describe('CanvasRenderer', () => {
   describe('Default Theme', () => {
@@ -130,5 +131,48 @@ describe('CanvasRenderer row hashing', () => {
     expect(rowHash()).toBeUndefined();
     cells[0]!.grapheme_len = 0; cells[0]!.flags = CellFlags.ITALIC;
     expect(rowHash()).toBeUndefined();
+  });
+});
+
+
+describe('CanvasRenderer background runs', () => {
+  test('preserves rectangles and colors across inverse and selection boundaries', () => {
+    const cell = (inverse = false): TerminalCell => ({
+      codepoint: 65, flags: inverse ? CellFlags.INVERSE : 0, width: 1,
+      fg_r: 40, fg_g: 50, fg_b: 60, bg_r: 10, bg_g: 20, bg_b: 30,
+      hyperlink_id: 0, grapheme_len: 0,
+    });
+    const cells = [cell(), cell(), cell(true), cell(true), cell()];
+    const paint = (selection: SelectionCoordinates | null, row = cells, selectionBackground?: string): [number, number, string][] => {
+      const renderer = new CanvasRenderer(document.createElement('canvas'), { fontSize: 10,
+        ...(selectionBackground ? { theme: { selectionBackground } } : {}) });
+      const context = (renderer as any).ctx;
+      const calls: [number, number, string][] = [];
+      context.fillRect = (x: number, _y: number, width: number, _height: number) => { calls.push([x, width, context.fillStyle]); };
+      (renderer as any).paintRow(row, 0, row.length, selection, () => '');
+      return calls.slice(1);
+    };
+    expect(paint(null)).toEqual([
+      [0, 16, 'rgb(10,20,30)'], [16, 16, 'rgb(40,50,60)'], [32, 8, 'rgb(10,20,30)'],
+    ]);
+    expect(paint({ startCol: 1, startRow: 0, endCol: 2, endRow: 0 })).toEqual([
+      [0, 8, 'rgb(10,20,30)'], [8, 16, DEFAULT_THEME.selectionBackground],
+      [24, 8, 'rgb(40,50,60)'], [32, 8, 'rgb(10,20,30)'],
+    ]);
+    cells[1] = cell(true);
+    cells[1].fg_r = 10; cells[1].fg_g = 20; cells[1].fg_b = 30;
+    const merged = [[0, 16, 'rgb(10,20,30)'], [16, 16, 'rgb(40,50,60)'], [32, 8, 'rgb(10,20,30)']];
+    expect(paint(null)).toEqual(merged);
+    expect(paint({ startCol: 1, startRow: 0, endCol: 1, endRow: 0 }, cells, 'rgb(10,20,30)')).toEqual(merged);
+    expect(paint({ startCol: 0, startRow: 0, endCol: 0, endRow: 0 }, cells, 'rgb(10,20,30)')).toEqual(merged);
+    const styled = [cell(), cell()];
+    styled[0]!.flags = CellFlags.BOLD;
+    expect(paint(null, styled)).toEqual([[0, 16, 'rgb(10,20,30)']]);
+    const different = [cell(), cell(), cell(true), cell(true)];
+    different[1]!.bg_b = 31; different[3]!.fg_b = 61;
+    expect(paint(null, different)).toEqual([
+      [0, 8, 'rgb(10,20,30)'], [8, 8, 'rgb(10,20,31)'],
+      [16, 8, 'rgb(40,50,60)'], [24, 8, 'rgb(40,50,61)'],
+    ]);
   });
 });
