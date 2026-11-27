@@ -733,7 +733,7 @@ impl Model {
                     self.graphics.resize_alternate(alternate_delta, rows);
                 },
                 Event::ClearVisible { alternate, rows } => self.graphics.delete_visible(alternate, rows),
-                Event::ClearHistory => self.graphics.delete_scrollback(),
+                Event::ClearHistory if !self.in_alt => self.graphics.delete_scrollback(),
                 Event::Alternate(enabled) => {
                     self.graphics.cancel_pending();
                     if self.in_alt && !enabled { self.graphics.leave_alternate_screen(); }
@@ -2294,6 +2294,27 @@ mod tests {
         model.feed(b"\x1b[?1049h\x1b[1;1H");
         model.feed(place(3).as_bytes());
         model.feed(b"\x1b[2J");
+        assert!(model.graphics.placements.is_empty());
+    }
+
+    #[test]
+    fn alternate_erase_history_preserves_main_scrollback_placements() {
+        let mut model = Model::new(Size::validate(20, 3).unwrap(), 50);
+        model.cell_px = (8, 16);
+        model.feed(place(1).as_bytes());
+        model.feed("\r\n".repeat(5).as_bytes());
+        let line = model.graphics.placements[0].line;
+        let history = model.term.screen().history.len();
+        assert!(line < 0 && history > 0);
+
+        model.feed(b"\x1b[?1049h\x1b[3J");
+        assert_eq!(model.graphics.placements.len(), 1);
+        assert_eq!(model.graphics.placements[0].line, line);
+
+        model.feed(b"\x1b[?1049l");
+        assert_eq!(model.term.screen().history.len(), history);
+        model.feed(b"\x1b[3J");
+        assert!(model.term.screen().history.is_empty());
         assert!(model.graphics.placements.is_empty());
     }
 

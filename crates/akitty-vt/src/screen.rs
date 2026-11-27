@@ -209,7 +209,7 @@ impl Row {
     pub fn trailing_padding(&self) -> bool {
         self.wrapped
             && self.wrap_padding
-            && self.cells.last().is_some_and(|cell| !cell.written())
+            && self.cells.last().is_some_and(|cell| cell.width() == 1 && !cell.written())
     }
     pub fn text(&self) -> String {
         self.cells
@@ -886,13 +886,13 @@ impl Screen {
                     row.used()
                 };
                 if index == old_cursor_row {
-                    used = used.max(old_cursor_col + usize::from(old_wrap));
-                    cursor_logical = Some(logical.len() + old_cursor_col + usize::from(old_wrap));
+                    used = used.max(old_cursor_col + usize::from(old_wrap && !row.trailing_padding()));
+                    cursor_logical = Some(logical.len() + old_cursor_col + usize::from(old_wrap && !row.trailing_padding()));
                 }
                 if index == old_saved_row {
-                    used = used.max(old_saved_col + usize::from(old_saved_wrap));
+                    used = used.max(old_saved_col + usize::from(old_saved_wrap && !row.trailing_padding()));
                     saved_logical =
-                        Some(logical.len() + old_saved_col + usize::from(old_saved_wrap));
+                        Some(logical.len() + old_saved_col + usize::from(old_saved_wrap && !row.trailing_padding()));
                 }
                 if index == old_viewport_row {
                     viewport_logical = Some(logical.len());

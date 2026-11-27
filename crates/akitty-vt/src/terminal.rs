@@ -1275,7 +1275,8 @@ impl Terminal {
                 // The last column is padding only when it holds nothing. A wide glyph wrapping while the
                 // cursor sits on an already-written last column leaves that text visible, and claiming the
                 // column as padding would drop it from selection and from a wrapped-row join.
-                let empty = !self.screen().rows[row].cells[self.cols() - 1].written();
+                let last = &self.screen().rows[row].cells[self.cols() - 1];
+                let empty = last.width() == 1 && !last.written();
                 self.screen_mut().rows[row].wrap_padding = !self.screen().cursor.pending_wrap && empty;
                 self.screen_mut().rows[row].wrapped = true;
                 self.screen_mut().cursor.position.col = 0;
@@ -3538,6 +3539,75 @@ mod tests {
         assert!(!term.screen().rows[0].trailing_padding(), "a cropped row's new last column is content");
         term.screen_mut().select(Position { row: 0, col: 0 }, Position { row: 0, col: 2 });
         assert_eq!(term.screen().selection_text(), "abc", "cropping must not mark a real character as padding");
+    }
+
+    #[test]
+    fn reflow_keeps_active_and_saved_cursors_on_wide_glyph_trailing_cells() {
+        for saved in [false, true] {
+            let mut term = Terminal::new(4, 4, 10).unwrap();
+            feed(&mut term, "ab界\x1b[1;4H語\x1b[1;4H".as_bytes());
+            assert_eq!(term.cursor(), Position { row: 0, col: 3 });
+            assert!(!term.screen().rows[0].trailing_padding());
+            if saved { feed(&mut term, b"\x1b7\x1b[2;1H"); }
+            term.resize(8, 4, |_| {}).unwrap();
+            if saved { feed(&mut term, b"\x1b8"); }
+            assert_eq!(term.cursor(), Position { row: 0, col: 3 });
+            feed(&mut term, b"X");
+            let cells = &term.screen().rows[0].cells;
+            assert_eq!((cells[3].ch, cells[3].width()), ('X', 1));
+            assert_eq!((cells[4].ch, cells[4].width()), ('語', 2));
+            assert_eq!(cells[5].width(), 0);
+        }
+    }
+
+    #[test]
+    fn reflow_preserves_a_wide_glyph_with_the_cursor_on_its_continuation_row() {
+        for saved in [false, true] {
+            let mut term = Terminal::new(4, 4, 10).unwrap();
+            feed(&mut term, "ab界\x1b[1;4H語\x1b[2;1H\x1b[2K".as_bytes());
+            if saved { feed(&mut term, b"\x1b7\x1b[1;1H"); }
+            term.resize(8, 4, |_| {}).unwrap();
+            if saved { feed(&mut term, b"\x1b8"); }
+            assert_eq!(term.cursor(), Position { row: 0, col: 4 });
+            feed(&mut term, b"X");
+            let cells = &term.screen().rows[0].cells;
+            assert_eq!((cells[2].ch, cells[2].width()), ('界', 2));
+            assert_eq!(cells[3].width(), 0);
+            assert_eq!((cells[4].ch, cells[4].width()), ('X', 1));
+        }
+    }
+
+    #[test]
+    fn reflow_discards_wrap_padding_under_the_active_cursor() {
+        let mut term = Terminal::new(4, 2, 10).unwrap();
+        feed(&mut term, "abc界\x1b[1;4H".as_bytes());
+        term.resize(5, 1, |_| {}).unwrap();
+        assert_eq!(term.screen().rows[0].text(), "abc界");
+    }
+
+    #[test]
+    fn reflow_discards_wrap_padding_with_pending_cursors() {
+        for active in [false, true] {
+            let mut term = Terminal::new(4, 2, 10).unwrap();
+            feed(&mut term, "abcd\x1b7\x1b[1;4H\x1b[K界".as_bytes());
+            if active { feed(&mut term, b"\x1b8"); }
+            term.resize(5, 2, |_| {}).unwrap();
+            assert_eq!(term.screen().rows[0].text().trim_end(), "abc界");
+            if !active { feed(&mut term, b"\x1b8"); }
+            assert_eq!(term.cursor(), Position { row: 0, col: 3 });
+            feed(&mut term, b"X");
+            assert_eq!(term.screen().rows[0].text().trim_end(), "abcX");
+        }
+    }
+
+    #[test]
+    fn reflow_discards_a_hard_line_blank_under_the_saved_cursor() {
+        let mut term = Terminal::new(5, 2, 10).unwrap();
+        feed(&mut term, b"abcd\x1b7\r\nW\x1b[1;1H");
+        term.resize(4, 2, |_| {}).unwrap();
+        assert_eq!(term.screen().rows[0].text(), "abcd");
+        assert_eq!(term.screen().rows[1].text().trim_end(), "W");
+        assert!(term.screen().history.is_empty());
     }
 
     #[test]

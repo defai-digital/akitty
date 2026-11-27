@@ -7,7 +7,7 @@ and source/build input hashes. `scripts/build-wasm.sh` builds those local source
 it does not fetch a terminal project or apply an upstream patch.
 
 The native 2.4.1 workspace version rebuilds the artifact with Rust 1.99.1. Its SHA-256 is
-`ef062797c6730c8d0f39b6537aab38d9c82ac788f10e8fe5178f0b60198fb405`;
+`6bcc1688c11ebb44d87a469c3dccda96ef4fec37dba4b1140195b65d6481bf84`;
 the matching workspace and engine input hashes are in `wasm-provenance.json`.
 
 ## Current implementation
