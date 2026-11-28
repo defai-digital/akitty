@@ -13,12 +13,12 @@ you review the exact command before anything is sent to the shell.
 
 [Install](#install) · [Features](#everyday-terminal-features) ·
 [Agents](#work-with-ai-agents) · [User guide](docs/USER_GUIDE.md) ·
-[Release notes](docs/releases/2.4.2.md) · [All documentation](docs/README.md)
+[Release notes](docs/releases/2.4.3.md) · [All documentation](docs/README.md)
 
 ## Install
 
-Download **AkiTTY 2.4.2** for Apple Silicon, unzip it, and move **Akitty.app**
-to Applications. [Download ZIP](https://github.com/defai-digital/akitty/releases/download/v2.4.2/AkiTTY-2.4.2-macOS-arm64.zip) ·
+Download **AkiTTY 2.4.3** for Apple Silicon, unzip it, and move **Akitty.app**
+to Applications. [Download ZIP](https://github.com/defai-digital/akitty/releases/download/v2.4.3/AkiTTY-2.4.3-macOS-arm64.zip) ·
 [Latest release](https://github.com/defai-digital/akitty/releases/latest)
 
 Or use the installer. It verifies the checksum, code signature, and

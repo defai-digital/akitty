@@ -68,11 +68,14 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
           return registration;
         };
         const report = (event, id) => {
-          sequence += 1;
-          const version = generation, invalidate = () => { if (generation === version) { started = null; current = null; currentOwner = null; } };
+          const sent = ++sequence, version = generation;
+          const invalidate = () => {
+            if (generation !== version || sequence !== sent) return;
+            started = null; current = null; currentOwner = null;
+          };
           // Companions may finish in any order. AkiTTY orders each reporter's events and rejects older epochs.
           try {
-            const child = spawn(companion, ["ax-code-report", event, id, reporter, String(sequence), started], { stdio: ["ignore", "pipe", "ignore"] });
+            const child = spawn(companion, ["ax-code-report", event, id, reporter, String(sent), started], { stdio: ["ignore", "pipe", "ignore"] });
             let output = "";
             child.stdout.on("data", (chunk) => { if (output.length < 4096) output += chunk; });
             child.on("error", invalidate);

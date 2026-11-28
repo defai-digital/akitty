@@ -193,6 +193,10 @@ final class AgentIntegrationsTests: XCTestCase {
           } else await send("session.deleted", { info: { id: "ses_old" } });
         }
         await send("session.created", { info: { id: "ses_new" } });
+        if (process.argv[3] === "late-failure") {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          process.exit(0);
+        }
         if (process.argv[3] === "fork") {
           await send("session.status", { sessionID: "ses_new", status: { type: "busy" } });
           await send("session.created", { info: { id: "ses_child", parentID: "ses_new" } });
@@ -209,7 +213,7 @@ final class AgentIntegrationsTests: XCTestCase {
         await new Promise((resolve) => setTimeout(resolve, 1000));
 
         """.utf8).write(to: driver)
-        for mode in ["delete", "exit", "reload", "fork", "dispose", "owner", "retry", "blocked-child", "restart"] {
+        for mode in ["delete", "exit", "reload", "fork", "dispose", "owner", "retry", "blocked-child", "restart", "late-failure"] {
             let log = root.appendingPathComponent("reports-\(mode)")
             let companion = try script("akitty-agent-\(mode)", in: root, body: """
             if [ "$1" = "ax-code-reporter" ]; then
@@ -224,7 +228,7 @@ final class AgentIntegrationsTests: XCTestCase {
             fi
             printf '%s %s %s %s %s\\n' "$2" "$3" "$4" "$5" "$6" >> '\(log.path)'
             if [ "$3" = "ses_old" ]; then sleep 0.3; fi
-            if [ "\(mode)" = "restart" ] && [ "$3" = "ses_old" ]; then printf '{"version":1,"ok":false}\\n'; else printf '{"version":1,"ok":true}\\n'; fi
+            if { [ "\(mode)" = "restart" ] || [ "\(mode)" = "late-failure" ]; } && [ "$3" = "ses_old" ]; then printf '{"version":1,"ok":false}\\n'; else printf '{"version":1,"ok":true}\\n'; fi
             """)
             let settings = AXCodeMCPSettings(path: settings.path, executable: companion)
             try Data(settings.pluginSource.utf8).write(to: plugin)

@@ -35,7 +35,7 @@ behavior, physical IME or every OS/font combination.
 
 ## Status
 
-- Source version **0.6.18**. The package version moves independently of the native app.
+- Source version **0.6.19**. The package version moves independently of the native app.
 - The package is **private** (`"private": true`) and is **not published** to npm or GitHub Packages. Consume it from
   source, for example through a workspace or Git dependency.
 - It exports TypeScript source (`lib/index.ts`) and `akitty-vt.wasm`; there is no prebuilt bundle. The consuming

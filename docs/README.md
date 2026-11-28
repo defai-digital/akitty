@@ -1,7 +1,7 @@
 # AkiTTY documentation
 
 Start with the [project README](../README.md) for installation and an overview.
-The current release is described in [AkiTTY 2.4.2](releases/2.4.2.md); changes
+The current release is described in [AkiTTY 2.4.3](releases/2.4.3.md); changes
 on `main` since then are in [unreleased](releases/unreleased.md).
 
 ## Use the app

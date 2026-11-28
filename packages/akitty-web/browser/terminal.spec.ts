@@ -7,6 +7,29 @@ test.beforeEach(async ({ page }) => {
   await page.waitForFunction(() => 'fixture' in window)
 })
 
+test('partial redraws keep the translucent scrollbar at the same opacity', async ({ page }) => {
+  const pixels = await page.evaluate(async () => {
+    const { CanvasRenderer } = await import('/lib/renderer.ts')
+    const canvas = document.createElement('canvas')
+    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 })
+    const buffer = {
+      getLine: () => null,
+      getCursor: () => ({ x: 0, y: 0, visible: false }),
+      getDimensions: () => ({ cols: 12, rows: 8 }),
+      isRowDirty: (row: number) => row === 0,
+      clearDirty: () => {},
+    }
+    const history = { getScrollbackLength: () => 24, getScrollbackLine: () => null }
+    const sample = () => canvas.getContext('2d')!.getImageData(canvas.width - 5, canvas.height - 3, 1, 1).data[0]
+    renderer.render(buffer, true, 0, history, 1)
+    const first = sample()
+    renderer.render(buffer, false, 0, history, 1)
+    return { first, second: sample() }
+  })
+  expect(pixels.first).toBeGreaterThan(30)
+  expect(pixels.second).toBe(pixels.first)
+})
+
 test('large asynchronous output yields while preserving UTF-8, replies and final canvas state', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))

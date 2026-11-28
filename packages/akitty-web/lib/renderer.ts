@@ -147,6 +147,12 @@ export class CanvasRenderer {
     if (!forceAll && !anyDirty && !cursorChanged && !selectionRows?.size) {
       return false;
     }
+    const offset = Math.max(0, Math.floor(viewportY));
+    const height = dims.rows * this.metrics.height;
+    const thumbHeight = opacity > 0 && historyLength > 0 ? Math.max(20, height * dims.rows / (historyLength + dims.rows)) : 0;
+    const thumbTop = thumbHeight ? (height - thumbHeight) * (historyLength - offset) / historyLength : 0;
+    const firstThumbRow = Math.max(0, Math.floor(thumbTop / this.metrics.height));
+    const endThumbRow = Math.min(dims.rows, Math.ceil((thumbTop + thumbHeight) / this.metrics.height));
     this.frameLines.length = 0; this.font = ''; this.fill = '';
     const reusable = viewportY === 0 && !selection && !this.hoveredId && !this.hoveredRange;
     let hashes: (number | undefined)[] | undefined;
@@ -156,6 +162,7 @@ export class CanvasRenderer {
       const needed = new Set(dirtyRows);
       if (cursorChanged) { needed.add(this.lastCursor.y); needed.add(shownCursor.y); }
       for (const row of selectionRows ?? []) needed.add(row);
+      for (let row = Math.max(firstThumbRow, offset); row < endThumbRow; row++) needed.add(row - offset);
       // A transition back to row reuse needs a complete hash baseline.
       if (!reusable || retainHashes) buffer.prepareRows?.(needed);
     }
@@ -163,7 +170,8 @@ export class CanvasRenderer {
       hashes = Array.from({ length: dims.rows }, (_, row) => retainHashes && !dirtyRows.has(row) ? this.drawnRows[row] : this.rowHash(buffer, row));
       const differences = hashes.filter((hash, row) => hash !== this.drawnRows[row]).length;
       const opaque = !/rgba|transparent|hsla/i.test(this.theme.background) && !/^#[a-f0-9]{4}(?:[a-f0-9]{4})?$/i.test(this.theme.background);
-      if (!forceAll && differences > dims.rows / 2 && opaque && Number.isInteger(this.metrics.height * this.devicePixelRatio) && this.drawnRows.length === dims.rows) {
+      // A copied row would also move any scrollbar pixels already composited over it.
+      if (!forceAll && !thumbHeight && differences > dims.rows / 2 && opaque && Number.isInteger(this.metrics.height * this.devicePixelRatio) && this.drawnRows.length === dims.rows) {
         let best = dims.rows - differences;
         for (let amount = 1; amount <= Math.floor(dims.rows / 2); amount++) {
           let matches = 0;
@@ -179,14 +187,15 @@ export class CanvasRenderer {
         }
       }
     } else this.drawnRows = [];
-    const offset = Math.max(0, Math.floor(viewportY));
     let cursorRowPainted = false;
     for (let row = 0; row < dims.rows; row++) {
       const movedCursorRow = cursorChanged && (row === this.lastCursor.y || row === shownCursor.y);
       const cursorRepair = shift > 0 && (row === this.lastCursor.y - shift || row === shownCursor.y || row === 0);
       const reported = dirtyRows.has(row);
       const changed = hashes ? hashes[row] === undefined ? reported : hashes[row] !== this.drawnRows[row + shift] : reported;
-      if (!forceAll && !changed && !movedCursorRow && !cursorRepair && !selectionRows?.has(row)) continue;
+      // Restore the pixels under the translucent thumb before compositing it again.
+      const underThumb = row >= firstThumbRow && row < endThumbRow;
+      if (!forceAll && !changed && !movedCursorRow && !cursorRepair && !underThumb && !selectionRows?.has(row)) continue;
       let cells: TerminalCell[] | null;
       let sourceRow = row;
       if (offset > row) { sourceRow = historyLength + row - offset; cells = sourceRow >= 0 ? history?.getScrollbackLine(sourceRow) ?? null : null; }
@@ -197,10 +206,9 @@ export class CanvasRenderer {
     }
     if (hashes) this.drawnRows = hashes;
     if (cursorRowPainted) this.cursor(shownCursor, cursorColor);
-    if (opacity > 0 && historyLength > 0) {
-      const height = dims.rows * this.metrics.height, thumb = Math.max(20, height * dims.rows / (historyLength + dims.rows));
+    if (thumbHeight) {
       this.setFill(`rgba(128,128,128,${0.7 * opacity})`);
-      this.ctx.fillRect(dims.cols * this.metrics.width - 8, (height - thumb) * (historyLength - offset) / historyLength, 6, thumb);
+      this.ctx.fillRect(dims.cols * this.metrics.width - 8, thumbTop, 6, thumbHeight);
     }
     this.lastCursor = shownCursor; this.viewport = viewportY; this.history = historyLength; this.scrollbar = opacity; this.invalid = false;
     this.lastCursorColor = cursorColor;
