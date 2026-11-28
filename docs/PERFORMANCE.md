@@ -1,10 +1,31 @@
-# Terminal throughput improvements
+# Performance measurements and history
+
+This is AkiTTY's performance log. Each section records one change: what was
+measured, on which machine, the result, and whether the change was kept.
+Sections are in the order the work happened, so later sections supersede
+earlier numbers. Native Mac app and browser rendering need separate measurements.
+
+**Current headline results**
+
+- [macOS PTY throughput](#macos-pty-throughput): end-to-end app comparison
+  shown in the README.
+- [Reference engine throughput](#reference-engine-throughput): headless parser
+  and grid comparison with libghostty-vt, Alacritty, and Kitty.
+- [Idle cost](#idle-cost): CPU and context switches with several idle windows.
+- [Benchmark harness](../benchmarks/README.md): how to reproduce the
+  Native/WASM engine benchmark.
+
+Rejected experiments are kept with their measurements so they are not retried
+without new evidence, for example the
+[rejected Unicode scroll experiment](#rejected-unicode-scroll-experiment).
+
+## First throughput pass
 
 The November 2026 performance pass reduces work in AkiTTY's owned engine and
 native PTY worker. It retains the existing ABI, terminal behavior and rendering
-architecture. Native Mac app and browser rendering need separate measurements.
+architecture.
 
-## Plan and implementation
+### Plan and implementation
 
 1. Measure the existing release-mode engine and native rasterizer before editing.
    Use the current checkout as the baseline, rather than an older release.
@@ -28,7 +49,7 @@ architecture. Native Mac app and browser rendering need separate measurements.
 These changes are independently implemented in AkiTTY. No external terminal engine
 or renderer is linked into the product.
 
-## Measurements
+### Measurements
 
 Measured on Apple M3 Max / macOS 27.2.1, Rust 1.99.1 release mode, Node 26.9.0.
 Baseline: `3b1d9cf3f8c36121e7ad8764e05050252744b22c` (1.3.26). Candidate identity
@@ -83,7 +104,7 @@ and PTY throughput. Separate I/O/parser threads remain a candidate for a later
 hot-path pass; the GPU glyph atlas landed in the rendering follow-up at the end
 of this file.
 
-## Reproduction and regression coverage
+### Reproduction and regression coverage
 
 ```sh
 bash scripts/benchmark.sh --samples 30 --rounds 128 --output build/throughput.json
@@ -2786,3 +2807,17 @@ measurement window. Baseline presentation p95 pooled across three runs was
 Process CPU was 35.03% at the baseline median and 35.08% in the candidate run.
 These results quantify texture reuse. App-wide speed and physical key-to-paint
 latency require separate measurements.
+
+## Idle cost
+
+The PTY worker wakes the host through a notification pipe whenever it advances
+the model, so an idle pane does not poll on a timer; a 1 Hz safety tick
+backstops a missed wake. Hidden panes (background tabs, occluded or minimized
+windows, a hidden app) coalesce wakeups to 4 Hz and release their window-sized
+bitmaps and Metal textures until shown again.
+
+Measured on an Apple M5 Max (macOS 27.2, release build, idle zsh, 60-second
+`top` samples): four windows used 0.10% CPU and about 34 context switches a
+second, and eight used 0.21% and about 63, with almost no idle wakeups. Hiding
+the app changed neither. Each pane adds about eight switches a second, which
+matches the PTY worker's 250 ms idle poll for a silent child exit.

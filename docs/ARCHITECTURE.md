@@ -1,229 +1,203 @@
-# Akitty architecture and implementation plan
+# AkiTTY architecture
 
-Akitty's native macOS app uses the independently authored `akitty-vt` Rust
-terminal engine with its own Rust PTY integration, Swift/AppKit interface,
-CoreText/Metal rendering and Rust command-palette ranking. Its own source is MIT licensed.
-Windows and Linux are reached through the separate AkiTTY Web browser terminal.
-The Experimental Linux and Windows Tauri desktops shipped in 1.3.5 are discontinued
-and removed from the tree; git history retains them.
+AkiTTY's native macOS app combines the independently authored `akitty-vt` Rust
+terminal engine, Rust PTY sessions, a Swift/AppKit interface, CoreText/Metal
+rendering, and Rust command-palette ranking. Windows and Linux are reached
+through the separate AkiTTY Web browser terminal. All of AkiTTY's own source is
+MIT licensed.
 
-The product focus is visible, human-controlled AI agent workflows: program-reported
-identity, trusted-host execution approval, and observable terminal sessions.
-Agent Overview and text accessibility already exist; current work improves their
-focus, navigation, and validation. These controls govern input through AkiTTY's host
-boundary, not operating-system process permissions. See [host workflows](AGENT_WORKFLOWS.md)
-and [accessibility](ACCESSIBILITY.md).
+The product focus is visible, human-controlled AI agent workflows:
+program-reported identity, trusted-host execution approval, and observable
+terminal sessions. These controls govern input through AkiTTY's host boundary,
+not operating-system process permissions. The native app uses a bounded OSC 7501
+record model, an opt-in same-user Unix socket, the bundled `akitty-agent`
+client, and a private bounded event store. One per-pane approval queue serves
+local command requests, Siri and Shortcuts, and supported Claude Code and Codex
+permission prompts. The app owns the approval decision: approved command
+requests queue exact terminal input, and hook integrations return an allow or
+deny decision to the agent. [Agent contracts](AGENT_NATIVE.md) ·
+[Shell integration and host control](AGENT_WORKFLOWS.md)
 
-The native app uses a bounded OSC 7501 record model, an opt-in same-user
-Unix socket, the bundled `akitty-agent` client, and a private bounded event store.
-AkiTTY 2.0.0 shares one per-pane approval queue across local command requests,
-Siri and Shortcuts, and supported Claude Code and Codex permission prompts.
-The app owns the approval decision. Approved command requests queue exact
-terminal input, and the hook integrations return an allow or deny decision to
-the agent. [Native agent contracts and scope](AGENT_NATIVE.md)
+## Contents
+
+- [Components](#components)
+- [Design decisions](#design-decisions)
+- [Terminal engine](#terminal-engine) · [PTY pipeline](#pty-pipeline) · [Native rendering](#native-rendering) · [Kitty graphics](#kitty-graphics)
+- [Compatibility scope](#compatibility-scope)
+- [macOS app surface](#macos-app-surface) · [AkiTTY Web](#akitty-web) · [macOS folder opening](#macos-folder-opening)
+- [Named window layouts](#named-window-layouts) · [zsh command history](#zsh-command-history) · [Selection and input state](#selection-and-input-state)
+- [Known limitations](#known-limitations)
+- [Verification boundaries](#verification-boundaries)
+
+## Components
 
 | Component | Technology |
 | --- | --- |
-| AkiTTY native Mac app | Owned akitty-vt engine + Rust PTYs + Swift/AppKit/CoreText/Metal |
-| AkiTTY Web | Same owned Rust engine compiled to WebAssembly + DOM/Canvas |
+| AkiTTY native Mac app | `akitty-vt` engine + Rust PTYs + Swift/AppKit/CoreText/Metal |
+| AkiTTY Web | The same Rust engine compiled to WebAssembly + DOM/Canvas |
 
-No Ghostty, Alacritty or VTE implementation is compiled or bundled. Historical
+`akitty-core` composes `akitty-vt` with the shared protocols, authority
+primitives, and Unix child cleanup in `akitty-agent-core`; the VT engine depends
+on neither host crate. The [contributor guide](../CONTRIBUTING.md) maps these
+components to their source, tests, build commands, and generated artifacts.
+
+No Ghostty, Alacritty, or VTE implementation is compiled or bundled. Historical
 notices and test origins are documented in the [provenance ledger](../third_party/TERMINAL_ENGINE.md).
-Native and browser platform behavior and performance require separate qualification.
-The [throughput plan and measurements](PERFORMANCE.md) document the ASCII-run and
-PTY read-batching implementation and its measured scope.
+The Linux and Windows Tauri desktops shipped experimentally in 1.3.5 were
+discontinued and removed; git history retains them. Native and browser behavior
+and performance are qualified separately; see [performance](PERFORMANCE.md).
 
-The [contributor guide](../CONTRIBUTING.md) maps these components to their source,
-tests, build commands, and generated artifacts. `akitty-core` composes `akitty-vt`
-with the shared protocols, authority primitives, and Unix child cleanup in
-`akitty-agent-core`; the VT engine depends on neither host crate.
+## Design decisions
 
-## Decisions
-
-- Own the streaming parser, screens/history, protocol modes, mutation events and
-  keyboard encoder in `akitty-vt`. It has no PTY, filesystem or wall-clock access;
-  hosts supply time and enforce clipboard/process policy. Unicode libraries and
-  other ordinary dependencies retain their own licenses.
-  The parser lends printable UTF-8 runs to the terminal, skipping whole eight-byte
-  words of printable ASCII where a run opens and after each multi-byte scalar. Plain
-  ASCII uses packed spans, stored without destructor checks on rows certified
-  heap-free; ordinary narrow/wide Unicode codepoints use batched cells with each grapheme
-  class carried into the next pair decision. Insert mode, character-set shifts,
-  contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
-  A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;
-  it has no unbounded map or per-key heap allocation. A synchronized frame whose
-  exact `?2026l` arrives in the same chunk as its `?2026h` is applied as it arrives,
-  which a host cannot tell from a replayed queue. Otherwise synchronized output retains
-  the same bounded action queue, holding printable text as runs in one shared buffer
-  that replay through the row writer when the queue flushes, and copying deferred
-  CSIs into recycled records; each item keeps its scalar-action charge against the
-  queue bound. A CSI whose introducer arrives whole has its ordinary body (prefix,
-  digits, `;`, final byte) collected in one loop before the byte machine resumes.
-- Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
-  Each PTY is a bounded two-stage pipeline. A reader thread owns every `read(2)`
-  and a worker thread owns the model, replies, writes, resize and child status, so
-  no read runs with the terminal state held and no parse waits on the kernel.
-  Reads move through a fixed ring of four 64 KiB slots whose ownership passes
-  between the stages, so a read is never copied and a parser that falls behind
-  stops the reader instead of growing memory. Every read that is available at once
-  fills one slot up to its full size, which is published when it is full and
-  otherwise on would-block, EOF or a read error. macOS hands a PTY master at most
-  1 KiB per read, so a slot holding less than 1 KiB is published on its first
-  would-block: a prompt, bell or query still arrives with the reads that produced
-  it. A saturated stream instead bridges the writer's refill gaps: 16 immediate
-  re-reads, then 1 ms polls while the parser still has published bytes, within
-  3 ms per slot. The parser interrupts a bridge through a ring-owned idle pipe the
-  moment it runs dry, and a stop or hangup publishes at once, so bridging only
-  overlaps parse time and never delays an idle terminal. Bytes gathered before a
-  failure are applied before it is reported. The
-  worker applies at most one ring (256 KiB) per pass, with each model lock covering
-  at most 8 KiB, so input and resize keep their turn, and it wakes the host once
-  per applied batch rather than once per parsed chunk.
-  Session state is mutex protected; logical serialization does not assume
-  DispatchQueue calls stay on one OS thread. A close or child exit ends the reader
-  with a bounded drain, and a hangup or read failure still flushes its tail.
-  Shutdown sends HUP, then KILL, and polls child status with a bounded deadline;
-  it never blocks in `wait()`. If macOS delays reaping, one shared reaper retains
-  ownership, with a 64-child limit including pending cleanup. Swift marks a
-  session closed before calling Rust cleanup and releases its lock, so late UI
-  events cannot block the main thread behind child termination. Repeated view
-  shutdown requests wait for the same cleanup. Close/quit confirmations are
-  guarded, asynchronous window sheets; Cancel and Escape preserve the session.
-- ABI v1 uses bounded UTF-8 JSON, integer session handles, explicit buffer freeing,
+- **Engine:** `akitty-vt` owns the streaming parser, screens and history,
+  protocol modes, mutation events, and keyboard encoder. It has no PTY,
+  filesystem, or wall-clock access. [Details](#terminal-engine)
+- **PTYs:** Rust owns PTY lifecycle, input backpressure, the grid, and terminal
+  protocol events through a bounded two-stage pipeline. [Details](#pty-pipeline)
+- **ABI:** v1 uses bounded UTF-8 JSON, integer session handles, explicit buffer freeing,
   version checks, errors and panic containment. Both sides validate dimensions.
-- Swift owns AppKit windows/tabs/splits, IME, text accessibility, pasteboard policy,
-  CoreText rasterization and Metal presentation. A renderer failure switches to a
-  visible software fallback. No GTK/OpenGL code is carried over.
-  The rasterizer keeps its bitmap and glyph cache between frames and repaints only the rows the core marked dirty
-  (plus the old and new cursor rows); a new size, font or scale, any image, or an unknown change repaints everything.
-  Ordered cell arrays let partial snapshots copy unchanged spans in bulk and let the rasterizer locate dirty rows
-  with binary searches rather than scanning every retained cell. Metadata-only updates share the retained cell array.
-  Integer-pixel text scrolls move retained bitmap rows and repaint exposed rows, cursor damage and complex or
-  decorated text. Coalesced updates relocate their pending dirty rows too. Images, composition, cropped grids
-  and fractional geometry retain the full repaint path. Metal receives the moved pixel rows as well.
-  Automatic refreshes of visible unfocused panes coalesce at 30 Hz, retaining one trailing update. Focused panes,
-  recent local input and grid resizing bypass this pacing; explicit scroll/selection refreshes remain immediate.
-  Hidden panes retain their 4 Hz cadence. Live PTY panes are driven primarily by the core notification pipe, while
-  the display link remains active for animation ticks and sessions without a notification descriptor. Panes that
-  become hidden, occluded, minimized, or detached stop rasterizing, release window-sized bitmap/texture retention,
-  and force a full repaint when they become visible again. Focus/visibility changes re-evaluate the pending deadline,
-  and shutdown invalidates it before closing the session.
-  Metal updates a same-sized bitmap texture in place when no GPU frame is pending, including when every pixel row
-  needs replacement. Software fallback frames are always full. A raster that finishes after the backing scale
-  changes is discarded and redrawn before publication.
-  Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
-  the cell box rather than through the font (rows are taller than glyphs, so font strokes leave gaps). Other
-  non-ASCII text is fitted into its cell: wide glyphs are centred and shrunk to fit, and `GlyphClusters` joins emoji
-  ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
-  ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
-  font preference or the system language.
-  Frames of plain single-scalar ASCII, geometric cell glyphs, fitted monochrome single-scalar text in one or two
-  columns, single-cell colour clusters, and single underline/strikethrough decorations on narrow cells can be drawn
-  from a glyph atlas when they contain no images, IME text, wide geometric glyphs, decorations on wide cells,
-  multi-scalar text, colour clusters that span cells, complex underline styles, or fractional geometry
-  (`MetalText.swift`). A two-column cell is fitted into a box twice
-  as wide and centred in it, exactly as the CPU rasterizer places it. What the colour eligibility excludes is a
-  superset of what `GlyphClusters.merge` joins on — any ZWJ or regional indicator, not only a trailing ZWJ or an
-  indicator pair — and every join merge can make starts at a cell carrying one, so on an eligible frame
-  merging is the identity and the atlas may iterate raw cells instead of merged clusters.
-  Each distinct font glyph is rasterised once by CoreText into one bounded coverage texture and uploaded only when
-  new, and the GPU composites per-row instance buffers of cell fills, glyph quads, decoration strips and cursor
-  quads. Box, block and braille scalars reuse the same `CellGlyphs` geometry to make colour-independent coverage
-  tiles. Colour clusters draw from a second BGRA page of the same bounded side — 16 MiB rather than 4, so it is
-  allocated only for a frame that reports it may sample the page (`TextFrame.usesColourPage`) and dropped on any
-  atlas reset, which means an emoji-free epoch never pays for it. A colour tile is the whole cell box rather than
-  cropped ink, so its instance maps the tile with no offset arithmetic, and it shares the fitted path's CoreText
-  placement so it lands exactly where the equivalent mask would. One page suffices because a cluster is a single
-  CoreText line and cannot be split across the two; the tile key still carries the foreground colour, because a
-  COLR palette may reference it. Only the rows the core marked dirty are
-  re-encoded and uploaded; while a frame is still on the GPU the upload publishes a complete replacement buffer
-  from a bounded pool instead of rewriting the one it may read, so a frame never samples a half-updated revision.
-  The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
-  only with that cache. Atlas rebuilds are rationed per font/scale/grid/theme epoch, and a frame needing more masks
-  than an empty atlas holds is refused, so an adversarial colour workload degrades to the software rasterizer
-  instead of churning masks every frame. Standing down is not permanent: after a fixed number of refused frames the
-  composer is allowed one probation rebuild, so a repertoire that outgrew the atlas and then shrank recovers without
-  a resize, font or theme change, while a sustained storm still pays at most one wasted rebuild per interval. Because macOS text smoothing depends on the text colour at 1x and 2x, font
-  masks are keyed by style, scalar, column count and foreground colour; geometric and decoration masks omit style and
-  colour. Keying by scalar rather than by text matters for CJK: Swift compares strings by canonical equivalence, so a
-  compatibility ideograph (U+FA10) equals and hashes like its unified form (U+585A) while CoreText draws different
-  ink for each. The CoreText line analysis behind a fitted mask is cached separately and keyed by style and text
-  alone, since it does not depend on the column count; a full analysis cache is dropped and rebuilt rather than
-  refused, so a large CJK repertoire cannot pin the path to the software rasterizer for the rest of the epoch.
-  Fitted text masks are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
-  reproduce pixel-for-pixel (wide geometric glyphs, decorations on wide cells, multi-scalar text, colour clusters
-  that join cells or exceed the bounded scalar count,
-  complex underline styles, IME composition, Kitty images, backing scales outside 1x-3x) keeps the software
-  rasterizer unchanged. A successful full
-  content scan certifies
-  atlas eligibility; a no-scroll incremental frame rechecks only its damaged rows, while scrolling, unknown damage,
-  layout changes, fallback recovery and resource release require a fresh full scan. Snapshot damage is merged before
-  any host callback can request a redraw, and CPU bitmap completion invalidates atlas reuse before frame observers run,
-  so reentrant callbacks cannot render new cells with stale damage or eligibility. Frame-start observers run after the
-  older frame has captured its state and damage, leaving newer snapshot damage intact for the queued redraw. Suspended
-  atlases validate content before changing layout epochs, so an unsupported frame cannot re-arm their rebuild budget.
-- Window chrome stays out of the grid. Tabs share the title bar (full-size content view, hidden title text that
+- **Native UI:** Swift owns AppKit windows/tabs/splits, IME, text accessibility, pasteboard policy, CoreText rasterization and Metal presentation. A renderer failure switches to a visible software fallback. No GTK/OpenGL code is carried over. [Details](#native-rendering)
+- **Window chrome:** stays out of the grid. Tabs share the title bar (full-size content view, hidden title text that
   remains set for the Window menu and accessibility), and the window takes the focused pane's theme background and
   matching light or dark appearance. Pane status is a floating capsule over the pane rather than a reserved row, so
   a status appearing or clearing never resizes the PTY. Its style comes from the message source in Swift: program
   reports are neutral and click-through, and only the core's control record produces the agent style.
-- Clipboard reads from terminal applications are denied. OSC 52 text writes need
+- **Clipboard:** reads from terminal applications are denied. OSC 52 text writes need
   user approval by default; the prompt's Always allow choice (restorable in
   Settings) lets later writes through with a status capsule note. Images are
   unsupported, so confirmation never decodes images.
-- Rust ranks native commands through the bounded `command_palette` ABI operation.
+- **Command palette:** Rust ranks native commands through the bounded `command_palette` ABI operation.
   Swift validates the closed command IDs and dispatches native actions, falling back
   to its native catalog on failure. No Node runtime, JavaScript engine, shell bridge,
   dynamic plugin loading, or arbitrary user JavaScript is included.
 
-## Independent advice
+## Terminal engine
 
-Muse CLI recommended a mature Rust engine, narrow versioned ABI, bounded process
-shutdown, permission-first clipboard behavior, native IME/accessibility and
-blocking regressions. Grok CLI and Muse CLI independently recommended declarative
-palette results validated and dispatched by Swift. Grok's first architecture call timed out; a shorter retry completed and agreed on
-engine reuse, while highlighting render data cost, character-width authority and
-PTY cleanup. Raw discussions are private and excluded from publication.
+`akitty-vt` owns the streaming parser, screens/history, protocol modes, mutation
+events and keyboard encoder. It has no PTY, filesystem or wall-clock access;
+hosts supply time and enforce clipboard/process policy. Unicode libraries and
+other ordinary dependencies retain their own licenses.
+The parser lends printable UTF-8 runs to the terminal, skipping whole eight-byte
+words of printable ASCII where a run opens and after each multi-byte scalar. Plain
+ASCII uses packed spans, stored without destructor checks on rows certified
+heap-free; ordinary narrow/wide Unicode codepoints use batched cells with each grapheme
+class carried into the next pair decision. Insert mode, character-set shifts,
+contextual grapheme joins, wrapping and wide-cell repair retain scalar handling.
+A per-terminal 16-slot, fixed-key cache reuses exact cluster break/width analyses;
+it has no unbounded map or per-key heap allocation. A synchronized frame whose
+exact `?2026l` arrives in the same chunk as its `?2026h` is applied as it arrives,
+which a host cannot tell from a replayed queue. Otherwise synchronized output retains
+the same bounded action queue, holding printable text as runs in one shared buffer
+that replay through the row writer when the queue flushes, and copying deferred
+CSIs into recycled records; each item keeps its scalar-action charge against the
+queue bound. A CSI whose introducer arrives whole has its ordinary body (prefix,
+digits, `;`, final byte) collected in one loop before the byte machine resumes.
 
-Advice is not test evidence. In particular, a serial queue is not a fixed OS thread.
+## PTY pipeline
 
-## Implementation order and acceptance
+Rust owns PTY lifecycle, input backpressure, grid, and terminal protocol events.
+Each PTY is a bounded two-stage pipeline. A reader thread owns every `read(2)`
+and a worker thread owns the model, replies, writes, resize and child status, so
+no read runs with the terminal state held and no parse waits on the kernel.
+Reads move through a fixed ring of four 64 KiB slots whose ownership passes
+between the stages, so a read is never copied and a parser that falls behind
+stops the reader instead of growing memory. Every read that is available at once
+fills one slot up to its full size, which is published when it is full and
+otherwise on would-block, EOF or a read error. macOS hands a PTY master at most
+1 KiB per read, so a slot holding less than 1 KiB is published on its first
+would-block: a prompt, bell or query still arrives with the reads that produced
+it. A saturated stream instead bridges the writer's refill gaps: 16 immediate
+re-reads, then 1 ms polls while the parser still has published bytes, within
+3 ms per slot. The parser interrupts a bridge through a ring-owned idle pipe the
+moment it runs dry, and a stop or hangup publishes at once, so bridging only
+overlaps parse time and never delays an idle terminal. Bytes gathered before a
+failure are applied before it is reported. The
+worker applies at most one ring (256 KiB) per pass, with each model lock covering
+at most 8 KiB, so input and resize keep their turn, and it wakes the host once
+per applied batch rather than once per parsed chunk.
+Session state is mutex protected; logical serialization does not assume
+DispatchQueue calls stay on one OS thread. A close or child exit ends the reader
+with a bounded drain, and a hangup or read failure still flushes its tail.
+Shutdown sends HUP, then KILL, and polls child status with a bounded deadline;
+it never blocks in `wait()`. If macOS delays reaping, one shared reaper retains
+ownership, with a 64-child limit including pending cleanup. Swift marks a
+session closed before calling Rust cleanup and releases its lock, so late UI
+events cannot block the main thread behind child termination. Repeated view
+shutdown requests wait for the same cleanup. Close/quit confirmations are
+guarded, asynchronous window sheets; Cancel and Escape preserve the session.
 
-1. Rust engine, ABI, PTY lifecycle: terminal escape behavior, split UTF-8/escape
-   input, alternate screen, resize, output replies, stale handles, bounds, process
-   cleanup and backpressure regressions must pass.
-2. Swift app: interactive shell, tabs/splits, scrollback, copy/paste/find, IME and
-   accessible text. Test native policy and Unicode selection behavior.
-3. Metal presentation: check each creation/encoding/completion stage; exercise
-   fallback by injected device/pipeline failure and verify the app still draws.
-4. Rust palette: deterministic ranking, bounded inputs, schema/ID validation,
-   failure fallback and native execution. Run Rust conformance and Swift ABI integration.
-5. macOS CI runs the complete local verification command with no ignored test
-   failures. Public files are checked for secrets, machine paths and agent files.
-6. Build and smoke-test the app before committing/pushing. Signing/notarization,
-   release publication and independent artifact verification are separate gates.
-   Full external esctest qualification remains outstanding. VoiceOver operation
-   testing is planned; automated accessibility tests do not establish user validation.
+## Native rendering
 
-Version 1.1.0 adds opt-in bash/zsh shell observations, trusted host command control,
-a persistent quick terminal, quoted file/text drops and a deep-dark default background.
-See [host workflows](AGENT_WORKFLOWS.md).
-Performance/stability and broader platform/workflow qualification remain in [the roadmap](ROADMAP.md).
+The rasterizer keeps its bitmap and glyph cache between frames and repaints only the rows the core marked dirty
+(plus the old and new cursor rows); a new size, font or scale, any image, or an unknown change repaints everything.
+Ordered cell arrays let partial snapshots copy unchanged spans in bulk and let the rasterizer locate dirty rows
+with binary searches rather than scanning every retained cell. Metadata-only updates share the retained cell array.
+Integer-pixel text scrolls move retained bitmap rows and repaint exposed rows, cursor damage and complex or
+decorated text. Coalesced updates relocate their pending dirty rows too. Images, composition, cropped grids
+and fractional geometry retain the full repaint path. Metal receives the moved pixel rows as well.
+Automatic refreshes of visible unfocused panes coalesce at 30 Hz, retaining one trailing update. Focused panes,
+recent local input and grid resizing bypass this pacing; explicit scroll/selection refreshes remain immediate.
+Hidden panes retain their 4 Hz cadence. Live PTY panes are driven primarily by the core notification pipe, while
+the display link remains active for animation ticks and sessions without a notification descriptor. Panes that
+become hidden, occluded, minimized, or detached stop rasterizing, release window-sized bitmap/texture retention,
+and force a full repaint when they become visible again. Focus/visibility changes re-evaluate the pending deadline,
+and shutdown invalidates it before closing the session.
+Metal updates a same-sized bitmap texture in place when no GPU frame is pending, including when every pixel row
+needs replacement. Software fallback frames are always full. A raster that finishes after the backing scale
+changes is discarded and redrawn before publication.
+Cells holding one box-drawing, block or braille scalar are drawn by `CellGlyphs` as whole-device-pixel fills inside
+the cell box rather than through the font (rows are taller than glyphs, so font strokes leave gaps). Other
+non-ASCII text is fitted into its cell: wide glyphs are centred and shrunk to fit, and `GlyphClusters` joins emoji
+ZWJ sequences and regional-indicator pairs into one drawn glyph without changing the core's wcwidth column layout.
+ASCII keeps the plain CoreText path. Every face carries a CJK-first cascade list (`GlyphFonts`) chosen from the CJK
+font preference or the system language.
+Frames of plain single-scalar ASCII, geometric cell glyphs, fitted monochrome single-scalar text in one or two
+columns, single-cell colour clusters, and single underline/strikethrough decorations on narrow cells can be drawn
+from a glyph atlas when they contain no images, IME text, wide geometric glyphs, decorations on wide cells,
+multi-scalar text, colour clusters that span cells, complex underline styles, or fractional geometry
+(`MetalText.swift`). A two-column cell is fitted into a box twice
+as wide and centred in it, exactly as the CPU rasterizer places it. What the colour eligibility excludes is a
+superset of what `GlyphClusters.merge` joins on — any ZWJ or regional indicator, not only a trailing ZWJ or an
+indicator pair — and every join merge can make starts at a cell carrying one, so on an eligible frame
+merging is the identity and the atlas may iterate raw cells instead of merged clusters.
+Each distinct font glyph is rasterised once by CoreText into one bounded coverage texture and uploaded only when
+new, and the GPU composites per-row instance buffers of cell fills, glyph quads, decoration strips and cursor
+quads. Box, block and braille scalars reuse the same `CellGlyphs` geometry to make colour-independent coverage
+tiles. Colour clusters draw from a second BGRA page of the same bounded side — 16 MiB rather than 4, so it is
+allocated only for a frame that reports it may sample the page (`TextFrame.usesColourPage`) and dropped on any
+atlas reset, which means an emoji-free epoch never pays for it. A colour tile is the whole cell box rather than
+cropped ink, so its instance maps the tile with no offset arithmetic, and it shares the fitted path's CoreText
+placement so it lands exactly where the equivalent mask would. One page suffices because a cluster is a single
+CoreText line and cannot be split across the two; the tile key still carries the foreground colour, because a
+COLR palette may reference it. Only the rows the core marked dirty are
+re-encoded and uploaded; while a frame is still on the GPU the upload publishes a complete replacement buffer
+from a bounded pool instead of rewriting the one it may read, so a frame never samples a half-updated revision.
+The atlas texture is tied to the glyph mask cache: frames drawn by other paths leave it alone, and it is released
+only with that cache. Atlas rebuilds are rationed per font/scale/grid/theme epoch, and a frame needing more masks
+than an empty atlas holds is refused, so an adversarial colour workload degrades to the software rasterizer
+instead of churning masks every frame. Standing down is not permanent: after a fixed number of refused frames the
+composer is allowed one probation rebuild, so a repertoire that outgrew the atlas and then shrank recovers without
+a resize, font or theme change, while a sustained storm still pays at most one wasted rebuild per interval. Because macOS text smoothing depends on the text colour at 1x and 2x, font
+masks are keyed by style, scalar, column count and foreground colour; geometric and decoration masks omit style and
+colour. Keying by scalar rather than by text matters for CJK: Swift compares strings by canonical equivalence, so a
+compatibility ideograph (U+FA10) equals and hashes like its unified form (U+585A) while CoreText draws different
+ink for each. The CoreText line analysis behind a fitted mask is cached separately and keyed by style and text
+alone, since it does not depend on the column count; a full analysis cache is dropped and rebuilt rather than
+refused, so a large CJK repertoire cannot pin the path to the software rasterizer for the rest of the epoch.
+Fitted text masks are anchored to the cell box and use the same CoreText placement as the CPU rasterizer. Content the atlas does not
+reproduce pixel-for-pixel (wide geometric glyphs, decorations on wide cells, multi-scalar text, colour clusters
+that join cells or exceed the bounded scalar count,
+complex underline styles, IME composition, Kitty images, backing scales outside 1x-3x) keeps the software
+rasterizer unchanged. A successful full
+content scan certifies
+atlas eligibility; a no-scroll incremental frame rechecks only its damaged rows, while scrolling, unknown damage,
+layout changes, fallback recovery and resource release require a fresh full scan. Snapshot damage is merged before
+any host callback can request a redraw, and CPU bitmap completion invalidates atlas reuse before frame observers run,
+so reentrant callbacks cannot render new cells with stale damage or eligibility. Frame-start observers run after the
+older frame has captured its state and damage, leaving newer snapshot damage intact for the queued redraw. Suspended
+atlases validate content before changing layout epochs, so an unsupported frame cannot re-arm their rebuild budget.
 
-## Compatibility scope
-
-Shell integration (on by default for bash/zsh since 1.2.0) and the opt-in quick terminal are native features;
-they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
-public extension ecosystem are outside the current roadmap. Sixel, image clipboard
-protocols, and custom shaders remain unsupported. Existing macOS accessible text/selection
-APIs and Agent Overview are maintained features. VoiceOver testing and focused
-accessibility improvements are P1; user validation is not complete.
-
-The Kitty keyboard protocol is advertised because
-`KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
-is a modifier or composes text, and input-method text still composes. CoreText rendering is not a claim of Ghostty's
-performance or shaping parity. Full esctest results are not inferred from the
-curated conformance suite.
+## Kitty graphics
 
 Kitty graphics follows the protocol with hard limits. The core strips APC strings from the
 byte stream before the VT parser, keeps decoded RGBA images under hard limits
@@ -250,6 +224,21 @@ its generation changes (an image wider or taller than Metal's 16384-pixel textur
 renderer failure); an image-only update skips the CPU raster entirely. A display
 link polls while `animating` is set or images changed in the last second. The software
 fallback still composites images in the CPU bitmap.
+
+## Compatibility scope
+
+Shell integration (on by default for bash/zsh since 1.2.0) and the opt-in quick terminal are native features;
+they do not automatically update the separate Web package or its host. Ghostty configuration compatibility, third-party plugins and a
+public extension ecosystem are outside the current roadmap. Sixel, image clipboard
+protocols, and custom shaders remain unsupported. Existing macOS accessible text/selection
+APIs and Agent Overview are maintained features. VoiceOver testing and focused
+accessibility improvements are P1; user validation is not complete.
+
+The Kitty keyboard protocol is advertised because
+`KittyKeyboard.swift` encodes every flag; Option-as-Alt governs whether Option
+is a modifier or composes text, and input-method text still composes. CoreText rendering is not a claim of Ghostty's
+performance or shaping parity. Full esctest results are not inferred from the
+curated conformance suite.
 
 ## macOS app surface
 
@@ -460,3 +449,49 @@ Program mouse reporting keeps priority; Option selects locally. Alternate-screen
 cursor keys only while DEC mode 1007 is enabled.
 
 Web custom wheel handlers may reset or dispose their terminal. The adapter stops the current gesture when the handler replaces or closes the engine, so it cannot access released state or scroll a replacement terminal.
+
+## Known limitations
+
+These are known gaps in shipped behavior that are deliberately left as they are.
+Fixed issues and their regressions are recorded in the release notes.
+
+- **A resize to exactly one column permanently narrows a wide glyph.** At 4x4,
+  print `A界B`, resize to 1x4 and back: `界` returns one column wide and `B`
+  lands in column 3. Round trips through two or three columns restore the pair.
+  A two-column cell cannot exist in a one-column row, so reflow clamps it with
+  `width.min(cols)`. Recovering the width from the base character would be wrong
+  for emoji and ZWJ clusters, whose width comes from cluster analysis. A real
+  fix needs per-cell width history, and the only trigger is a one-column terminal.
+- **Font installation changes are not part of the glyph layouts.**
+  `GlyphFonts.cascadeFont` drops preferred faces that are not installed, but
+  neither `GridRasterizer.Layout` nor `TextComposer.Layout` keys on installed
+  fonts. Enabling or disabling a font in Font Book, followed by a theme change or
+  an image appearing, can refresh one render path's faces and not the other's.
+  The effect is cosmetic. The fix is a generation counter bumped on
+  `kCTFontManagerRegisteredFontsChangedNotification`, owned by the view and
+  passed into both render calls, not state inside the pure `GlyphFonts` helpers.
+  Changes to preferred languages are already covered by `GlyphFonts.cascadeKey()`.
+- **`TextComposer.compose(deferPublication:)` defaults to `false`.** Production
+  always passes `true`; only test helpers use the default. With the default, a
+  dropped frame can leave atlas entries whose bytes were never uploaded, which
+  draws invisible glyphs. Changing the default affects 47 test call sites, so
+  it belongs in a change about that API.
+- **Spanning colour clusters use the CPU rasterizer.** ZWJ sequences, flags,
+  combining sequences, wide geometric glyphs, and decorations on wide cells keep
+  a frame on the software path. Drawing them from the atlas needs cluster
+  iteration in the composer. `testEveryCellMergeWouldJoinIsRefusedByEligibility`
+  pins the current coupling.
+- **The rasterizer's conservative scroll rule stays.** Rows containing non-ASCII
+  text are repainted instead of reusing the retained bitmap. Removing the rule
+  fails pixel equivalence at 2x and 3x, and a narrower variant was not adopted
+  because `GridRasterizer` is the pixel-exact reference for the renderer tests.
+  See [the rejected Unicode scroll experiment](PERFORMANCE.md#rejected-unicode-scroll-experiment).
+
+## Verification boundaries
+
+`scripts/verify.sh` runs on macOS CI with no ignored test failures and audits
+public files for secrets, machine paths, and agent files. A successful gate and
+app build do not cover signing, notarization, publication, or independent
+artifact verification; those are separate gates in [RELEASING.md](RELEASING.md).
+Full external esctest qualification and a VoiceOver user session are still
+outstanding; automated accessibility tests do not establish user validation.

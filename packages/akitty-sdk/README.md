@@ -89,7 +89,7 @@ are frozen. The package exports compiled ESM and explicit `.d.ts` declarations.
 Its one runtime dependency is [Zod](https://zod.dev), pinned exactly; there are no
 native binaries.
 
-## Schemas (SDK 0.3.0)
+## Schemas
 
 Validation is defined as Zod schemas, which the package exports so a program or
 host can check a document before handing it to the client, or validate OSC 771
@@ -127,7 +127,7 @@ Tests include an isolated packed consumer with declaration checks. The repositor
 checks snapshots and cleanup, and verifies that OSC payloads never enter the grid.
 See [the protocol contract](../../docs/ABI.md).
 
-## Trusted host command management (SDK 0.2.0 / native app 1.1.0)
+## Trusted host command management
 
 The main import remains a program-side presentation client. It lets each program
 show its own tab sprite/activity and background completion indicator, with text

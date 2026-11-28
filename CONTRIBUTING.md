@@ -33,6 +33,9 @@ Within `macos/Sources/AkittyKit/`, organize files by responsibility.
 - `Application/` owns app lifecycle, menus, windows, panes, tabs, Find, and the command palette.
 - `Agents/` owns native agent integration, approvals, Overview, event history, and conversation restore.
 - `Rendering/` owns glyphs, frame pacing, damage tracking, the Metal atlas, and the software renderer.
+- Top-level files hold the terminal view, the Rust bridge, preferences, profiles,
+  window layouts, the Quick Terminal, drops, the default-terminal handler, Siri
+  intents, Kitty keyboard encoding, and update control.
 
 Keep each type together so its private state stays private. These folders share
 one Swift target. Keep packaged files in `Resources/`.
@@ -87,6 +90,24 @@ Web unit tests are colocated in `lib/`; `browser/` contains Playwright fixtures 
 specs. Web test setup and its legacy Bun API shim live in `test/`. Root SDK and
 gateway tests use Node's test runner. Preserve historical test notices.
 
+### Optional qualification runs
+
+These runs are not part of the gate. Use them when changing PTY lifecycle,
+hot paths, sleep/wake handling, or agent integrations.
+
+| Check | Command |
+| --- | --- |
+| Longer PTY soak (800 sessions; checks descriptors, threads, and RSS settle) | `AKITTY_STRESS_ROUNDS=100 cargo test --locked -p akitty-core --test lifecycle_stress -- --nocapture` |
+| Headless feed and snapshot timing probe | `cargo test --release --locked -p akitty-core --test hotpath_probe -- --ignored --nocapture` |
+| Manual system sleep/wake | `AKITTY_SLEEP_WAKE_MANUAL=1 swift test --package-path macos --filter AkittyKitTests.SleepWakeTests` |
+| Installed Claude Code, Codex, and AX Code | `AKITTY_LIVE_AGENTS=1 AKITTY_LIVE_AXCODE_MODEL=<model> swift test --package-path macos --filter AgentLiveTests` |
+| Live MCP clients (contacts model providers) | `AKITTY_MCP_LIVE_CLI=grok,muse swift test --package-path macos --filter MCPIntegrationTests` |
+| Other bash or zsh builds | `AKITTY_TEST_BASH=/path/to/bash AKITTY_TEST_ZSH=/path/to/zsh python3 scripts/test_shell_integration.py` |
+| Native/WASM engine benchmark | See [benchmarks](benchmarks/README.md). |
+
+The timing probe includes JSON request overhead and does not measure UI
+latency, GPU behavior, idle power, or long-running stability.
+
 ## Generated files and local output
 
 | Tracked artifact | How to update it |
@@ -109,11 +130,14 @@ and SDK publication are separate operations described in
 
 ## Documentation and change scope
 
-Use [ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership and design decisions,
-[ABI.md](docs/ABI.md) for native contracts, and component READMEs for usage.
-[COMPATIBILITY.md](docs/COMPATIBILITY.md) records qualification limits;
-[ROADMAP.md](docs/ROADMAP.md) records planned work. Put user-visible changes in
-`docs/releases/unreleased.md` and versioned release notes when releasing.
+The [documentation index](docs/README.md) lists every guide and its audience.
+Use [ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership, design decisions,
+and known limitations, [ABI.md](docs/ABI.md) for native contracts, and component
+READMEs for usage. [COMPATIBILITY.md](docs/COMPATIBILITY.md) records
+qualification limits; [ROADMAP.md](docs/ROADMAP.md) records priorities and
+planned work. Put user-visible changes in `docs/releases/unreleased.md`. Name
+the release version only in the README, the documentation index, and release
+notes, so other guides stay correct across releases.
 
 Keep refactors focused and preserve unrelated work. Avoid repository-wide
 formatting changes. New boundary behavior needs bounded validation and relevant

@@ -2,7 +2,7 @@
 
 AkiTTY can show your agents' reported activity, ask you to review commands, and
 offer to resume a reported conversation when you reopen your workspace.
-[AkiTTY user guide](USER_GUIDE.md) · [AkiTTY 2.4.2 release notes](releases/2.4.2.md)
+[AkiTTY user guide](USER_GUIDE.md) · [Release notes](releases/)
 
 ## Set up an agent
 
@@ -168,17 +168,34 @@ before the subcommand selects a different local test/instance endpoint.
 AX Code, Grok, Muse Code, Kimi Code and AGY. For each it shows where the CLI was found (the inherited PATH, then
 the usual install folders such as `~/.local/bin` and `/opt/homebrew/bin`), the
 version `--version` prints, and the workflows available for that agent. A missing
-CLI links to its install instructions. **Install**, **Reinstall** and **Remove**
-change AkiTTY's entries and apply at once. **Connected** shows the newest
-conversation that agent reported from an open pane. For AX Code, **Install**
-adds AkiTTY's MCP server (`akitty`,
+CLI links to its install instructions.
+
+- **Install**, **Reinstall** and **Remove** change AkiTTY's entries and apply at once.
+  **Connected** shows the newest conversation that agent reported from an open pane.
+- **Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
+  launch, so integrations work without the menu each time. **Turn On** / **Turn
+  Off** changes it for the running app. Each request still needs its own approval.
+- Each installer is idempotent, preserves unrelated settings, recognizes its own
+  entries after the app moves, and refuses to replace a conflicting user-owned MCP
+  server or AGY hook. Grok, Muse and Kimi lifecycle entries are merged with other
+  hooks; Remove deletes only AkiTTY's entries. JSON settings are reformatted with
+  sorted keys, while managed TOML blocks preserve text outside their markers.
+- On the CLI, use `status` to inspect a row, or `uninstall` to remove it.
+  `--config` selects the main settings file; `--hooks` selects the separate
+  lifecycle file for Grok, Kimi Code or AGY, which is useful for isolated
+  validation. Restart the client to load configuration changes.
+
+### AX Code
+
+**Install** (`akitty-agent ax-code-mcp install`) adds AkiTTY's MCP server (`akitty`,
 running `akitty-agent mcp`) to `~/.config/ax-code/ax-code.json`
-(`$XDG_CONFIG_HOME/ax-code`), or run `akitty-agent ax-code-mcp install`. AX Code
-merges that plain-JSON file with the commented `ax-code.jsonc` people edit, so
-AkiTTY never rewrites the commented file; a server named `akitty` that AkiTTY did
-not add is never replaced or removed. AX Code then asks for commands through the
-MCP `request_command` tool, and each waits in the approval queue. **Install**
-also writes a small AX Code plugin, `~/.config/ax-code/plugin/akitty.js`, whose
+(`$XDG_CONFIG_HOME/ax-code`). AX Code merges that plain-JSON file with the
+commented `ax-code.jsonc` people edit, so AkiTTY never rewrites the commented
+file; a server named `akitty` that AkiTTY did not add is never replaced or
+removed. AX Code then asks for commands through the MCP `request_command` tool,
+and each waits in the approval queue.
+
+**Install** also writes a small AX Code plugin, `~/.config/ax-code/plugin/akitty.js`, whose
 `event` hook starts `akitty-agent ax-code-report start|end <id>` with a reporter
 ID, AkiTTY-issued epoch and sequence when a conversation is created, becomes
 busy or is deleted, and when the plugin is disposed or AX Code exits. Disposed
@@ -191,7 +208,9 @@ AX Code. AX Code 7.31.2 connects to the server (`ax-code mcp list` shows `akitty
 connected`) and loads the plugin, which reported start and end for a real
 `ax-code run`.
 
-The other four rows install the same MCP request workflow plus client-specific
+### Grok, Muse Code, Kimi Code, and AGY
+
+These four rows install the same MCP request workflow plus client-specific
 lifecycle reporting, without granting AkiTTY control of the client's own prompts:
 
 - **Grok**: `akitty-agent grok-mcp install` adds a managed
@@ -217,20 +236,6 @@ lifecycle reporting, without granting AkiTTY control of the client's own prompts
   `~/.gemini/config/mcp_config.json` and installs a SessionStart hook in
   `hooks.json` beside it. AGY reports `conversationId`; its Stop event is not
   treated as SessionEnd because AGY documents no SessionEnd hook.
-
-Each installer is idempotent, preserves unrelated settings, recognizes its own
-entries after the app moves, and refuses to replace a conflicting user-owned MCP
-server or AGY hook. Grok, Muse and Kimi lifecycle entries are merged with other
-hooks; Remove deletes only AkiTTY's entries. JSON settings are reformatted with
-sorted keys, while managed TOML blocks preserve text outside their markers. Use
-`status` to inspect a row, or `uninstall` to remove it. `--config` selects the
-main settings file; `--hooks` selects the separate lifecycle file for Grok,
-Kimi Code or AGY, which is useful for isolated validation. Restart the client
-to load configuration changes.
-
-**Turn on when AkiTTY starts** (off by default) turns Local Agent Requests on at
-launch, so integrations work without the menu each time. **Turn On** / **Turn
-Off** changes it for the running app. Each request still needs its own approval.
 
 ## Claude Code permission prompts
 
@@ -454,9 +459,6 @@ runs the installed Claude Code, Codex and AX Code at once in real panes: Claude
 Code's and Codex's permission prompts (Codex with AkiTTY's hooks, trusted for
 that run only) and AX Code's MCP request are answered through AkiTTY, each
 command runs, and all three report their conversations. It changes no global
-agent configuration. `AgentAccessibilityAuditTests` walks the accessibility tree
-`AgentMCPSettingsTests` covers idempotent installation and removal, conflict
-preservation, Grok/Claude identity separation, client-specific lifecycle payloads,
 all seven resume commands, and Muse/Kimi/Grok/AGY settings. Isolated real-CLI
 smoke checks validate the generated Grok, Muse, Kimi and AGY configuration without
 requiring a model call. `AgentAccessibilityAuditTests` walks the accessibility tree

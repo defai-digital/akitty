@@ -13,12 +13,11 @@ upgrading the OS is not part of the macOS 27.2 setup.
 AkiTTY includes ten App Intents and matching App Shortcuts. The shortcuts ship
 with the app; users do not need to build their own workflow first. The bundled
 trigger phrases are in English. System language, region, device support, and
-Siri settings affect discovery and speech recognition. The ten actions ship in
-[AkiTTY 2.4.2](releases/2.4.2.md).
+Siri settings affect discovery and speech recognition.
 
 ## Get started on macOS 27.2
 
-1. Install AkiTTY 2.4.2 and open **Akitty.app** once.
+1. Install AkiTTY and open **Akitty.app** once.
    When building from source, use `bash scripts/build-app.sh debug` and open
    `build/Akitty.app`. The packaging script includes the required metadata;
    launching a standalone executable from `swift build` is not the setup path.
@@ -127,20 +126,7 @@ command for approval. This integration exposes the listed App Shortcuts;
 arbitrary conversational tool selection and multi-action orchestration are
 outside the qualified scope.
 
-## Implementation plan and build verification
-
-The implementation follows these steps:
-
-1. Define specific intents with meaningful titles, descriptions, parameters,
-   authentication, and foreground behavior; provide a single App Shortcuts provider.
-2. Resolve current pane entities by app-instance and session identifiers, reject
-   closed or stale references, and annotate the corresponding AppKit views.
-3. Reuse native command approval and event handling for both system intents and
-   existing socket clients; preserve cancellation and uncertain-dispatch handling.
-4. Extract library metadata, merge it into app metadata, validate the ten default
-   shortcuts and entity declarations, and train the phrases before signing.
-5. Test pane resolution, startup, visibility, cancellation, denial, and real PTY
-   dispatch, then qualify actual Siri recognition on supported devices.
+## Build and verification
 
 App packaging uses stable Xcode 27.2 with the Swift build engine, which produces
 the compiler's `.swiftconstvalues` files. `build-siri-metadata.py` invokes Apple's
@@ -170,13 +156,6 @@ boundaries, release metadata, and the Web/Rust suites. Packaging checks all ten
 actions, default shortcuts, the read-only background allowlist, and nonempty
 phrase training. Debug and optimized Swift builds must produce equivalent
 intent metadata.
-
-The macOS 27.2 baseline (`905984f`) passed the full gate, app bundle/signature
-checks, and both debug and optimized Swift metadata extraction. The native
-suite executed 282 tests with zero failures and one benchmark skipped. Web
-tests passed, including 22 Chromium/WebKit browser checks; Firefox could not
-start locally because of a profile error and remains a CI qualification item.
-These results do not establish spoken Siri recognition or system discovery.
 
 Device qualification still needs the following checks on the installed macOS
 27.2 bundle; calling `perform()` in a unit test does not establish spoken Siri
