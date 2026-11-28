@@ -88,9 +88,13 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
         };
         process.once("exit", () => finish(true));
         export const AkittyConversationReport = async (input) => {
-          await ready();
           const owner = {};
-          input?.lifecycle?.onDispose?.(() => { if (currentOwner === owner) finish(); });
+          let disposed = false;
+          input?.lifecycle?.onDispose?.(() => {
+            disposed = true;
+            if (currentOwner === owner) finish();
+          });
+          await ready();
           // AX Code marks both sub-agent sessions and forks with parentID. A sub-agent runs while its parent is
           // busy; a fork is continued on its own. Only conversations the person works in are reported.
           const parents = new Map();
@@ -102,6 +106,7 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
           };
           return {
             event: async ({ event }) => {
+              if (disposed) return;
               const properties = event?.properties ?? {};
               const info = properties.info ?? {};
               if (valid(info.id) && info.parentID && parents.size < 1000) parents.set(info.id, info.parentID);
@@ -111,7 +116,7 @@ public struct AXCodeMCPSettings: AgentMCPSettings {
                 const parent = parents.get(properties.sessionID);
                 if (parent && busy.has(parent)) return;
               } else if (event.type === "session.idle") { busy.delete(properties.sessionID); return; }
-              if (!await ready()) return;
+              if (!await ready() || disposed) return;
               if (event.type === "session.created" && !info.parentID) start(info.id);
               else if (event.type === "session.status") start(properties.sessionID);
               else if (event.type === "session.deleted" && info.id === current) { report("end", current); current = null; currentOwner = null; }

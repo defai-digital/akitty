@@ -199,7 +199,11 @@ final class AgentIntegrationsTests: XCTestCase {
           await send("session.status", { sessionID: "ses_child", status: { type: "busy" } });
         }
         if (process.argv[3] === "exit") process.exit(0);
-        if (process.argv[3] === "dispose") dispose();
+        if (process.argv[3] === "dispose") {
+          const pending = send("session.created", { info: { id: "ses_late" } });
+          dispose();
+          await pending;
+        }
         await send("session.deleted", { info: { id: "ses_new" } });
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));

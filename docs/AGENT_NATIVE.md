@@ -180,10 +180,11 @@ not add is never replaced or removed. AX Code then asks for commands through the
 MCP `request_command` tool, and each waits in the approval queue. **Install**
 also writes a small AX Code plugin, `~/.config/ax-code/plugin/akitty.js`, whose
 `event` hook starts `akitty-agent ax-code-report start|end <id>` with a reporter
-ID, AkiTTY-issued epoch and sequence when a conversation is created or becomes busy, is
-deleted, disposed or AX Code exits. AkiTTY discards late reports instead of reopening an old conversation. A fork you
-continue is reported; a sub-agent session, which runs while its parent is busy,
-is not. The companion finds the pane from its terminal, as
+ID, AkiTTY-issued epoch and sequence when a conversation is created, becomes
+busy or is deleted, and when the plugin is disposed or AX Code exits. Disposed
+hooks discard pending events, and AkiTTY ignores older reports that would
+reopen a conversation. The plugin reports continued forks and skips sub-agent
+sessions while their parent is busy. The companion finds the pane from its terminal, as
 for hooks. A `plugin/akitty.js` AkiTTY did not write is never replaced or
 removed. AX Code has no permission hook, so its own approval prompts stay in
 AX Code. AX Code 7.31.2 connects to the server (`ax-code mcp list` shows `akitty
